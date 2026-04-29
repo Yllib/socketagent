@@ -222,6 +222,14 @@ function createConnectionHandler(transport: ClientTransport) {
   }
 
   async function handleMessage(msg: ClientMessage): Promise<void> {
+    // Wire-format handshake — relay path absorbs this earlier in relay-client,
+    // so the only callers reaching here are direct-WS clients. Reply so the
+    // app knows binary uploads are supported.
+    if ((msg as any).type === "client_capabilities") {
+      sendJson({ type: "server_capabilities", binaryEnvelope: true });
+      return;
+    }
+
     switch (msg.type) {
       case "new_session": {
         const cwd = msg.cwd || DEFAULT_CWD;

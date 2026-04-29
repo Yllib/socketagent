@@ -1,6 +1,10 @@
 import WebSocket from "ws";
-import { KeyPair, EncryptedEnvelope, encrypt, decrypt, toBase64, fromBase64 } from "./relay-crypto";
+import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
 import { ClientMessage } from "./protocol";
+
+// Binary envelope plaintext markers — first byte of the decrypted payload.
+const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
+const BIN_MARKER_UPLOAD_CHUNK = 0x42;  // 'B' — upload chunk: [1 idLen][idBytes][4 chunkIdx BE][bytes]
 
 export type RelayStatus = "disconnected" | "connecting" | "waiting_for_peer" | "paired" | "error";
 
@@ -28,6 +32,11 @@ export class RelayClient {
   private pongReceived = true;
   private static PING_INTERVAL = 30_000;  // send ping every 30s
   private static PING_TIMEOUT = 10_000;   // if no pong within 10s, connection is dead
+
+  // Wire-format flag — flipped to true after the phone announces
+  // {type: "client_capabilities", binaryEnvelope: true}. While false we keep
+  // sending the legacy JSON `{n, c}` envelope so older app builds keep working.
+  private binaryEnabled = false;
 
   // Virtual WebSocket interface for ClaudeSession compatibility
   private virtualWs: VirtualRelaySocket;
@@ -76,8 +85,12 @@ export class RelayClient {
       this.pongReceived = true;
     });
 
-    this.ws.on("message", (data) => {
+    this.ws.on("message", (data, isBinary) => {
       try {
+        if (isBinary) {
+          this.handleBinaryFrame(Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer));
+          return;
+        }
         const raw = data.toString();
         const parsed = JSON.parse(raw);
         this.handleRelayMessage(parsed);
@@ -91,6 +104,7 @@ export class RelayClient {
       this.stopPingPong();
       this.ws = null;
       this.phonePublicKey = null;
+      this.binaryEnabled = false;
       this.virtualWs._setOpen(false);
       this.setStatus("disconnected");
       if (!this.closed) this.scheduleReconnect();
@@ -108,13 +122,24 @@ export class RelayClient {
 
     const json = JSON.stringify(msg);
 
-    if (this.phonePublicKey) {
-      // Encrypted mode
-      const envelope = encrypt(json, this.phonePublicKey, this.opts.keyPair.secretKey);
-      this.ws.send(JSON.stringify(envelope));
-    } else {
+    if (!this.phonePublicKey) {
       // Pre-key-exchange: send plaintext (only used for key_exchange_ack)
       this.ws.send(json);
+      return;
+    }
+
+    if (this.binaryEnabled) {
+      // Binary envelope: 1-byte JSON marker + UTF-8 JSON, encrypted as raw bytes.
+      const jsonBytes = new TextEncoder().encode(json);
+      const plaintext = new Uint8Array(jsonBytes.length + 1);
+      plaintext[0] = BIN_MARKER_JSON;
+      plaintext.set(jsonBytes, 1);
+      const envelope = encryptBinary(plaintext, this.phonePublicKey, this.opts.keyPair.secretKey);
+      this.ws.send(envelope, { binary: true });
+    } else {
+      // Legacy text JSON envelope `{n, c}`.
+      const envelope = encrypt(json, this.phonePublicKey, this.opts.keyPair.secretKey);
+      this.ws.send(JSON.stringify(envelope));
     }
   }
 
@@ -148,6 +173,7 @@ export class RelayClient {
     if (parsed.type === "peer_disconnected") {
       console.log(`[Relay] Phone disconnected from relay`);
       this.phonePublicKey = null;
+      this.binaryEnabled = false;  // next phone may be old-format
       this.virtualWs._setOpen(false);
       this.setStatus("waiting_for_peer");
       return;
@@ -182,7 +208,7 @@ export class RelayClient {
           this.opts.keyPair.secretKey
         );
         const msg = JSON.parse(plaintext) as ClientMessage;
-        this.opts.onMessage(msg);
+        this.dispatchClientMessage(msg);
       } catch (err: any) {
         console.error(`[Relay] Decryption failed: ${err.message}`);
       }
@@ -190,6 +216,82 @@ export class RelayClient {
     }
 
     console.warn(`[Relay] Unknown message type: ${parsed.type || "no type"}`);
+  }
+
+  /**
+   * Decrypt a binary frame and route the plaintext payload. Plaintext is
+   * `[1-byte marker][rest]`; the marker tells us whether `rest` is UTF-8 JSON
+   * or a packed upload-chunk record.
+   */
+  private handleBinaryFrame(buf: Buffer): void {
+    if (!this.phonePublicKey) {
+      console.error(`[Relay] Binary frame received before key exchange — dropping`);
+      return;
+    }
+    let plaintext: Uint8Array;
+    try {
+      plaintext = decryptBinary(buf, this.phonePublicKey, this.opts.keyPair.secretKey);
+    } catch (err: any) {
+      console.error(`[Relay] Binary decryption failed: ${err.message}`);
+      return;
+    }
+    if (plaintext.length === 0) return;
+    const marker = plaintext[0];
+
+    if (marker === BIN_MARKER_JSON) {
+      try {
+        const json = new TextDecoder().decode(plaintext.subarray(1));
+        const msg = JSON.parse(json) as ClientMessage;
+        this.dispatchClientMessage(msg);
+      } catch (err: any) {
+        console.error(`[Relay] Binary JSON parse failed: ${err.message}`);
+      }
+      return;
+    }
+
+    if (marker === BIN_MARKER_UPLOAD_CHUNK) {
+      // [1 marker][1 idLen][N idBytes][4 chunkIdx BE][bytes...]
+      if (plaintext.length < 6) return;
+      const idLen = plaintext[1];
+      const headerEnd = 2 + idLen + 4;
+      if (plaintext.length < headerEnd) return;
+      const uploadId = new TextDecoder().decode(plaintext.subarray(2, 2 + idLen));
+      const off = 2 + idLen;
+      const chunkIndex =
+        ((plaintext[off] << 24) >>> 0) |
+        (plaintext[off + 1] << 16) |
+        (plaintext[off + 2] << 8) |
+        plaintext[off + 3];
+      const data = Buffer.from(plaintext.subarray(headerEnd));
+      this.dispatchClientMessage({
+        type: "upload_chunk_bin",
+        uploadId,
+        chunkIndex,
+        data,
+      } as any);
+      return;
+    }
+
+    console.warn(`[Relay] Unknown binary marker: 0x${marker.toString(16)}`);
+  }
+
+  /**
+   * Dispatch a decrypted client message. Intercepts the wire-format capability
+   * handshake so the rest of the server never sees it; everything else goes
+   * through to the handler.
+   */
+  private dispatchClientMessage(msg: ClientMessage): void {
+    if ((msg as any).type === "client_capabilities") {
+      const wantsBinary = !!(msg as any).binaryEnvelope;
+      if (wantsBinary && !this.binaryEnabled) {
+        this.binaryEnabled = true;
+        console.log(`[Relay] Phone announced binary envelope support — flipping outbound to binary`);
+      }
+      // Ack so the phone knows the server is now sending binary.
+      this.send({ type: "server_capabilities", binaryEnvelope: this.binaryEnabled });
+      return;
+    }
+    this.opts.onMessage(msg);
   }
 
   private setStatus(status: RelayStatus): void {

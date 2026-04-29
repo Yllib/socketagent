@@ -135,6 +135,20 @@ export interface UploadChunkMessage {
   data: string;
 }
 
+/** Binary-frame variant of upload_chunk — `data` is raw bytes, no base64 inflation. */
+export interface UploadChunkBinMessage {
+  type: "upload_chunk_bin";
+  uploadId: string;
+  chunkIndex: number;
+  data: Buffer;
+}
+
+/** Phone announces its wire-format support after key exchange. */
+export interface ClientCapabilitiesMessage {
+  type: "client_capabilities";
+  binaryEnvelope?: boolean;
+}
+
 export interface SetEffortMessage {
   type: "set_effort";
   effort: "low" | "medium" | "high" | "max";
@@ -306,6 +320,8 @@ export type ClientMessage =
   | CreateCwdMessage
   | UploadStartMessage
   | UploadChunkMessage
+  | UploadChunkBinMessage
+  | ClientCapabilitiesMessage
   | ScheduleTaskMessage
   | ListScheduledTasksMessage
   | CancelScheduledTaskMessage

@@ -205,6 +205,7 @@ function createConnectionHandler(transport: ClientTransport) {
     fileName: string;
     receivedChunks: number;
     totalChunks: number;
+    chunkSize: number;
   }>();
 
   function sendJson(obj: Record<string, unknown>): void {
@@ -1676,6 +1677,7 @@ function createConnectionHandler(transport: ClientTransport) {
         const fileName = path.basename(msg.fileName || "upload"); // sanitize: strip path traversal
         const fileSize = msg.fileSize;
         const totalChunks = msg.totalChunks;
+        const chunkSize = (msg as any).chunkSize || 512 * 1024;
 
         const cwd = activeSession?.getCwd() || DEFAULT_CWD;
         const uploadDir = path.join(cwd, ".uploads");
@@ -1693,8 +1695,8 @@ function createConnectionHandler(transport: ClientTransport) {
         }
 
         const fd = fs.openSync(filePath, "w");
-        activeUploads.set(uploadId, { fd, filePath, fileName, receivedChunks: 0, totalChunks });
-        console.log(`Upload started: ${fileName} (${totalChunks} chunks, ${(fileSize / 1024).toFixed(1)} KB)`);
+        activeUploads.set(uploadId, { fd, filePath, fileName, receivedChunks: 0, totalChunks, chunkSize });
+        console.log(`Upload started: ${fileName} (${totalChunks} chunks @ ${(chunkSize / 1024).toFixed(0)} KB, ${(fileSize / 1024).toFixed(1)} KB total)`);
         break;
       }
 
@@ -1708,9 +1710,34 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
 
-        const CHUNK_SIZE = 512 * 1024;
         const bytes = Buffer.from(data, "base64");
-        fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * CHUNK_SIZE);
+        fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * upload.chunkSize);
+        upload.receivedChunks++;
+
+        if (upload.receivedChunks >= upload.totalChunks) {
+          fs.closeSync(upload.fd);
+          activeUploads.delete(uploadId);
+          sendJson({
+            type: "upload_complete",
+            uploadId,
+            serverPath: upload.filePath,
+          });
+          console.log(`Upload complete: ${upload.fileName} -> ${upload.filePath}`);
+        }
+        break;
+      }
+
+      case "upload_chunk_bin": {
+        const uploadId = (msg as any).uploadId as string;
+        const chunkIndex = (msg as any).chunkIndex as number;
+        const bytes = (msg as any).data as Buffer;
+        const upload = activeUploads.get(uploadId);
+        if (!upload) {
+          sendJson({ type: "error", message: `Unknown upload: ${uploadId}` });
+          break;
+        }
+
+        fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * upload.chunkSize);
         upload.receivedChunks++;
 
         if (upload.receivedChunks >= upload.totalChunks) {
@@ -2397,13 +2424,35 @@ wss.on("connection", (ws: WebSocket) => {
 
   const handler = createConnectionHandler(ws);
 
-  ws.on("message", async (data: Buffer) => {
+  ws.on("message", async (data: Buffer, isBinary: boolean) => {
     let msg: ClientMessage;
-    try {
-      msg = JSON.parse(data.toString()) as ClientMessage;
-    } catch {
-      ws.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
-      return;
+
+    if (isBinary) {
+      // Direct-WS binary frame — currently only used for upload chunks.
+      // Format: [1 marker(0x42)][1 idLen][idBytes][4 chunkIdx BE][bytes]
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      if (buf.length < 6 || buf[0] !== 0x42) {
+        ws.send(JSON.stringify({ type: "error", message: "Unknown binary frame" }));
+        return;
+      }
+      const idLen = buf[1];
+      const headerEnd = 2 + idLen + 4;
+      if (buf.length < headerEnd) {
+        ws.send(JSON.stringify({ type: "error", message: "Binary frame too short" }));
+        return;
+      }
+      const uploadId = buf.subarray(2, 2 + idLen).toString("utf-8");
+      const off = 2 + idLen;
+      const chunkIndex = buf.readUInt32BE(off);
+      const chunkBytes = buf.subarray(headerEnd);
+      msg = { type: "upload_chunk_bin", uploadId, chunkIndex, data: chunkBytes } as any;
+    } else {
+      try {
+        msg = JSON.parse(data.toString()) as ClientMessage;
+      } catch {
+        ws.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
+        return;
+      }
     }
 
     try {

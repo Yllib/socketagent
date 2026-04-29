@@ -46,6 +46,37 @@ export function decrypt(
   return new TextDecoder().decode(plaintext);
 }
 
+/**
+ * Encrypt arbitrary bytes into a packed binary envelope: [24-byte nonce | ciphertext].
+ * Sent as a WebSocket binary frame, no JSON wrapping, no base64 — saves the ~33%
+ * inflation the {n, c} envelope incurs on every message.
+ */
+export function encryptBinary(
+  plaintext: Uint8Array,
+  theirPublicKey: Uint8Array,
+  mySecretKey: Uint8Array
+): Buffer {
+  const nonce = nacl.randomBytes(nacl.box.nonceLength);
+  const ciphertext = nacl.box(plaintext, nonce, theirPublicKey, mySecretKey);
+  if (!ciphertext) throw new Error("Encryption failed");
+  return Buffer.concat([Buffer.from(nonce), Buffer.from(ciphertext)]);
+}
+
+/** Decrypt a packed binary envelope produced by encryptBinary. */
+export function decryptBinary(
+  envelope: Buffer | Uint8Array,
+  theirPublicKey: Uint8Array,
+  mySecretKey: Uint8Array
+): Uint8Array {
+  const buf = envelope instanceof Buffer ? envelope : Buffer.from(envelope);
+  if (buf.length < nacl.box.nonceLength) throw new Error("Envelope too short");
+  const nonce = new Uint8Array(buf.subarray(0, nacl.box.nonceLength));
+  const ciphertext = new Uint8Array(buf.subarray(nacl.box.nonceLength));
+  const plaintext = nacl.box.open(ciphertext, nonce, theirPublicKey, mySecretKey);
+  if (!plaintext) throw new Error("Decryption failed — invalid key or corrupted message");
+  return plaintext;
+}
+
 /** Encode a Uint8Array as base64 string */
 export function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");

@@ -1754,6 +1754,9 @@ function createConnectionHandler(transport: ClientTransport) {
         fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * upload.chunkSize);
         upload.receivedChunks++;
         upload.bytesReceived += bytes.length;
+        if (upload.receivedChunks % 10 === 0 || upload.receivedChunks === upload.totalChunks) {
+          console.log(`[Upload] chunk ${upload.receivedChunks}/${upload.totalChunks} received (${(upload.bytesReceived / 1024 / 1024).toFixed(1)} MB) for ${upload.fileName}`);
+        }
         maybeEmitUploadProgress(uploadId);
 
         if (upload.receivedChunks >= upload.totalChunks) {
@@ -1783,6 +1786,9 @@ function createConnectionHandler(transport: ClientTransport) {
         fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * upload.chunkSize);
         upload.receivedChunks++;
         upload.bytesReceived += bytes.length;
+        if (upload.receivedChunks % 10 === 0 || upload.receivedChunks === upload.totalChunks) {
+          console.log(`[Upload] chunk ${upload.receivedChunks}/${upload.totalChunks} received (${(upload.bytesReceived / 1024 / 1024).toFixed(1)} MB) for ${upload.fileName}`);
+        }
         maybeEmitUploadProgress(uploadId);
 
         if (upload.receivedChunks >= upload.totalChunks) {

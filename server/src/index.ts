@@ -206,7 +206,29 @@ function createConnectionHandler(transport: ClientTransport) {
     receivedChunks: number;
     totalChunks: number;
     chunkSize: number;
+    totalBytes: number;
+    bytesReceived: number;
+    lastProgressEmit: number;
   }>();
+
+  // Throttle interval for upload_progress emissions.
+  const UPLOAD_PROGRESS_INTERVAL_MS = 250;
+
+  function maybeEmitUploadProgress(uploadId: string, force = false): void {
+    const upload = activeUploads.get(uploadId);
+    if (!upload) return;
+    const now = Date.now();
+    if (!force && now - upload.lastProgressEmit < UPLOAD_PROGRESS_INTERVAL_MS) return;
+    upload.lastProgressEmit = now;
+    sendJson({
+      type: "upload_progress",
+      uploadId,
+      bytesReceived: upload.bytesReceived,
+      totalBytes: upload.totalBytes,
+      receivedChunks: upload.receivedChunks,
+      totalChunks: upload.totalChunks,
+    });
+  }
 
   function sendJson(obj: Record<string, unknown>): void {
     if (transport.readyState === WebSocket.OPEN) {
@@ -1703,7 +1725,17 @@ function createConnectionHandler(transport: ClientTransport) {
         }
 
         const fd = fs.openSync(filePath, "w");
-        activeUploads.set(uploadId, { fd, filePath, fileName, receivedChunks: 0, totalChunks, chunkSize });
+        activeUploads.set(uploadId, {
+          fd,
+          filePath,
+          fileName,
+          receivedChunks: 0,
+          totalChunks,
+          chunkSize,
+          totalBytes: fileSize,
+          bytesReceived: 0,
+          lastProgressEmit: 0,
+        });
         console.log(`Upload started: ${fileName} (${totalChunks} chunks @ ${(chunkSize / 1024).toFixed(0)} KB, ${(fileSize / 1024).toFixed(1)} KB total)`);
         break;
       }
@@ -1721,9 +1753,12 @@ function createConnectionHandler(transport: ClientTransport) {
         const bytes = Buffer.from(data, "base64");
         fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * upload.chunkSize);
         upload.receivedChunks++;
+        upload.bytesReceived += bytes.length;
+        maybeEmitUploadProgress(uploadId);
 
         if (upload.receivedChunks >= upload.totalChunks) {
           fs.closeSync(upload.fd);
+          maybeEmitUploadProgress(uploadId, true);  // final 100% tick
           activeUploads.delete(uploadId);
           sendJson({
             type: "upload_complete",
@@ -1747,9 +1782,12 @@ function createConnectionHandler(transport: ClientTransport) {
 
         fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * upload.chunkSize);
         upload.receivedChunks++;
+        upload.bytesReceived += bytes.length;
+        maybeEmitUploadProgress(uploadId);
 
         if (upload.receivedChunks >= upload.totalChunks) {
           fs.closeSync(upload.fd);
+          maybeEmitUploadProgress(uploadId, true);
           activeUploads.delete(uploadId);
           sendJson({
             type: "upload_complete",

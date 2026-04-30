@@ -1754,9 +1754,7 @@ function createConnectionHandler(transport: ClientTransport) {
         fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * upload.chunkSize);
         upload.receivedChunks++;
         upload.bytesReceived += bytes.length;
-        if (upload.receivedChunks % 10 === 0 || upload.receivedChunks === upload.totalChunks) {
-          console.log(`[Upload] chunk ${upload.receivedChunks}/${upload.totalChunks} received (${(upload.bytesReceived / 1024 / 1024).toFixed(1)} MB) for ${upload.fileName}`);
-        }
+        console.log(`[Upload] chunk ${upload.receivedChunks}/${upload.totalChunks} (legacy base64) ${(upload.bytesReceived / 1024 / 1024).toFixed(1)} MB`);
         maybeEmitUploadProgress(uploadId);
 
         if (upload.receivedChunks >= upload.totalChunks) {
@@ -1786,9 +1784,7 @@ function createConnectionHandler(transport: ClientTransport) {
         fs.writeSync(upload.fd, bytes, 0, bytes.length, chunkIndex * upload.chunkSize);
         upload.receivedChunks++;
         upload.bytesReceived += bytes.length;
-        if (upload.receivedChunks % 10 === 0 || upload.receivedChunks === upload.totalChunks) {
-          console.log(`[Upload] chunk ${upload.receivedChunks}/${upload.totalChunks} received (${(upload.bytesReceived / 1024 / 1024).toFixed(1)} MB) for ${upload.fileName}`);
-        }
+        console.log(`[Upload] chunk ${upload.receivedChunks}/${upload.totalChunks} (binary) ${(upload.bytesReceived / 1024 / 1024).toFixed(1)} MB`);
         maybeEmitUploadProgress(uploadId);
 
         if (upload.receivedChunks >= upload.totalChunks) {
@@ -2479,6 +2475,7 @@ wss.on("connection", (ws: WebSocket) => {
   ws.on("message", async (data: Buffer, isBinary: boolean) => {
     let msg: ClientMessage;
 
+    console.log(`[WS Recv] isBinary=${isBinary} bytes=${data.length}`);
     if (isBinary) {
       // Direct-WS binary frame — currently only used for upload chunks.
       // Format: [1 marker(0x42)][1 idLen][idBytes][4 chunkIdx BE][bytes]

@@ -7,6 +7,7 @@ import * as http from "http";
 import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
+import { CodexSession, createSession, Session, detectAvailableBackends } from "./codex-session";
 import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { ClientMessage, SessionInfo } from "./protocol";
@@ -91,7 +92,7 @@ if (fs.existsSync(pluginsDir)) {
 }
 
 // Global session registry — sessions survive client disconnects
-const activeSessions: Map<string, ClaudeSession> = new Map();
+const activeSessions: Map<string, Session> = new Map();
 
 // Sessions whose context has been cleared — next query should NOT pass resume
 const clearedSessions: Set<string> = new Set();
@@ -105,7 +106,7 @@ const connectedClients = new Set<WebSocket>();
 // already reconnected before the continue script runs.
 interface SessionClient {
   ws: WebSocket;
-  setActiveSession: (s: ClaudeSession) => void;
+  setActiveSession: (s: Session) => void;
 }
 const sessionClients = new Map<string, SessionClient>();
 
@@ -187,7 +188,7 @@ interface ClientTransport {
  * Used for both direct WebSocket connections and relay connections.
  */
 function createConnectionHandler(transport: ClientTransport) {
-  let activeSession: ClaudeSession | null = null;
+  let activeSession: Session | null = null;
   let activeSessionId: string | null = null;
   let pendingTtsEnabled = false;
   let pendingTtsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
@@ -248,7 +249,11 @@ function createConnectionHandler(transport: ClientTransport) {
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
     if ((msg as any).type === "client_capabilities") {
-      sendJson({ type: "server_capabilities", binaryEnvelope: true });
+      sendJson({
+        type: "server_capabilities",
+        binaryEnvelope: true,
+        backends: detectAvailableBackends(),
+      });
       return;
     }
 
@@ -259,7 +264,7 @@ function createConnectionHandler(transport: ClientTransport) {
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
         }
-        activeSession = new ClaudeSession(transport as any, cwd, plugins);
+        activeSession = createSession(msg.backend, transport as any, cwd, plugins);
         activeSession.setTtsEnabled(pendingTtsEnabled);
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -314,7 +319,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession = existing;
           console.log(`Reconnected to running session ${msg.sessionId}`);
         } else {
-          activeSession = new ClaudeSession(transport as any, sessionInfo.cwd, plugins);
+          activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins);
           (activeSession as any)._resumeSessionId = msg.sessionId;
         }
         activeSessionId = msg.sessionId;
@@ -331,7 +336,7 @@ function createConnectionHandler(transport: ClientTransport) {
         // Register this client so /continue can find the real WebSocket
         sessionClients.set(msg.sessionId, {
           ws: transport as WebSocket,
-          setActiveSession: (s: ClaudeSession) => { activeSession = s; },
+          setActiveSession: (s: Session) => { activeSession = s; },
         });
 
         sendJson({
@@ -463,7 +468,8 @@ function createConnectionHandler(transport: ClientTransport) {
             cwd = msg.cwd;
             addRecentCwd(cwd);
           }
-          activeSession = new ClaudeSession(transport as any, cwd, plugins);
+          const promptBackend = savedResumeId ? getSession(savedResumeId)?.backend : undefined;
+          activeSession = createSession(promptBackend, transport as any, cwd, plugins);
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setEffort(pendingEffort);
           activeSession.setThinking(pendingThinking);
@@ -1402,7 +1408,7 @@ function createConnectionHandler(transport: ClientTransport) {
           // Step 3: Create a new session primed to resume-at this point
           const sessionInfo = getSession(sessionId);
           const cwd = sessionInfo?.cwd || activeSession?.getCwd() || process.env.DEFAULT_CWD || process.env.HOME || "/";
-          activeSession = new ClaudeSession(transport as any, cwd, plugins);
+          activeSession = createSession(sessionInfo?.backend, transport as any, cwd, plugins);
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -1494,7 +1500,7 @@ function createConnectionHandler(transport: ClientTransport) {
           }
 
           // Set up new session ready to resume the fork
-          activeSession = new ClaudeSession(transport as any, sessionInfo.cwd, plugins);
+          activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins);
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -1554,7 +1560,7 @@ function createConnectionHandler(transport: ClientTransport) {
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
         }
-        activeSession = new ClaudeSession(transport as any, sessionInfo.cwd, plugins);
+        activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins);
         activeSession.setTtsEnabled(pendingTtsEnabled);
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -1844,7 +1850,7 @@ const httpServer = http.createServer((req, res) => {
         const ws = existingClient?.ws?.readyState === WebSocket.OPEN
           ? existingClient.ws
           : { readyState: WebSocket.CLOSED, send: () => {} } as any;
-        const session = new ClaudeSession(ws, sessionInfo.cwd, plugins);
+        const session = createSession(sessionInfo.backend, ws, sessionInfo.cwd, plugins);
 
         (session as any)._resumeSessionId = sessionId;
         session.onActivity = () => scheduleBroadcast();
@@ -2162,6 +2168,7 @@ let relayConnectionHandler: ReturnType<typeof createConnectionHandler> | null = 
 httpServer.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT} (WebSocket + HTTP)`);
   console.log(`Default working directory: ${DEFAULT_CWD}`);
+  console.log(`Available backends: ${detectAvailableBackends().join(", ")}`);
 
   // Initialize plugins
   const pluginContext: PluginContext = {
@@ -2327,7 +2334,8 @@ async function checkScheduledTasks(): Promise<void> {
 
       // Create headless session (same pattern as /continue endpoint)
       const ws = { readyState: WebSocket.CLOSED, send: () => {} } as any;
-      const session = new ClaudeSession(ws, task.cwd, plugins);
+      // Scheduler doesn't currently carry backend per task — use claude default.
+      const session = createSession(undefined, ws, task.cwd, plugins);
       session.onActivity = () => scheduleBroadcast();
 
       // If reusing session, set the resume ID so SDK continues that session

@@ -1,3 +1,13 @@
+// ── Backend selection ──
+
+/**
+ * Which agent backend drives the session. "claude" uses the Claude Agent SDK
+ * (subscription auth via the Claude Code CLI). "codex" uses the OpenAI Codex
+ * CLI (subscription auth via ChatGPT Plus/Pro). Defaults to "claude" when
+ * omitted for backward compatibility with existing sessions.
+ */
+export type Backend = "claude" | "codex";
+
 // ── Client → Server messages ──
 
 export interface PromptMessage {
@@ -16,6 +26,8 @@ export interface AnswerMessage {
 export interface NewSessionMessage {
   type: "new_session";
   cwd?: string;
+  /** Which agent backend to use. Defaults to "claude" if omitted. */
+  backend?: Backend;
 }
 
 export interface ResumeSessionMessage {
@@ -469,6 +481,8 @@ export interface SessionInfo {
   running?: boolean;
   lastUsage?: UsageInfo & { costUsd?: number; numTurns?: number };
   scheduledTaskId?: string;
+  /** Backend that drives this session. Absent on legacy sessions = "claude". */
+  backend?: Backend;
 }
 
 export interface ErrorServerMessage {
@@ -480,6 +494,8 @@ export interface SessionCreatedServerMessage {
   type: "session_created";
   sessionId: string;
   cwd: string;
+  /** Echoed back so the client knows which backend the server is using. */
+  backend?: Backend;
 }
 
 export interface HistoryEntry {

@@ -280,7 +280,21 @@ export class CodexSession {
     this.proc = spawn("codex", args, {
       cwd: this.cwd, // resume relies on this — it does NOT inherit cwd from the original session
       env: process.env,
-      stdio: ["pipe", "pipe", "pipe"],
+      // Stdin must be "ignore", not "pipe". With a pipe, codex sees stdin as
+      // open and blocks indefinitely with "Reading additional input from
+      // stdin..." even though the prompt is provided as an argv argument.
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    this.proc.on("error", (err) => {
+      // Spawn-level failure (e.g., codex binary missing). exit never fires
+      // for this case, so we'd hang forever without surfacing it.
+      console.error(`[codex] spawn error: ${err.message}`);
+      this._isRunning = false;
+      this.send({
+        type: "error",
+        message: `codex failed to launch: ${err.message}`,
+      } as ServerMessage);
     });
 
     let stdoutTail = "";
@@ -328,6 +342,7 @@ export class CodexSession {
 
         // Non-zero exit. Stderr likely contains the cause (auth failure,
         // network, codex crash). Tail to keep payload small.
+        console.error(`[codex] exit ${code}: ${stderr.slice(-1500)}`);
         this.send({
           type: "error",
           message: `codex exec exit ${code}: ${stderr.slice(-1500)}`,

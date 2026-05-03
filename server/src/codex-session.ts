@@ -122,6 +122,9 @@ export class CodexSession {
   private _pendingUserPrompt: { text: string; uuid: string } | null = null;
   private _currentPrompt = "";   // for SessionInfo.title on first save
   private _lastAssistantText = ""; // for messagePreview on turn.completed
+  // Mid-turn user messages get queued here (codex runs each turn atomically;
+  // we run queued prompts as new turns once the current one settles).
+  private _pendingInjections: string[] = [];
 
   public onActivity?: () => void;
   public onMonitorOutput?: (text: string) => void;
@@ -205,12 +208,35 @@ export class CodexSession {
   }
 
   /**
-   * Codex runs prompt → completion atomically; mid-turn injection is not
-   * supported. We accept the call to keep callers happy but the message is
-   * dropped on the floor (and we surface a notice).
+   * Codex runs each turn atomically (prompt → completion via one `codex exec`
+   * subprocess), so mid-turn injection isn't possible. Instead, we queue the
+   * message and run it as a new turn once the current one settles. The user
+   * sees the same "queued:next" UI affordance as Claude — the difference is
+   * just that codex's queue runs sequentially as separate turns rather than
+   * being woven into the SDK's stream.
    */
   async injectMessage(text: string, _priority: 'now' | 'next' | 'later' = 'now'): Promise<void> {
-    console.warn(`[codex] injectMessage dropped (not supported): ${text.slice(0, 80)}`);
+    if (!this._isRunning) {
+      // Race: turn finished between the client deciding to queue and us
+      // receiving the message. Just run it directly.
+      void this.runQuery(text).catch((err) => {
+        console.error(`[codex] direct-run injected message failed: ${err.message}`);
+      });
+      return;
+    }
+    this._pendingInjections.push(text);
+  }
+
+  /** Drain the next queued prompt, if any. Called from the proc exit handler. */
+  private _drainNextInjection(): void {
+    const next = this._pendingInjections.shift();
+    if (!next) return;
+    // setImmediate so the current promise settles before the next turn starts.
+    setImmediate(() => {
+      this.runQuery(next).catch((err) => {
+        console.error(`[codex] queued runQuery failed: ${err.message}`);
+      });
+    });
   }
 
   getSessionContext(): SessionContext {
@@ -331,12 +357,16 @@ export class CodexSession {
             content: "(interrupted)",
             sessionId: this.sessionId!,
           } as ServerMessage);
+          // Don't drain queued prompts after a user-initiated abort.
+          this._pendingInjections = [];
           resolve();
           return;
         }
 
         if (code === 0) {
           resolve();
+          // Run the next queued prompt as a new turn.
+          this._drainNextInjection();
           return;
         }
 

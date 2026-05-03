@@ -1,22 +1,20 @@
 /**
- * SKETCH FOR REVIEW — not wired into the server yet.
- *
  * Codex backend mirroring claude-session.ts. Drives the OpenAI Codex CLI
  * (`codex exec --json`) as a subprocess under the user's ChatGPT subscription
  * (auth_mode: "chatgpt" in ~/.codex/auth.json — no API key required).
  *
- * What this sketch covers:
+ * What this implementation covers:
  *   - Subprocess lifecycle (spawn, JSONL parse, stderr capture, exit handling)
  *   - thread_id capture + resume across turns
  *   - Sandbox mode (read-only / workspace-write / bypass) controllable per turn
  *   - Translation of codex JSONL events → existing SocketClaude ServerMessage
  *
- * Intentionally PUNTED for the sketch:
+ * Intentionally not supported:
  *   - Questions / answers (no codex equivalent in --json mode)
  *   - Mid-turn message injection (codex runs prompt → completion atomically;
  *     to interrupt, kill the subprocess and start a new turn)
- *   - MCP tool plugins (codex has its own MCP config in ~/.codex/config.toml,
- *     not pluggable from this layer)
+ *   - Plugin-provided MCP servers (Codex gets the SocketClaude app MCP bridge,
+ *     but arbitrary plugin MCP injection is not wired here yet)
  *   - Fork / branch / rewind / clear_context
  *   - Append system prompt (codex uses AGENTS.md, not per-turn)
  *   - Compaction / context-window tracking (no JSONL surface)
@@ -49,6 +47,8 @@ import {
   updateSessionActivity,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
+import { AppToolContext } from "./app-tool-handlers";
+import { registerCodexAppMcp } from "./codex-app-mcp";
 
 const now = (): string => new Date().toISOString();
 
@@ -113,7 +113,10 @@ export class CodexSession {
   private proc: ChildProcess | null = null;
   private _isRunning = false;
   private _model: string | null = null;
-  private _sandbox: SandboxMode = "workspace-write";
+  private _sandbox: SandboxMode = "danger-full-access";
+  private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
+  private _kokoroVoice = "af_heart";
+  private _kokoroSpeed = 1.0;
   private _stderrBuffer: string[] = [];
   private _abortRequested = false;
   // Persistence state — see runQuery/handleEvent for the buffer-then-flush
@@ -122,9 +125,6 @@ export class CodexSession {
   private _pendingUserPrompt: { text: string; uuid: string } | null = null;
   private _currentPrompt = "";   // for SessionInfo.title on first save
   private _lastAssistantText = ""; // for messagePreview on turn.completed
-  // Mid-turn user messages get queued here (codex runs each turn atomically;
-  // we run queued prompts as new turns once the current one settles).
-  private _pendingInjections: string[] = [];
 
   public onActivity?: () => void;
   public onMonitorOutput?: (text: string) => void;
@@ -189,9 +189,13 @@ export class CodexSession {
   setForkSource(_id: string): void {}
   setResumeSessionAt(_uuid: string): void {}
   setTtsEnabled(_b: boolean): void {}
-  setTtsEngine(_e: string): void {}
-  setKokoroVoice(_v: string): void {}
-  setKokoroSpeed(_s: number): void {}
+  setTtsEngine(e: string): void {
+    if (e === "system" || e === "kokoro_server" || e === "kokoro_device") {
+      this._ttsEngine = e;
+    }
+  }
+  setKokoroVoice(v: string): void { this._kokoroVoice = v; }
+  setKokoroSpeed(s: number): void { this._kokoroSpeed = s; }
   resolveQuestion(_qid: string, _answers: Record<string, string>): boolean { return false; }
   submitAuthCode(_code: string): void {}
   interrupt(): void { this.abort(); }
@@ -209,11 +213,7 @@ export class CodexSession {
 
   /**
    * Codex runs each turn atomically (prompt → completion via one `codex exec`
-   * subprocess), so mid-turn injection isn't possible. Instead, we queue the
-   * message and run it as a new turn once the current one settles. The user
-   * sees the same "queued:next" UI affordance as Claude — the difference is
-   * just that codex's queue runs sequentially as separate turns rather than
-   * being woven into the SDK's stream.
+   * subprocess), so mid-turn injection isn't supported by SocketClaude.
    */
   async injectMessage(text: string, _priority: 'now' | 'next' | 'later' = 'now'): Promise<void> {
     if (!this._isRunning) {
@@ -224,19 +224,7 @@ export class CodexSession {
       });
       return;
     }
-    this._pendingInjections.push(text);
-  }
-
-  /** Drain the next queued prompt, if any. Called from the proc exit handler. */
-  private _drainNextInjection(): void {
-    const next = this._pendingInjections.shift();
-    if (!next) return;
-    // setImmediate so the current promise settles before the next turn starts.
-    setImmediate(() => {
-      this.runQuery(next).catch((err) => {
-        console.error(`[codex] queued runQuery failed: ${err.message}`);
-      });
-    });
+    throw new Error("Codex does not support sending another message while a query is running");
   }
 
   getSessionContext(): SessionContext {
@@ -299,29 +287,21 @@ export class CodexSession {
       this._pendingUserPrompt = { text: prompt, uuid: userMsgUuid };
     }
 
+    const mcpRegistration = registerCodexAppMcp(this.createAppToolContext());
+    const mcpUrl = this.buildCodexMcpUrl(mcpRegistration.token);
     const args = this.threadId
-      ? this.buildResumeArgs(this.threadId, prompt)
-      : this.buildExecArgs(prompt);
+      ? this.buildResumeArgs(this.threadId, mcpUrl)
+      : this.buildExecArgs(mcpUrl);
 
     this.proc = spawn("codex", args, {
       cwd: this.cwd, // resume relies on this — it does NOT inherit cwd from the original session
       env: process.env,
-      // Stdin must be "ignore", not "pipe". With a pipe, codex sees stdin as
-      // open and blocks indefinitely with "Reading additional input from
-      // stdin..." even though the prompt is provided as an argv argument.
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
-
-    this.proc.on("error", (err) => {
-      // Spawn-level failure (e.g., codex binary missing). exit never fires
-      // for this case, so we'd hang forever without surfacing it.
-      console.error(`[codex] spawn error: ${err.message}`);
-      this._isRunning = false;
-      this.send({
-        type: "error",
-        message: `codex failed to launch: ${err.message}`,
-      } as ServerMessage);
+    this.proc.stdin?.on("error", (err) => {
+      console.warn(`[codex] stdin error: ${err.message}`);
     });
+    this.proc.stdin?.end(prompt);
 
     let stdoutTail = "";
     this.proc.stdout!.setEncoding("utf8");
@@ -347,6 +327,32 @@ export class CodexSession {
     });
 
     return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settleResolve = () => {
+        if (settled) return;
+        settled = true;
+        mcpRegistration.unregister();
+        resolve();
+      };
+      const settleReject = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        mcpRegistration.unregister();
+        reject(err);
+      };
+
+      this.proc!.on("error", (err) => {
+        // Spawn-level failure (e.g., codex binary missing). exit never fires
+        // for this case, so surface it and settle the turn explicitly.
+        console.error(`[codex] spawn error: ${err.message}`);
+        this._isRunning = false;
+        this.send({
+          type: "error",
+          message: `codex failed to launch: ${err.message}`,
+        } as ServerMessage);
+        settleReject(err);
+      });
+
       this.proc!.on("exit", (code, signal) => {
         this._isRunning = false;
         const stderr = this._stderrBuffer.join("");
@@ -358,15 +364,12 @@ export class CodexSession {
             sessionId: this.sessionId!,
           } as ServerMessage);
           // Don't drain queued prompts after a user-initiated abort.
-          this._pendingInjections = [];
-          resolve();
+          settleResolve();
           return;
         }
 
         if (code === 0) {
-          resolve();
-          // Run the next queued prompt as a new turn.
-          this._drainNextInjection();
+          settleResolve();
           return;
         }
 
@@ -377,9 +380,19 @@ export class CodexSession {
           type: "error",
           message: `codex exec exit ${code}: ${stderr.slice(-1500)}`,
         } as ServerMessage);
-        reject(new Error(`codex exec exit ${code}`));
+        settleReject(new Error(`codex exec exit ${code}`));
       });
     });
+  }
+
+  private createAppToolContext(): AppToolContext {
+    return {
+      getSessionId: () => this.sessionId || "",
+      send: (msg) => this.send(msg as ServerMessage),
+      getTtsEngine: () => this._ttsEngine,
+      getKokoroVoice: () => this._kokoroVoice,
+      getKokoroSpeed: () => this._kokoroSpeed,
+    };
   }
 
   /** Mirrors the abort path. SIGTERM the subprocess; codex flushes pending events. */
@@ -432,6 +445,10 @@ export class CodexSession {
               cwd: this.cwd,
               backend: "codex",
             } as ServerMessage);
+            this.send({
+              type: "permission_mode_changed",
+              permissionMode: this.permissionMode,
+            } as any);
           }
         }
 
@@ -694,20 +711,30 @@ export class CodexSession {
 
   // ─── codex CLI argument builders ─────────────────────────────────────
 
-  private buildExecArgs(prompt: string): string[] {
+  private buildCodexMcpUrl(token: string): string {
+    const port = process.env.PORT || "8085";
+    return `http://127.0.0.1:${port}/codex-mcp/${encodeURIComponent(token)}`;
+  }
+
+  private codexMcpConfigArg(mcpUrl: string): string {
+    return `mcp_servers."socketclaude-app".url="${mcpUrl}"`;
+  }
+
+  private buildExecArgs(mcpUrl: string): string[] {
     const args = [
       "exec",
       "--json",
       "-s", this._sandbox,
       "-C", this.cwd,
       "--skip-git-repo-check",
+      "-c", this.codexMcpConfigArg(mcpUrl),
     ];
     if (this._model) args.push("-m", this._model);
-    args.push(prompt);
+    args.push("-");
     return args;
   }
 
-  private buildResumeArgs(threadId: string, prompt: string): string[] {
+  private buildResumeArgs(threadId: string, mcpUrl: string): string[] {
     // resume rejects -s and -C as flags. Sandbox is set via -c override.
     // cwd is picked up from the spawn cwd option, NOT inherited from session.
     // Verified: `-c sandbox_mode="<mode>"` overrides the default read-only on
@@ -717,9 +744,10 @@ export class CodexSession {
       "--json",
       "--skip-git-repo-check",
       "-c", `sandbox_mode="${this._sandbox}"`,
+      "-c", this.codexMcpConfigArg(mcpUrl),
     ];
     if (this._model) args.push("-m", this._model);
-    args.push(prompt);
+    args.push("-");
     return args;
   }
 }
@@ -745,6 +773,9 @@ export function createSession(
   plugins: SocketClaudePlugin[],
 ): Session {
   if (backend === "codex") {
+    if (!detectAvailableBackends().includes("codex")) {
+      throw new Error("Codex backend is not available on this server. Install and authenticate the Codex CLI first.");
+    }
     return new CodexSession(ws, cwd, plugins);
   }
   // Lazy require keeps the cycle (CodexSession → ClaudeSession via type-only

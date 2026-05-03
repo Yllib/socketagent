@@ -15,7 +15,12 @@ import {
 import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { SocketClaudePlugin, SessionContext } from "./plugin-api";
-import { generateKokoroAudio, isKokoroAvailable } from "./kokoro-tts";
+import {
+  AppToolContext,
+  handleScheduleReminderTool,
+  handleSendFileTool,
+  handleSpeakTool,
+} from "./app-tool-handlers";
 
 // SDK 0.2.116 tries the linux-*-musl optional-dep package before the glibc one.
 // Both get installed as peer optional deps, so on a glibc host the SDK picks the
@@ -59,7 +64,6 @@ interface MonitorState {
 }
 
 export class ClaudeSession {
-  static _recentSendFiles: Map<string, number> = new Map();
   private sessionId: string | null = null;
   private pendingQuestions: Map<string, PendingQuestion> = new Map();
   private abortController: AbortController | null = null;
@@ -723,6 +727,14 @@ export class ClaudeSession {
         }
       }
 
+      const appToolContext: AppToolContext = {
+        getSessionId: () => this.sessionId || "",
+        send: (msg) => this.send(msg as ServerMessage),
+        getTtsEngine: () => this._ttsEngine,
+        getKokoroVoice: () => this._kokoroVoice,
+        getKokoroSpeed: () => this._kokoroSpeed,
+      };
+
       // Build the MCP server with app-facing tools (Speak, SendFile, ScheduleReminder)
       const appTools = createSdkMcpServer({
         name: "app",
@@ -731,37 +743,7 @@ export class ClaudeSession {
             "Speak",
             "Speak text aloud to the user via text-to-speech. Use this to provide a concise spoken summary of your response. Keep it natural and conversational — no markdown, no code, no formatting. Summarize rather than reading everything verbatim. Only call this once per response. Avoid starting with a very short sentence — lead with a substantial opening sentence so audio playback begins with meaningful content.",
             { text: z.string().describe("The text to speak aloud to the user") },
-            async (args) => {
-              try {
-                console.log(`[MCP:Speak] Called with ${args.text.length} chars`);
-                this.send({
-                  type: "speak",
-                  text: args.text,
-                  sessionId: this.sessionId || "",
-                } as any);
-                // If server-side Kokoro TTS is active, generate and send audio
-                if (this._ttsEngine === "kokoro_server") {
-                  try {
-                    const wavBuffer = generateKokoroAudio(args.text, this._kokoroVoice, this._kokoroSpeed);
-                    if (wavBuffer) {
-                      this.send({
-                        type: "tts_audio",
-                        audioData: wavBuffer.toString("base64"),
-                        text: args.text,
-                        sessionId: this.sessionId || "",
-                      } as any);
-                    }
-                  } catch (e) {
-                    console.error(`[KokoroTTS] Error generating audio:`, e);
-                  }
-                }
-                console.log(`[MCP:Speak] Returning result`);
-                return { content: [{ type: "text" as const, text: "Speaking to user." }] };
-              } catch (e: any) {
-                console.error(`[MCP:Speak] Error: ${e.message}`, e.stack);
-                return { content: [{ type: "text" as const, text: `Speak error: ${e.message}` }], isError: true };
-              }
-            }
+            async (args) => handleSpeakTool(appToolContext, args)
           ),
           tool(
             "SendFile",
@@ -769,48 +751,7 @@ export class ClaudeSession {
             {
               file_path: z.string().describe("Absolute path to the file to send"),
             },
-            async (args) => {
-              try {
-                const filePath = args.file_path;
-                console.log(`[MCP:SendFile] Called with path=${filePath}`);
-                if (!fs.existsSync(filePath)) {
-                  return { content: [{ type: "text" as const, text: `File not found: ${filePath}` }] };
-                }
-                const stat = fs.statSync(filePath);
-                const fileName = path.basename(filePath);
-                const fileId = crypto.createHash("md5").update(`${filePath}:${stat.mtimeMs}:${stat.size}`).digest("hex").slice(0, 12);
-
-                // Dedup: skip if same file was sent within the last 10 seconds
-                const now = Date.now();
-                const dedup = ClaudeSession._recentSendFiles;
-                if (dedup.has(fileId) && now - dedup.get(fileId)! < 10000) {
-                  const sizeStr = stat.size > 1024 * 1024
-                    ? `${(stat.size / 1024 / 1024).toFixed(1)} MB`
-                    : `${(stat.size / 1024).toFixed(1)} KB`;
-                  console.log(`[MCP:SendFile] Dedup: ${fileName} already sent recently, skipping`);
-                  return { content: [{ type: "text" as const, text: `File already sent: ${fileName} (${sizeStr})` }] };
-                }
-                dedup.set(fileId, now);
-
-                // Send metadata only — file data transferred on-demand when user taps download
-                this.send({
-                  type: "file",
-                  fileId,
-                  fileName,
-                  filePath,
-                  fileSize: stat.size,
-                  sessionId: this.sessionId || "",
-                } as any);
-                const sizeStr = stat.size > 1024 * 1024
-                  ? `${(stat.size / 1024 / 1024).toFixed(1)} MB`
-                  : `${(stat.size / 1024).toFixed(1)} KB`;
-                console.log(`[MCP:SendFile] Returning result for ${fileName} (${sizeStr})`);
-                return { content: [{ type: "text" as const, text: `File ready for download: ${fileName} (${sizeStr})` }] };
-              } catch (e: any) {
-                console.error(`[MCP:SendFile] Error: ${e.message}`, e.stack);
-                return { content: [{ type: "text" as const, text: `SendFile error: ${e.message}` }], isError: true };
-              }
-            }
+            async (args) => handleSendFileTool(appToolContext, args)
           ),
           tool(
             "ScheduleReminder",
@@ -820,30 +761,7 @@ export class ClaudeSession {
               body: z.string().describe("Optional longer description for the notification body. Use empty string if not needed."),
               scheduledTime: z.string().describe("When to fire the reminder, in ISO 8601 format (e.g. 2026-02-18T15:30:00)"),
             },
-            async (args) => {
-              const scheduledDate = new Date(args.scheduledTime);
-              if (isNaN(scheduledDate.getTime())) {
-                return { content: [{ type: "text" as const, text: `Invalid date format: ${args.scheduledTime}. Use ISO 8601 format.` }] };
-              }
-              if (scheduledDate.getTime() <= Date.now()) {
-                return { content: [{ type: "text" as const, text: `Scheduled time is in the past. Please provide a future time.` }] };
-              }
-
-              const hash = crypto.createHash("md5").update(`${args.title}:${args.scheduledTime}`).digest();
-              const notificationId = Math.abs(hash.readInt32BE(0));
-
-              this.send({
-                type: "reminder",
-                title: args.title,
-                body: args.body || "",
-                scheduledTime: args.scheduledTime,
-                notificationId,
-                sessionId: this.sessionId || "",
-              } as any);
-
-              const when = scheduledDate.toLocaleString();
-              return { content: [{ type: "text" as const, text: `Reminder scheduled: "${args.title}" at ${when}` }] };
-            }
+            async (args) => handleScheduleReminderTool(appToolContext, args)
           ),
           tool(
             "ScheduleTask",

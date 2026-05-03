@@ -15,6 +15,7 @@ import { SocketClaudePlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
+import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 
 const PORT = parseInt(process.env.PORT || "8085", 10);
 const DEFAULT_CWD = process.env.DEFAULT_CWD || process.cwd();
@@ -244,6 +245,10 @@ function createConnectionHandler(transport: ClientTransport) {
     }
   }
 
+  function codexUnavailable(): boolean {
+    return !detectAvailableBackends().includes("codex");
+  }
+
   async function handleMessage(msg: ClientMessage): Promise<void> {
     // Wire-format handshake — relay path absorbs this earlier in relay-client,
     // so the only callers reaching here are direct-WS clients. Reply so the
@@ -260,6 +265,13 @@ function createConnectionHandler(transport: ClientTransport) {
     switch (msg.type) {
       case "new_session": {
         const cwd = msg.cwd || DEFAULT_CWD;
+        if (msg.backend === "codex" && codexUnavailable()) {
+          sendJson({
+            type: "error",
+            message: "Codex backend is not available on this server. Install and authenticate the Codex CLI first.",
+          });
+          break;
+        }
         // Detach old session so it stops sending to this client
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
@@ -307,6 +319,13 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({
             type: "error",
             message: `Session ${msg.sessionId} not found`,
+          });
+          break;
+        }
+        if (sessionInfo.backend === "codex" && codexUnavailable()) {
+          sendJson({
+            type: "error",
+            message: "This is a Codex session, but Codex is not available on this server. Install and authenticate the Codex CLI first.",
           });
           break;
         }
@@ -469,6 +488,13 @@ function createConnectionHandler(transport: ClientTransport) {
             addRecentCwd(cwd);
           }
           const promptBackend = savedResumeId ? getSession(savedResumeId)?.backend : undefined;
+          if (promptBackend === "codex" && codexUnavailable()) {
+            sendJson({
+              type: "error",
+              message: "This is a Codex session, but Codex is not available on this server. Install and authenticate the Codex CLI first.",
+            });
+            break;
+          }
           activeSession = createSession(promptBackend, transport as any, cwd, plugins);
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setEffort(pendingEffort);
@@ -478,6 +504,13 @@ function createConnectionHandler(transport: ClientTransport) {
 
         // If session is already running, inject the message inline between turns
         if (activeSession.isRunning) {
+          if (activeSession instanceof CodexSession) {
+            sendJson({
+              type: "error",
+              message: "Codex does not support sending another message while a query is running. Wait for the current response to finish or stop it first.",
+            });
+            break;
+          }
           const priority = (msg as any).priority || 'now';
           const messageId = (msg as any).messageId || '';
           console.log(`[Inject] Session running, injecting user message inline (priority=${priority}, messageId=${messageId})`);
@@ -1330,6 +1363,8 @@ function createConnectionHandler(transport: ClientTransport) {
         const dryRun = (msg as any).dryRun === true;
         if (!activeSession) {
           sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "No active session" });
+        } else if (activeSession instanceof CodexSession) {
+          sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "Rewind is not supported for Codex sessions." });
         } else if (!uuid) {
           sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "No message UUID" });
         } else if (!activeSession.isRunning) {
@@ -1360,6 +1395,10 @@ function createConnectionHandler(transport: ClientTransport) {
         }
         if (!uuid) {
           sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: "No message UUID" });
+          break;
+        }
+        if (getSession(sessionId)?.backend === "codex" || activeSession instanceof CodexSession) {
+          sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: "Conversation rewind is not supported for Codex sessions." });
           break;
         }
 
@@ -1463,6 +1502,10 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({ type: "branch_result", success: false, originalSessionId: sourceId, branchPointUuid: branchUuid, error: "Session not found" });
           break;
         }
+        if (sessionInfo.backend === "codex") {
+          sendJson({ type: "branch_result", success: false, originalSessionId: sourceId, branchPointUuid: branchUuid, error: "Branching from a message is not supported for Codex sessions." });
+          break;
+        }
 
         try {
           // Use SDK's forkSession with upToMessageId to create a branch at the specific message
@@ -1555,6 +1598,10 @@ function createConnectionHandler(transport: ClientTransport) {
         const sessionInfo = getSession(sourceId);
         if (!sessionInfo) {
           sendJson({ type: "error", message: "Session not found" });
+          break;
+        }
+        if (sessionInfo.backend === "codex") {
+          sendJson({ type: "error", message: "Forking is not supported for Codex sessions." });
           break;
         }
         if (activeSession && activeSession.isRunning) {
@@ -1818,6 +1865,21 @@ function createConnectionHandler(transport: ClientTransport) {
 }
 
 const httpServer = http.createServer((req, res) => {
+  if (isCodexAppMcpRequest(req)) {
+    void handleCodexAppMcpRequest(req, res).catch((err) => {
+      console.error(`[Codex MCP] Unhandled request error: ${err.message}`, err.stack);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal MCP server error" },
+          id: null,
+        }));
+      }
+    });
+    return;
+  }
+
   // POST /continue — trigger a prompt on a session without a WebSocket (used by restart script)
   if (req.method === "POST" && req.url?.startsWith("/continue")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);

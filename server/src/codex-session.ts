@@ -725,7 +725,7 @@ export class CodexSession {
   }
 
   private codexMcpConfigArg(mcpUrl: string): string {
-    return `mcp_servers."socketclaude-app".url="${mcpUrl}"`;
+    return `mcp_servers.socketclaude_app.url="${mcpUrl}"`;
   }
 
   private buildExecArgs(mcpUrl: string): string[] {

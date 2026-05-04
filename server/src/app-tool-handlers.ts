@@ -10,6 +10,7 @@ export interface AppToolContext {
   getSessionId(): string;
   getCwd?(): string;
   send(msg: ServerMessage | Record<string, any>): void;
+  appendHistory?(entry: Record<string, any>): void;
   getTtsEngine(): "system" | "kokoro_server" | "kokoro_device";
   getKokoroVoice(): string;
   getKokoroSpeed(): number;
@@ -62,6 +63,32 @@ interface AppMonitorState {
 const recentSendFiles: Map<string, number> = new Map();
 const appMonitors: Map<string, AppMonitorState> = new Map();
 
+function appendVisibleToolHistory(
+  ctx: AppToolContext,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  toolOutput: string,
+): void {
+  if (!ctx.appendHistory) return;
+  const toolUseId = `mcp_${toolName}_${crypto.randomUUID()}`;
+  const timestamp = new Date().toISOString();
+  ctx.appendHistory({
+    role: "tool_call",
+    content: JSON.stringify(toolInput),
+    toolName,
+    toolInput,
+    toolUseId,
+    timestamp,
+  });
+  ctx.appendHistory({
+    role: "tool_result",
+    content: toolOutput,
+    toolUseId,
+    toolOutput,
+    timestamp: new Date().toISOString(),
+  });
+}
+
 function sizeLabel(bytes: number): string {
   return bytes > 1024 * 1024
     ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -97,7 +124,9 @@ export async function handleSpeakTool(
     }
 
     console.log("[MCP:Speak] Returning result");
-    return { content: [{ type: "text", text: "Speaking to user." }] };
+    const resultText = "Speaking to user.";
+    appendVisibleToolHistory(ctx, "Speak", { text: args.text }, resultText);
+    return { content: [{ type: "text", text: resultText }] };
   } catch (e: any) {
     console.error(`[MCP:Speak] Error: ${e.message}`, e.stack);
     return { content: [{ type: "text", text: `Speak error: ${e.message}` }], isError: true };
@@ -137,7 +166,9 @@ export async function handleSendFileTool(
 
     const sizeStr = sizeLabel(stat.size);
     console.log(`[MCP:SendFile] Returning result for ${fileName} (${sizeStr})`);
-    return { content: [{ type: "text", text: `File ready for download: ${fileName} (${sizeStr})` }] };
+    const resultText = `File ready for download: ${fileName} (${sizeStr})`;
+    appendVisibleToolHistory(ctx, "SendFile", { file_path: filePath }, resultText);
+    return { content: [{ type: "text", text: resultText }] };
   } catch (e: any) {
     console.error(`[MCP:SendFile] Error: ${e.message}`, e.stack);
     return { content: [{ type: "text", text: `SendFile error: ${e.message}` }], isError: true };

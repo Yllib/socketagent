@@ -393,6 +393,9 @@ export class CodexSession {
       getSessionId: () => this.sessionId || "",
       getCwd: () => this.cwd,
       send: (msg) => this.send(msg as ServerMessage),
+      appendHistory: (entry) => {
+        if (this.sessionId) appendHistory(this.sessionId, entry as HistoryEntry);
+      },
       getTtsEngine: () => this._ttsEngine,
       getKokoroVoice: () => this._kokoroVoice,
       getKokoroSpeed: () => this._kokoroSpeed,
@@ -638,7 +641,11 @@ export class CodexSession {
 
       case "mcp_tool_call": {
         const it = item as Extract<CodexItem, { type: "mcp_tool_call" }>;
-        const toolName = `mcp:${it.server}/${it.tool}`;
+        const isSocketClaudeApp =
+          it.server === "socketclaude_app" ||
+          it.server === "socketclaude-app" ||
+          it.server === "\"socketclaude-app\"";
+        const toolName = isSocketClaudeApp ? it.tool : `mcp:${it.server}/${it.tool}`;
         if (lifecycle === "item.started") {
           const input = (it.arguments as Record<string, unknown>) ?? {};
           this.send({
@@ -648,7 +655,7 @@ export class CodexSession {
             toolUseId: it.id,
             sessionId: sid,
           } as ServerMessage);
-          appendHistory(sid, {
+          if (!isSocketClaudeApp) appendHistory(sid, {
             role: "tool_call",
             content: JSON.stringify(input),
             toolName,
@@ -666,7 +673,7 @@ export class CodexSession {
             output,
             sessionId: sid,
           } as ServerMessage);
-          appendHistory(sid, {
+          if (!isSocketClaudeApp) appendHistory(sid, {
             role: "tool_result",
             content: output,
             toolUseId: it.id,

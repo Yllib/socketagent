@@ -6,7 +6,9 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   AppToolContext,
+  handleMonitorTool,
   handleScheduleReminderTool,
+  handleScheduleTaskTool,
   handleSendFileTool,
   handleSpeakTool,
 } from "./app-tool-handlers";
@@ -87,6 +89,39 @@ function createServer(context: AppToolContext): McpServer {
       },
     },
     async (args) => handleScheduleReminderTool(context, args as { title: string; body?: string; scheduledTime: string }),
+  );
+
+  server.registerTool(
+    "ScheduleTask",
+    {
+      title: "Schedule Task",
+      description: "Schedule a Codex/Claude prompt to run automatically at a future time. Use this when the user wants to defer work until later.",
+      inputSchema: {
+        prompt: z.string().describe("The prompt/instructions to execute at the scheduled time"),
+        cwd: z.string().describe("Working directory for the scheduled task (absolute path)"),
+        scheduledTime: z.string().describe("When to run the task, in ISO 8601 format"),
+        recurrenceType: z.enum(["once", "daily", "weekly", "monthly", "custom"]).optional().describe("How often to repeat. Default: once"),
+        customIntervalMs: z.number().optional().describe("Custom interval in milliseconds when recurrenceType is custom"),
+        reuseSession: z.boolean().optional().describe("If true and recurring, reuse the same session for all occurrences"),
+      },
+    },
+    async (args) => handleScheduleTaskTool(context, args as any),
+  );
+
+  server.registerTool(
+    "Monitor",
+    {
+      title: "Monitor",
+      description: "Start a background shell command and monitor its output. Output is batched and delivered back into the session. For Codex, toggling is limited to Monitor-started task IDs.",
+      inputSchema: {
+        command: z.string().optional().describe("Shell command to run in background with monitoring enabled"),
+        description: z.string().optional().describe("Human-readable description of the process"),
+        timeoutSeconds: z.number().optional().describe("Auto-stop monitoring after N seconds; the process may continue"),
+        taskId: z.string().optional().describe("Monitor-started task ID to stop/toggle"),
+        enabled: z.boolean().optional().describe("Set false to stop monitoring a Monitor-started task"),
+      },
+    },
+    async (args) => handleMonitorTool(context, args as any),
   );
 
   return server;

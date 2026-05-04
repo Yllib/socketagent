@@ -47,7 +47,7 @@ import {
   updateSessionActivity,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
-import { AppToolContext } from "./app-tool-handlers";
+import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp } from "./codex-app-mcp";
 
 const now = (): string => new Date().toISOString();
@@ -199,7 +199,9 @@ export class CodexSession {
   resolveQuestion(_qid: string, _answers: Record<string, string>): boolean { return false; }
   submitAuthCode(_code: string): void {}
   interrupt(): void { this.abort(); }
-  stopMonitoring(_taskId: string): void {}
+  stopMonitoring(taskId: string): void {
+    stopAppMonitor(taskId, true);
+  }
 
   async stopTask(_taskId: string): Promise<void> {}
   async mcpServerStatus(): Promise<unknown[]> { return []; }
@@ -247,10 +249,10 @@ export class CodexSession {
 
   /**
    * Run a single turn. New thread on first call, resume on subsequent.
-   * The second parameter exists for ClaudeSession-signature parity; codex
-   * tracks resume state internally via threadId and ignores it.
+   * The second parameter is used when a fresh WebSocket/process resumes an
+   * existing SocketClaude/Codex thread.
    */
-  async runQuery(prompt: string, _resumeSessionId?: string): Promise<void> {
+  async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
     if (this._isRunning) throw new Error("CodexSession already running a turn");
     this._isRunning = true;
     this._abortRequested = false;
@@ -261,9 +263,10 @@ export class CodexSession {
     // Resume case: index.ts set _resumeSessionId before calling runQuery.
     // Adopt it as our SocketClaude sessionId so history writes target the
     // right file. (We confirm/replace it when thread.started fires.)
-    if (!this.sessionId && this._resumeSessionId) {
-      this.sessionId = this._resumeSessionId;
-      this.threadId = this._resumeSessionId;
+    const resumeTarget = resumeSessionId || this._resumeSessionId;
+    if (!this.sessionId && resumeTarget) {
+      this.sessionId = resumeTarget;
+      this.threadId = resumeTarget;
       this._sessionInfoSaved = true;
     }
 
@@ -388,10 +391,14 @@ export class CodexSession {
   private createAppToolContext(): AppToolContext {
     return {
       getSessionId: () => this.sessionId || "",
+      getCwd: () => this.cwd,
       send: (msg) => this.send(msg as ServerMessage),
       getTtsEngine: () => this._ttsEngine,
       getKokoroVoice: () => this._kokoroVoice,
       getKokoroSpeed: () => this._kokoroSpeed,
+      isRunning: () => this._isRunning,
+      injectMessage: (text, priority) => this.injectMessage(text, priority),
+      onMonitorOutput: (text) => this.onMonitorOutput?.(text),
     };
   }
 
@@ -443,6 +450,7 @@ export class CodexSession {
               type: "session_created",
               sessionId: this.sessionId,
               cwd: this.cwd,
+              title,
               backend: "codex",
             } as ServerMessage);
             this.send({

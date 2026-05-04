@@ -494,6 +494,7 @@ export interface SessionCreatedServerMessage {
   type: "session_created";
   sessionId: string;
   cwd: string;
+  title?: string;
   /** Echoed back so the client knows which backend the server is using. */
   backend?: Backend;
 }

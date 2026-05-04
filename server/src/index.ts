@@ -277,6 +277,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.detachWebSocket();
         }
         activeSession = createSession(msg.backend, transport as any, cwd, plugins);
+        activeSessionId = null;
         activeSession.setTtsEnabled(pendingTtsEnabled);
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -496,6 +497,7 @@ function createConnectionHandler(transport: ClientTransport) {
             break;
           }
           activeSession = createSession(promptBackend, transport as any, cwd, plugins);
+          activeSessionId = savedResumeId || null;
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setEffort(pendingEffort);
           activeSession.setThinking(pendingThinking);
@@ -587,6 +589,13 @@ function createConnectionHandler(transport: ClientTransport) {
           const sid = activeSession?.getSessionId();
           if (sid && !activeSessions.has(sid)) {
             activeSessions.set(sid, activeSession!);
+          }
+          if (sid) {
+            activeSessionId = sid;
+            sessionClients.set(sid, {
+              ws: transport as WebSocket,
+              setActiveSession: (s: Session) => { activeSession = s; },
+            });
           }
         };
         const interval = setInterval(() => {

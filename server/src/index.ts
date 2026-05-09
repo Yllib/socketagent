@@ -8,7 +8,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CodexSession, createSession, Session, detectAvailableBackends } from "./codex-session";
-import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
+import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { ClientMessage, SessionInfo } from "./protocol";
 import { SocketClaudePlugin, PluginContext } from "./plugin-api";
@@ -303,8 +303,12 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.detachWebSocket();
         }
         let sessionInfo = getSession(msg.sessionId);
-        // If not in SocketClaude store but cwd is provided, this is an SDK-only session
+        // If not in SocketClaude store but cwd is provided, this is an SDK-only
+        // session (claude or codex). The caller passes `backend` so we tag the
+        // freshly-registered SessionInfo correctly — without it, codex SDK
+        // resumes would default to claude and fail on the first prompt.
         if (!sessionInfo && (msg as any).cwd) {
+          const sdkBackend = ((msg as any).backend as "claude" | "codex" | undefined);
           sessionInfo = {
             id: msg.sessionId,
             title: "Untitled",
@@ -312,9 +316,10 @@ function createConnectionHandler(transport: ClientTransport) {
             createdAt: new Date().toISOString(),
             lastActive: new Date().toISOString(),
             messagePreview: "",
+            backend: sdkBackend,
           };
           saveSession(sessionInfo);
-          console.log(`[Resume] Created SocketClaude entry for SDK session ${msg.sessionId} in ${(msg as any).cwd}`);
+          console.log(`[Resume] Created SocketClaude entry for SDK session ${msg.sessionId} in ${(msg as any).cwd} (backend=${sdkBackend ?? "claude"})`);
         }
         if (!sessionInfo) {
           sendJson({
@@ -722,9 +727,15 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({ type: "error", message: "No cwd provided for list_sdk_sessions" });
           break;
         }
-        const sdkSessions = listSdkSessions(cwd);
-        console.log(`[SdkSessions] Found ${sdkSessions.length} sessions for ${cwd}`);
-        sendJson({ type: "sdk_session_list", cwd, sessions: sdkSessions });
+        const claudeSessions = listSdkSessions(cwd);
+        const codexSessions = listCodexSessions(cwd);
+        // Merge and sort by lastActive desc so the most recent is on top
+        // regardless of which backend produced it.
+        const sessions = [...claudeSessions, ...codexSessions].sort((a, b) =>
+          new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime()
+        );
+        console.log(`[SdkSessions] Found ${claudeSessions.length} claude + ${codexSessions.length} codex sessions for ${cwd}`);
+        sendJson({ type: "sdk_session_list", cwd, sessions });
         break;
       }
 

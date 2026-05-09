@@ -983,6 +983,7 @@ export interface SdkSessionEntry {
   createdAt: string;
   lastActive: string;
   tracked: boolean; // true if already in SocketClaude store
+  backend?: "claude" | "codex"; // absent on legacy entries; treat as claude
 }
 
 /**
@@ -1069,6 +1070,7 @@ export function listSdkSessions(cwd: string, limit = 30): SdkSessionEntry[] {
         createdAt: tracked.createdAt,
         lastActive: tracked.lastActive,
         tracked: true,
+        backend: "claude",
       });
       continue;
     }
@@ -1082,6 +1084,7 @@ export function listSdkSessions(cwd: string, limit = 30): SdkSessionEntry[] {
         createdAt: new Date(mtime).toISOString(),
         lastActive: new Date(mtime).toISOString(),
         tracked: false,
+        backend: "claude",
       });
       continue;
     }
@@ -1131,9 +1134,113 @@ export function listSdkSessions(cwd: string, limit = 30): SdkSessionEntry[] {
       createdAt: new Date(mtime).toISOString(),
       lastActive: new Date(mtime).toISOString(),
       tracked: false,
+      backend: "claude",
     });
 
     // Stop once we have enough results
+    if (results.length >= limit) break;
+  }
+
+  return results;
+}
+
+/**
+ * Read the first line of a (potentially huge) file synchronously, growing the
+ * buffer as needed. Caps at 1 MB to avoid pathological cases. Returns null on
+ * read errors or if no newline appears within the cap.
+ */
+function readFirstLineSync(filePath: string): string | null {
+  let fd: number;
+  try { fd = fs.openSync(filePath, "r"); } catch { return null; }
+  try {
+    let buf = Buffer.alloc(0);
+    const chunk = Buffer.alloc(64 * 1024);
+    let pos = 0;
+    while (true) {
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, pos);
+      if (bytesRead === 0) break;
+      buf = Buffer.concat([buf, chunk.subarray(0, bytesRead)]);
+      const nl = buf.indexOf(0x0a); // '\n'
+      if (nl >= 0) return buf.subarray(0, nl).toString("utf8");
+      pos += bytesRead;
+      if (buf.length > 1024 * 1024) break;
+    }
+  } catch {
+    /* fall through */
+  } finally {
+    try { fs.closeSync(fd); } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/**
+ * List Codex CLI sessions for a given CWD. Codex stores rollouts at
+ * ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl with a
+ * `session_meta` line at the top containing `id`, `cwd`, `timestamp`. We walk
+ * the date-partitioned tree, sort by mtime, and parse the first line of the
+ * top `limit*3` candidates (cheap because we only read up to one line).
+ */
+export function listCodexSessions(cwd: string, limit = 30): SdkSessionEntry[] {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const sessionsDir = path.join(homeDir, ".codex", "sessions");
+  if (!fs.existsSync(sessionsDir)) return [];
+
+  // Walk the date-partitioned tree to gather candidate rollout files.
+  const candidates: { filePath: string; mtimeMs: number }[] = [];
+  function walk(dir: string): void {
+    let entries: string[];
+    try { entries = fs.readdirSync(dir); } catch { return; }
+    for (const entry of entries) {
+      const p = path.join(dir, entry);
+      let stat: fs.Stats;
+      try { stat = fs.statSync(p); } catch { continue; }
+      if (stat.isDirectory()) {
+        walk(p);
+      } else if (entry.startsWith("rollout-") && entry.endsWith(".jsonl")) {
+        candidates.push({ filePath: p, mtimeMs: stat.mtimeMs });
+      }
+    }
+  }
+  walk(sessionsDir);
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const scanLimit = limit * 3;
+
+  // Tracked map keyed by codex thread_id (== our SocketClaude session id).
+  const store = readStore();
+  const trackedMap = new Map<string, SessionInfo>();
+  for (const s of store) {
+    if (s.cwd === cwd && s.backend === "codex") trackedMap.set(s.id, s);
+  }
+
+  const results: SdkSessionEntry[] = [];
+  for (const { filePath, mtimeMs } of candidates.slice(0, scanLimit)) {
+    const firstLine = readFirstLineSync(filePath);
+    if (!firstLine) continue;
+
+    let meta: any;
+    try { meta = JSON.parse(firstLine); } catch { continue; }
+    if (meta?.type !== "session_meta" || !meta.payload) continue;
+    if (meta.payload.cwd !== cwd) continue;
+
+    const sessionId = meta.payload.id as string | undefined;
+    if (!sessionId) continue;
+    const timestamp = (meta.payload.timestamp as string | undefined) || new Date(mtimeMs).toISOString();
+    const tracked = trackedMap.get(sessionId);
+
+    let firstMessage = "Codex session";
+    if (tracked) {
+      firstMessage = tracked.messagePreview || tracked.title || firstMessage;
+    }
+
+    results.push({
+      sessionId,
+      firstMessage,
+      createdAt: timestamp,
+      lastActive: tracked?.lastActive || new Date(mtimeMs).toISOString(),
+      tracked: !!tracked,
+      backend: "codex",
+    });
+
     if (results.length >= limit) break;
   }
 

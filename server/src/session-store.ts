@@ -1174,6 +1174,150 @@ function readFirstLineSync(filePath: string): string | null {
 }
 
 /**
+ * Locate a codex rollout file by thread id. Walks ~/.codex/sessions/ and
+ * returns the first path whose filename ends with `-<sessionId>.jsonl`.
+ * Returns null if not found.
+ */
+export function findCodexRolloutFile(sessionId: string): string | null {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const sessionsDir = path.join(homeDir, ".codex", "sessions");
+  if (!fs.existsSync(sessionsDir)) return null;
+
+  const suffix = `-${sessionId}.jsonl`;
+  let found: string | null = null;
+  function walk(dir: string): void {
+    if (found) return;
+    let entries: string[];
+    try { entries = fs.readdirSync(dir); } catch { return; }
+    for (const entry of entries) {
+      if (found) return;
+      const p = path.join(dir, entry);
+      let stat: fs.Stats;
+      try { stat = fs.statSync(p); } catch { continue; }
+      if (stat.isDirectory()) {
+        walk(p);
+      } else if (entry.endsWith(suffix)) {
+        found = p;
+        return;
+      }
+    }
+  }
+  walk(sessionsDir);
+  return found;
+}
+
+/**
+ * Read a codex rollout file and translate it into SocketClaude HistoryEntry
+ * items. Used to backfill chat history when resuming a codex session that
+ * we don't already have local history for (e.g., one created via the codex
+ * CLI directly, or before this session's machine ran the SocketClaude
+ * server).
+ *
+ * Mapping:
+ *   - event_msg user_message            → role: "user" (canonical user input,
+ *     skipping the response_item duplicates that include AGENTS.md/permissions
+ *     boilerplate codex injects on each turn)
+ *   - response_item message role=assistant → role: "assistant"
+ *   - response_item function_call       → role: "tool_call" (exec_command is
+ *     re-labelled as "Bash" so the existing tool-call rendering picks it up)
+ *   - response_item function_call_output → role: "tool_result"
+ *   - everything else (session_meta, turn_context, reasoning items,
+ *     event_msg token_count/task_started/etc.) → skipped
+ */
+export function readCodexRolloutHistory(sessionId: string): HistoryEntry[] {
+  const file = findCodexRolloutFile(sessionId);
+  if (!file) return [];
+
+  let raw: string;
+  try { raw = fs.readFileSync(file, "utf8"); } catch { return []; }
+
+  const extractText = (content: unknown): string => {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content.map((b: any) => {
+        if (typeof b === "string") return b;
+        if (b && typeof b === "object" && typeof b.text === "string") return b.text;
+        return "";
+      }).join("");
+    }
+    return "";
+  };
+
+  const cleanCommandOutput = (output: string): string => {
+    // codex wraps shell output with metadata lines; strip the wrapper so the
+    // chat shows what the model actually saw rather than the framing.
+    const idx = output.indexOf("Output:\n");
+    return idx >= 0 ? output.substring(idx + "Output:\n".length) : output;
+  };
+
+  const result: HistoryEntry[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let obj: any;
+    try { obj = JSON.parse(line); } catch { continue; }
+
+    const ts = (obj.timestamp as string) || new Date().toISOString();
+    const t = obj.type;
+    const p = obj.payload;
+    if (!p || typeof p !== "object") continue;
+
+    if (t === "event_msg") {
+      if (p.type === "user_message") {
+        const content = (p.message as string) ?? "";
+        if (content) result.push({ role: "user", content, timestamp: ts });
+      }
+      // Other event_msg subtypes (token_count, task_started, agent_message
+      // dupes, info, etc.) are skipped — response_items carry the canonical
+      // content for everything else.
+      continue;
+    }
+
+    if (t === "response_item") {
+      if (p.type === "message") {
+        if (p.role === "assistant") {
+          const text = extractText(p.content);
+          if (text) result.push({ role: "assistant", content: text, timestamp: ts });
+        }
+        // role=user / role=developer skipped (handled by event_msg + boilerplate filter)
+        continue;
+      }
+      if (p.type === "function_call") {
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(p.arguments ?? "{}"); } catch { /* leave empty */ }
+        // codex's shell tool is `exec_command`; surface it as Bash so the
+        // app's tool-call renderer treats it like a normal shell tool.
+        const toolName = p.name === "exec_command" ? "Bash" : (p.name ?? "tool");
+        const argCmd = (args as any).cmd ?? (args as any).command;
+        const content = typeof argCmd === "string" ? argCmd : JSON.stringify(args);
+        result.push({
+          role: "tool_call",
+          content,
+          toolName,
+          toolInput: args,
+          toolUseId: p.call_id,
+          timestamp: ts,
+        });
+        continue;
+      }
+      if (p.type === "function_call_output") {
+        const rawOutput = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? "");
+        const cleaned = cleanCommandOutput(rawOutput);
+        result.push({
+          role: "tool_result",
+          content: cleaned,
+          toolUseId: p.call_id,
+          toolOutput: cleaned,
+          timestamp: ts,
+        });
+        continue;
+      }
+      // Skip reasoning, etc.
+    }
+  }
+  return result;
+}
+
+/**
  * List Codex CLI sessions for a given CWD. Codex stores rollouts at
  * ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl with a
  * `session_meta` line at the top containing `id`, `cwd`, `timestamp`. We walk

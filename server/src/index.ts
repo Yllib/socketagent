@@ -8,7 +8,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CodexSession, createSession, Session, detectAvailableBackends } from "./codex-session";
-import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
+import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { ClientMessage, SessionInfo } from "./protocol";
 import { SocketClaudePlugin, PluginContext } from "./plugin-api";
@@ -393,7 +393,30 @@ function createConnectionHandler(transport: ClientTransport) {
         const lastTimestamp = allHistory.length > 0
           ? allHistory[allHistory.length - 1].timestamp
           : "";
-        {
+        if (sessionInfo.backend === "codex") {
+          // Codex doesn't write to ~/.claude/projects, so getMissedMessages
+          // would always return []. Instead, when our local history is empty
+          // (e.g., session was created via the codex CLI directly, or this
+          // is a first resume after an install), backfill from the codex
+          // rollout file so the chat doesn't appear as a fresh session.
+          if (allHistory.length === 0) {
+            const fromRollout = readCodexRolloutHistory(msg.sessionId);
+            if (fromRollout.length > 0) {
+              console.log(`[Resume] Backfilled ${fromRollout.length} entries from codex rollout for ${msg.sessionId}`);
+              for (const entry of fromRollout) {
+                appendHistory(msg.sessionId, entry);
+              }
+              sendJson({
+                type: "session_history",
+                sessionId: msg.sessionId,
+                messages: fromRollout,
+                total: fromRollout.length,
+                offset: 0,
+                append: true,
+              });
+            }
+          }
+        } else {
           // When history is empty, use epoch so we sync ALL messages from the JSONL
           const missed = getMissedMessages(msg.sessionId, sessionInfo.cwd, lastTimestamp || "1970-01-01T00:00:00Z");
           if (missed.length > 0) {

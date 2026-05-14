@@ -1317,6 +1317,102 @@ export function readCodexRolloutHistory(sessionId: string): HistoryEntry[] {
   return result;
 }
 
+export interface CodexRolloutContextUsage {
+  totalTokens: number;
+  maxTokens: number;
+  model?: string;
+  categories: Array<{ name: string; tokens: number; color: string }>;
+  source: "codex_rollout";
+  lastTokenUsage: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+    reasoning_output_tokens: number;
+    total_tokens: number;
+  };
+  totalTokenUsage?: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+    reasoning_output_tokens: number;
+    total_tokens: number;
+  };
+  rateLimits?: any;
+}
+
+/**
+ * Read the latest Codex token_count event for a thread. There is no public
+ * `codex status <thread>` CLI surface today, but rollout files include
+ * model_context_window and per-turn token usage after each turn.
+ */
+export function readCodexRolloutContextUsage(sessionId: string): CodexRolloutContextUsage | null {
+  const file = findCodexRolloutFile(sessionId);
+  if (!file) return null;
+
+  let raw: string;
+  try { raw = fs.readFileSync(file, "utf8"); } catch { return null; }
+
+  let latestInfo: any = null;
+  let latestRateLimits: any = null;
+  let latestModel: string | undefined;
+
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let obj: any;
+    try { obj = JSON.parse(line); } catch { continue; }
+
+    const payload = obj.payload;
+    if (!payload || typeof payload !== "object") continue;
+
+    if (obj.type === "turn_context" && typeof payload.model === "string") {
+      latestModel = payload.model;
+      continue;
+    }
+
+    if (obj.type === "event_msg" && payload.type === "token_count" && payload.info) {
+      latestInfo = payload.info;
+      latestRateLimits = payload.rate_limits;
+    }
+  }
+
+  const last = latestInfo?.last_token_usage;
+  const maxTokens = Number(latestInfo?.model_context_window ?? 0);
+  const inputTokens = Number(last?.input_tokens ?? 0);
+  if (!last || inputTokens <= 0 || maxTokens <= 0) return null;
+
+  const cached = Number(last.cached_input_tokens ?? 0);
+  const uncached = Math.max(0, inputTokens - cached);
+  const categories = [
+    ...(cached > 0 ? [{ name: "Cached input", tokens: cached, color: "#89B4FA" }] : []),
+    ...(uncached > 0 ? [{ name: "Uncached input", tokens: uncached, color: "#F9E2AF" }] : []),
+  ];
+
+  return {
+    totalTokens: inputTokens,
+    maxTokens,
+    ...(latestModel ? { model: latestModel } : {}),
+    categories,
+    source: "codex_rollout",
+    lastTokenUsage: {
+      input_tokens: inputTokens,
+      cached_input_tokens: cached,
+      output_tokens: Number(last.output_tokens ?? 0),
+      reasoning_output_tokens: Number(last.reasoning_output_tokens ?? 0),
+      total_tokens: Number(last.total_tokens ?? 0),
+    },
+    ...(latestInfo.total_token_usage ? {
+      totalTokenUsage: {
+        input_tokens: Number(latestInfo.total_token_usage.input_tokens ?? 0),
+        cached_input_tokens: Number(latestInfo.total_token_usage.cached_input_tokens ?? 0),
+        output_tokens: Number(latestInfo.total_token_usage.output_tokens ?? 0),
+        reasoning_output_tokens: Number(latestInfo.total_token_usage.reasoning_output_tokens ?? 0),
+        total_tokens: Number(latestInfo.total_token_usage.total_tokens ?? 0),
+      },
+    } : {}),
+    ...(latestRateLimits ? { rateLimits: latestRateLimits } : {}),
+  };
+}
+
 /**
  * List Codex CLI sessions for a given CWD. Codex stores rollouts at
  * ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl with a

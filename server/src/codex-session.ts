@@ -45,6 +45,8 @@ import {
   saveSession,
   appendHistory,
   updateSessionActivity,
+  updateSessionContextUsage,
+  readCodexRolloutContextUsage,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
@@ -125,6 +127,13 @@ export class CodexSession {
   private _pendingUserPrompt: { text: string; uuid: string } | null = null;
   private _currentPrompt = "";   // for SessionInfo.title on first save
   private _lastAssistantText = ""; // for messagePreview on turn.completed
+  private _lastUsage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreateTokens: number;
+    contextWindow: number;
+  } | null = null;
 
   public onActivity?: () => void;
   public onMonitorOutput?: (text: string) => void;
@@ -372,6 +381,7 @@ export class CodexSession {
         }
 
         if (code === 0) {
+          this.refreshRolloutContextUsage();
           settleResolve();
           return;
         }
@@ -486,28 +496,22 @@ export class CodexSession {
 
       case "turn.completed": {
         const sid = this.sessionId!;
+        const contextUsage = readCodexRolloutContextUsage(sid);
+        const usage = this.usageFromCodexEvent(evt.usage, contextUsage);
+        this._lastUsage = usage;
         this.send({
           type: "result",
           content: "",
           sessionId: sid,
-          usage: {
-            inputTokens: evt.usage.input_tokens,
-            outputTokens: evt.usage.output_tokens,
-            cacheReadTokens: evt.usage.cached_input_tokens ?? 0,
-            cacheCreateTokens: 0,
-            contextWindow: 0,
-          },
+          usage,
         } as ServerMessage);
+        if (contextUsage) {
+          this.sendRolloutContextUsage(sid, contextUsage, usage);
+        }
         // Update lastActive + messagePreview so the session list reflects
         // recent activity. Codex doesn't give us a cost number under
         // ChatGPT-sub billing, so leave costUsd undefined.
-        updateSessionActivity(sid, this._lastAssistantText, {
-          inputTokens: evt.usage.input_tokens,
-          outputTokens: evt.usage.output_tokens,
-          cacheReadTokens: evt.usage.cached_input_tokens ?? 0,
-          cacheCreateTokens: 0,
-          contextWindow: 0,
-        });
+        updateSessionActivity(sid, this._lastAssistantText, usage);
         return;
       }
 
@@ -528,6 +532,59 @@ export class CodexSession {
         this.handleItem(evt.type, evt.item);
         return;
     }
+  }
+
+  private usageFromCodexEvent(
+    eventUsage: CodexUsage,
+    contextUsage: ReturnType<typeof readCodexRolloutContextUsage>,
+  ): NonNullable<CodexSession["_lastUsage"]> {
+    const lastTokenUsage = contextUsage?.lastTokenUsage;
+    const cachedInputTokens = lastTokenUsage?.cached_input_tokens ?? eventUsage.cached_input_tokens ?? 0;
+    return {
+      inputTokens: lastTokenUsage
+        ? Math.max(0, lastTokenUsage.input_tokens - cachedInputTokens)
+        : eventUsage.input_tokens,
+      outputTokens: lastTokenUsage?.output_tokens ?? eventUsage.output_tokens,
+      cacheReadTokens: cachedInputTokens,
+      cacheCreateTokens: 0,
+      contextWindow: contextUsage?.maxTokens ?? 0,
+    };
+  }
+
+  private sendRolloutContextUsage(
+    sid: string,
+    contextUsage: NonNullable<ReturnType<typeof readCodexRolloutContextUsage>>,
+    usage: NonNullable<CodexSession["_lastUsage"]>,
+  ): void {
+    this.send({
+      type: "context_usage",
+      sessionId: sid,
+      ...contextUsage,
+    } as any);
+    this.send({
+      type: "usage_update",
+      sessionId: sid,
+      ...usage,
+    } as any);
+    updateSessionContextUsage(sid, contextUsage);
+  }
+
+  private refreshRolloutContextUsage(): void {
+    const sid = this.sessionId;
+    if (!sid) return;
+    const contextUsage = readCodexRolloutContextUsage(sid);
+    if (!contextUsage) return;
+    const cachedInputTokens = contextUsage.lastTokenUsage.cached_input_tokens;
+    const usage = {
+      inputTokens: Math.max(0, contextUsage.lastTokenUsage.input_tokens - cachedInputTokens),
+      outputTokens: contextUsage.lastTokenUsage.output_tokens,
+      cacheReadTokens: cachedInputTokens,
+      cacheCreateTokens: 0,
+      contextWindow: contextUsage.maxTokens,
+    };
+    this._lastUsage = usage;
+    this.sendRolloutContextUsage(sid, contextUsage, usage);
+    updateSessionActivity(sid, this._lastAssistantText, usage);
   }
 
   private handleItem(

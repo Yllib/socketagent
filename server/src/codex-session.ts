@@ -134,6 +134,7 @@ export class CodexSession {
     cacheCreateTokens: number;
     contextWindow: number;
   } | null = null;
+  private _fileChangeSnapshots = new Map<string, Map<string, string | null>>();
 
   public onActivity?: () => void;
   public onMonitorOutput?: (text: string) => void;
@@ -266,6 +267,7 @@ export class CodexSession {
     this._isRunning = true;
     this._abortRequested = false;
     this._stderrBuffer = [];
+    this._fileChangeSnapshots.clear();
     this._currentPrompt = prompt;
     this._lastAssistantText = "";
 
@@ -587,6 +589,83 @@ export class CodexSession {
     updateSessionActivity(sid, this._lastAssistantText, usage);
   }
 
+  private snapshotFileChanges(item: Extract<CodexItem, { type: "file_change" }>): void {
+    const snapshots = new Map<string, string | null>();
+    for (const change of item.changes) {
+      if (snapshots.has(change.path)) continue;
+      snapshots.set(change.path, this.readTextSnapshot(change.path));
+    }
+    this._fileChangeSnapshots.set(item.id, snapshots);
+  }
+
+  private buildFileChangeDiff(item: Extract<CodexItem, { type: "file_change" }>): string {
+    const snapshots = this._fileChangeSnapshots.get(item.id);
+    this._fileChangeSnapshots.delete(item.id);
+
+    const parts: string[] = [];
+    for (const change of item.changes) {
+      const before = snapshots?.has(change.path)
+        ? snapshots.get(change.path)!
+        : this.readTextSnapshot(change.path);
+      const after = this.readTextSnapshot(change.path);
+      const diff = this.unifiedDiff(change.path, before, after);
+      parts.push(diff || `${change.kind}: ${change.path}`);
+    }
+    return this.truncateToolOutput(parts.join("\n\n"));
+  }
+
+  private resolveChangePath(filePath: string): string {
+    return path.isAbsolute(filePath) ? filePath : path.join(this.cwd, filePath);
+  }
+
+  private readTextSnapshot(filePath: string): string | null {
+    const resolved = this.resolveChangePath(filePath);
+    try {
+      const stat = fs.statSync(resolved);
+      if (!stat.isFile()) return null;
+      if (stat.size > 512 * 1024) return `[diff skipped: file larger than 512 KiB]`;
+      const buf = fs.readFileSync(resolved);
+      if (buf.includes(0)) return "[diff skipped: binary file]";
+      return buf.toString("utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  private unifiedDiff(filePath: string, before: string | null, after: string | null): string {
+    if (before === after) return "";
+    if (before?.startsWith("[diff skipped:") || after?.startsWith("[diff skipped:")) {
+      return `${filePath}\n${before ?? after}`;
+    }
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketclaude-codex-diff-"));
+    const beforePath = path.join(tmpDir, "before");
+    const afterPath = path.join(tmpDir, "after");
+    try {
+      fs.writeFileSync(beforePath, before ?? "", "utf8");
+      fs.writeFileSync(afterPath, after ?? "", "utf8");
+      try {
+        return execFileSync(
+          "diff",
+          ["-u", "--label", `a/${filePath}`, "--label", `b/${filePath}`, beforePath, afterPath],
+          { encoding: "utf8", maxBuffer: 1024 * 1024 },
+        ).toString().trimEnd();
+      } catch (err: any) {
+        const stdout = err?.stdout ? String(err.stdout) : "";
+        if (stdout) return stdout.trimEnd();
+        return `${filePath}\n[diff unavailable]`;
+      }
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    }
+  }
+
+  private truncateToolOutput(output: string): string {
+    const max = 120 * 1024;
+    if (output.length <= max) return output;
+    return `${output.slice(0, max)}\n\n[diff truncated: ${output.length - max} additional chars]`;
+  }
+
   private handleItem(
     lifecycle: "item.started" | "item.updated" | "item.completed",
     item: CodexItem,
@@ -662,6 +741,7 @@ export class CodexSession {
       case "file_change": {
         const it = item as Extract<CodexItem, { type: "file_change" }>;
         if (lifecycle === "item.started") {
+          this.snapshotFileChanges(it);
           this.send({
             type: "tool_call",
             tool: "ApplyPatch",
@@ -678,7 +758,7 @@ export class CodexSession {
             timestamp: now(),
           });
         } else if (lifecycle === "item.completed") {
-          const summary = it.changes.map((c) => `${c.kind}: ${c.path}`).join("\n");
+          const summary = this.buildFileChangeDiff(it);
           this.send({
             type: "tool_result",
             toolUseId: it.id,

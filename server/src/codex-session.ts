@@ -135,6 +135,13 @@ export class CodexSession {
     contextWindow: number;
   } | null = null;
   private _fileChangeSnapshots = new Map<string, Map<string, string | null>>();
+  private _queuedPrompts: Array<{
+    text: string;
+    priority: "now" | "next" | "later";
+    messageId?: string;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
 
   public onActivity?: () => void;
   public onMonitorOutput?: (text: string) => void;
@@ -225,9 +232,11 @@ export class CodexSession {
 
   /**
    * Codex runs each turn atomically (prompt → completion via one `codex exec`
-   * subprocess), so mid-turn injection isn't supported by SocketClaude.
+   * subprocess). The CLI has no mid-turn injection surface, so while a turn is
+   * running we queue the prompt and start a follow-up `codex exec resume` turn
+   * as soon as the current subprocess exits.
    */
-  async injectMessage(text: string, _priority: 'now' | 'next' | 'later' = 'now'): Promise<void> {
+  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'now', messageId?: string): Promise<void> {
     if (!this._isRunning) {
       // Race: turn finished between the client deciding to queue and us
       // receiving the message. Just run it directly.
@@ -236,7 +245,18 @@ export class CodexSession {
       });
       return;
     }
-    throw new Error("Codex does not support sending another message while a query is running");
+    return new Promise<void>((resolve, reject) => {
+      this._queuedPrompts.push({ text, priority, messageId, resolve, reject });
+    });
+  }
+
+  retractQueuedPrompt(messageId: string): string | null {
+    if (!messageId) return null;
+    const idx = this._queuedPrompts.findIndex((p) => p.messageId === messageId);
+    if (idx < 0) return null;
+    const [prompt] = this._queuedPrompts.splice(idx, 1);
+    prompt.reject(new Error("Queued prompt retracted"));
+    return prompt.text;
   }
 
   getSessionContext(): SessionContext {
@@ -372,6 +392,7 @@ export class CodexSession {
         const stderr = this._stderrBuffer.join("");
 
         if (this._abortRequested || signal === "SIGTERM" || signal === "SIGINT") {
+          this.clearQueuedPrompts("Codex turn interrupted");
           this.send({
             type: "result",
             content: "(interrupted)",
@@ -384,6 +405,14 @@ export class CodexSession {
 
         if (code === 0) {
           this.refreshRolloutContextUsage();
+          const nextPrompt = this.dequeueNextPrompt();
+          if (nextPrompt) {
+            nextPrompt.resolve();
+            this.runQuery(nextPrompt.text, this.sessionId ?? undefined)
+              .then(settleResolve)
+              .catch(settleReject);
+            return;
+          }
           settleResolve();
           return;
         }
@@ -420,12 +449,33 @@ export class CodexSession {
   /** Mirrors the abort path. SIGTERM the subprocess; codex flushes pending events. */
   abort(): void {
     this._abortRequested = true;
+    this.clearQueuedPrompts("Codex turn interrupted");
     if (this.proc && !this.proc.killed) {
       this.proc.kill("SIGTERM");
       // Hard kill if it doesn't exit promptly.
       setTimeout(() => {
         if (this.proc && !this.proc.killed) this.proc.kill("SIGKILL");
       }, 2000);
+    }
+  }
+
+  private dequeueNextPrompt(): {
+    text: string;
+    priority: "now" | "next" | "later";
+    messageId?: string;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  } | null {
+    if (this._queuedPrompts.length === 0) return null;
+    const nowIdx = this._queuedPrompts.findIndex((p) => p.priority === "now");
+    if (nowIdx >= 0) return this._queuedPrompts.splice(nowIdx, 1)[0];
+    return this._queuedPrompts.shift() ?? null;
+  }
+
+  private clearQueuedPrompts(reason: string): void {
+    const queued = this._queuedPrompts.splice(0);
+    for (const prompt of queued) {
+      prompt.reject(new Error(reason));
     }
   }
 

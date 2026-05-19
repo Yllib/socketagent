@@ -263,6 +263,16 @@ function createConnectionHandler(transport: ClientTransport) {
     }
 
     switch (msg.type) {
+      case "retract_queued_prompt": {
+        const messageId = msg.messageId || "";
+        let retracted = false;
+        if (activeSession instanceof CodexSession) {
+          retracted = activeSession.retractQueuedPrompt(messageId) !== null;
+        }
+        sendJson({ type: "queued_prompt_retracted", messageId, retracted });
+        break;
+      }
+
       case "new_session": {
         const cwd = msg.cwd || DEFAULT_CWD;
         if (msg.backend === "codex" && codexUnavailable()) {
@@ -534,21 +544,18 @@ function createConnectionHandler(transport: ClientTransport) {
 
         // If session is already running, inject the message inline between turns
         if (activeSession.isRunning) {
-          if (activeSession instanceof CodexSession) {
-            sendJson({
-              type: "error",
-              message: "Codex does not support sending another message while a query is running. Wait for the current response to finish or stop it first.",
-            });
-            break;
-          }
           const priority = (msg as any).priority || 'now';
           const messageId = (msg as any).messageId || '';
           console.log(`[Inject] Session running, injecting user message inline (priority=${priority}, messageId=${messageId})`);
-          activeSession.injectMessage(msg.text, priority).then(() => {
+          activeSession.injectMessage(msg.text, priority, messageId).then(() => {
             // Acknowledge injection so the app can promote the pending message
             sendJson({ type: "injection_ack", messageId });
           }).catch((e: any) => {
-            console.error(`[Inject] Failed: ${e}`);
+            if (e?.message === "Queued prompt retracted") {
+              console.log(`[Inject] Queued prompt retracted (messageId=${messageId})`);
+            } else {
+              console.error(`[Inject] Failed: ${e}`);
+            }
           });
           break;
         }

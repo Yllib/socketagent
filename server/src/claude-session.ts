@@ -640,7 +640,7 @@ export class ClaudeSession {
 
   /** Inject a user message into the running conversation between turns.
    *  priority: 'now' = interrupt current tool, 'next' = between turns, 'later' = after current task */
-  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'now'): Promise<void> {
+  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'now', _messageId?: string): Promise<void> {
     if (!this.activeQuery || !this._isRunning) return;
     console.log(`[Inject] Queuing message (priority=${priority}): ${text.slice(0, 80)}...`);
 

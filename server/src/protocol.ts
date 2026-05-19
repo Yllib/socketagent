@@ -17,6 +17,11 @@ export interface PromptMessage {
   cwd?: string;
 }
 
+export interface RetractQueuedPromptMessage {
+  type: "retract_queued_prompt";
+  messageId: string;
+}
+
 export interface AnswerMessage {
   type: "answer";
   questionId: string;
@@ -295,6 +300,7 @@ export interface DeleteScheduledTaskMessage {
 
 export type ClientMessage =
   | PromptMessage
+  | RetractQueuedPromptMessage
   | AnswerMessage
   | NewSessionMessage
   | ResumeSessionMessage

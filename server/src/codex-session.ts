@@ -33,7 +33,7 @@
  *     (issue: openai/codex#4776) — keep the dispatcher tolerant of unknowns
  */
 
-import { spawn, ChildProcess, execFileSync } from "child_process";
+import { spawn, spawnSync, execFileSync, ChildProcess } from "child_process";
 import { WebSocket } from "ws";
 import * as crypto from "crypto";
 import * as fs from "fs";
@@ -975,8 +975,9 @@ export function createSession(
   plugins: SocketClaudePlugin[],
 ): Session {
   if (backend === "codex") {
-    if (!detectAvailableBackends().includes("codex")) {
-      throw new Error("Codex backend is not available on this server. Install and authenticate the Codex CLI first.");
+    const availability = getCodexAvailability();
+    if (!availability.available) {
+      throw new Error(`Codex backend is not available on this server: ${availability.reason || "unknown reason"}`);
     }
     return new CodexSession(ws, cwd, plugins);
   }
@@ -990,15 +991,57 @@ export function createSession(
 // ─── Backend availability detection ─────────────────────────────────────────
 
 let _cachedBackends: Backend[] | null = null;
+let _cachedCodexAvailability: { available: boolean; reason?: string } | null = null;
 
-function probeCodexAvailable(): boolean {
+export function getCodexAvailability(): { available: boolean; reason?: string } {
+  if (_cachedCodexAvailability) return _cachedCodexAvailability;
   try {
-    execFileSync("codex", ["--version"], { timeout: 3000, stdio: "ignore" });
-  } catch {
-    return false;
+    const result = spawnSync("codex", ["--version"], {
+      timeout: 3000,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    if (result.error) {
+      const code = (result.error as NodeJS.ErrnoException).code;
+      _cachedCodexAvailability = {
+        available: false,
+        reason: code === "ENOENT"
+          ? "Codex CLI was not found on PATH"
+          : `Codex CLI probe failed: ${result.error.message}`,
+      };
+      return _cachedCodexAvailability;
+    }
+
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.stdout || "").trim();
+      _cachedCodexAvailability = {
+        available: false,
+        reason: detail
+          ? `Codex CLI probe exited ${result.status}: ${detail.slice(0, 300)}`
+          : `Codex CLI probe exited ${result.status}`,
+      };
+      return _cachedCodexAvailability;
+    }
+
+    const home = process.env.HOME || os.homedir();
+    if (!fs.existsSync(path.join(home, ".codex", "auth.json"))) {
+      _cachedCodexAvailability = {
+        available: false,
+        reason: "Codex CLI is installed but ~/.codex/auth.json is missing",
+      };
+      return _cachedCodexAvailability;
+    }
+
+    _cachedCodexAvailability = { available: true };
+    return _cachedCodexAvailability;
+  } catch (e: any) {
+    _cachedCodexAvailability = {
+      available: false,
+      reason: `Codex availability check failed: ${e?.message || String(e)}`,
+    };
+    return _cachedCodexAvailability;
   }
-  const home = process.env.HOME || os.homedir();
-  return fs.existsSync(path.join(home, ".codex", "auth.json"));
 }
 
 /**
@@ -1012,7 +1055,11 @@ function probeCodexAvailable(): boolean {
 export function detectAvailableBackends(): Backend[] {
   if (_cachedBackends) return _cachedBackends;
   const list: Backend[] = ["claude"];
-  if (probeCodexAvailable()) list.push("codex");
+  try {
+    if (getCodexAvailability().available) list.push("codex");
+  } catch (e: any) {
+    console.error(`[codex] backend detection failed: ${e?.message || String(e)}`);
+  }
   _cachedBackends = list;
   return list;
 }

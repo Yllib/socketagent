@@ -7,7 +7,7 @@ import * as http from "http";
 import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
-import { CodexSession, createSession, Session, detectAvailableBackends } from "./codex-session";
+import { CodexSession, createSession, Session, detectAvailableBackends, getCodexAvailability } from "./codex-session";
 import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { ClientMessage, SessionInfo } from "./protocol";
@@ -16,6 +16,14 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
+
+process.on("uncaughtException", (err) => {
+  console.error("[fatal-guard] Uncaught exception:", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[fatal-guard] Unhandled rejection:", reason);
+});
 
 const PORT = parseInt(process.env.PORT || "8085", 10);
 const DEFAULT_CWD = process.env.DEFAULT_CWD || process.cwd();
@@ -249,6 +257,11 @@ function createConnectionHandler(transport: ClientTransport) {
     return !detectAvailableBackends().includes("codex");
   }
 
+  function codexUnavailableMessage(prefix = "Codex backend is not available on this server"): string {
+    const availability = getCodexAvailability();
+    return `${prefix}: ${availability.reason || "unknown reason"}`;
+  }
+
   async function handleMessage(msg: ClientMessage): Promise<void> {
     // Wire-format handshake — relay path absorbs this earlier in relay-client,
     // so the only callers reaching here are direct-WS clients. Reply so the
@@ -278,7 +291,7 @@ function createConnectionHandler(transport: ClientTransport) {
         if (msg.backend === "codex" && codexUnavailable()) {
           sendJson({
             type: "error",
-            message: "Codex backend is not available on this server. Install and authenticate the Codex CLI first.",
+            message: codexUnavailableMessage(),
           });
           break;
         }
@@ -341,7 +354,7 @@ function createConnectionHandler(transport: ClientTransport) {
         if (sessionInfo.backend === "codex" && codexUnavailable()) {
           sendJson({
             type: "error",
-            message: "This is a Codex session, but Codex is not available on this server. Install and authenticate the Codex CLI first.",
+            message: codexUnavailableMessage("This is a Codex session, but Codex is not available on this server"),
           });
           break;
         }
@@ -530,7 +543,7 @@ function createConnectionHandler(transport: ClientTransport) {
           if (promptBackend === "codex" && codexUnavailable()) {
             sendJson({
               type: "error",
-              message: "This is a Codex session, but Codex is not available on this server. Install and authenticate the Codex CLI first.",
+              message: codexUnavailableMessage("This is a Codex session, but Codex is not available on this server"),
             });
             break;
           }
@@ -2311,7 +2324,11 @@ httpServer.listen(PORT, async () => {
 
   // Start relay client if configured
   if (RELAY_URL) {
-    startRelayClient();
+    try {
+      startRelayClient();
+    } catch (e: any) {
+      console.error(`[Relay] Failed to start relay client: ${e?.message || String(e)}`);
+    }
   }
 });
 

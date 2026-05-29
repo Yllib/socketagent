@@ -123,6 +123,11 @@ export class CodexSession {
   private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private appServerAgentText = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
+  private pendingAppServerSteeredInputs: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }> = [];
   private _isRunning = false;
   private _model: string | null = null;
   private _sandbox: SandboxMode = "danger-full-access";
@@ -279,7 +284,7 @@ export class CodexSession {
           expectedTurnId: this.activeAppServerTurnId,
           input: [{ type: "text", text, text_elements: [] }],
         });
-        return;
+        return this.waitForAppServerSteeredInputDelivery();
       } catch (err: any) {
         console.warn(`[codex app-server] turn/steer failed; queueing follow-up: ${err?.message || String(err)}`);
       }
@@ -768,6 +773,29 @@ export class CodexSession {
     for (const prompt of queued) {
       prompt.reject(new Error(reason));
     }
+    const steered = this.pendingAppServerSteeredInputs.splice(0);
+    for (const pending of steered) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+  }
+
+  private waitForAppServerSteeredInputDelivery(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.pendingAppServerSteeredInputs.findIndex((p) => p.resolve === resolve);
+        if (idx >= 0) this.pendingAppServerSteeredInputs.splice(idx, 1);
+        reject(new Error("Timed out waiting for Codex app-server to emit steered user message"));
+      }, 30_000);
+      this.pendingAppServerSteeredInputs.push({ resolve, reject, timer });
+    });
+  }
+
+  private markNextAppServerSteeredInputDelivered(): void {
+    const pending = this.pendingAppServerSteeredInputs.shift();
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pending.resolve();
   }
 
   private handleAppServerNotification(method: string, params: unknown): void {
@@ -875,6 +903,11 @@ export class CodexSession {
   private handleAppServerItem(method: "item/started" | "item/completed", item: any): void {
     const sid = this.sessionId;
     if (!sid || !item?.id || !item?.type) return;
+
+    if (item.type === "userMessage" && method === "item/started") {
+      this.markNextAppServerSteeredInputDelivered();
+      return;
+    }
 
     if (item.type === "agentMessage" && method === "item/completed") {
       const text = item.text || this.appServerAgentText.get(item.id) || "";

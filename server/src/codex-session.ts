@@ -15,7 +15,7 @@
  *     to interrupt, kill the subprocess and start a new turn)
  *   - Plugin-provided MCP servers (Codex gets the SocketClaude app MCP bridge,
  *     but arbitrary plugin MCP injection is not wired here yet)
- *   - Fork / branch / rewind / clear_context
+ *   - Fork / branch / rewind
  *   - Append system prompt (codex uses AGENTS.md, not per-turn)
  *   - Compaction / context-window tracking (no JSONL surface)
  *   - Effort / thinking config (no codex flag)
@@ -46,6 +46,7 @@ import {
   appendHistory,
   updateSessionActivity,
   updateSessionContextUsage,
+  remapSession,
   readCodexRolloutContextUsage,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
@@ -504,7 +505,13 @@ export class CodexSession {
             messagePreview: "",
             backend: "codex",
           };
-          saveSession(info);
+          if (this.replacesSessionId) {
+            remapSession(this.replacesSessionId, this.sessionId);
+            saveSession(info);
+            this.replacesSessionId = undefined;
+          } else {
+            saveSession(info);
+          }
           this._sessionInfoSaved = true;
 
           // Tell the client the real sessionId now that we have it.

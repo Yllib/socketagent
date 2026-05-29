@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { SessionInfo, HistoryEntry } from "./protocol";
+import { Backend, SessionInfo, HistoryEntry } from "./protocol";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
@@ -627,20 +627,34 @@ function ensureArchiveDir(): void {
 }
 
 /**
- * Clear context for a session: archive Claude Code's JSONL, our history, and todos.
+ * Clear context for a session: archive the backend transcript, our history, and todos.
  * The session metadata (sessions.json) is preserved so it still shows in the list.
  * Archived files get a timestamp suffix so multiple clears don't overwrite.
  */
 export function clearSessionContext(sessionId: string, cwd: string): void {
   ensureArchiveDir();
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const sessions = readStore();
+  const session = sessions.find((s) => s.id === sessionId);
+  const backend = session?.backend;
+  let codexRolloutPath: string | undefined;
 
-  // 1. Archive Claude Code's JSONL session file
-  const jsonlPath = getJsonlPath(sessionId, cwd);
-  if (fs.existsSync(jsonlPath)) {
-    const archiveName = `${sessionId}_${ts}.jsonl`;
-    fs.renameSync(jsonlPath, path.join(ARCHIVE_DIR, archiveName));
-    console.log(`[ClearContext] Archived JSONL: ${archiveName}`);
+  // 1. Archive the backend's native transcript.
+  if (backend === "codex") {
+    const rolloutPath = findCodexRolloutFile(sessionId);
+    if (rolloutPath && fs.existsSync(rolloutPath)) {
+      codexRolloutPath = rolloutPath;
+      const archiveName = `${sessionId}_${ts}_codex-rollout.jsonl`;
+      fs.renameSync(rolloutPath, path.join(ARCHIVE_DIR, archiveName));
+      console.log(`[ClearContext] Archived Codex rollout: ${archiveName}`);
+    }
+  } else {
+    const jsonlPath = getJsonlPath(sessionId, cwd);
+    if (fs.existsSync(jsonlPath)) {
+      const archiveName = `${sessionId}_${ts}.jsonl`;
+      fs.renameSync(jsonlPath, path.join(ARCHIVE_DIR, archiveName));
+      console.log(`[ClearContext] Archived JSONL: ${archiveName}`);
+    }
   }
 
   // 2. Archive our chat history
@@ -669,8 +683,6 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
 
   // 5. Write a metadata sidecar so restore can recover the title/cwd
   // even after the session row has been remapped to a new SDK session id.
-  const sessions = readStore();
-  const session = sessions.find((s) => s.id === sessionId);
   if (session) {
     const metaName = `${sessionId}_${ts}_meta.json`;
     const meta = {
@@ -679,6 +691,8 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
       cwd: session.cwd,
       createdAt: session.createdAt,
       clearedAt: new Date().toISOString(),
+      ...(session.backend ? { backend: session.backend } : {}),
+      ...(codexRolloutPath ? { codexRolloutPath } : {}),
     };
     fs.writeFileSync(path.join(ARCHIVE_DIR, metaName), JSON.stringify(meta, null, 2), "utf-8");
     console.log(`[ClearContext] Wrote meta: ${metaName}`);
@@ -704,6 +718,7 @@ export interface ArchiveEntry {
 }
 
 const ARCHIVE_SUFFIXES: Array<[string, string]> = [
+  ["_codex-rollout.jsonl", "codex-rollout"],
   ["_sdk-events.jsonl", "sdk-events"],
   ["_history.json", "history"],
   ["_todos.json", "todos"],
@@ -778,7 +793,7 @@ export function listArchives(): ArchiveEntry[] {
     }
     if (!title) title = "Untitled";
 
-    // cwd fallback: pull from the first line of the archived Claude Code JSONL.
+    // cwd fallback: pull from the archived backend transcript.
     const jsonlName = group.files.get("jsonl");
     if (!cwd && jsonlName) {
       try {
@@ -787,6 +802,18 @@ export function listArchives(): ArchiveEntry[] {
         if (firstLine) {
           const obj = JSON.parse(firstLine);
           if (typeof obj.cwd === "string") cwd = obj.cwd;
+        }
+      } catch {}
+    }
+    const codexRolloutName = group.files.get("codex-rollout");
+    if (!cwd && codexRolloutName) {
+      try {
+        const firstLine = fs.readFileSync(path.join(ARCHIVE_DIR, codexRolloutName), "utf-8").split("\n", 1)[0];
+        if (firstLine) {
+          const obj = JSON.parse(firstLine);
+          if (obj?.type === "session_meta" && typeof obj.payload?.cwd === "string") {
+            cwd = obj.payload.cwd;
+          }
         }
       } catch {}
     }
@@ -800,7 +827,7 @@ export function listArchives(): ArchiveEntry[] {
       clearedAt,
       messagePreview,
       messageCount,
-      hasJsonl: group.files.has("jsonl"),
+      hasJsonl: group.files.has("jsonl") || group.files.has("codex-rollout"),
     });
   }
 
@@ -829,12 +856,15 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
 
   const metaPath = path.join(ARCHIVE_DIR, `${sid}_${ts}_meta.json`);
   const jsonlArchive = path.join(ARCHIVE_DIR, `${sid}_${ts}.jsonl`);
+  const codexRolloutArchive = path.join(ARCHIVE_DIR, `${sid}_${ts}_codex-rollout.jsonl`);
   const histArchive = path.join(ARCHIVE_DIR, `${sid}_${ts}_history.json`);
   const todosArchive = path.join(ARCHIVE_DIR, `${sid}_${ts}_todos.json`);
   const sdkEventsArchive = path.join(ARCHIVE_DIR, `${sid}_${ts}_sdk-events.jsonl`);
 
   let metaTitle = "";
   let metaCreatedAt = "";
+  let metaBackend: Backend | undefined;
+  let codexRolloutPath = "";
   let cwd = "";
   if (fs.existsSync(metaPath)) {
     try {
@@ -842,6 +872,8 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
       if (typeof meta.title === "string") metaTitle = meta.title;
       if (typeof meta.createdAt === "string") metaCreatedAt = meta.createdAt;
       if (typeof meta.cwd === "string") cwd = meta.cwd;
+      if (meta.backend === "claude" || meta.backend === "codex") metaBackend = meta.backend;
+      if (typeof meta.codexRolloutPath === "string") codexRolloutPath = meta.codexRolloutPath;
     } catch {}
   }
 
@@ -855,6 +887,17 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
       }
     } catch {}
   }
+  if (!cwd && fs.existsSync(codexRolloutArchive)) {
+    try {
+      const firstLine = fs.readFileSync(codexRolloutArchive, "utf-8").split("\n", 1)[0];
+      if (firstLine) {
+        const obj = JSON.parse(firstLine);
+        if (obj?.type === "session_meta" && typeof obj.payload?.cwd === "string") {
+          cwd = obj.payload.cwd;
+        }
+      }
+    } catch {}
+  }
   if (!cwd) return { ok: false, reason: "cannot determine cwd for this archive" };
 
   const liveHist = historyFile(sid);
@@ -865,6 +908,16 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
     if (fs.existsSync(liveJsonl)) fs.unlinkSync(liveJsonl);
     fs.renameSync(jsonlArchive, liveJsonl);
+  }
+  if (fs.existsSync(codexRolloutArchive)) {
+    const liveCodexRollout = codexRolloutPath || findCodexRolloutFile(sid) || buildCodexRolloutRestorePath(sid, codexRolloutArchive);
+    if (!liveCodexRollout) {
+      return { ok: false, reason: "cannot determine Codex rollout path for this archive" };
+    }
+    const destDir = path.dirname(liveCodexRollout);
+    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+    if (fs.existsSync(liveCodexRollout)) fs.unlinkSync(liveCodexRollout);
+    fs.renameSync(codexRolloutArchive, liveCodexRollout);
   }
   if (fs.existsSync(histArchive)) {
     ensureHistoryDir();
@@ -908,6 +961,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     createdAt: metaCreatedAt || restoredAt,
     lastActive: restoredAt,
     messagePreview,
+    ...(metaBackend ? { backend: metaBackend } : {}),
   };
   if (existingIdx >= 0) {
     sessions[existingIdx] = restored;
@@ -922,7 +976,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
 
 export function deleteArchive(sid: string, ts: string): void {
   ensureArchiveDir();
-  for (const suffix of [".jsonl", "_history.json", "_todos.json", "_sdk-events.jsonl", "_meta.json"]) {
+  for (const suffix of [".jsonl", "_codex-rollout.jsonl", "_history.json", "_todos.json", "_sdk-events.jsonl", "_meta.json"]) {
     const p = path.join(ARCHIVE_DIR, `${sid}_${ts}${suffix}`);
     if (fs.existsSync(p)) {
       fs.unlinkSync(p);
@@ -1204,6 +1258,26 @@ export function findCodexRolloutFile(sessionId: string): string | null {
   }
   walk(sessionsDir);
   return found;
+}
+
+function buildCodexRolloutRestorePath(sessionId: string, archivePath: string): string | null {
+  let timestamp = "";
+  try {
+    const firstLine = fs.readFileSync(archivePath, "utf-8").split("\n", 1)[0];
+    if (firstLine) {
+      const obj = JSON.parse(firstLine);
+      if (typeof obj?.payload?.timestamp === "string") timestamp = obj.payload.timestamp;
+    }
+  } catch {}
+
+  const d = timestamp ? new Date(timestamp) : new Date();
+  if (Number.isNaN(d.getTime())) return null;
+  const year = String(d.getUTCFullYear());
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const stamp = d.toISOString().slice(0, 19).replace(/:/g, "-");
+  const homeDir = process.env.HOME || require("os").homedir();
+  return path.join(homeDir, ".codex", "sessions", year, month, day, `rollout-${stamp}-${sessionId}.jsonl`);
 }
 
 /**

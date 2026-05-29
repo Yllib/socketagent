@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import type { Backend } from "./protocol";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
@@ -26,6 +27,7 @@ export interface ScheduledTask {
   id: string;
   prompt: string;
   cwd: string;
+  backend?: Backend;
   scheduledTime: string;
   createdAt: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";

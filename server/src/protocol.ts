@@ -266,6 +266,7 @@ export interface ScheduleTaskMessage {
   type: "schedule_task";
   prompt: string;
   cwd: string;
+  backend?: Backend;
   scheduledTime: string;
   recurrence?: {
     type: "once" | "daily" | "weekly" | "monthly" | "custom";
@@ -288,6 +289,7 @@ export interface UpdateScheduledTaskMessage {
   taskId: string;
   prompt?: string;
   cwd?: string;
+  backend?: Backend;
   scheduledTime?: string;
   recurrence?: { type: "once" | "daily" | "weekly" | "monthly" | "custom"; intervalMs?: number } | null;
   reuseSession?: boolean;

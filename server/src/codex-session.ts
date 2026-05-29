@@ -434,6 +434,7 @@ export class CodexSession {
     return {
       getSessionId: () => this.sessionId || "",
       getCwd: () => this.cwd,
+      getBackend: () => "codex",
       send: (msg) => this.send(msg as ServerMessage),
       appendHistory: (entry) => {
         if (this.sessionId) appendHistory(this.sessionId, entry as HistoryEntry);

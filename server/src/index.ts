@@ -10,7 +10,7 @@ import { ClaudeSession } from "./claude-session";
 import { CodexSession, createSession, Session, detectAvailableBackends, getCodexAvailability } from "./codex-session";
 import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
-import { ClientMessage, SessionInfo } from "./protocol";
+import { Backend, ClientMessage, SessionInfo } from "./protocol";
 import { SocketClaudePlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
@@ -810,10 +810,12 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "schedule_task": {
         const recurrence = (msg as any).recurrence;
+        const backend = ((msg as any).backend === "codex" ? "codex" : "claude") as Backend;
         const task: ScheduledTask = {
           id: crypto.randomUUID(),
           prompt: (msg as any).prompt,
           cwd: (msg as any).cwd,
+          backend,
           scheduledTime: (msg as any).scheduledTime,
           createdAt: new Date().toISOString(),
           status: "pending",
@@ -850,6 +852,13 @@ function createConnectionHandler(transport: ClientTransport) {
         if (task && (task.status === "pending" || task.status === "cancelled")) {
           if ((msg as any).prompt !== undefined) task.prompt = (msg as any).prompt;
           if ((msg as any).cwd !== undefined) task.cwd = (msg as any).cwd;
+          if ((msg as any).backend !== undefined) {
+            const nextBackend = (msg as any).backend === "codex" ? "codex" : "claude";
+            if (task.backend && task.backend !== nextBackend) {
+              task.sessionId = undefined;
+            }
+            task.backend = nextBackend;
+          }
           if ((msg as any).scheduledTime !== undefined) task.scheduledTime = (msg as any).scheduledTime;
           if ((msg as any).recurrence !== undefined) {
             const rec = (msg as any).recurrence;
@@ -2460,17 +2469,21 @@ async function checkScheduledTasks(): Promise<void> {
 
       // Determine if we should resume an existing session
       const shouldResume = task.reuseSession && task.sessionId;
+      const backend = task.backend
+        || (shouldResume && task.sessionId ? getSession(task.sessionId)?.backend : undefined)
+        || "claude";
+      task.backend = backend;
+      saveScheduledTask(task);
 
       // Create headless session (same pattern as /continue endpoint)
       const ws = { readyState: WebSocket.CLOSED, send: () => {} } as any;
-      // Scheduler doesn't currently carry backend per task — use claude default.
-      const session = createSession(undefined, ws, task.cwd, plugins);
+      const session = createSession(backend, ws, task.cwd, plugins);
       session.onActivity = () => scheduleBroadcast();
 
       // If reusing session, set the resume ID so SDK continues that session
       if (shouldResume) {
         (session as any)._resumeSessionId = task.sessionId;
-        console.log(`[Scheduler] Reusing session ${task.sessionId}`);
+        console.log(`[Scheduler] Reusing ${backend} session ${task.sessionId}`);
       }
 
       const tempId = `scheduled-${task.id}`;

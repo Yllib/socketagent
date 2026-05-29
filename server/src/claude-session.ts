@@ -729,6 +729,7 @@ export class ClaudeSession {
 
       const appToolContext: AppToolContext = {
         getSessionId: () => this.sessionId || "",
+        getBackend: () => "claude",
         send: (msg) => this.send(msg as ServerMessage),
         getTtsEngine: () => this._ttsEngine,
         getKokoroVoice: () => this._kokoroVoice,
@@ -793,6 +794,7 @@ export class ClaudeSession {
                 id: crypto.randomUUID(),
                 prompt: args.prompt,
                 cwd: args.cwd,
+                backend: "claude",
                 scheduledTime: args.scheduledTime,
                 createdAt: new Date().toISOString(),
                 status: "pending",

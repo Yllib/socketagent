@@ -2,13 +2,14 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { spawn, ChildProcess } from "child_process";
-import { ServerMessage } from "./protocol";
+import type { Backend, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 
 export interface AppToolContext {
   getSessionId(): string;
   getCwd?(): string;
+  getBackend?(): Backend;
   send(msg: ServerMessage | Record<string, any>): void;
   appendHistory?(entry: Record<string, any>): void;
   getTtsEngine(): "system" | "kokoro_server" | "kokoro_device";
@@ -34,6 +35,7 @@ export interface ReminderArgs {
 export interface ScheduleTaskArgs {
   prompt: string;
   cwd: string;
+  backend?: Backend;
   scheduledTime: string;
   recurrenceType?: "once" | "daily" | "weekly" | "monthly" | "custom";
   customIntervalMs?: number;
@@ -225,6 +227,7 @@ export async function handleScheduleTaskTool(
     id: crypto.randomUUID(),
     prompt: args.prompt,
     cwd: args.cwd,
+    backend: args.backend || ctx.getBackend?.() || "claude",
     scheduledTime: args.scheduledTime,
     createdAt: new Date().toISOString(),
     status: "pending",

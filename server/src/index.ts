@@ -16,6 +16,7 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
+import { getAdvertisedServerSettings, getCodexDriversAvailable, setCodexDriver } from "./server-settings";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -267,15 +268,44 @@ function createConnectionHandler(transport: ClientTransport) {
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
     if ((msg as any).type === "client_capabilities") {
+      const settings = getAdvertisedServerSettings();
       sendJson({
         type: "server_capabilities",
         binaryEnvelope: true,
         backends: detectAvailableBackends(),
+        codexDriver: settings.codexDriver,
+        codexDriversAvailable: settings.codexDriversAvailable,
       });
       return;
     }
 
     switch (msg.type) {
+      case "get_server_settings": {
+        sendJson({
+          type: "server_settings",
+          ...getAdvertisedServerSettings(),
+        });
+        break;
+      }
+
+      case "set_codex_driver": {
+        const available = getCodexDriversAvailable();
+        if (!available.includes(msg.driver)) {
+          sendJson({
+            type: "error",
+            message: `Codex driver '${msg.driver}' is not available on this server`,
+          });
+          break;
+        }
+        const settings = setCodexDriver(msg.driver);
+        sendJson({
+          type: "server_settings",
+          codexDriver: settings.codexDriver,
+          codexDriversAvailable: available,
+        });
+        break;
+      }
+
       case "retract_queued_prompt": {
         const messageId = msg.messageId || "";
         let retracted = false;

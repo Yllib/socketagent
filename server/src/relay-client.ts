@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
 import { ClientMessage } from "./protocol";
 import { detectAvailableBackends } from "./codex-session";
+import { getAdvertisedServerSettings } from "./server-settings";
 
 // Binary envelope plaintext markers — first byte of the decrypted payload.
 const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
@@ -291,10 +292,13 @@ export class RelayClient {
       // Ack so the phone knows the server is now sending binary, and tell
       // it which agent backends this server can drive (claude is always
       // present; codex iff installed + authed).
+      const settings = getAdvertisedServerSettings();
       this.send({
         type: "server_capabilities",
         binaryEnvelope: this.binaryEnabled,
         backends: detectAvailableBackends(),
+        codexDriver: settings.codexDriver,
+        codexDriversAvailable: settings.codexDriversAvailable,
       });
       return;
     }

@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { Backend, SessionInfo, HistoryEntry } from "./protocol";
+import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
@@ -710,6 +710,7 @@ export interface ArchiveEntry {
   ts: string;
   title: string;
   cwd: string;
+  backend?: Backend;
   createdAt: string;
   clearedAt: string;
   messagePreview: string;
@@ -759,6 +760,7 @@ export function listArchives(): ArchiveEntry[] {
   for (const group of groups.values()) {
     let title = "";
     let cwd = "";
+    let backend: Backend | undefined;
     let createdAt = "";
     // Timestamp encoding in the archive filename is `toISOString().replace(/[:.]/g, "-")`.
     // Reverse it: the first three dashes after `T` were `:`/`:`/`.` in the original.
@@ -769,6 +771,7 @@ export function listArchives(): ArchiveEntry[] {
         const meta = JSON.parse(fs.readFileSync(path.join(ARCHIVE_DIR, metaName), "utf-8"));
         if (typeof meta.title === "string" && meta.title) title = meta.title;
         if (typeof meta.cwd === "string" && meta.cwd) cwd = meta.cwd;
+        if (meta.backend === "claude" || meta.backend === "codex") backend = meta.backend;
         if (typeof meta.createdAt === "string") createdAt = meta.createdAt;
         if (typeof meta.clearedAt === "string" && meta.clearedAt) clearedAt = meta.clearedAt;
       } catch {}
@@ -806,6 +809,7 @@ export function listArchives(): ArchiveEntry[] {
       } catch {}
     }
     const codexRolloutName = group.files.get("codex-rollout");
+    if (!backend && codexRolloutName) backend = "codex";
     if (!cwd && codexRolloutName) {
       try {
         const firstLine = fs.readFileSync(path.join(ARCHIVE_DIR, codexRolloutName), "utf-8").split("\n", 1)[0];
@@ -823,6 +827,7 @@ export function listArchives(): ArchiveEntry[] {
       ts: group.ts,
       title,
       cwd,
+      ...(backend ? { backend } : {}),
       createdAt,
       clearedAt,
       messagePreview,

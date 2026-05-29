@@ -8,6 +8,8 @@
  */
 export type Backend = "claude" | "codex";
 
+export type CodexDriver = "exec" | "app-server";
+
 // ── Client → Server messages ──
 
 export interface PromptMessage {
@@ -42,6 +44,15 @@ export interface ResumeSessionMessage {
 
 export interface ListSessionsMessage {
   type: "list_sessions";
+}
+
+export interface GetServerSettingsMessage {
+  type: "get_server_settings";
+}
+
+export interface SetCodexDriverMessage {
+  type: "set_codex_driver";
+  driver: CodexDriver;
 }
 
 export interface DeleteSessionMessage {
@@ -307,6 +318,8 @@ export type ClientMessage =
   | NewSessionMessage
   | ResumeSessionMessage
   | ListSessionsMessage
+  | GetServerSettingsMessage
+  | SetCodexDriverMessage
   | DeleteSessionMessage
   | RenameSessionMessage
   | ClearContextMessage
@@ -496,6 +509,20 @@ export interface SessionInfo {
 export interface ErrorServerMessage {
   type: "error";
   message: string;
+}
+
+export interface ServerCapabilitiesMessage {
+  type: "server_capabilities";
+  binaryEnvelope?: boolean;
+  backends: Backend[];
+  codexDriver?: CodexDriver;
+  codexDriversAvailable?: CodexDriver[];
+}
+
+export interface ServerSettingsMessage {
+  type: "server_settings";
+  codexDriver: CodexDriver;
+  codexDriversAvailable: CodexDriver[];
 }
 
 export interface SessionCreatedServerMessage {
@@ -829,6 +856,8 @@ export type ServerMessage =
   | ResultServerMessage
   | SessionListServerMessage
   | ErrorServerMessage
+  | ServerCapabilitiesMessage
+  | ServerSettingsMessage
   | SessionCreatedServerMessage
   | SessionHistoryServerMessage
   | StatusServerMessage

@@ -39,7 +39,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { ServerMessage, Backend, SessionInfo, HistoryEntry } from "./protocol";
+import { ServerMessage, Backend, SessionInfo, HistoryEntry, CodexDriver } from "./protocol";
 import { SessionContext, SocketClaudePlugin } from "./plugin-api";
 import {
   saveSession,
@@ -52,6 +52,8 @@ import {
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp } from "./codex-app-mcp";
+import { CodexAppServerClient, CodexAppServerNotification } from "./codex-app-server-client";
+import { loadServerSettings } from "./server-settings";
 
 const now = (): string => new Date().toISOString();
 
@@ -114,6 +116,13 @@ export class CodexSession {
   private sessionId: string | null = null; // SocketClaude session id (= codex thread_id)
   private threadId: string | null = null;  // codex thread_id (for resume)
   private proc: ChildProcess | null = null;
+  private appServer: CodexAppServerClient | null = null;
+  private appServerInitialized = false;
+  private appServerMcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
+  private activeAppServerTurnId: string | null = null;
+  private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
+  private appServerAgentText = new Map<string, string>();
+  private appServerToolOutput = new Map<string, string>();
   private _isRunning = false;
   private _model: string | null = null;
   private _sandbox: SandboxMode = "danger-full-access";
@@ -155,6 +164,7 @@ export class CodexSession {
     private ws: WebSocket,
     private cwd: string,
     private _plugins: SocketClaudePlugin[] = [],
+    private readonly codexDriver: CodexDriver = "exec",
   ) {}
 
   // ─── Public API (subset of ClaudeSession) ────────────────────────────
@@ -246,6 +256,35 @@ export class CodexSession {
       });
       return;
     }
+
+    if (this.codexDriver === "app-server" && this.threadId && this.activeAppServerTurnId) {
+      const userMsgUuid = crypto.randomUUID();
+      if (this.sessionId) {
+        appendHistory(this.sessionId, {
+          role: "user",
+          content: text,
+          uuid: userMsgUuid,
+          timestamp: now(),
+        });
+        this.send({
+          type: "user_message_uuid",
+          uuid: userMsgUuid,
+          sessionId: this.sessionId,
+        } as any);
+      }
+      try {
+        await this.ensureAppServer();
+        await this.appServer!.steerTurn({
+          threadId: this.threadId,
+          expectedTurnId: this.activeAppServerTurnId,
+          input: [{ type: "text", text, text_elements: [] }],
+        });
+        return;
+      } catch (err: any) {
+        console.warn(`[codex app-server] turn/steer failed; queueing follow-up: ${err?.message || String(err)}`);
+      }
+    }
+
     return new Promise<void>((resolve, reject) => {
       this._queuedPrompts.push({ text, priority, messageId, resolve, reject });
     });
@@ -284,6 +323,10 @@ export class CodexSession {
    * existing SocketClaude/Codex thread.
    */
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
+    if (this.codexDriver === "app-server") {
+      return this.runAppServerQuery(prompt, resumeSessionId);
+    }
+
     if (this._isRunning) throw new Error("CodexSession already running a turn");
     this._isRunning = true;
     this._abortRequested = false;
@@ -430,6 +473,231 @@ export class CodexSession {
     });
   }
 
+  private async runAppServerQuery(prompt: string, resumeSessionId?: string): Promise<void> {
+    if (this._isRunning) throw new Error("CodexSession already running a turn");
+    this._isRunning = true;
+    this._abortRequested = false;
+    this._currentPrompt = prompt;
+    this._lastAssistantText = "";
+    this.appServerAgentText.clear();
+    this.appServerToolOutput.clear();
+
+    const resumeTarget = resumeSessionId || this._resumeSessionId;
+    if (!this.sessionId && resumeTarget) {
+      this.sessionId = resumeTarget;
+      this.threadId = resumeTarget;
+      this._sessionInfoSaved = true;
+    }
+
+    const userMsgUuid = crypto.randomUUID();
+    if (this.sessionId) {
+      appendHistory(this.sessionId, {
+        role: "user",
+        content: prompt,
+        uuid: userMsgUuid,
+        timestamp: now(),
+      });
+      this.send({
+        type: "user_message_uuid",
+        uuid: userMsgUuid,
+        sessionId: this.sessionId,
+      } as any);
+    } else {
+      this._pendingUserPrompt = { text: prompt, uuid: userMsgUuid };
+    }
+
+    await this.ensureAppServer();
+
+    const completion = new Promise<void>((resolve, reject) => {
+      this.appServerTurnSettler = { resolve, reject };
+    });
+
+    try {
+      const threadConfig = this.buildAppServerThreadParams();
+      if (this.threadId) {
+        const resumed = await this.appServer!.resumeThread({
+          ...threadConfig,
+          threadId: this.threadId,
+        });
+        this.adoptAppServerThread(this.extractThreadId(resumed) || this.threadId);
+      } else {
+        const started = await this.appServer!.startThread(threadConfig);
+        this.adoptAppServerThread(this.extractThreadId(started));
+      }
+
+      if (!this.threadId) throw new Error("codex app-server did not return a thread id");
+
+      const turn = await this.appServer!.startTurn({
+        threadId: this.threadId,
+        cwd: this.cwd,
+        input: [{ type: "text", text: prompt, text_elements: [] }],
+      });
+      this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
+
+      await completion;
+
+      const nextPrompt = this._abortRequested ? null : this.dequeueNextPrompt();
+      if (nextPrompt) {
+        nextPrompt.resolve();
+        this._isRunning = false;
+        this.activeAppServerTurnId = null;
+        this.appServerTurnSettler = null;
+        await this.runAppServerQuery(nextPrompt.text, this.sessionId ?? undefined);
+      }
+    } catch (err: any) {
+      this.send({
+        type: "error",
+        message: `codex app-server error: ${err?.message || String(err)}`,
+      } as ServerMessage);
+      throw err;
+    } finally {
+      this._isRunning = false;
+      this.activeAppServerTurnId = null;
+      this.appServerTurnSettler = null;
+    }
+  }
+
+  private async ensureAppServer(): Promise<void> {
+    if (!this.appServer) {
+      this.appServer = new CodexAppServerClient({
+        cwd: this.cwd,
+        env: process.env,
+        requestTimeoutMs: 60_000,
+        startupTimeoutMs: 30_000,
+      });
+      this.appServer.on("notification", (notification: CodexAppServerNotification) => {
+        this.handleAppServerNotification(notification.method, notification.params);
+        this.onActivity?.();
+      });
+      this.appServer.on("stderr", (chunk: string) => {
+        this._stderrBuffer.push(chunk);
+      });
+      this.appServer.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+        if (this._isRunning && !this._abortRequested) {
+          this.appServerTurnSettler?.reject(new Error(`codex app-server exited code=${code} signal=${signal}`));
+        }
+      });
+    }
+
+    if (!this.appServerInitialized) {
+      await this.appServer.initialize({
+        clientInfo: {
+          name: "socketclaude",
+          title: "SocketClaude",
+          version: "1.0.0",
+        },
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+        },
+      });
+      this.appServerInitialized = true;
+    }
+  }
+
+  private buildAppServerThreadParams(): {
+    cwd: string;
+    sandbox: SandboxMode;
+    approvalPolicy: "never";
+    model?: string;
+    config: Record<string, unknown>;
+    experimentalRawEvents: boolean;
+    persistExtendedHistory: boolean;
+  } {
+    return {
+      cwd: this.cwd,
+      sandbox: this._sandbox,
+      approvalPolicy: "never",
+      ...(this._model ? { model: this._model } : {}),
+      config: this.appServerConfig(),
+      experimentalRawEvents: false,
+      persistExtendedHistory: false,
+    };
+  }
+
+  private appServerConfig(): Record<string, unknown> {
+    if (!this.appServerMcpRegistration) {
+      this.appServerMcpRegistration = registerCodexAppMcp(this.createAppToolContext());
+    }
+    const mcpUrl = this.buildCodexMcpUrl(this.appServerMcpRegistration.token);
+    return {
+      mcp_servers: {
+        socketclaude_app: {
+          url: mcpUrl,
+        },
+      },
+    };
+  }
+
+  private extractThreadId(value: unknown): string | null {
+    const v = value as any;
+    return v?.thread?.id || v?.threadId || null;
+  }
+
+  private extractTurnId(value: unknown): string | null {
+    const v = value as any;
+    return v?.turn?.id || v?.turnId || null;
+  }
+
+  private adoptAppServerThread(threadId: string | null): void {
+    if (!threadId) return;
+    this.threadId = threadId;
+    const isFirstTime = !this.sessionId;
+    this.sessionId = threadId;
+
+    if (!this._sessionInfoSaved) {
+      const title =
+        this._currentPrompt.slice(0, 50) +
+        (this._currentPrompt.length > 50 ? "..." : "");
+      const info: SessionInfo = {
+        id: this.sessionId,
+        title,
+        cwd: this.cwd,
+        createdAt: now(),
+        lastActive: now(),
+        messagePreview: "",
+        backend: "codex",
+      };
+      if (this.replacesSessionId) {
+        remapSession(this.replacesSessionId, this.sessionId);
+        saveSession(info);
+        this.replacesSessionId = undefined;
+      } else {
+        saveSession(info);
+      }
+      this._sessionInfoSaved = true;
+
+      if (isFirstTime) {
+        this.send({
+          type: "session_created",
+          sessionId: this.sessionId,
+          cwd: this.cwd,
+          title,
+          backend: "codex",
+        } as ServerMessage);
+        this.send({
+          type: "permission_mode_changed",
+          permissionMode: this.permissionMode,
+        } as any);
+      }
+    }
+
+    if (this._pendingUserPrompt) {
+      appendHistory(this.sessionId, {
+        role: "user",
+        content: this._pendingUserPrompt.text,
+        uuid: this._pendingUserPrompt.uuid,
+        timestamp: now(),
+      });
+      this.send({
+        type: "user_message_uuid",
+        uuid: this._pendingUserPrompt.uuid,
+        sessionId: this.sessionId,
+      } as any);
+      this._pendingUserPrompt = null;
+    }
+  }
+
   private createAppToolContext(): AppToolContext {
     return {
       getSessionId: () => this.sessionId || "",
@@ -452,6 +720,27 @@ export class CodexSession {
   abort(): void {
     this._abortRequested = true;
     this.clearQueuedPrompts("Codex turn interrupted");
+    if (this.codexDriver === "app-server") {
+      if (this.appServer && this.threadId && this.activeAppServerTurnId) {
+        this.appServer.interruptTurn({
+          threadId: this.threadId,
+          turnId: this.activeAppServerTurnId,
+        }).catch((err) => {
+          console.warn(`[codex app-server] turn interrupt failed: ${err.message}`);
+        });
+      }
+      this.appServerTurnSettler?.resolve();
+      this.appServerTurnSettler = null;
+      this._isRunning = false;
+      if (this.sessionId) {
+        this.send({
+          type: "result",
+          content: "(interrupted)",
+          sessionId: this.sessionId,
+        } as ServerMessage);
+      }
+      return;
+    }
     if (this.proc && !this.proc.killed) {
       this.proc.kill("SIGTERM");
       // Hard kill if it doesn't exit promptly.
@@ -479,6 +768,259 @@ export class CodexSession {
     for (const prompt of queued) {
       prompt.reject(new Error(reason));
     }
+  }
+
+  private handleAppServerNotification(method: string, params: unknown): void {
+    const p = params as any;
+    switch (method) {
+      case "thread/started":
+        this.adoptAppServerThread(p?.thread?.id || p?.threadId || null);
+        return;
+
+      case "turn/started":
+        this.activeAppServerTurnId = p?.turn?.id || p?.turnId || this.activeAppServerTurnId;
+        return;
+
+      case "item/agentMessage/delta": {
+        const sid = this.sessionId;
+        if (!sid) return;
+        const itemId = p?.itemId || p?.item?.id || "agent";
+        const delta = String(p?.delta ?? "");
+        this.appServerAgentText.set(itemId, (this.appServerAgentText.get(itemId) || "") + delta);
+        if (delta) {
+          this.send({ type: "text", content: delta, sessionId: sid } as ServerMessage);
+        }
+        return;
+      }
+
+      case "item/reasoning/summaryTextDelta":
+      case "item/reasoning/textDelta": {
+        const sid = this.sessionId;
+        const delta = String(p?.delta ?? "");
+        if (sid && delta) this.send({ type: "thinking", content: delta, sessionId: sid } as ServerMessage);
+        return;
+      }
+
+      case "item/commandExecution/outputDelta":
+      case "command/exec/outputDelta":
+      case "process/outputDelta": {
+        const sid = this.sessionId;
+        if (!sid) return;
+        const itemId = p?.itemId || p?.item?.id || p?.processId || p?.id;
+        const delta = String(p?.delta ?? p?.chunk ?? "");
+        if (!itemId || !delta) return;
+        const key = String(itemId);
+        this.appServerToolOutput.set(key, (this.appServerToolOutput.get(key) || "") + delta);
+        this.send({
+          type: "tool_result_chunk",
+          toolUseId: key,
+          content: delta,
+          sessionId: sid,
+          done: false,
+          chunkIndex: 1,
+        } as any);
+        return;
+      }
+
+      case "thread/tokenUsage/updated": {
+        const usage = this.usageFromAppServerTokenUsage(p?.tokenUsage);
+        if (!usage || !this.sessionId) return;
+        this._lastUsage = usage;
+        this.send({
+          type: "usage_update",
+          sessionId: this.sessionId,
+          ...usage,
+        } as any);
+        updateSessionActivity(this.sessionId, this._lastAssistantText, usage);
+        return;
+      }
+
+      case "item/started":
+      case "item/completed":
+        this.handleAppServerItem(method, p?.item);
+        return;
+
+      case "turn/completed": {
+        const sid = this.sessionId;
+        if (sid) {
+          const usage = this._lastUsage ?? {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreateTokens: 0,
+            contextWindow: 0,
+          };
+          this.send({
+            type: "result",
+            content: "",
+            sessionId: sid,
+            usage,
+          } as ServerMessage);
+          updateSessionActivity(sid, this._lastAssistantText, usage);
+        }
+        this.appServerTurnSettler?.resolve();
+        return;
+      }
+
+      case "error":
+      case "warning":
+      case "configWarning":
+        if (p?.message) {
+          this.send({ type: "error", message: String(p.message) } as ServerMessage);
+        }
+        return;
+    }
+  }
+
+  private handleAppServerItem(method: "item/started" | "item/completed", item: any): void {
+    const sid = this.sessionId;
+    if (!sid || !item?.id || !item?.type) return;
+
+    if (item.type === "agentMessage" && method === "item/completed") {
+      const text = item.text || this.appServerAgentText.get(item.id) || "";
+      if (text) {
+        this._lastAssistantText = text;
+        appendHistory(sid, {
+          role: "assistant",
+          content: text,
+          timestamp: now(),
+        });
+      }
+      this.appServerAgentText.delete(item.id);
+      return;
+    }
+
+    if (item.type === "reasoning" && method === "item/completed") {
+      const text = [
+        ...(Array.isArray(item.summary) ? item.summary : []),
+        ...(Array.isArray(item.content) ? item.content : []),
+      ].join("\n");
+      if (text) this.send({ type: "thinking", content: text, sessionId: sid } as ServerMessage);
+      return;
+    }
+
+    if (item.type === "commandExecution") {
+      if (method === "item/started") {
+        this.send({
+          type: "tool_call",
+          tool: "Bash",
+          input: { command: item.command || "" },
+          toolUseId: item.id,
+          sessionId: sid,
+        } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: item.command || "",
+          toolName: "Bash",
+          toolInput: { command: item.command || "" },
+          toolUseId: item.id,
+          timestamp: now(),
+        });
+      } else {
+        const buffered = this.appServerToolOutput.get(item.id) || "";
+        const baseOutput = item.aggregatedOutput ?? buffered;
+        const suffix = item.exitCode ? `\n[exit ${item.exitCode}]` : "";
+        const output = `${baseOutput || ""}${suffix}`;
+        this.send({
+          type: "tool_result_chunk",
+          toolUseId: item.id,
+          content: "",
+          sessionId: sid,
+          done: true,
+          chunkIndex: 1,
+        } as any);
+        this.send({
+          type: "tool_result",
+          toolUseId: item.id,
+          output,
+          sessionId: sid,
+        } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
+          timestamp: now(),
+        });
+        this.appServerToolOutput.delete(item.id);
+      }
+      return;
+    }
+
+    if (item.type === "fileChange") {
+      const changes = Array.isArray(item.changes) ? item.changes : [];
+      if (method === "item/started") {
+        this.send({
+          type: "tool_call",
+          tool: "ApplyPatch",
+          input: { changes },
+          toolUseId: item.id,
+          sessionId: sid,
+        } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: changes.map((c: any) => `${c.kind || c.type || "change"}: ${c.path || c.filePath || ""}`).join("\n"),
+          toolName: "ApplyPatch",
+          toolInput: { changes },
+          toolUseId: item.id,
+          timestamp: now(),
+        });
+      } else {
+        const output = changes.map((c: any) => `${c.kind || c.type || "change"}: ${c.path || c.filePath || ""}`).join("\n") || "File changes applied";
+        this.send({
+          type: "tool_result",
+          toolUseId: item.id,
+          output,
+          sessionId: sid,
+        } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
+          timestamp: now(),
+        });
+      }
+      return;
+    }
+
+    if (item.type === "mcpToolCall") {
+      const isSocketClaudeApp = item.server === "socketclaude_app" || item.server === "socketclaude-app";
+      const toolName = isSocketClaudeApp ? item.tool : `mcp:${item.server}/${item.tool}`;
+      if (method === "item/started") {
+        const input = (item.arguments && typeof item.arguments === "object") ? item.arguments : {};
+        this.send({
+          type: "tool_call",
+          tool: toolName,
+          input,
+          toolUseId: item.id,
+          sessionId: sid,
+        } as ServerMessage);
+      } else {
+        const output = item.error
+          ? `Error: ${JSON.stringify(item.error)}`
+          : JSON.stringify(item.result ?? null, null, 2);
+        this.send({
+          type: "tool_result",
+          toolUseId: item.id,
+          output,
+          sessionId: sid,
+        } as ServerMessage);
+      }
+    }
+  }
+
+  private usageFromAppServerTokenUsage(tokenUsage: any): NonNullable<CodexSession["_lastUsage"]> | null {
+    const last = tokenUsage?.last || tokenUsage?.total;
+    if (!last) return null;
+    const cached = Number(last.cachedInputTokens ?? 0);
+    return {
+      inputTokens: Math.max(0, Number(last.inputTokens ?? 0) - cached),
+      outputTokens: Number(last.outputTokens ?? 0),
+      cacheReadTokens: cached,
+      cacheCreateTokens: 0,
+      contextWindow: Number(tokenUsage?.modelContextWindow ?? 0),
+    };
   }
 
   // ─── Event translation: codex JSONL → SocketClaude ServerMessage ─────
@@ -987,7 +1529,7 @@ export function createSession(
     if (!availability.available) {
       throw new Error(`Codex backend is not available on this server: ${availability.reason || "unknown reason"}`);
     }
-    return new CodexSession(ws, cwd, plugins);
+    return new CodexSession(ws, cwd, plugins, loadServerSettings().codexDriver);
   }
   // Lazy require keeps the cycle (CodexSession → ClaudeSession via type-only
   // import) from blowing up at runtime.

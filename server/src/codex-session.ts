@@ -577,6 +577,9 @@ export class CodexSession {
       this.appServer.on("stderr", (chunk: string) => {
         this._stderrBuffer.push(chunk);
       });
+      this.appServer.on("serverRequest", (request: { method?: string }) => {
+        console.warn(`[codex app-server] unsupported server request: ${request.method || "unknown"}`);
+      });
       this.appServer.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
         if (this._isRunning && !this._abortRequested) {
           this.appServerTurnSettler?.reject(new Error(`codex app-server exited code=${code} signal=${signal}`));

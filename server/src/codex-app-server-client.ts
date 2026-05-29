@@ -96,6 +96,12 @@ interface WireResponse {
   error?: unknown;
 }
 
+interface WireServerRequest {
+  id: number;
+  method: string;
+  params?: unknown;
+}
+
 interface PendingRequest<T> {
   method: string;
   resolve: (value: T) => void;
@@ -255,6 +261,11 @@ export class CodexAppServerClient extends EventEmitter {
         continue;
       }
 
+      if (this.isServerRequest(msg)) {
+        this.handleServerRequest(msg);
+        continue;
+      }
+
       if (this.isResponse(msg)) {
         this.handleResponse(msg);
         continue;
@@ -285,6 +296,22 @@ export class CodexAppServerClient extends EventEmitter {
     }
   }
 
+  private handleServerRequest(msg: WireServerRequest): void {
+    this.emit("serverRequest", msg);
+    this.writeResponse({
+      id: msg.id,
+      error: {
+        code: "unsupported_server_request",
+        message: `SocketClaude does not handle Codex app-server request '${msg.method}' yet`,
+      },
+    });
+  }
+
+  private writeResponse(response: WireResponse): void {
+    if (!this.proc || !this.proc.stdin.writable) return;
+    this.proc.stdin.write(JSON.stringify(response) + "\n");
+  }
+
   private rejectAll(error: Error): void {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
@@ -297,6 +324,13 @@ export class CodexAppServerClient extends EventEmitter {
     return !!value
       && typeof value === "object"
       && typeof (value as { id?: unknown }).id === "number";
+  }
+
+  private isServerRequest(value: unknown): value is WireServerRequest {
+    return !!value
+      && typeof value === "object"
+      && typeof (value as { id?: unknown }).id === "number"
+      && typeof (value as { method?: unknown }).method === "string";
   }
 
   private isNotification(value: unknown): value is CodexAppServerNotification {

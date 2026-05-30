@@ -125,11 +125,6 @@ export class CodexSession {
   private appServerToolOutput = new Map<string, string>();
   private appServerFileChangeDiff = new Map<string, string>();
   private _isCompacting = false;
-  private pendingAppServerSteeredInputs: Array<{
-    resolve: () => void;
-    reject: (error: Error) => void;
-    timer: NodeJS.Timeout;
-  }> = [];
   private _isRunning = false;
   private _model: string | null = null;
   private _sandbox: SandboxMode = "danger-full-access";
@@ -325,7 +320,7 @@ export class CodexSession {
           expectedTurnId: this.activeAppServerTurnId,
           input: [{ type: "text", text, text_elements: [] }],
         });
-        return this.waitForAppServerSteeredInputDelivery();
+        return;
       } catch (err: any) {
         console.warn(`[codex app-server] turn/steer failed; queueing follow-up: ${err?.message || String(err)}`);
       }
@@ -819,29 +814,6 @@ export class CodexSession {
     for (const prompt of queued) {
       prompt.reject(new Error(reason));
     }
-    const steered = this.pendingAppServerSteeredInputs.splice(0);
-    for (const pending of steered) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error(reason));
-    }
-  }
-
-  private waitForAppServerSteeredInputDelivery(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = this.pendingAppServerSteeredInputs.findIndex((p) => p.resolve === resolve);
-        if (idx >= 0) this.pendingAppServerSteeredInputs.splice(idx, 1);
-        reject(new Error("Timed out waiting for Codex app-server to emit steered user message"));
-      }, 30_000);
-      this.pendingAppServerSteeredInputs.push({ resolve, reject, timer });
-    });
-  }
-
-  private markNextAppServerSteeredInputDelivered(): void {
-    const pending = this.pendingAppServerSteeredInputs.shift();
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    pending.resolve();
   }
 
   private handleAppServerNotification(method: string, params: unknown): void {
@@ -1026,10 +998,7 @@ export class CodexSession {
     const sid = this.sessionId;
     if (!sid || !item?.id || !item?.type) return;
 
-    if (item.type === "userMessage" && method === "item/started") {
-      this.markNextAppServerSteeredInputDelivered();
-      return;
-    }
+    if (item.type === "userMessage") return;
 
     if (item.type === "agentMessage" && method === "item/completed") {
       const text = item.text || this.appServerAgentText.get(item.id) || "";

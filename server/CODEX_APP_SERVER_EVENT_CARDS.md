@@ -6,7 +6,7 @@ Observed with `codex app-server` 0.133.0 through `server/scripts/probe-codex-app
 
 - `item/agentMessage/delta`: stream to existing assistant text bubbles.
 - `item/completed` with `agentMessage`: persist the completed assistant message.
-- `item/started` / `item/completed` with `userMessage`: use to acknowledge steered messages after App Server actually emits them.
+- `item/started` / `item/completed` with `userMessage`: known event type, but not reliable enough as the app's injection acknowledgement point. Acknowledge steered messages when `turn/steer` succeeds.
 - `item/reasoning/textDelta` and `item/reasoning/summaryTextDelta`: stream to existing thinking cards.
 
 ## Tool Cards

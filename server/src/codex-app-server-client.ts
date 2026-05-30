@@ -10,7 +10,21 @@ export type CodexAppServerApprovalPolicy =
   | "untrusted"
   | "on-failure"
   | "on-request"
+  | {
+      granular: {
+        sandbox_approval: boolean;
+        rules: boolean;
+        skill_approval: boolean;
+        request_permissions: boolean;
+        mcp_elicitations: boolean;
+      };
+    }
   | "never";
+
+export type CodexAppServerApprovalsReviewer =
+  | "user"
+  | "auto_review"
+  | "guardian_subagent";
 
 export type CodexAppServerUserInput =
   | {
@@ -53,6 +67,7 @@ export interface CodexAppServerThreadStartParams {
   cwd: string;
   sandbox?: CodexAppServerSandbox;
   approvalPolicy?: CodexAppServerApprovalPolicy;
+  approvalsReviewer?: CodexAppServerApprovalsReviewer;
   model?: string;
   config?: unknown;
   experimentalRawEvents?: boolean;
@@ -65,6 +80,7 @@ export interface CodexAppServerThreadResumeParams {
   cwd?: string;
   sandbox?: CodexAppServerSandbox;
   approvalPolicy?: CodexAppServerApprovalPolicy;
+  approvalsReviewer?: CodexAppServerApprovalsReviewer;
   model?: string;
   config?: unknown;
   experimentalRawEvents?: boolean;
@@ -112,6 +128,11 @@ interface WireServerRequest {
   method: string;
   params?: unknown;
 }
+
+export type CodexAppServerRequestResponder = (response:
+  | { result: unknown; error?: never }
+  | { error: unknown; result?: never }
+) => void;
 
 interface PendingRequest<T> {
   method: string;
@@ -345,14 +366,22 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   private handleServerRequest(msg: WireServerRequest): void {
-    this.emit("serverRequest", msg);
-    this.writeResponse({
-      id: msg.id,
-      error: {
-        code: "unsupported_server_request",
-        message: `SocketAgent does not handle Codex app-server request '${msg.method}' yet`,
-      },
-    });
+    let responded = false;
+    const respond: CodexAppServerRequestResponder = (response) => {
+      if (responded) return;
+      responded = true;
+      this.writeResponse({ id: msg.id, ...response });
+    };
+
+    const handled = this.emit("serverRequest", msg, respond);
+    if (!handled) {
+      respond({
+        error: {
+          code: "unsupported_server_request",
+          message: `SocketAgent does not handle Codex app-server request '${msg.method}' yet`,
+        },
+      });
+    }
   }
 
   private writeResponse(response: WireResponse): void {

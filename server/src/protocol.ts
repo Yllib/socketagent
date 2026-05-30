@@ -97,6 +97,7 @@ export interface RequestTtsAudioMessage {
 export interface RequestFileMessage {
   type: "request_file";
   filePath: string;
+  fileId?: string;
 }
 
 export interface LoadMoreHistoryMessage {
@@ -381,6 +382,9 @@ export type ClientMessage =
   | { type: "skills_list" }
   | { type: "skills_save"; name: string; scope: string; format: string; agent?: "claude" | "codex"; frontmatter: Record<string, string>; body: string; filePath?: string }
   | { type: "skills_delete"; filePath: string }
+  | { type: "protected_files_list"; requestId?: string }
+  | { type: "protected_files_add"; requestId?: string; path: string; label?: string }
+  | { type: "protected_files_delete"; requestId?: string; path: string }
   | { type: "plugins_list" }
   | { type: "plugins_install"; pluginId: string }
   | { type: "plugins_uninstall"; pluginId: string }

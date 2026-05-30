@@ -28,6 +28,32 @@ process.on("unhandledRejection", (reason) => {
 
 const PORT = parseInt(process.env.PORT || "8085", 10);
 const DEFAULT_CWD = process.env.DEFAULT_CWD || process.cwd();
+const PROTECTED_FILES_CONFIG = path.join(
+  process.env.HOME || "/home/rdp",
+  ".socketagent",
+  "protected-files.json"
+);
+
+type ProtectedFileEntry = { path: string; label?: string };
+
+function readProtectedFiles(): ProtectedFileEntry[] {
+  try {
+    if (!fs.existsSync(PROTECTED_FILES_CONFIG)) return [];
+    const raw = fs.readFileSync(PROTECTED_FILES_CONFIG, "utf-8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((entry) => entry && typeof entry.path === "string")
+      : [];
+  } catch (err: any) {
+    console.error(`[protected-files] Failed to read config: ${err.message || err}`);
+    return [];
+  }
+}
+
+function writeProtectedFiles(entries: ProtectedFileEntry[]): void {
+  fs.mkdirSync(path.dirname(PROTECTED_FILES_CONFIG), { recursive: true });
+  fs.writeFileSync(PROTECTED_FILES_CONFIG, JSON.stringify(entries, null, 2), "utf-8");
+}
 
 // ── .env migrations (run once on startup, before reading config) ──
 (function migrateEnv() {
@@ -1421,6 +1447,84 @@ function createConnectionHandler(transport: ClientTransport) {
         break;
       }
 
+      case "protected_files_list": {
+        const requestId = (msg as any).requestId;
+        sendJson({
+          type: "protected_files_list",
+          requestId,
+          entries: readProtectedFiles(),
+        });
+        break;
+      }
+
+      case "protected_files_add": {
+        const requestId = (msg as any).requestId;
+        const filePath = String((msg as any).path || "").trim();
+        const label = String((msg as any).label || "").trim();
+        if (!filePath) {
+          sendJson({
+            type: "protected_files_result",
+            requestId,
+            ok: false,
+            error: "Missing path",
+          });
+          break;
+        }
+        try {
+          const entries = readProtectedFiles();
+          if (!entries.some((entry) => entry.path === filePath)) {
+            entries.push({ path: filePath, ...(label ? { label } : {}) });
+            writeProtectedFiles(entries);
+          }
+          sendJson({
+            type: "protected_files_result",
+            requestId,
+            ok: true,
+            entries,
+          });
+        } catch (err: any) {
+          sendJson({
+            type: "protected_files_result",
+            requestId,
+            ok: false,
+            error: err.message || "Failed to add protected file",
+          });
+        }
+        break;
+      }
+
+      case "protected_files_delete": {
+        const requestId = (msg as any).requestId;
+        const filePath = String((msg as any).path || "");
+        if (!filePath) {
+          sendJson({
+            type: "protected_files_result",
+            requestId,
+            ok: false,
+            error: "Missing path",
+          });
+          break;
+        }
+        try {
+          const entries = readProtectedFiles().filter((entry) => entry.path !== filePath);
+          writeProtectedFiles(entries);
+          sendJson({
+            type: "protected_files_result",
+            requestId,
+            ok: true,
+            entries,
+          });
+        } catch (err: any) {
+          sendJson({
+            type: "protected_files_result",
+            requestId,
+            ok: false,
+            error: err.message || "Failed to delete protected file",
+          });
+        }
+        break;
+      }
+
       case "plugins_list": {
         try {
           const mpPlugins = listMarketplacePlugins();
@@ -2309,38 +2413,6 @@ const httpServer = http.createServer((req, res) => {
     stream.pipe(res);
     stream.on("error", (err) => {
       console.error("[TTS Model] Stream error:", err);
-      res.end();
-    });
-    return;
-  }
-
-  // GET /download — stream a file for HTTP download (avoids WebSocket main-thread blocking)
-  if (req.method === "GET" && req.url?.startsWith("/download")) {
-    const url = new URL(req.url, `http://localhost:${PORT}`);
-    const token = url.searchParams.get("token");
-    if (token !== AUTH_TOKEN) {
-      res.writeHead(401);
-      res.end("Unauthorized");
-      return;
-    }
-    const filePath = url.searchParams.get("path");
-    if (!filePath || !fs.existsSync(filePath)) {
-      res.writeHead(404);
-      res.end("File not found");
-      return;
-    }
-    const stat = fs.statSync(filePath);
-    const fileName = path.basename(filePath);
-    console.log(`[HTTP Download] Serving ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
-    res.writeHead(200, {
-      "Content-Type": "application/octet-stream",
-      "Content-Disposition": `attachment; filename="${fileName}"`,
-      "Content-Length": stat.size.toString(),
-    });
-    const readStream = fs.createReadStream(filePath);
-    readStream.pipe(res);
-    readStream.on("error", (err) => {
-      console.error(`[HTTP Download] Error streaming ${fileName}:`, err);
       res.end();
     });
     return;

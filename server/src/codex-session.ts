@@ -53,7 +53,14 @@ import {
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp } from "./codex-app-mcp";
-import { CodexAppServerClient, CodexAppServerNotification, CodexAppServerUserInput } from "./codex-app-server-client";
+import {
+  CodexAppServerApprovalPolicy,
+  CodexAppServerApprovalsReviewer,
+  CodexAppServerClient,
+  CodexAppServerNotification,
+  CodexAppServerRequestResponder,
+  CodexAppServerUserInput,
+} from "./codex-app-server-client";
 import { resolveCodexDriver } from "./server-settings";
 import { listSkills, SkillEntry } from "./skills-manager";
 
@@ -138,11 +145,15 @@ export class CodexSession {
   private appServerAgentText = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
   private appServerFileChangeDiff = new Map<string, string>();
+  private appServerFileChangePaths = new Map<string, string[]>();
   private appServerSeenUserMessageItems = new Set<string>();
   private _isCompacting = false;
   private _isRunning = false;
   private _model: string | null = null;
   private _sandbox: SandboxMode = "danger-full-access";
+  private _approvalPolicy: CodexAppServerApprovalPolicy = "never";
+  private _approvalsReviewer: CodexAppServerApprovalsReviewer = "user";
+  private _permissionMode = "bypassPermissions";
   private _appendSystemPrompt = "";
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   private _kokoroVoice = "af_heart";
@@ -186,9 +197,7 @@ export class CodexSession {
   get isCompacting(): boolean { return this._isCompacting; }
   get driver(): CodexDriver { return this.codexDriver; }
   get permissionMode(): string | null {
-    if (this._sandbox === "read-only") return "plan";
-    if (this._sandbox === "danger-full-access") return "bypassPermissions";
-    return "default";
+    return this._permissionMode;
   }
   get sessionModel(): string | null { return this._model; }
   get activeBackgroundTasks(): Map<string, string> { return new Map(); }
@@ -197,7 +206,14 @@ export class CodexSession {
   getCwd(): string { return this.cwd; }
   getActiveToolCall(): { toolUseId: string; name: string } | null { return null; }
   getAccumulatedBashOutput(): string | null { return null; }
-  setSandbox(mode: SandboxMode): void { this._sandbox = mode; }
+  setSandbox(mode: SandboxMode): void {
+    this._sandbox = mode;
+    this._permissionMode = mode === "read-only"
+      ? "plan"
+      : mode === "danger-full-access"
+        ? "bypassPermissions"
+        : "default";
+  }
 
   /** Mirrors ClaudeSession.setModel — async to match signature. */
   async setModel(model?: string): Promise<void> {
@@ -205,17 +221,26 @@ export class CodexSession {
   }
 
   /**
-   * Maps SocketAgent permission modes onto codex sandbox modes:
-   *   "plan"        → read-only
-   *   "default"     → workspace-write
-   *   "acceptEdits" → workspace-write (codex doesn't gate edits separately)
-   *   "bypassPermissions" → danger-full-access
+   * Maps SocketAgent permission modes onto Codex sandbox + approval policy.
+   * Non-bypass modes route approvals to SocketAgent so protected-file plugins
+   * can block before the command or file change executes.
    */
   async setPermissionMode(mode: string): Promise<void> {
+    this._permissionMode = mode;
+    this._approvalsReviewer = "user";
     switch (mode) {
-      case "plan": this._sandbox = "read-only"; break;
-      case "bypassPermissions": this._sandbox = "danger-full-access"; break;
-      default: this._sandbox = "workspace-write"; break;
+      case "plan":
+        this._sandbox = "read-only";
+        this._approvalPolicy = "untrusted";
+        break;
+      case "bypassPermissions":
+        this._sandbox = "danger-full-access";
+        this._approvalPolicy = "never";
+        break;
+      default:
+        this._sandbox = "workspace-write";
+        this._approvalPolicy = "untrusted";
+        break;
     }
   }
 
@@ -366,7 +391,9 @@ export class CodexSession {
       sessionId: this.sessionId ?? "",
       cwd: this.cwd,
       send: (msg: ServerMessage | Record<string, any>) => this.send(msg as ServerMessage),
-      appendHistory: () => {},  // history persistence wired separately
+      appendHistory: (entry: HistoryEntry) => {
+        if (this.sessionId) appendHistory(this.sessionId, entry);
+      },
       pendingQuestions: new Map(),
       questionCounter: { next: () => crypto.randomUUID() },
     };
@@ -635,8 +662,11 @@ export class CodexSession {
       this.appServer.on("stderr", (chunk: string) => {
         this._stderrBuffer.push(chunk);
       });
-      this.appServer.on("serverRequest", (request: { method?: string }) => {
-        console.warn(`[codex app-server] unsupported server request: ${request.method || "unknown"}`);
+      this.appServer.on("serverRequest", (
+        request: { method?: string; params?: unknown },
+        respond: CodexAppServerRequestResponder,
+      ) => {
+        void this.handleAppServerRequest(request, respond);
       });
       this.appServer.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
         if (this._isRunning && !this._abortRequested) {
@@ -664,7 +694,8 @@ export class CodexSession {
   private buildAppServerThreadParams(): {
     cwd: string;
     sandbox: SandboxMode;
-    approvalPolicy: "never";
+    approvalPolicy: CodexAppServerApprovalPolicy;
+    approvalsReviewer: CodexAppServerApprovalsReviewer;
     model?: string;
     config: Record<string, unknown>;
     experimentalRawEvents: boolean;
@@ -673,7 +704,8 @@ export class CodexSession {
     return {
       cwd: this.cwd,
       sandbox: this._sandbox,
-      approvalPolicy: "never",
+      approvalPolicy: this._approvalPolicy,
+      approvalsReviewer: this._approvalsReviewer,
       ...(this._model ? { model: this._model } : {}),
       config: this.appServerConfig(),
       experimentalRawEvents: false,
@@ -943,6 +975,137 @@ export class CodexSession {
       } as any);
     }
     pending.resolve();
+  }
+
+  private async handleAppServerRequest(
+    request: { method?: string; params?: unknown },
+    respond: CodexAppServerRequestResponder,
+  ): Promise<void> {
+    const method = request.method || "unknown";
+    const params = (request.params || {}) as any;
+    try {
+      switch (method) {
+        case "item/commandExecution/requestApproval": {
+          const command = String(params.command || "");
+          const allowed = await this.canApproveAppServerTool("Bash", {
+            command,
+          });
+          respond({ result: { decision: allowed ? "accept" : "decline" } });
+          return;
+        }
+
+        case "execCommandApproval": {
+          const command = Array.isArray(params.command)
+            ? params.command.join(" ")
+            : String(params.command || "");
+          const allowed = await this.canApproveAppServerTool("Bash", {
+            command,
+          });
+          respond({ result: { decision: allowed ? "approved" : "denied" } });
+          return;
+        }
+
+        case "item/fileChange/requestApproval": {
+          const allowed = await this.canApproveAppServerFileChange(params.itemId);
+          respond({ result: { decision: allowed ? "accept" : "decline" } });
+          return;
+        }
+
+        case "applyPatchApproval": {
+          const allowed = await this.canApproveLegacyApplyPatch(params.fileChanges);
+          respond({ result: { decision: allowed ? "approved" : "denied" } });
+          return;
+        }
+
+        case "item/permissions/requestApproval": {
+          const permissionsAllowed = await this.canApprovePermissionRequest(params.permissions);
+          respond({
+            result: {
+              permissions: permissionsAllowed
+                ? (params.permissions || {})
+                : { network: null, fileSystem: null },
+              scope: "turn",
+              strictAutoReview: true,
+            },
+          });
+          return;
+        }
+
+        default:
+          console.warn(`[codex app-server] unsupported server request: ${method}`);
+          respond({
+            error: {
+              code: "unsupported_server_request",
+              message: `SocketAgent does not handle Codex app-server request '${method}' yet`,
+            },
+          });
+      }
+    } catch (err: any) {
+      console.error(`[codex app-server] approval request failed: ${err?.message || String(err)}`);
+      respond({
+        error: {
+          code: "socketagent_approval_error",
+          message: err?.message || String(err),
+        },
+      });
+    }
+  }
+
+  private async canApproveAppServerTool(
+    toolName: string,
+    input: Record<string, any>,
+  ): Promise<boolean> {
+    const sessionCtx = this.getSessionContext();
+    for (const plugin of this._plugins) {
+      if (!plugin.canUseToolInterceptor) continue;
+      const result = await plugin.canUseToolInterceptor(toolName, input, sessionCtx);
+      if (!result) continue;
+      return result.behavior !== "deny";
+    }
+    return true;
+  }
+
+  private async canApproveAppServerFileChange(itemId: unknown): Promise<boolean> {
+    if (!itemId) return true;
+    const paths = this.appServerFileChangePaths.get(String(itemId)) || [];
+    if (paths.length === 0) return true;
+    for (const filePath of paths) {
+      const allowed = await this.canApproveAppServerTool("Edit", {
+        file_path: filePath,
+      });
+      if (!allowed) return false;
+    }
+    return true;
+  }
+
+  private async canApprovePermissionRequest(permissions: any): Promise<boolean> {
+    const fileSystem = permissions?.fileSystem || null;
+    const writePaths = [
+      ...(Array.isArray(fileSystem?.write) ? fileSystem.write : []),
+      ...(Array.isArray(fileSystem?.entries)
+        ? fileSystem.entries
+            .filter((entry: any) => entry?.access === "write" || entry?.writable === true)
+            .map((entry: any) => entry?.path || entry?.root || entry?.glob)
+        : []),
+    ].filter(Boolean);
+    for (const filePath of writePaths) {
+      const allowed = await this.canApproveAppServerTool("Edit", {
+        file_path: String(filePath),
+      });
+      if (!allowed) return false;
+    }
+    return true;
+  }
+
+  private async canApproveLegacyApplyPatch(fileChanges: unknown): Promise<boolean> {
+    if (!fileChanges || typeof fileChanges !== "object") return true;
+    for (const filePath of Object.keys(fileChanges as Record<string, unknown>)) {
+      const allowed = await this.canApproveAppServerTool("Edit", {
+        file_path: filePath,
+      });
+      if (!allowed) return false;
+    }
+    return true;
   }
 
   private handleAppServerNotification(method: string, params: unknown): void {
@@ -1352,13 +1515,15 @@ export class CodexSession {
 
     if (item.type === "fileChange") {
       const changes = Array.isArray(item.changes) ? item.changes : [];
+      const files = changes.map((c: any) => c?.path || c?.filePath).filter(Boolean);
       if (method === "item/started") {
+        this.appServerFileChangePaths.set(item.id, files);
         this.send({
           type: "tool_call",
           tool: "ApplyPatch",
           input: {
             changes,
-            files: changes.map((c: any) => c?.path || c?.filePath).filter(Boolean),
+            files,
           },
           toolUseId: item.id,
           sessionId: sid,
@@ -1369,7 +1534,7 @@ export class CodexSession {
           toolName: "ApplyPatch",
           toolInput: {
             changes,
-            files: changes.map((c: any) => c?.path || c?.filePath).filter(Boolean),
+            files,
           },
           toolUseId: item.id,
           timestamp: now(),
@@ -1392,6 +1557,7 @@ export class CodexSession {
           timestamp: now(),
         });
         this.appServerFileChangeDiff.delete(item.id);
+        this.appServerFileChangePaths.delete(item.id);
       }
       return;
     }

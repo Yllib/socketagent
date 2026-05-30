@@ -512,7 +512,7 @@ export interface SessionInfo {
   scheduledTaskId?: string;
   /** Backend that drives this session. Absent on legacy sessions = "claude". */
   backend?: Backend;
-  /** Codex runtime driver for codex sessions. Absent on legacy sessions = "exec". */
+  /** Codex runtime driver for codex sessions. Absent means use the server default. */
   codexDriver?: CodexDriver;
 }
 

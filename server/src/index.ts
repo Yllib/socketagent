@@ -186,7 +186,7 @@ function scheduleBroadcast(): void {
 
 function getStoredCodexDriver(sessionInfo: SessionInfo | undefined): CodexDriver | undefined {
   if (sessionInfo?.backend !== "codex") return undefined;
-  return (sessionInfo as any).codexDriver || "exec";
+  return (sessionInfo as any).codexDriver;
 }
 
 /**
@@ -1602,7 +1602,7 @@ function createConnectionHandler(transport: ClientTransport) {
         }
         const rewindSessionInfo = getSession(sessionId);
         if (rewindSessionInfo?.backend === "codex" || activeSession instanceof CodexSession) {
-          const codexDriver = (rewindSessionInfo as any)?.codexDriver || (activeSession instanceof CodexSession ? activeSession.driver : "exec");
+          const codexDriver = (rewindSessionInfo as any)?.codexDriver || (activeSession instanceof CodexSession ? activeSession.driver : resolveCodexDriver(undefined));
           const detail = codexDriver === "app-server"
             ? "Codex App Server currently exposes turn-count rollback, but not a safe message-level conversation rewind."
             : "Conversation rewind is not supported for Codex exec sessions.";
@@ -1711,7 +1711,7 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
         if (sessionInfo.backend === "codex") {
-          const codexDriver = (sessionInfo as any).codexDriver || "exec";
+          const codexDriver = (sessionInfo as any).codexDriver || resolveCodexDriver(undefined);
           const detail = codexDriver === "app-server"
             ? "Codex App Server currently exposes full thread fork and turn-count rollback, but not a safe branch-at-message operation."
             : "Branching from a message is not supported for Codex exec sessions.";
@@ -2680,7 +2680,7 @@ async function checkScheduledTasks(): Promise<void> {
         ? resolveCodexDriver(
           task.codexDriver
             || (reusableSessionInfo as any)?.codexDriver
-            || (shouldResume ? "exec" : undefined)
+            || undefined
         )
         : undefined;
       if (codexDriver) task.codexDriver = codexDriver;

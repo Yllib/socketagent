@@ -321,13 +321,19 @@ export class CodexSession {
           };
           this._pendingAppServerSteers.push(pending);
           try {
+            const turnId = this.activeAppServerTurnId!;
+            console.log(`[codex app-server] steering message mid-turn (thread=${this.threadId}, turn=${turnId}, priority=${priority}, messageId=${messageId || ""})`);
             this.appServer!.steerTurn({
               threadId: this.threadId!,
-              expectedTurnId: this.activeAppServerTurnId!,
+              expectedTurnId: turnId,
               input: this.buildAppServerTurnInput(text),
-            }).catch((err: any) => {
-              this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
-            });
+            })
+              .then(() => {
+                console.log(`[codex app-server] turn/steer accepted (turn=${turnId}, messageId=${messageId || ""})`);
+              })
+              .catch((err: any) => {
+                this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
+              });
           } catch (err: any) {
             this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
           }
@@ -337,6 +343,9 @@ export class CodexSession {
       }
     }
 
+    if (this.codexDriver === "app-server") {
+      console.warn(`[codex app-server] no active turn for injection; queueing follow-up (thread=${this.threadId || ""}, turn=${this.activeAppServerTurnId || ""}, priority=${priority}, messageId=${messageId || ""})`);
+    }
     return new Promise<void>((resolve, reject) => {
       this._queuedPrompts.push({ text, priority, messageId, resolve, reject });
     });

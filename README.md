@@ -45,6 +45,34 @@ The selected backend list is written to `server/.env` as `ENABLED_BACKENDS`. Cod
 
 Install the Android APK from the latest GitHub release, then install the server on the machine you want the agent to control.
 
+Latest APK:
+
+```text
+https://github.com/Yllib/socketagent/releases/latest/download/app-release.apk
+```
+
+Quick start:
+
+1. Install the APK on your Android phone.
+2. Clone or download this repo on the computer you want to control.
+3. Run the installer for your OS.
+4. Choose Claude, Codex, or both when prompted.
+5. Sign in to the selected agent CLI when prompted.
+6. Scan the QR code printed by the installer.
+
+If you miss the QR code or want to pair another phone later, run:
+
+```bash
+socketagent pair
+```
+
+Requirements:
+
+- Android phone for the app.
+- Linux, WSL, or Windows machine for the server.
+- A Claude Code account if using Claude.
+- A ChatGPT/Codex account if using Codex.
+
 ### Linux
 
 Interactive install:

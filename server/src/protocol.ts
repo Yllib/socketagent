@@ -545,7 +545,7 @@ export interface SessionCreatedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "todos_update" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;

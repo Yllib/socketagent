@@ -1102,13 +1102,23 @@ export class CodexSession {
       case "turn/plan/updated": {
         const sid = this.sessionId || p?.threadId;
         if (!sid) return;
+        const turnId = String(p?.turnId || "");
+        const explanation = typeof p?.explanation === "string" ? p.explanation : "";
+        const plan = Array.isArray(p?.plan) ? p.plan : [];
         this.send({
           type: "codex_plan",
-          turnId: String(p?.turnId || ""),
-          explanation: typeof p?.explanation === "string" ? p.explanation : "",
-          plan: Array.isArray(p?.plan) ? p.plan : [],
+          turnId,
+          explanation,
+          plan,
           sessionId: sid,
         } as any);
+        appendHistory(sid, {
+          role: "codex_plan",
+          content: explanation,
+          toolUseId: turnId,
+          toolInput: { explanation, steps: plan },
+          timestamp: now(),
+        } as HistoryEntry);
         return;
       }
 
@@ -1537,28 +1547,45 @@ export class CodexSession {
 
     if (item.type === "imageGeneration") {
       if (method === "item/started") {
+        const input = {
+          status: item.status,
+          revisedPrompt: item.revisedPrompt ?? null,
+        };
         this.send({
           type: "tool_call",
           tool: "ImageGeneration",
-          input: {
-            status: item.status,
-            revisedPrompt: item.revisedPrompt ?? null,
-          },
+          input,
           toolUseId: item.id,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: "ImageGeneration",
+          toolName: "ImageGeneration",
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp: now(),
+        });
       } else {
         const generatedPath = this.appServerGeneratedImagePath(event?.threadId, item.id);
         const savedPath = item.savedPath || generatedPath || "";
         let sentImage = false;
         if (savedPath && fs.existsSync(savedPath)) sentImage = this.sendToolImageForPath(sid, item.id, savedPath);
         if (!sentImage) sentImage = this.sendToolImageFromBase64(sid, item.id, item.result, savedPath);
+        const output = sentImage && savedPath ? savedPath : item.status || "Image generation completed";
         this.send({
           type: "tool_result",
           toolUseId: item.id,
-          output: sentImage && savedPath ? savedPath : item.status || "Image generation completed",
+          output,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
+          timestamp: now(),
+        });
       }
       return;
     }

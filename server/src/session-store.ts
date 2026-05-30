@@ -1501,8 +1501,38 @@ function appServerJsonPreview(value: unknown): string {
   try { return JSON.stringify(value ?? ""); } catch { return String(value ?? ""); }
 }
 
+function appServerGeneratedImagePath(threadId: unknown, itemId: unknown): string | null {
+  const thread = String(threadId || "").trim();
+  const item = String(itemId || "").trim();
+  if (!thread || !item) return null;
+  const homeDir = process.env.HOME || require("os").homedir();
+  return path.join(homeDir, ".codex", "generated_images", thread, `${item}.png`);
+}
+
+function appServerImageFromResult(threadId: unknown, item: any): { filePath: string; mimeType: string } | null {
+  const explicitPath = typeof item?.savedPath === "string" ? item.savedPath : "";
+  const filePath = explicitPath || appServerGeneratedImagePath(threadId, item?.id) || "";
+  if (!filePath) return null;
+  const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
+  if (fs.existsSync(resolved)) return { filePath: resolved, mimeType: "image/png" };
+
+  let imageData = typeof item?.result === "string" ? item.result.trim() : "";
+  if (!imageData) return null;
+  const dataUrl = imageData.match(/^data:([^;,]+);base64,(.+)$/);
+  const mimeType = dataUrl?.[1] || "image/png";
+  if (dataUrl) imageData = dataUrl[2];
+  if (!/^[A-Za-z0-9+/=\s]+$/.test(imageData)) return null;
+  imageData = imageData.replace(/\s+/g, "");
+  const bytes = Buffer.from(imageData, "base64");
+  if (bytes.length === 0 || bytes.length > 20 * 1024 * 1024) return null;
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  fs.writeFileSync(resolved, bytes);
+  return { filePath: resolved, mimeType };
+}
+
 function appServerThreadToHistory(thread: any): HistoryEntry[] {
   const result: HistoryEntry[] = [];
+  const threadId = thread?.id || thread?.sessionId || "";
   const turns = Array.isArray(thread?.turns) ? thread.turns : [];
   for (const turn of turns) {
     const timestamp = epochToIso(turn?.startedAt ?? turn?.completedAt, nowIso());
@@ -1591,6 +1621,68 @@ function appServerThreadToHistory(thread: any): HistoryEntry[] {
           content: item.status ? `Patch ${item.status}` : "Patch complete",
           toolUseId: item.id,
           toolOutput: item.status ? `Patch ${item.status}` : "Patch complete",
+          timestamp,
+        });
+        continue;
+      }
+
+      if (item.type === "imageView") {
+        const imagePath = String(item.path ?? "");
+        result.push({
+          role: "tool_call",
+          content: imagePath,
+          toolName: "ViewImage",
+          toolInput: { path: imagePath },
+          toolUseId: item.id,
+          timestamp,
+        });
+        if (imagePath) {
+          result.push({
+            role: "tool_image",
+            content: "",
+            toolUseId: item.id,
+            filePath: imagePath,
+            mimeType: "image/png",
+            timestamp,
+          });
+        }
+        result.push({
+          role: "tool_result",
+          content: imagePath || "Image viewed",
+          toolUseId: item.id,
+          toolOutput: imagePath || "Image viewed",
+          timestamp,
+        });
+        continue;
+      }
+
+      if (item.type === "imageGeneration") {
+        const input = { status: item.status, revisedPrompt: item.revisedPrompt ?? null };
+        const image = appServerImageFromResult(threadId, item);
+        const output = image?.filePath || String(item.status || "Image generation completed");
+        result.push({
+          role: "tool_call",
+          content: "ImageGeneration",
+          toolName: "ImageGeneration",
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp,
+        });
+        if (image) {
+          result.push({
+            role: "tool_image",
+            content: "",
+            toolUseId: item.id,
+            filePath: image.filePath,
+            mimeType: image.mimeType,
+            timestamp,
+          });
+        }
+        result.push({
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
           timestamp,
         });
         continue;

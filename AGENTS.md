@@ -12,7 +12,7 @@ Flutter App (Android) ←—WebSocket (JSON)—→ Node.js Server ←—Claude A
 
 - **Server** (`server/`): Node.js + TypeScript WebSocket server on port 8085. Drives Claude through the Claude Agent SDK and Codex through the Codex CLI/app-server, manages sessions, streams responses to the app. Supports a plugin API for extensibility and optional relay for remote connections.
 - **App** (`app/`): Flutter Android app. Closed-source, lives as a nested git repo inside `app/` (gitignored from this repo). Private repo: `Yllib/socketagent-app`.
-- **Relay** (`~/claude/socketclaude-relay/`): Separate Node.js service on port 9988, proxied by NAS Caddy at `wss://relay.jarofdirt.info`. Handles pairing, NaCl key exchange, Stripe subscription validation ($5/month, 7-day trial), and message forwarding. Runs as `socketagent-relay.service`.
+- **Relay** (`~/claude/socketagent-relay/`): Separate Node.js service on port 9988, proxied by NAS Caddy at `wss://relay.jarofdirt.info`. Handles pairing, NaCl key exchange, Stripe subscription validation ($5/month, 7-day trial), and message forwarding. Runs as `socketagent-relay.service`.
 
 ## Server (`server/`)
 

@@ -91,6 +91,11 @@ export interface CodexAppServerTurnInterruptParams {
   turnId?: string;
 }
 
+export interface CodexAppServerThreadReadParams {
+  threadId: string;
+  includeTurns: boolean;
+}
+
 export interface CodexAppServerNotification<T = unknown> {
   method: string;
   params: T;
@@ -216,6 +221,10 @@ export class CodexAppServerClient extends EventEmitter {
 
   async rollbackThread(threadId: string, numTurns: number): Promise<unknown> {
     return this.request("thread/rollback", { threadId, numTurns });
+  }
+
+  async readThread(params: CodexAppServerThreadReadParams): Promise<unknown> {
+    return this.request("thread/read", params);
   }
 
   async request<T = unknown>(

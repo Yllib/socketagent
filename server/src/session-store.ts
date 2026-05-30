@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { execFileSync } from "child_process";
 import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
+import { CodexAppServerClient } from "./codex-app-server-client";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
@@ -1243,9 +1244,15 @@ function readFirstLineSync(filePath: string): string | null {
  * Returns null if not found.
  */
 export function findCodexRolloutFile(sessionId: string): string | null {
+  const indexedPath = findCodexRolloutPathFromStateDb(sessionId);
+  if (indexedPath) return indexedPath;
+
   const homeDir = process.env.HOME || require("os").homedir();
-  const sessionsDir = path.join(homeDir, ".codex", "sessions");
-  if (!fs.existsSync(sessionsDir)) return null;
+  const roots = [
+    path.join(homeDir, ".codex", "sessions"),
+    path.join(homeDir, ".codex", "archived_sessions"),
+  ].filter((dir) => fs.existsSync(dir));
+  if (roots.length === 0) return null;
 
   const suffix = `-${sessionId}.jsonl`;
   let found: string | null = null;
@@ -1266,8 +1273,31 @@ export function findCodexRolloutFile(sessionId: string): string | null {
       }
     }
   }
-  walk(sessionsDir);
+  for (const root of roots) {
+    walk(root);
+    if (found) break;
+  }
   return found;
+}
+
+function findCodexRolloutPathFromStateDb(sessionId: string): string | null {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
+  if (!fs.existsSync(dbPath)) return null;
+  const sql = `SELECT rollout_path FROM threads WHERE id = ${sqlStringLiteral(sessionId)} LIMIT 1;`;
+  try {
+    const raw = execFileSync("sqlite3", ["-json", dbPath, sql], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    }).trim();
+    if (!raw) return null;
+    const rows = JSON.parse(raw) as Array<{ rollout_path?: string }>;
+    const rolloutPath = rows[0]?.rollout_path;
+    return rolloutPath && fs.existsSync(rolloutPath) ? rolloutPath : null;
+  } catch {
+    return null;
+  }
 }
 
 function buildCodexRolloutRestorePath(sessionId: string, archivePath: string): string | null {
@@ -1399,6 +1429,146 @@ export function readCodexRolloutHistory(sessionId: string): HistoryEntry[] {
     }
   }
   return result;
+}
+
+function appServerUserInputToText(input: any): string {
+  if (!input || typeof input !== "object") return "";
+  if (input.type === "text") return String(input.text ?? "");
+  if (input.type === "skill") return `/${String(input.name ?? "skill")}`;
+  return "";
+}
+
+function appServerJsonPreview(value: unknown): string {
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value ?? ""); } catch { return String(value ?? ""); }
+}
+
+function appServerThreadToHistory(thread: any): HistoryEntry[] {
+  const result: HistoryEntry[] = [];
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  for (const turn of turns) {
+    const timestamp = epochToIso(turn?.startedAt ?? turn?.completedAt, nowIso());
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    for (const item of items) {
+      if (!item || typeof item !== "object") continue;
+
+      if (item.type === "userMessage") {
+        const content = (Array.isArray(item.content) ? item.content : [])
+          .map(appServerUserInputToText)
+          .filter(Boolean)
+          .join("\n")
+          .trim();
+        if (content) result.push({ role: "user", content, timestamp });
+        continue;
+      }
+
+      if (item.type === "agentMessage") {
+        const text = String(item.text ?? "");
+        if (text) result.push({ role: "assistant", content: text, timestamp });
+        continue;
+      }
+
+      if (item.type === "commandExecution") {
+        const command = String(item.command ?? "");
+        result.push({
+          role: "tool_call",
+          content: command,
+          toolName: "Bash",
+          toolInput: { command, cwd: item.cwd },
+          toolUseId: item.id,
+          timestamp,
+        });
+        if (item.aggregatedOutput != null || item.exitCode != null) {
+          const suffix = item.exitCode ? `\n[exit ${item.exitCode}]` : "";
+          const output = `${String(item.aggregatedOutput ?? "")}${suffix}`;
+          result.push({
+            role: "tool_result",
+            content: output,
+            toolUseId: item.id,
+            toolOutput: output,
+            timestamp,
+          });
+        }
+        continue;
+      }
+
+      if (item.type === "mcpToolCall" || item.type === "dynamicToolCall") {
+        const toolName = item.type === "mcpToolCall"
+          ? `${item.server || "mcp"}.${item.tool || "tool"}`
+          : `${item.namespace || "dynamic"}.${item.tool || "tool"}`;
+        const args = item.arguments ?? {};
+        result.push({
+          role: "tool_call",
+          content: appServerJsonPreview(args),
+          toolName,
+          toolInput: args,
+          toolUseId: item.id,
+          timestamp,
+        });
+        const output = appServerJsonPreview(item.result ?? item.error ?? item.contentItems ?? "");
+        if (output) {
+          result.push({
+            role: "tool_result",
+            content: output,
+            toolUseId: item.id,
+            toolOutput: output,
+            timestamp,
+          });
+        }
+        continue;
+      }
+
+      if (item.type === "fileChange") {
+        const changes = Array.isArray(item.changes) ? item.changes : [];
+        result.push({
+          role: "tool_call",
+          content: appServerJsonPreview(changes),
+          toolName: "ApplyPatch",
+          toolInput: { changes },
+          toolUseId: item.id,
+          timestamp,
+        });
+        result.push({
+          role: "tool_result",
+          content: item.status ? `Patch ${item.status}` : "Patch complete",
+          toolUseId: item.id,
+          toolOutput: item.status ? `Patch ${item.status}` : "Patch complete",
+          timestamp,
+        });
+        continue;
+      }
+    }
+  }
+  return result;
+}
+
+export async function readCodexAppServerThreadHistory(sessionId: string): Promise<HistoryEntry[]> {
+  const client = new CodexAppServerClient({
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 15_000,
+    startupTimeoutMs: 15_000,
+  });
+  try {
+    await client.initialize({
+      clientInfo: {
+        name: "socketagent",
+        title: "SocketAgent",
+        version: "1.0.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+        requestAttestation: false,
+      },
+    });
+    const response = await client.readThread({ threadId: sessionId, includeTurns: true });
+    return appServerThreadToHistory((response as any)?.thread);
+  } catch (err: any) {
+    console.warn(`[CodexHistory] app-server thread/read failed for ${sessionId}: ${err?.message || String(err)}`);
+    return [];
+  } finally {
+    await client.stop().catch(() => {});
+  }
 }
 
 export interface CodexRolloutContextUsage {

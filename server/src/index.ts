@@ -8,7 +8,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CodexSession, archiveCodexAppServerThread, createSession, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
+import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -458,17 +458,21 @@ function createConnectionHandler(transport: ClientTransport) {
           // is a first resume after an install), backfill from the codex
           // rollout file so the chat doesn't appear as a fresh session.
           if (allHistory.length === 0) {
-            const fromRollout = readCodexRolloutHistory(msg.sessionId);
-            if (fromRollout.length > 0) {
-              console.log(`[Resume] Backfilled ${fromRollout.length} entries from codex rollout for ${msg.sessionId}`);
-              for (const entry of fromRollout) {
+            let fromCodex = readCodexRolloutHistory(msg.sessionId);
+            let source = fromCodex.length > 0 ? "codex rollout" : "codex app-server thread/read";
+            if (fromCodex.length === 0) {
+              fromCodex = await readCodexAppServerThreadHistory(msg.sessionId);
+            }
+            if (fromCodex.length > 0) {
+              console.log(`[Resume] Backfilled ${fromCodex.length} entries from ${source} for ${msg.sessionId}`);
+              for (const entry of fromCodex) {
                 appendHistory(msg.sessionId, entry);
               }
               sendJson({
                 type: "session_history",
                 sessionId: msg.sessionId,
-                messages: fromRollout,
-                total: fromRollout.length,
+                messages: fromCodex,
+                total: fromCodex.length,
                 offset: 0,
                 append: true,
               });

@@ -562,6 +562,20 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "prompt": {
+        if (msg.sessionId) {
+          const runningForPrompt = activeSessions.get(msg.sessionId);
+          if (runningForPrompt && activeSession !== runningForPrompt) {
+            runningForPrompt.setWebSocket(transport as any);
+            activeSession = runningForPrompt;
+            activeSessionId = msg.sessionId;
+            sessionClients.set(msg.sessionId, {
+              ws: transport as WebSocket,
+              setActiveSession: (s: Session) => { activeSession = s; },
+            });
+            console.log(`[Prompt] Reattached to running session ${msg.sessionId} before injection`);
+          }
+        }
+
         if (!activeSession) {
           let cwd = DEFAULT_CWD;
           const savedResumeId = msg.sessionId;

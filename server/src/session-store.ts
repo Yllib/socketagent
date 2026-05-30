@@ -156,6 +156,18 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): void {
   fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
 }
 
+export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[]): void {
+  if (newEntries.length === 0) return;
+  ensureHistoryDir();
+  const file = historyFile(sessionId);
+  let entries: HistoryEntry[] = [];
+  if (fs.existsSync(file)) {
+    entries = JSON.parse(fs.readFileSync(file, "utf-8"));
+  }
+  entries.push(...newEntries);
+  fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
+}
+
 // Sessions whose user-uuid backfill has already run this process lifetime.
 // Re-running is harmless but doubles the disk reads — once per restart is enough.
 const _backfilledSessions = new Set<string>();

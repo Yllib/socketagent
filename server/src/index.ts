@@ -8,7 +8,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CodexSession, archiveCodexAppServerThread, createSession, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
+import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -465,9 +465,7 @@ function createConnectionHandler(transport: ClientTransport) {
             }
             if (fromCodex.length > 0) {
               console.log(`[Resume] Backfilled ${fromCodex.length} entries from ${source} for ${msg.sessionId}`);
-              for (const entry of fromCodex) {
-                appendHistory(msg.sessionId, entry);
-              }
+              appendHistoryBulk(msg.sessionId, fromCodex);
               sendJson({
                 type: "session_history",
                 sessionId: msg.sessionId,
@@ -483,9 +481,7 @@ function createConnectionHandler(transport: ClientTransport) {
           const missed = getMissedMessages(msg.sessionId, sessionInfo.cwd, lastTimestamp || "1970-01-01T00:00:00Z");
           if (missed.length > 0) {
             console.log(`[Resume] Found ${missed.length} missed messages from JSONL`);
-            for (const entry of missed) {
-              appendHistory(msg.sessionId, entry);
-            }
+            appendHistoryBulk(msg.sessionId, missed);
             sendJson({
               type: "session_history",
               sessionId: msg.sessionId,
@@ -1734,9 +1730,7 @@ function createConnectionHandler(transport: ClientTransport) {
           const branchIdx = allHistory.findIndex((e) => e.uuid === branchUuid);
           if (branchIdx !== -1) {
             const branchHistory = allHistory.slice(0, branchIdx + 1);
-            for (const entry of branchHistory) {
-              appendHistory(newSessionId, entry);
-            }
+            appendHistoryBulk(newSessionId, branchHistory);
           }
 
           // Save the new session in our store
@@ -1832,9 +1826,7 @@ function createConnectionHandler(transport: ClientTransport) {
             forked.setAppendSystemPrompt(pendingSystemPrompt);
             const { threadId: newSessionId } = await forked.forkAppServerThread(sourceId);
             const sourceHistory = getHistory(sourceId);
-            for (const entry of sourceHistory) {
-              appendHistory(newSessionId, { ...entry });
-            }
+            appendHistoryBulk(newSessionId, sourceHistory.map((entry) => ({ ...entry })));
             saveSession({
               id: newSessionId,
               title: `${sessionInfo.title || "Untitled"} (fork)`,

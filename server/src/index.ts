@@ -1010,6 +1010,7 @@ function createConnectionHandler(transport: ClientTransport) {
             : GIT_ROOT;
           execSync("npm ci", { cwd: tscDir, stdio: "pipe", timeout: 120000 });
           execSync("npx tsc", { cwd: tscDir, stdio: "pipe", timeout: 120000 });
+          installSocketAgentCliFromRepo(GIT_ROOT);
 
           if (beforeHash === afterHash) {
             if ((msg as any).forceRestart) {
@@ -2959,6 +2960,108 @@ function findGitRoot(startDir: string): string | null {
 const GIT_ROOT = findGitRoot(SERVER_DIR);
 let lastAutoUpdateError: string | null = null;
 
+function pathIncludesDir(pathValue: string | undefined, dir: string): boolean {
+  if (!pathValue) return false;
+  const entries = pathValue.split(path.delimiter).map((entry) => path.resolve(entry || "."));
+  return entries.includes(path.resolve(dir));
+}
+
+function appendUnixPathHint(home: string, binDir: string): void {
+  if (pathIncludesDir(process.env.PATH, binDir)) return;
+
+  const shellFiles = [".profile", ".bashrc", ".zshrc"].map((file) => path.join(home, file));
+  const alreadyConfigured = shellFiles.some((file) => {
+    try {
+      return fs.existsSync(file) && fs.readFileSync(file, "utf-8").includes(".local/bin");
+    } catch {
+      return false;
+    }
+  });
+  if (alreadyConfigured) return;
+
+  const profilePath = path.join(home, ".profile");
+  fs.appendFileSync(
+    profilePath,
+    `\n# SocketAgent CLI\nexport PATH="$HOME/.local/bin:$PATH"\n`
+  );
+}
+
+function replaceSymlink(linkPath: string, targetPath: string): void {
+  try {
+    const existing = fs.lstatSync(linkPath);
+    if (!existing.isSymbolicLink() && !existing.isFile()) {
+      console.warn(`[CLI] Skipping ${linkPath}; path exists and is not a file or symlink`);
+      return;
+    }
+    fs.rmSync(linkPath, { force: true });
+  } catch (e: any) {
+    if (e?.code !== "ENOENT") throw e;
+  }
+  fs.symlinkSync(targetPath, linkPath);
+}
+
+function installSocketAgentCliUnix(gitRoot: string): void {
+  const os = require("os");
+  const home = process.env.HOME || os.homedir();
+  if (!home) throw new Error("HOME is not set");
+
+  const targetPath = path.join(gitRoot, "bin", "socketagent");
+  if (!fs.existsSync(targetPath)) {
+    console.warn(`[CLI] socketagent target missing: ${targetPath}`);
+    return;
+  }
+
+  fs.chmodSync(targetPath, 0o755);
+  const binDir = path.join(home, ".local", "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  replaceSymlink(path.join(binDir, "socketagent"), targetPath);
+  replaceSymlink(path.join(binDir, "socketclaude"), targetPath);
+  appendUnixPathHint(home, binDir);
+  console.log(`[CLI] Installed socketagent command in ${binDir}`);
+}
+
+function installSocketAgentCliWindows(gitRoot: string): void {
+  const os = require("os");
+  const { execFileSync } = require("child_process");
+  const userHome = process.env.USERPROFILE || os.homedir();
+  const localAppData = process.env.LOCALAPPDATA || path.join(userHome, "AppData", "Local");
+  const binDir = path.join(localAppData, "SocketAgent", "bin");
+  const ps1Path = path.join(gitRoot, "bin", "socketagent.ps1");
+  if (!fs.existsSync(ps1Path)) {
+    console.warn(`[CLI] socketagent PowerShell target missing: ${ps1Path}`);
+    return;
+  }
+
+  fs.mkdirSync(binDir, { recursive: true });
+  const cmdBody = `@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "${ps1Path}" %*\r\n`;
+  fs.writeFileSync(path.join(binDir, "socketagent.cmd"), cmdBody);
+  fs.writeFileSync(path.join(binDir, "socketclaude.cmd"), cmdBody);
+
+  const escapedBinDir = binDir.replace(/'/g, "''");
+  const pathCommand = [
+    "$path = [Environment]::GetEnvironmentVariable('PATH', 'User')",
+    `$dir = '${escapedBinDir}'`,
+    "if (-not (($path -split ';') -contains $dir)) {",
+    "  $newPath = if ([string]::IsNullOrWhiteSpace($path)) { $dir } else { \"$path;$dir\" }",
+    "  [Environment]::SetEnvironmentVariable('PATH', $newPath, 'User')",
+    "}",
+  ].join("; ");
+  execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", pathCommand], { stdio: "pipe" });
+  console.log(`[CLI] Installed socketagent command in ${binDir}`);
+}
+
+function installSocketAgentCliFromRepo(gitRoot: string): void {
+  try {
+    if (process.platform === "win32") {
+      installSocketAgentCliWindows(gitRoot);
+    } else {
+      installSocketAgentCliUnix(gitRoot);
+    }
+  } catch (e: any) {
+    console.error(`[CLI] Failed to install socketagent command: ${e?.message || String(e)}`);
+  }
+}
+
 async function checkForUpdates(): Promise<void> {
   if (!GIT_ROOT) return;
   try {
@@ -3008,6 +3111,7 @@ async function checkForUpdates(): Promise<void> {
     // Install/update deps so SDK and other package changes are picked up
     await execAsync("npm ci", { cwd: tscDir, timeout: 120000 });
     await execAsync("npx tsc", { cwd: tscDir, timeout: 120000 });
+    installSocketAgentCliFromRepo(GIT_ROOT);
 
     lastAutoUpdateError = null;
 
@@ -3026,6 +3130,7 @@ async function checkForUpdates(): Promise<void> {
 }
 
 if (GIT_ROOT) {
+  installSocketAgentCliFromRepo(GIT_ROOT);
   console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s)`);
   setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
 } else {

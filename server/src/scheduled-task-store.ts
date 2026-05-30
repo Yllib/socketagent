@@ -4,7 +4,7 @@ import type { Backend, CodexDriver } from "./protocol";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
-  ".socketagent"
+  ".claude-assistant"
 );
 const TASKS_FILE = path.join(STORE_DIR, "scheduled-tasks.json");
 

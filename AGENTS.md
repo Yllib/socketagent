@@ -26,7 +26,7 @@ Flutter App (Android) ←—WebSocket (JSON)—→ Node.js Server ←—Claude A
 
 Compile: `cd /home/rdp/claude/socketclaude-public/server && npx tsc`
 
-Runs as **systemd user service** (`socketagent.service`). Auto-restarts on crash, auto-updates from git every 60s (resets to origin, installs deps with `npm ci`, compiles, restarts when no sessions active).
+Runs as a **systemd user service** (`socketagent.service` on fresh installs, `socketclaude.service` on upgraded installs). Auto-restarts on crash, auto-updates from git every 60s (resets to origin, installs deps with `npm ci`, compiles, restarts when no sessions active).
 
 **CRITICAL: Do NOT restart the server manually unless absolutely necessary.** To deploy server changes, just commit and push — the auto-update will pick it up within 60s. This applies to all servers (local and remote).
 
@@ -85,7 +85,7 @@ The deploy script bumps the version in `pubspec.yaml`, builds the APK, commits, 
 **Auto-update:** The app checks `app-version.json` from the public server repo (`Yllib/socketagent`) on startup. If a newer version exists, it shows an update banner. Users can download and install from Settings > About.
 
 ## Data Files
-- `~/.socketagent/` — Session metadata, chat history, relay keys, scheduled tasks, recent CWDs, protected files config, Outlook tokens
+- `~/.claude-assistant/` — Session metadata, chat history, relay keys, scheduled tasks, recent CWDs, protected files config, Outlook tokens. This legacy path is intentionally preserved so SocketAgent upgrades keep existing pairings and history.
 - `~/.claude/projects/` — Claude Code session JSONL files (used for missed message recovery)
 
 ## Installers

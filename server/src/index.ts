@@ -2245,7 +2245,7 @@ const httpServer = http.createServer((req, res) => {
       res.end(`Invalid model: ${modelName}. Allowed: ${allowedModels.join(", ")}`);
       return;
     }
-    const modelDir = path.join(require("os").homedir(), ".socketagent", "tts-models", modelName);
+    const modelDir = path.join(require("os").homedir(), ".claude-assistant", "tts-models", modelName);
 
     const fileName = url.searchParams.get("file") || "";
     if (!fileName) {
@@ -2886,7 +2886,7 @@ wss.on("connection", (ws: WebSocket) => {
 function startRelayClient(): void {
   const keysPath = path.join(
     process.env.HOME || require("os").homedir(),
-    ".socketagent",
+    ".claude-assistant",
     "relay-keys.json"
   );
   const keyPair = loadOrCreateKeyPair(keysPath);
@@ -2895,8 +2895,9 @@ function startRelayClient(): void {
   console.log(`[Relay] Connecting to ${RELAY_URL}`);
   console.log(`[Relay] Pairing token: ${PAIRING_TOKEN}`);
 
-  // Display QR code for pairing (format: SA|<token>|<pubkey>)
-  const qrPayload = `SA|${PAIRING_TOKEN}|${pubkeyBase64}`;
+  // Display QR code for pairing. The SC prefix is kept as the wire-format
+  // marker so existing SocketClaude app builds can still re-pair.
+  const qrPayload = `SC|${PAIRING_TOKEN}|${pubkeyBase64}`;
 
   try {
     const qrcode = require("qrcode-terminal");

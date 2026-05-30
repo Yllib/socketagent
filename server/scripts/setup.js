@@ -100,8 +100,9 @@ if (fs.existsSync(keysFile)) {
 
 // --- Output QR payload on last line (parsed by installer) ---
 // Relay URL is hardcoded in the app — QR only needs token + pubkey.
-// Format: SA|<token>|<pubkey> — plain delimited, no JSON (avoids
-// PowerShell stripping quotes when passing to qrcode-terminal).
-const qrPayload = `SA|${pairingToken}|${publicKeyB64}`;
+// Format: SC|<token>|<pubkey> — plain delimited, no JSON (avoids
+// PowerShell stripping quotes when passing to qrcode-terminal). The SC prefix
+// is kept as the wire-format marker so existing app builds can still re-pair.
+const qrPayload = `SC|${pairingToken}|${publicKeyB64}`;
 
 console.log(qrPayload);

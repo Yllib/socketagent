@@ -4,7 +4,7 @@ import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
-  ".socketagent"
+  ".claude-assistant"
 );
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
 const HISTORY_DIR = path.join(STORE_DIR, "history");

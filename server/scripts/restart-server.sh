@@ -37,11 +37,15 @@ if [[ -z "${_RESTART_DETACHED:-}" ]]; then
   exec systemd-run --user --scope --unit="socketagent-restart-$$" "$0" "$@"
 fi
 
-STORE_DIR="$HOME/.socketagent"
+STORE_DIR="$HOME/.claude-assistant"
 SESSIONS_FILE="$STORE_DIR/sessions.json"
 HISTORY_DIR="$STORE_DIR/history"
 SERVER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SERVICE_NAME="socketagent"
+if systemctl --user list-unit-files socketagent.service >/dev/null 2>&1; then
+  SERVICE_NAME="socketagent"
+else
+  SERVICE_NAME="socketclaude"
+fi
 
 COMPILE=true
 EXTRA_SESSION=""

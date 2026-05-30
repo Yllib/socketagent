@@ -166,7 +166,7 @@ Common values:
 - `RELAY_URL` - relay endpoint.
 - `PAIRING_TOKEN` - token encoded in the pairing QR.
 
-Runtime data is stored under `~/.socketagent/`, including session metadata, chat history, scheduled tasks, relay keys, recent working directories, and local app/server state.
+Runtime data is stored under `~/.claude-assistant/`, including session metadata, chat history, scheduled tasks, relay keys, recent working directories, and local app/server state. SocketAgent intentionally keeps this legacy path so upgrades preserve existing pairings and history.
 
 ## Plugins
 

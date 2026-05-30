@@ -38,7 +38,7 @@ done
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$REPO_ROOT/server"
 ENV_FILE="$SERVER_DIR/.env"
-DATA_DIR="$HOME/.socketagent"
+DATA_DIR="$HOME/.claude-assistant"
 KEYS_FILE="$DATA_DIR/relay-keys.json"
 SETUP_SCRIPT="$SERVER_DIR/scripts/setup.js"
 

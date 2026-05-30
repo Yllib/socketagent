@@ -1199,7 +1199,7 @@ export class CodexSession {
 
       case "item/started":
       case "item/completed":
-        this.handleAppServerItem(method, p?.item);
+        this.handleAppServerItem(method, p?.item, p);
         return;
 
       case "turn/completed": {
@@ -1235,7 +1235,7 @@ export class CodexSession {
     }
   }
 
-  private handleAppServerItem(method: "item/started" | "item/completed", item: any): void {
+  private handleAppServerItem(method: "item/started" | "item/completed", item: any, event?: any): void {
     const sid = this.sessionId;
     if (!sid || !item?.id || !item?.type) return;
 
@@ -1548,11 +1548,15 @@ export class CodexSession {
           sessionId: sid,
         } as ServerMessage);
       } else {
-        if (item.savedPath) this.sendToolImageForPath(sid, item.id, item.savedPath);
+        const generatedPath = this.appServerGeneratedImagePath(event?.threadId, item.id);
+        const savedPath = item.savedPath || generatedPath || "";
+        let sentImage = false;
+        if (savedPath && fs.existsSync(savedPath)) sentImage = this.sendToolImageForPath(sid, item.id, savedPath);
+        if (!sentImage) sentImage = this.sendToolImageFromBase64(sid, item.id, item.result, savedPath);
         this.send({
           type: "tool_result",
           toolUseId: item.id,
-          output: item.savedPath || item.result || item.status || "Image generation completed",
+          output: sentImage && savedPath ? savedPath : item.status || "Image generation completed",
           sessionId: sid,
         } as ServerMessage);
       }
@@ -1582,18 +1586,67 @@ export class CodexSession {
     return [event, sourceName].filter(Boolean).join(" ");
   }
 
-  private sendToolImageForPath(sessionId: string, toolUseId: string, filePath: string): void {
-    if (!filePath) return;
+  private appServerGeneratedImagePath(threadId: unknown, itemId: unknown): string | null {
+    const thread = String(threadId || this.threadId || "").trim();
+    const item = String(itemId || "").trim();
+    if (!thread || !item) return null;
+    return path.join(os.homedir(), ".codex", "generated_images", thread, `${item}.png`);
+  }
+
+  private sendToolImageFromBase64(sessionId: string, toolUseId: string, raw: unknown, filePath: string): boolean {
+    let imageData = typeof raw === "string" ? raw.trim() : "";
+    if (!imageData) return false;
+    const dataUrl = imageData.match(/^data:([^;,]+);base64,(.+)$/);
+    const mimeType = dataUrl?.[1] || "image/png";
+    if (dataUrl) imageData = dataUrl[2];
+    if (!/^[A-Za-z0-9+/=\s]+$/.test(imageData)) return false;
+    imageData = imageData.replace(/\s+/g, "");
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(imageData, "base64");
+    } catch {
+      return false;
+    }
+    if (bytes.length === 0 || bytes.length > 20 * 1024 * 1024) return false;
+    if (filePath && !fs.existsSync(filePath)) {
+      try {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, bytes);
+      } catch {
+        filePath = "";
+      }
+    }
+    this.send({
+      type: "tool_image",
+      toolUseId,
+      imageData,
+      mimeType,
+      filePath,
+      sessionId,
+    } as any);
+    appendHistory(sessionId, {
+      role: "tool_image",
+      content: "",
+      toolUseId,
+      filePath,
+      mimeType,
+      timestamp: now(),
+    });
+    return true;
+  }
+
+  private sendToolImageForPath(sessionId: string, toolUseId: string, filePath: string): boolean {
+    if (!filePath) return false;
     const resolved = path.isAbsolute(filePath) ? filePath : path.join(this.cwd, filePath);
     let stat: fs.Stats;
     try {
       stat = fs.statSync(resolved);
     } catch {
-      return;
+      return false;
     }
-    if (!stat.isFile() || stat.size > 20 * 1024 * 1024) return;
+    if (!stat.isFile() || stat.size > 20 * 1024 * 1024) return false;
     const mimeType = this.imageMimeType(resolved);
-    if (!mimeType) return;
+    if (!mimeType) return false;
     try {
       const imageData = fs.readFileSync(resolved).toString("base64");
       this.send({
@@ -1612,8 +1665,10 @@ export class CodexSession {
         mimeType,
         timestamp: now(),
       });
+      return true;
     } catch (err: any) {
       console.warn(`[codex app-server] failed to send tool image ${resolved}: ${err?.message || String(err)}`);
+      return false;
     }
   }
 

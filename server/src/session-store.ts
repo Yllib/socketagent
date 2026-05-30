@@ -647,7 +647,8 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
     if (rolloutPath && fs.existsSync(rolloutPath)) {
       codexRolloutPath = rolloutPath;
       const archiveName = `${sessionId}_${ts}_codex-rollout.jsonl`;
-      fs.renameSync(rolloutPath, path.join(ARCHIVE_DIR, archiveName));
+      fs.copyFileSync(rolloutPath, path.join(ARCHIVE_DIR, archiveName));
+      archiveCodexNativeRollout(sessionId, rolloutPath);
       console.log(`[ClearContext] Archived Codex rollout: ${archiveName}`);
     }
   } else {
@@ -912,6 +913,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
 
   const liveHist = historyFile(sid);
   const liveJsonl = getJsonlPath(sid, cwd);
+  let restoredCodexRolloutPath = "";
 
   if (fs.existsSync(jsonlArchive)) {
     const destDir = path.dirname(liveJsonl);
@@ -928,6 +930,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
     if (fs.existsSync(liveCodexRollout)) fs.unlinkSync(liveCodexRollout);
     fs.renameSync(codexRolloutArchive, liveCodexRollout);
+    restoredCodexRolloutPath = liveCodexRollout;
   }
   if (fs.existsSync(histArchive)) {
     ensureHistoryDir();
@@ -980,6 +983,9 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     sessions.push(restored);
   }
   writeStore(sessions);
+  if (restored.backend === "codex" && restoredCodexRolloutPath) {
+    updateCodexThreadRolloutState(sid, restoredCodexRolloutPath, false);
+  }
   console.log(`[RestoreArchive] Restored ${sid}_${ts} (title="${restored.title}", cwd=${cwd})`);
 
   return { ok: true, session: restored };
@@ -1278,6 +1284,46 @@ export function findCodexRolloutFile(sessionId: string): string | null {
     if (found) break;
   }
   return found;
+}
+
+function archiveCodexNativeRollout(sessionId: string, rolloutPath: string): string {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const archiveDir = path.join(homeDir, ".codex", "archived_sessions");
+  if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir, { recursive: true });
+
+  const archivedPath = path.join(archiveDir, path.basename(rolloutPath));
+  let finalPath = rolloutPath;
+  const alreadyArchived = path.resolve(path.dirname(rolloutPath)) === path.resolve(archiveDir);
+  if (!alreadyArchived && fs.existsSync(rolloutPath)) {
+    if (fs.existsSync(archivedPath)) fs.unlinkSync(archivedPath);
+    fs.renameSync(rolloutPath, archivedPath);
+    finalPath = archivedPath;
+  }
+  updateCodexThreadRolloutState(sessionId, finalPath, true);
+  return finalPath;
+}
+
+function updateCodexThreadRolloutState(sessionId: string, rolloutPath: string, archived: boolean): void {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
+  if (!fs.existsSync(dbPath)) return;
+  const archivedAt = archived ? String(Math.floor(Date.now() / 1000)) : "NULL";
+  const sql = `
+    UPDATE threads
+    SET rollout_path = ${sqlStringLiteral(rolloutPath)},
+        archived = ${archived ? 1 : 0},
+        archived_at = ${archivedAt}
+    WHERE id = ${sqlStringLiteral(sessionId)};
+  `;
+  try {
+    execFileSync("sqlite3", [dbPath, sql], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    });
+  } catch (err: any) {
+    console.warn(`[CodexArchive] failed to update Codex thread state for ${sessionId}: ${err?.message || String(err)}`);
+  }
 }
 
 function findCodexRolloutPathFromStateDb(sessionId: string): string | null {

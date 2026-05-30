@@ -692,6 +692,7 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
       createdAt: session.createdAt,
       clearedAt: new Date().toISOString(),
       ...(session.backend ? { backend: session.backend } : {}),
+      ...((session as any).codexDriver ? { codexDriver: (session as any).codexDriver } : {}),
       ...(codexRolloutPath ? { codexRolloutPath } : {}),
     };
     fs.writeFileSync(path.join(ARCHIVE_DIR, metaName), JSON.stringify(meta, null, 2), "utf-8");
@@ -869,6 +870,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
   let metaTitle = "";
   let metaCreatedAt = "";
   let metaBackend: Backend | undefined;
+  let metaCodexDriver: string | undefined;
   let codexRolloutPath = "";
   let cwd = "";
   if (fs.existsSync(metaPath)) {
@@ -878,6 +880,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
       if (typeof meta.createdAt === "string") metaCreatedAt = meta.createdAt;
       if (typeof meta.cwd === "string") cwd = meta.cwd;
       if (meta.backend === "claude" || meta.backend === "codex") metaBackend = meta.backend;
+      if (meta.codexDriver === "exec" || meta.codexDriver === "app-server") metaCodexDriver = meta.codexDriver;
       if (typeof meta.codexRolloutPath === "string") codexRolloutPath = meta.codexRolloutPath;
     } catch {}
   }
@@ -967,6 +970,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     lastActive: restoredAt,
     messagePreview,
     ...(metaBackend ? { backend: metaBackend } : {}),
+    ...(metaCodexDriver ? { codexDriver: metaCodexDriver as any } : {}),
   };
   if (existingIdx >= 0) {
     sessions[existingIdx] = restored;

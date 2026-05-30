@@ -121,6 +121,11 @@ export interface ClearContextMessage {
   sessionId: string;
 }
 
+export interface CompactContextMessage {
+  type: "compact_context";
+  sessionId?: string;
+}
+
 export interface ArchiveSessionMessage {
   type: "archive_session";
   sessionId: string;
@@ -323,6 +328,7 @@ export type ClientMessage =
   | DeleteSessionMessage
   | RenameSessionMessage
   | ClearContextMessage
+  | CompactContextMessage
   | ArchiveSessionMessage
   | AbortMessage
   | InterruptMessage
@@ -504,6 +510,8 @@ export interface SessionInfo {
   scheduledTaskId?: string;
   /** Backend that drives this session. Absent on legacy sessions = "claude". */
   backend?: Backend;
+  /** Codex runtime driver for codex sessions. Absent on legacy sessions = "exec". */
+  codexDriver?: CodexDriver;
 }
 
 export interface ErrorServerMessage {

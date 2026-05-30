@@ -7,7 +7,7 @@ import * as http from "http";
 import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
-import { CodexSession, createSession, Session, detectAvailableBackends, getCodexAvailability } from "./codex-session";
+import { CodexSession, archiveCodexAppServerThread, createSession, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, SessionInfo } from "./protocol";
@@ -1009,12 +1009,45 @@ function createConnectionHandler(transport: ClientTransport) {
             running.abort();
             activeSessions.delete(sid);
           }
+          if (sessionInfo.backend === "codex" && (sessionInfo as any).codexDriver !== "exec") {
+            let archivedByAppServer = false;
+            await archiveCodexAppServerThread(sid, sessionInfo.cwd)
+              .then(() => { archivedByAppServer = true; })
+              .catch((err) => {
+                console.warn(`[ClearContext] Codex app-server thread/archive failed for ${sid}: ${err.message || err}`);
+              });
+            if (archivedByAppServer && !(sessionInfo as any).codexDriver) {
+              (sessionInfo as any).codexDriver = "app-server";
+              saveSession(sessionInfo);
+            }
+          }
           clearSessionContext(sid, sessionInfo.cwd);
           clearedSessions.add(sid);
           console.log(`Cleared context for session ${sid}`);
           sendJson({ type: "context_cleared", sessionId: sid });
           broadcastSessionList();
         }
+        break;
+      }
+
+      case "compact_context": {
+        const targetSid = (msg as any).sessionId || activeSession?.getSessionId() || activeSessionId;
+        const targetSession = targetSid ? activeSessions.get(targetSid) || activeSession : activeSession;
+        if (!targetSession) {
+          sendJson({ type: "error", message: "No active session to compact" });
+          break;
+        }
+        if (targetSession instanceof CodexSession) {
+          if (targetSession.driver !== "app-server") {
+            sendJson({ type: "error", message: "Codex compaction is only supported in App Server mode" });
+            break;
+          }
+          targetSession.compactAppServerThread(targetSid || undefined).catch((e: any) => {
+            sendJson({ type: "error", message: `Codex compact failed: ${e.message || String(e)}` });
+          });
+          break;
+        }
+        sendJson({ type: "error", message: "Manual compact is not supported for this backend through SocketClaude yet" });
         break;
       }
 
@@ -1026,6 +1059,18 @@ function createConnectionHandler(transport: ClientTransport) {
           if (running) {
             running.abort();
             activeSessions.delete(sid);
+          }
+          if (sessionInfo.backend === "codex" && (sessionInfo as any).codexDriver !== "exec") {
+            let archivedByAppServer = false;
+            await archiveCodexAppServerThread(sid, sessionInfo.cwd)
+              .then(() => { archivedByAppServer = true; })
+              .catch((err) => {
+                console.warn(`[Archive] Codex app-server thread/archive failed for ${sid}: ${err.message || err}`);
+              });
+            if (archivedByAppServer && !(sessionInfo as any).codexDriver) {
+              (sessionInfo as any).codexDriver = "app-server";
+              saveSession(sessionInfo);
+            }
           }
           clearSessionContext(sid, sessionInfo.cwd);
           deleteSession(sid);
@@ -1053,6 +1098,11 @@ function createConnectionHandler(transport: ClientTransport) {
         try {
           const result = restoreArchive(sid, ts);
           if (result.ok) {
+            if (result.session.backend === "codex" && (result.session as any).codexDriver === "app-server") {
+              await unarchiveCodexAppServerThread(sid, result.session.cwd).catch((err) => {
+                console.warn(`[RestoreArchive] Codex app-server thread/unarchive failed for ${sid}: ${err.message || err}`);
+              });
+            }
             sendJson({ type: "archive_restored", sid, ts, session: result.session });
             broadcastSessionList();
           } else {
@@ -1466,7 +1516,10 @@ function createConnectionHandler(transport: ClientTransport) {
         if (!activeSession) {
           sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "No active session" });
         } else if (activeSession instanceof CodexSession) {
-          sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "Rewind is not supported for Codex sessions." });
+          const detail = activeSession.driver === "app-server"
+            ? "Codex App Server rollback is turn-level and does not restore workspace files for a message UUID."
+            : "Rewind is not supported for Codex exec sessions.";
+          sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: detail });
         } else if (!uuid) {
           sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "No message UUID" });
         } else if (!activeSession.isRunning) {
@@ -1499,8 +1552,13 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: "No message UUID" });
           break;
         }
-        if (getSession(sessionId)?.backend === "codex" || activeSession instanceof CodexSession) {
-          sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: "Conversation rewind is not supported for Codex sessions." });
+        const rewindSessionInfo = getSession(sessionId);
+        if (rewindSessionInfo?.backend === "codex" || activeSession instanceof CodexSession) {
+          const codexDriver = (rewindSessionInfo as any)?.codexDriver || (activeSession instanceof CodexSession ? activeSession.driver : "exec");
+          const detail = codexDriver === "app-server"
+            ? "Codex App Server currently exposes turn-count rollback, but not a safe message-level conversation rewind."
+            : "Conversation rewind is not supported for Codex exec sessions.";
+          sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: detail });
           break;
         }
 
@@ -1605,7 +1663,11 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
         if (sessionInfo.backend === "codex") {
-          sendJson({ type: "branch_result", success: false, originalSessionId: sourceId, branchPointUuid: branchUuid, error: "Branching from a message is not supported for Codex sessions." });
+          const codexDriver = (sessionInfo as any).codexDriver || "exec";
+          const detail = codexDriver === "app-server"
+            ? "Codex App Server currently exposes full thread fork and turn-count rollback, but not a safe branch-at-message operation."
+            : "Branching from a message is not supported for Codex exec sessions.";
+          sendJson({ type: "branch_result", success: false, originalSessionId: sourceId, branchPointUuid: branchUuid, error: detail });
           break;
         }
 
@@ -1703,7 +1765,64 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
         if (sessionInfo.backend === "codex") {
-          sendJson({ type: "error", message: "Forking is not supported for Codex sessions." });
+          if ((sessionInfo as any).codexDriver === "exec") {
+            sendJson({ type: "error", message: "Forking is only supported for Codex App Server sessions." });
+            break;
+          }
+          try {
+            if (activeSession && activeSession.isRunning) {
+              activeSession.detachWebSocket();
+            }
+            const forked = new CodexSession(transport as any, sessionInfo.cwd, plugins, "app-server");
+            forked.setTtsEnabled(pendingTtsEnabled);
+            forked.setTtsEngine(pendingTtsEngine);
+            forked.setKokoroVoice(pendingKokoroVoice);
+            forked.setKokoroSpeed(pendingKokoroSpeed);
+            forked.setEffort(pendingEffort);
+            forked.setThinking(pendingThinking);
+            forked.setDisallowedTools(pendingDisallowedTools);
+            forked.setAppendSystemPrompt(pendingSystemPrompt);
+            const { threadId: newSessionId } = await forked.forkAppServerThread(sourceId);
+            const sourceHistory = getHistory(sourceId);
+            for (const entry of sourceHistory) {
+              appendHistory(newSessionId, { ...entry });
+            }
+            saveSession({
+              id: newSessionId,
+              title: `${sessionInfo.title || "Untitled"} (fork)`,
+              cwd: sessionInfo.cwd,
+              createdAt: new Date().toISOString(),
+              lastActive: new Date().toISOString(),
+              messagePreview: `Forked from ${sourceId.substring(0, 8)}...`,
+              backend: "codex",
+              codexDriver: "app-server",
+            });
+            activeSession = forked;
+            activeSessionId = newSessionId;
+            sessionClients.set(newSessionId, {
+              ws: transport as WebSocket,
+              setActiveSession: (s: Session) => { activeSession = s; },
+            });
+            sendJson({
+              type: "session_forked",
+              originalSessionId: sourceId,
+              newSessionId,
+              cwd: sessionInfo.cwd,
+            });
+            const forkPage = getHistoryPage(newSessionId, 50);
+            sendJson({
+              type: "session_history",
+              sessionId: newSessionId,
+              messages: forkPage.entries,
+              total: forkPage.total,
+              offset: forkPage.offset,
+            });
+            broadcastSessionList();
+            console.log(`Forked Codex App Server session ${sourceId} → ${newSessionId}`);
+          } catch (e: any) {
+            console.error(`[Fork] Codex app-server fork failed: ${e.message || e}`);
+            sendJson({ type: "error", message: `Codex fork failed: ${e.message || String(e)}` });
+          }
           break;
         }
         if (activeSession && activeSession.isRunning) {

@@ -158,6 +158,11 @@ export class CodexAppServerClient extends EventEmitter {
 
     this.proc.on("exit", (code, signal) => {
       this.closed = true;
+      try { this.proc?.unref(); } catch {}
+      try { this.proc?.stdin.destroy(); } catch {}
+      try { this.proc?.stdout.destroy(); } catch {}
+      try { this.proc?.stderr.destroy(); } catch {}
+      this.proc = null;
       this.rejectAll(new Error(`codex app-server exited code=${code} signal=${signal}`));
       this.emit("exit", code, signal);
     });
@@ -173,6 +178,10 @@ export class CodexAppServerClient extends EventEmitter {
 
   async resumeThread(params: CodexAppServerThreadResumeParams): Promise<unknown> {
     return this.request("thread/resume", params);
+  }
+
+  async forkThread(params: CodexAppServerThreadResumeParams): Promise<unknown> {
+    return this.request("thread/fork", params);
   }
 
   async startTurn(params: CodexAppServerTurnStartParams): Promise<unknown> {
@@ -197,6 +206,10 @@ export class CodexAppServerClient extends EventEmitter {
 
   async compactThread(threadId: string): Promise<unknown> {
     return this.request("thread/compact/start", { threadId });
+  }
+
+  async rollbackThread(threadId: string, numTurns: number): Promise<unknown> {
+    return this.request("thread/rollback", { threadId, numTurns });
   }
 
   async request<T = unknown>(
@@ -225,15 +238,35 @@ export class CodexAppServerClient extends EventEmitter {
   async stop(signal: NodeJS.Signals = "SIGTERM", forceKillMs = 3000): Promise<void> {
     const proc = this.proc;
     if (!proc) return;
-    if (this.closed) return;
+    if (this.closed) {
+      try { proc.stdin.destroy(); } catch {}
+      try { proc.stdout.destroy(); } catch {}
+      try { proc.stderr.destroy(); } catch {}
+      this.proc = null;
+      return;
+    }
 
     await new Promise<void>((resolve) => {
-      const done = () => resolve();
-      const timer = setTimeout(() => {
-        if (!proc.killed) proc.kill("SIGKILL");
+      let exited = false;
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        this.closed = true;
+        this.proc = null;
+        try { proc.unref(); } catch {}
+        try { proc.removeAllListeners(); } catch {}
+        try { proc.stdin.destroy(); } catch {}
+        try { proc.stdout.destroy(); } catch {}
+        try { proc.stderr.destroy(); } catch {}
         resolve();
+      };
+      const timer = setTimeout(() => {
+        if (!exited) proc.kill("SIGKILL");
+        done();
       }, forceKillMs);
       proc.once("exit", () => {
+        exited = true;
         clearTimeout(timer);
         done();
       });

@@ -124,6 +124,7 @@ export class CodexSession {
   private appServerAgentText = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
   private appServerFileChangeDiff = new Map<string, string>();
+  private _isCompacting = false;
   private pendingAppServerSteeredInputs: Array<{
     resolve: () => void;
     reject: (error: Error) => void;
@@ -176,7 +177,8 @@ export class CodexSession {
   // ─── Public API (subset of ClaudeSession) ────────────────────────────
 
   get isRunning(): boolean { return this._isRunning; }
-  get isCompacting(): boolean { return false; }
+  get isCompacting(): boolean { return this._isCompacting; }
+  get driver(): CodexDriver { return this.codexDriver; }
   get permissionMode(): string | null {
     if (this._sandbox === "read-only") return "plan";
     if (this._sandbox === "danger-full-access") return "bypassPermissions";
@@ -245,6 +247,44 @@ export class CodexSession {
   async toggleMcpServer(_name: string, _enabled: boolean): Promise<void> {}
   async rewindFiles(_uuid: string, _dryRun = false): Promise<{ success: boolean; restored: string[] }> {
     return { success: false, restored: [] };
+  }
+
+  async forkAppServerThread(sourceThreadId: string): Promise<{ threadId: string }> {
+    if (this.codexDriver !== "app-server") {
+      throw new Error("Codex thread fork requires App Server mode");
+    }
+    await this.ensureAppServer();
+    const forked = await this.appServer!.forkThread({
+      ...this.buildAppServerThreadParams(),
+      threadId: sourceThreadId,
+    });
+    const threadId = this.extractThreadId(forked);
+    if (!threadId) throw new Error("codex app-server did not return a forked thread id");
+    this.threadId = threadId;
+    this.sessionId = threadId;
+    this._sessionInfoSaved = true;
+    return { threadId };
+  }
+
+  async compactAppServerThread(threadId = this.threadId || this.sessionId || this._resumeSessionId): Promise<void> {
+    if (this.codexDriver !== "app-server") {
+      throw new Error("Codex compaction requires App Server mode");
+    }
+    if (!threadId) throw new Error("No Codex thread id to compact");
+    await this.ensureAppServer();
+    this._isCompacting = true;
+    this.send({ type: "compacting", active: true, sessionId: threadId } as any);
+    await this.appServer!.compactThread(threadId);
+  }
+
+  async rollbackAppServerThread(numTurns: number, threadId = this.threadId || this.sessionId || this._resumeSessionId): Promise<void> {
+    if (this.codexDriver !== "app-server") {
+      throw new Error("Codex rollback requires App Server mode");
+    }
+    if (!threadId) throw new Error("No Codex thread id to roll back");
+    if (!Number.isFinite(numTurns) || numTurns < 1) throw new Error("Rollback must drop at least one turn");
+    await this.ensureAppServer();
+    await this.appServer!.rollbackThread(threadId, Math.floor(numTurns));
   }
 
   /**
@@ -666,6 +706,7 @@ export class CodexSession {
         lastActive: now(),
         messagePreview: "",
         backend: "codex",
+        codexDriver: this.codexDriver,
       };
       if (this.replacesSessionId) {
         remapSession(this.replacesSessionId, this.sessionId);
@@ -825,6 +866,14 @@ export class CodexSession {
           this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
           this.send({ type: "error", message: "Codex app-server entered systemError state", sessionId: sid } as any);
         }
+        return;
+      }
+
+      case "thread/compacted": {
+        const sid = this.sessionId || p?.threadId;
+        if (!sid) return;
+        this._isCompacting = false;
+        this.send({ type: "compacting", active: false, sessionId: sid } as any);
         return;
       }
 
@@ -1001,6 +1050,28 @@ export class CodexSession {
         ...(Array.isArray(item.content) ? item.content : []),
       ].join("\n");
       if (text) this.send({ type: "thinking", content: text, sessionId: sid } as ServerMessage);
+      return;
+    }
+
+    if (item.type === "contextCompaction") {
+      if (method === "item/started") {
+        this._isCompacting = true;
+        this.send({ type: "compacting", active: true, sessionId: sid } as any);
+      } else {
+        this._isCompacting = false;
+        this.send({ type: "compacting", active: false, sessionId: sid } as any);
+        this.send({
+          type: "compact_boundary",
+          trigger: "manual",
+          preTokens: 0,
+          sessionId: sid,
+        } as any);
+        appendHistory(sid, {
+          role: "assistant",
+          content: "[compact_boundary:0:manual]",
+          timestamp: now(),
+        });
+      }
       return;
     }
 
@@ -1776,6 +1847,46 @@ export function createSession(
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { ClaudeSession: CS } = require("./claude-session") as typeof import("./claude-session");
   return new CS(ws, cwd, plugins);
+}
+
+async function withStandaloneAppServerClient<T>(
+  cwd: string,
+  fn: (client: CodexAppServerClient) => Promise<T>,
+): Promise<T> {
+  const client = new CodexAppServerClient({
+    cwd,
+    env: process.env,
+    requestTimeoutMs: 60_000,
+    startupTimeoutMs: 30_000,
+  });
+  try {
+    await client.initialize({
+      clientInfo: {
+        name: "socketclaude",
+        title: "SocketClaude",
+        version: "1.0.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+        requestAttestation: false,
+      },
+    });
+    return await fn(client);
+  } finally {
+    await client.stop().catch(() => {});
+  }
+}
+
+export async function archiveCodexAppServerThread(threadId: string, cwd: string): Promise<void> {
+  await withStandaloneAppServerClient(cwd, async (client) => {
+    await client.archiveThread(threadId);
+  });
+}
+
+export async function unarchiveCodexAppServerThread(threadId: string, cwd: string): Promise<void> {
+  await withStandaloneAppServerClient(cwd, async (client) => {
+    await client.unarchiveThread(threadId);
+  });
 }
 
 // ─── Backend availability detection ─────────────────────────────────────────

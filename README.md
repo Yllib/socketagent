@@ -8,7 +8,7 @@ Use Claude Code or OpenAI Codex from your Android phone. SocketAgent pairs a mob
 - `install.sh` - Linux installer for Node.js, selected agent CLIs, server config, and a `systemd --user` service.
 - `install.ps1` - Windows installer for Node.js, selected agent CLIs, server config, and a scheduled task.
 - `app-version.json` - Published Android app version metadata.
-- `app/` - Android app source when checked out privately. The public repo ships APK releases, not app source.
+- Android app source - public Flutter app repo at <https://github.com/Yllib/socketagent-app>. This repo ships APK releases for normal installs.
 
 ## Architecture
 

@@ -85,6 +85,31 @@ function Convert-BackendSelection($value) {
     }
 }
 
+function Install-SocketAgentCli {
+    $toolsDir = Join-Path $env:LOCALAPPDATA "SocketAgent\bin"
+    New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
+
+    $targetPs1 = Join-Path $REPO_ROOT "bin\socketagent.ps1"
+    $socketAgentCmd = Join-Path $toolsDir "socketagent.cmd"
+    $socketClaudeCmd = Join-Path $toolsDir "socketclaude.cmd"
+    $cmdContent = "@echo off`r`npowershell -ExecutionPolicy Bypass -File `"$targetPs1`" %*`r`n"
+    Set-Content -Path $socketAgentCmd -Value $cmdContent -Encoding ASCII
+    Set-Content -Path $socketClaudeCmd -Value $cmdContent -Encoding ASCII
+
+    $userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+    $parts = @()
+    if ($userPath) { $parts = $userPath.Split(";") | Where-Object { $_ } }
+    $alreadyOnPath = $parts | Where-Object { $_.TrimEnd("\") -ieq $toolsDir.TrimEnd("\") }
+    if (-not $alreadyOnPath) {
+        $newPath = if ($userPath) { "$userPath;$toolsDir" } else { $toolsDir }
+        [System.Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
+        $env:PATH = "$env:PATH;$toolsDir"
+        Write-Ok "Added $toolsDir to user PATH"
+    }
+
+    Write-Ok "Installed socketagent command to $toolsDir"
+}
+
 # ══════════════════════════════════════════════
 #  Banner
 # ══════════════════════════════════════════════
@@ -560,10 +585,17 @@ if ($taskInfo.State -eq "Running") {
 }
 
 # ══════════════════════════════════════════════
-#  Phase 9: QR Code & Summary
+#  Phase 9: Install CLI
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 9: Phone Pairing"
+Write-Phase "Phase 9: Install CLI"
+Install-SocketAgentCli
+
+# ══════════════════════════════════════════════
+#  Phase 10: QR Code & Summary
+# ══════════════════════════════════════════════
+
+Write-Phase "Phase 10: Phone Pairing"
 
 # Set UTF-8 for QR code rendering in legacy terminals
 if ($null -eq $env:WT_SESSION) {
@@ -599,6 +631,7 @@ Write-Host ""
 Write-Host "  The server starts automatically when you log in."
 Write-Host ""
 Write-Host "  Management commands:" -ForegroundColor Cyan
+Write-Host "    CLI:      socketagent help"
 Write-Host "    Status:   Get-ScheduledTask -TaskName $TASK_NAME"
 Write-Host "    Start:    Start-ScheduledTask -TaskName $TASK_NAME"
 Write-Host "    Stop:     Stop-ScheduledTask -TaskName $TASK_NAME"

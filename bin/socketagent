@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  SCRIPT_PATH="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || echo "$SCRIPT_PATH")"
+fi
+
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+SERVER_DIR="$REPO_ROOT/server"
+SERVICE_NAME="socketagent"
+
+detect_service() {
+  if systemctl --user list-unit-files "$SERVICE_NAME.service" >/dev/null 2>&1; then
+    echo "$SERVICE_NAME"
+    return
+  fi
+  if systemctl --user status socketclaude.service >/dev/null 2>&1; then
+    echo "socketclaude"
+    return
+  fi
+  echo "$SERVICE_NAME"
+}
+
+usage() {
+  cat <<EOF
+SocketAgent command line
+
+Usage:
+  socketagent pair [--raw]        Show pairing QR or raw pairing payload
+  socketagent install [args...]   Re-run installer, e.g. --backends both
+  socketagent status              Show server service status
+  socketagent logs                Follow server logs
+  socketagent restart             Restart server using the safe restart script
+  socketagent doctor              Print basic install diagnostics
+  socketagent help                Show this help
+EOF
+}
+
+cmd="${1:-help}"
+if [[ $# -gt 0 ]]; then shift; fi
+
+case "$cmd" in
+  pair|qr)
+    exec node "$SERVER_DIR/scripts/show-pairing.js" "$@"
+    ;;
+  install|setup)
+    exec "$REPO_ROOT/install.sh" "$@"
+    ;;
+  status)
+    exec systemctl --user status "$(detect_service)" "$@"
+    ;;
+  logs)
+    exec journalctl --user -u "$(detect_service)" -f "$@"
+    ;;
+  restart)
+    exec "$SERVER_DIR/scripts/restart-server.sh" "$@"
+    ;;
+  doctor)
+    echo "SocketAgent diagnostics"
+    echo "Repo: $REPO_ROOT"
+    echo "Server: $SERVER_DIR"
+    echo "Node: $(command -v node || echo 'not found')"
+    if command -v node >/dev/null 2>&1; then echo "Node version: $(node --version)"; fi
+    echo "Claude CLI: $(command -v claude || echo 'not found')"
+    echo "Codex CLI: $(command -v codex || echo 'not found')"
+    active_service="$(detect_service)"
+    echo "Service: $active_service"
+    systemctl --user is-active "$active_service" >/dev/null 2>&1 \
+      && echo "Service status: active" \
+      || echo "Service status: not active"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo "" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

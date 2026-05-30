@@ -94,6 +94,7 @@ The installer handles:
 - QR code pairing for the Android app
 
 Re-running the installer is safe. Existing pairing keys and auth tokens are preserved unless you pass the reset option.
+The installer also registers a `socketagent` command on PATH. `socketclaude` is installed as an alias.
 
 ## Pairing
 
@@ -122,6 +123,17 @@ At the end of install, the server prints a QR code and a fallback pairing string
 - Private server plugin API
 
 ## Management
+
+### CLI
+
+```bash
+socketagent pair
+socketagent install --backends both
+socketagent status
+socketagent logs
+socketagent restart
+socketagent doctor
+```
 
 ### Linux
 

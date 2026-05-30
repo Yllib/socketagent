@@ -89,6 +89,31 @@ select_backends() {
   if [[ ",$ENABLED_BACKENDS," == *",codex,"* ]]; then INSTALL_CODEX=true; fi
 }
 
+install_cli() {
+  local bin_dir="$HOME/.local/bin"
+  mkdir -p "$bin_dir"
+  ln -sf "$REPO_ROOT/bin/socketagent" "$bin_dir/socketagent"
+  ln -sf "$REPO_ROOT/bin/socketagent" "$bin_dir/socketclaude"
+  ok "Installed socketagent command to $bin_dir"
+
+  case ":$PATH:" in
+    *":$bin_dir:"*) ;;
+    *)
+      warn "$bin_dir is not currently on PATH."
+      local shell_rc="$HOME/.profile"
+      if [[ -n "${SHELL:-}" && "$(basename "$SHELL")" == "bash" ]]; then
+        shell_rc="$HOME/.bashrc"
+      fi
+      if [[ -f "$shell_rc" ]] && ! grep -q 'HOME/.local/bin' "$shell_rc"; then
+        printf '\n# SocketAgent CLI\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$shell_rc"
+        ok "Added ~/.local/bin to PATH in $shell_rc"
+      else
+        warn "Add this to your shell profile if needed: export PATH=\"\$HOME/.local/bin:\$PATH\""
+      fi
+      ;;
+  esac
+}
+
 echo ""
 echo -e "  ${CYAN}SocketAgent Installer${NC}"
 echo -e "  ${CYAN}======================${NC}"
@@ -406,10 +431,17 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 9: QR Code & Summary
+#  Phase 9: Install CLI
 # ══════════════════════════════════════════════
 
-phase "Phase 9: Phone Pairing"
+phase "Phase 9: Install CLI"
+install_cli
+
+# ══════════════════════════════════════════════
+#  Phase 10: QR Code & Summary
+# ══════════════════════════════════════════════
+
+phase "Phase 10: Phone Pairing"
 
 echo ""
 echo -e "  ${CYAN}Scan this QR code with the SocketAgent app:${NC}"
@@ -433,6 +465,7 @@ echo ""
 echo "  The server starts automatically on boot."
 echo ""
 echo -e "  ${CYAN}Management commands:${NC}"
+echo "    CLI:       socketagent help"
 echo "    Status:    systemctl --user status $SERVICE_NAME"
 echo "    Start:     systemctl --user start $SERVICE_NAME"
 echo "    Stop:      systemctl --user stop $SERVICE_NAME"

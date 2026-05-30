@@ -2,6 +2,11 @@
 server/node_modules/
 server/dist/
 server/.env
+.last-auto-update-hash
+server/src/**/*.js
+server/src/**/*.js.map
+server/src/**/*.d.ts
+server/src/**/*.d.ts.map
 
 # Flutter app (private repo — lives in app/ as a nested git repo)
 app/

@@ -602,8 +602,24 @@ export class ClaudeSession {
     if (this.activeQuery) {
       await this.activeQuery.setPermissionMode(mode as any);
       this._permissionMode = mode;
+      this.persistPermissionMode(mode);
       console.log(`[PermissionMode] Set to ${mode} for session ${this.sessionId || '(pending)'}`);
     }
+  }
+
+  private persistPermissionMode(mode: string): void {
+    if (!this.sessionId) return;
+    const session = getSession(this.sessionId);
+    if (session) {
+      session.permissionMode = mode;
+      saveSession(session);
+    }
+    appendHistory(this.sessionId, {
+      role: "permission_mode",
+      content: "",
+      permissionMode: mode,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   /** Get MCP server health status */
@@ -1777,6 +1793,23 @@ export class ClaudeSession {
 
           // Forward init data to app (available agents, tools, MCP servers, model, etc.)
           const initMsg = message as any;
+          const initPermissionMode = initMsg.permissionMode as string | undefined;
+          if (initPermissionMode) {
+            this._permissionMode = initPermissionMode;
+            const session = getSession(this.sessionId || "");
+            if (session) {
+              session.permissionMode = initPermissionMode;
+              saveSession(session);
+            }
+            if (!resumeSessionId && this.sessionId) {
+              appendHistory(this.sessionId, {
+                role: "permission_mode",
+                content: "",
+                permissionMode: initPermissionMode,
+                timestamp: new Date().toISOString(),
+              });
+            }
+          }
           this._lastSessionInit = {
             type: "session_init",
             agents: initMsg.agents || undefined,
@@ -1784,7 +1817,7 @@ export class ClaudeSession {
             mcpServers: initMsg.mcp_servers || undefined,
             model: initMsg.model || undefined,
             claudeCodeVersion: initMsg.claude_code_version || undefined,
-            permissionMode: initMsg.permissionMode || undefined,
+            permissionMode: initPermissionMode || undefined,
             sessionId: this.sessionId || "",
           } as any;
           this.send(this._lastSessionInit!);
@@ -1928,7 +1961,11 @@ export class ClaudeSession {
           } as any);
           // Forward permission mode changes (e.g., entering/exiting plan mode)
           if (permMode) {
+            const previousMode = this._permissionMode;
             this._permissionMode = permMode;
+            if (previousMode !== permMode) {
+              this.persistPermissionMode(permMode);
+            }
             this.send({
               type: "permission_mode_changed",
               permissionMode: permMode,

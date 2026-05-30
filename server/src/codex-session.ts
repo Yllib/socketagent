@@ -18,7 +18,7 @@
  *   - Fork / branch / rewind
  *   - Append system prompt (codex uses AGENTS.md, not per-turn)
  *   - Compaction / context-window tracking (no JSONL surface)
- *   - Effort / thinking config (no codex flag)
+ *   - Thinking budget config (Codex exposes reasoning effort, wired below)
  *
  * Empirical schema notes (from probes — see chat history):
  *   - resume does NOT accept -s or -C; only -c overrides + a few flags
@@ -150,6 +150,7 @@ export class CodexSession {
   private _isCompacting = false;
   private _isRunning = false;
   private _model: string | null = null;
+  private _effort: "low" | "medium" | "high" | "max" = "high";
   private _sandbox: SandboxMode = "danger-full-access";
   private _approvalPolicy: CodexAppServerApprovalPolicy = "never";
   private _approvalsReviewer: CodexAppServerApprovalsReviewer = "user";
@@ -222,10 +223,11 @@ export class CodexSession {
 
   /**
    * Maps SocketAgent permission modes onto Codex sandbox + approval policy.
-   * Non-bypass modes route approvals to SocketAgent so protected-file plugins
-   * can block before the command or file change executes.
+   * Regular Yolo keeps approval callbacks enabled so SocketAgent can still
+   * enforce protected-file rules while auto-approving everything else.
    */
-  async setPermissionMode(mode: string): Promise<void> {
+  async setPermissionMode(mode: string, options: { recordHistory?: boolean } = {}): Promise<void> {
+    const previousMode = this._permissionMode;
     this._permissionMode = mode;
     this._approvalsReviewer = "user";
     switch (mode) {
@@ -235,6 +237,10 @@ export class CodexSession {
         break;
       case "bypassPermissions":
         this._sandbox = "danger-full-access";
+        this._approvalPolicy = "untrusted";
+        break;
+      case "superYolo":
+        this._sandbox = "danger-full-access";
         this._approvalPolicy = "never";
         break;
       default:
@@ -242,6 +248,28 @@ export class CodexSession {
         this._approvalPolicy = "untrusted";
         break;
     }
+    this.persistPermissionMode();
+    if (options.recordHistory !== false && previousMode !== this._permissionMode) {
+      this.appendPermissionModeHistory();
+    }
+  }
+
+  private persistPermissionMode(): void {
+    if (!this.sessionId) return;
+    const session = getSession(this.sessionId);
+    if (!session) return;
+    session.permissionMode = this._permissionMode;
+    saveSession(session);
+  }
+
+  private appendPermissionModeHistory(): void {
+    if (!this.sessionId) return;
+    appendHistory(this.sessionId, {
+      role: "permission_mode",
+      content: "",
+      permissionMode: this._permissionMode,
+      timestamp: now(),
+    });
   }
 
   setWebSocket(ws: WebSocket): void { this.ws = ws; }
@@ -249,7 +277,11 @@ export class CodexSession {
 
   // ─── No-op shims for ClaudeSession surface area ──────────────────────
   // Each is meaningful for Claude but has no codex-CLI equivalent.
-  setEffort(_e: string): void {}
+  setEffort(e: string): void {
+    if (e === "low" || e === "medium" || e === "high" || e === "max") {
+      this._effort = e;
+    }
+  }
   setThinking(_t: unknown): void {}
   setDisallowedTools(_t: string[]): void {}
   setAppendSystemPrompt(s: string): void { this._appendSystemPrompt = s; }
@@ -390,13 +422,46 @@ export class CodexSession {
     return {
       sessionId: this.sessionId ?? "",
       cwd: this.cwd,
-      send: (msg: ServerMessage | Record<string, any>) => this.send(msg as ServerMessage),
+      send: (msg: ServerMessage | Record<string, any>) => {
+        this.send(this.withCodexProtectedPrompt(msg) as ServerMessage);
+      },
       appendHistory: (entry: HistoryEntry) => {
-        if (this.sessionId) appendHistory(this.sessionId, entry);
+        if (this.sessionId) appendHistory(this.sessionId, this.withCodexProtectedHistory(entry));
       },
       pendingQuestions: new Map(),
       questionCounter: { next: () => crypto.randomUUID() },
     };
+  }
+
+  private withCodexProtectedPrompt(msg: ServerMessage | Record<string, any>): ServerMessage | Record<string, any> {
+    if ((msg as any).type !== "question" || !Array.isArray((msg as any).questions)) {
+      return msg;
+    }
+    return {
+      ...(msg as Record<string, any>),
+      questions: (msg as any).questions.map((question: any) => ({
+        ...question,
+        question: this.codexProtectedPromptText(question?.question),
+      })),
+    };
+  }
+
+  private withCodexProtectedHistory(entry: HistoryEntry): HistoryEntry {
+    if (entry.role !== "question" || !Array.isArray((entry as any).questions)) {
+      return entry;
+    }
+    return {
+      ...entry,
+      questions: (entry as any).questions.map((question: any) => ({
+        ...question,
+        question: this.codexProtectedPromptText(question?.question),
+      })),
+    };
+  }
+
+  private codexProtectedPromptText(text: unknown): unknown {
+    if (typeof text !== "string") return text;
+    return text.replace(/^Claude wants to /, "Codex wants to ");
   }
 
   /** Mirrors ClaudeSession.send — sends a ServerMessage over the WS. */
@@ -719,6 +784,7 @@ export class CodexSession {
     }
     const mcpUrl = this.buildCodexMcpUrl(this.appServerMcpRegistration.token);
     return {
+      model_reasoning_effort: this.codexReasoningEffort(),
       mcp_servers: {
         socketagent_app: {
           url: mcpUrl,
@@ -808,6 +874,7 @@ export class CodexSession {
         messagePreview: "",
         backend: "codex",
         codexDriver: this.codexDriver,
+        permissionMode: this.permissionMode || undefined,
       };
       if (this.replacesSessionId) {
         remapSession(this.replacesSessionId, this.sessionId);
@@ -819,12 +886,14 @@ export class CodexSession {
       this._sessionInfoSaved = true;
 
       if (isFirstTime) {
+        this.appendPermissionModeHistory();
         this.send({
           type: "session_created",
           sessionId: this.sessionId,
           cwd: this.cwd,
           title,
           backend: "codex",
+          permissionMode: this.permissionMode,
         } as ServerMessage);
         this.send({
           type: "permission_mode_changed",
@@ -1951,6 +2020,7 @@ export class CodexSession {
             messagePreview: "",
             backend: "codex",
             codexDriver: this.codexDriver,
+            permissionMode: this.permissionMode || undefined,
           };
           if (this.replacesSessionId) {
             remapSession(this.replacesSessionId, this.sessionId);
@@ -1965,12 +2035,14 @@ export class CodexSession {
           // Mirrors the Claude flow where the SDK's init message produces
           // a follow-up session_created with the real id.
           if (isFirstTime) {
+            this.appendPermissionModeHistory();
             this.send({
               type: "session_created",
               sessionId: this.sessionId,
               cwd: this.cwd,
               title,
               backend: "codex",
+              permissionMode: this.permissionMode,
             } as ServerMessage);
             this.send({
               type: "permission_mode_changed",
@@ -2376,6 +2448,10 @@ export class CodexSession {
     return `mcp_servers.socketagent_app.url="${mcpUrl}"`;
   }
 
+  private codexReasoningEffort(): "low" | "medium" | "high" {
+    return this._effort === "max" ? "high" : this._effort;
+  }
+
   private buildExecArgs(mcpUrl: string): string[] {
     const args = [
       "exec",
@@ -2384,6 +2460,7 @@ export class CodexSession {
       "-C", this.cwd,
       "--skip-git-repo-check",
       "-c", this.codexMcpConfigArg(mcpUrl),
+      "-c", `model_reasoning_effort="${this.codexReasoningEffort()}"`,
     ];
     if (this._model) args.push("-m", this._model);
     args.push("-");
@@ -2401,6 +2478,7 @@ export class CodexSession {
       "--skip-git-repo-check",
       "-c", `sandbox_mode="${this._sandbox}"`,
       "-c", this.codexMcpConfigArg(mcpUrl),
+      "-c", `model_reasoning_effort="${this.codexReasoningEffort()}"`,
     ];
     if (this._model) args.push("-m", this._model);
     args.push("-");

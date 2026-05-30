@@ -224,6 +224,30 @@ interface ClientTransport {
   send(data: string): void;
 }
 
+function normalizeCodexPermissionMode(mode: unknown): string | null {
+  if (mode === "superYolo" || mode === "bypassPermissions" || mode === "default" || mode === "plan") {
+    return mode;
+  }
+  if (mode === "auto" || mode === "acceptEdits") {
+    return "default";
+  }
+  return null;
+}
+
+async function restorePersistedPermissionMode(session: Session, sessionInfo?: SessionInfo): Promise<void> {
+  if (sessionInfo?.backend !== "codex") return;
+  const historyMode = sessionInfo.id
+    ? [...getHistory(sessionInfo.id)]
+        .reverse()
+        .find((entry) => entry.role === "permission_mode")
+        ?.permissionMode
+    : undefined;
+  const mode = normalizeCodexPermissionMode(sessionInfo.permissionMode || historyMode);
+  if (mode) {
+    await (session as any).setPermissionMode(mode, { recordHistory: false });
+  }
+}
+
 /**
  * Per-connection state and message handler.
  * Used for both direct WebSocket connections and relay connections.
@@ -429,6 +453,7 @@ function createConnectionHandler(transport: ClientTransport) {
           console.log(`Reconnected to running session ${msg.sessionId}`);
         } else {
           activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
+          await restorePersistedPermissionMode(activeSession, sessionInfo);
           (activeSession as any)._resumeSessionId = msg.sessionId;
         }
         activeSessionId = msg.sessionId;
@@ -453,6 +478,7 @@ function createConnectionHandler(transport: ClientTransport) {
           sessionId: msg.sessionId,
           cwd: sessionInfo.cwd,
           title: sessionInfo.title,
+          ...(activeSession.permissionMode ? { permissionMode: activeSession.permissionMode } : {}),
         });
 
         // Send message history — if session is running, load back to last user prompt
@@ -550,7 +576,7 @@ function createConnectionHandler(transport: ClientTransport) {
         // Always send status so the app resets its processing state on resume
         const resumeRunning = !!(existing && existing.isRunning);
         const resumeCompacting = !!(existing && existing.isCompacting);
-        const resumePermMode = existing?.permissionMode || null;
+        const resumePermMode = activeSession.permissionMode || null;
         const activeToolInfo = existing?.getActiveToolCall?.() || null;
         console.log(`[Resume] sessionId=${msg.sessionId} existing=${!!existing} isRunning=${existing?.isRunning} compacting=${resumeCompacting} permMode=${resumePermMode} → sending running=${resumeRunning} activeToolUseId=${activeToolInfo?.toolUseId || 'none'}`);
         sendJson({
@@ -624,6 +650,7 @@ function createConnectionHandler(transport: ClientTransport) {
             break;
           }
           activeSession = createSession(promptBackend, transport as any, cwd, plugins, getStoredCodexDriver(savedPromptSession));
+          await restorePersistedPermissionMode(activeSession, savedPromptSession);
           activeSessionId = savedResumeId || null;
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setEffort(pendingEffort);
@@ -1756,6 +1783,7 @@ function createConnectionHandler(transport: ClientTransport) {
           const sessionInfo = getSession(sessionId);
           const cwd = sessionInfo?.cwd || activeSession?.getCwd() || process.env.DEFAULT_CWD || process.env.HOME || "/";
           activeSession = createSession(sessionInfo?.backend, transport as any, cwd, plugins, getStoredCodexDriver(sessionInfo));
+          await restorePersistedPermissionMode(activeSession, sessionInfo);
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -1973,6 +2001,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.detachWebSocket();
         }
         activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
+        await restorePersistedPermissionMode(activeSession, sessionInfo);
         activeSession.setTtsEnabled(pendingTtsEnabled);
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -2256,7 +2285,7 @@ const httpServer = http.createServer((req, res) => {
     }
     let body = "";
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-    req.on("end", () => {
+    req.on("end", async () => {
       try {
         const { sessionId, prompt } = JSON.parse(body);
         if (!sessionId || !prompt) {
@@ -2278,6 +2307,7 @@ const httpServer = http.createServer((req, res) => {
           ? existingClient.ws
           : { readyState: WebSocket.CLOSED, send: () => {} } as any;
         const session = createSession(sessionInfo.backend, ws, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
+        await restorePersistedPermissionMode(session, sessionInfo);
 
         (session as any)._resumeSessionId = sessionId;
         session.onActivity = () => scheduleBroadcast();
@@ -2754,6 +2784,7 @@ async function checkScheduledTasks(): Promise<void> {
       // Create headless session (same pattern as /continue endpoint)
       const ws = { readyState: WebSocket.CLOSED, send: () => {} } as any;
       const session = createSession(backend, ws, task.cwd, plugins, codexDriver);
+      await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
       session.onActivity = () => scheduleBroadcast();
 
       // If reusing session, set the resume ID so SDK continues that session

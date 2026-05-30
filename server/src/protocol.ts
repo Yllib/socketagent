@@ -518,6 +518,8 @@ export interface SessionInfo {
   backend?: Backend;
   /** Codex runtime driver for codex sessions. Absent means use the server default. */
   codexDriver?: CodexDriver;
+  /** Last selected permission mode for this session. */
+  permissionMode?: string;
 }
 
 export interface ErrorServerMessage {
@@ -546,10 +548,11 @@ export interface SessionCreatedServerMessage {
   title?: string;
   /** Echoed back so the client knows which backend the server is using. */
   backend?: Backend;
+  permissionMode?: string;
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "permission_mode";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -581,6 +584,8 @@ export interface HistoryEntry {
   // Notification fields (role === "notification")
   status?: string;
   originToolUseId?: string;
+  // Permission mode fields (role === "permission_mode")
+  permissionMode?: string;
 }
 
 export interface SessionHistoryServerMessage {
@@ -593,6 +598,7 @@ export interface StatusServerMessage {
   type: "status";
   sessionId: string;
   running: boolean;
+  permissionMode?: string;
 }
 
 export interface CompactingServerMessage {

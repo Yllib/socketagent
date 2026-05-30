@@ -10,6 +10,7 @@ export interface ServerSettings {
 
 const STORE_DIR = path.join(process.env.HOME || os.homedir(), ".claude-assistant");
 const SETTINGS_FILE = path.join(STORE_DIR, "server-settings.json");
+const DEFAULT_CODEX_DRIVER: CodexDriver = "app-server";
 
 let cachedSettings: ServerSettings | null = null;
 let cachedDriversAvailable: CodexDriver[] | null = null;
@@ -26,7 +27,7 @@ export function loadServerSettings(): ServerSettings {
   if (cachedSettings) return cachedSettings;
   ensureStoreDir();
   if (!fs.existsSync(SETTINGS_FILE)) {
-    cachedSettings = { codexDriver: "exec" };
+    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER };
     return cachedSettings;
   }
 
@@ -37,7 +38,7 @@ export function loadServerSettings(): ServerSettings {
     };
   } catch (err: any) {
     console.warn(`[settings] Failed to read server settings: ${err?.message || String(err)}`);
-    cachedSettings = { codexDriver: "exec" };
+    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER };
   }
   return cachedSettings;
 }
@@ -90,8 +91,14 @@ export function getCodexDriversAvailable(): CodexDriver[] {
 export function getAdvertisedServerSettings(): ServerSettings & { codexDriversAvailable: CodexDriver[] } {
   const settings = loadServerSettings();
   const codexDriversAvailable = getCodexDriversAvailable();
+  const fallback = codexDriversAvailable.includes(DEFAULT_CODEX_DRIVER) ? DEFAULT_CODEX_DRIVER : "exec";
   return {
-    codexDriver: codexDriversAvailable.includes(settings.codexDriver) ? settings.codexDriver : "exec",
+    codexDriver: codexDriversAvailable.includes(settings.codexDriver) ? settings.codexDriver : fallback,
     codexDriversAvailable,
   };
+}
+
+export function resolveCodexDriver(driver?: CodexDriver): CodexDriver {
+  const requested = driver ? normalizeDriver(driver) : getAdvertisedServerSettings().codexDriver;
+  return getCodexDriversAvailable().includes(requested) ? requested : "exec";
 }

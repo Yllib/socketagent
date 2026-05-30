@@ -10,13 +10,13 @@ import { ClaudeSession } from "./claude-session";
 import { CodexSession, archiveCodexAppServerThread, createSession, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
-import { Backend, ClientMessage, SessionInfo } from "./protocol";
+import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketClaudePlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
-import { getAdvertisedServerSettings, getCodexDriversAvailable, setCodexDriver } from "./server-settings";
+import { getAdvertisedServerSettings, getCodexDriversAvailable, resolveCodexDriver, setCodexDriver } from "./server-settings";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -182,6 +182,11 @@ function scheduleBroadcast(): void {
     broadcastPending = false;
     broadcastSessionList();
   }, 2000);
+}
+
+function getStoredCodexDriver(sessionInfo: SessionInfo | undefined): CodexDriver | undefined {
+  if (sessionInfo?.backend !== "codex") return undefined;
+  return (sessionInfo as any).codexDriver || "exec";
 }
 
 /**
@@ -397,7 +402,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession = existing;
           console.log(`Reconnected to running session ${msg.sessionId}`);
         } else {
-          activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins);
+          activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
           (activeSession as any)._resumeSessionId = msg.sessionId;
         }
         activeSessionId = msg.sessionId;
@@ -569,7 +574,8 @@ function createConnectionHandler(transport: ClientTransport) {
             cwd = msg.cwd;
             addRecentCwd(cwd);
           }
-          const promptBackend = savedResumeId ? getSession(savedResumeId)?.backend : undefined;
+          const savedPromptSession = savedResumeId ? getSession(savedResumeId) : undefined;
+          const promptBackend = savedPromptSession?.backend;
           if (promptBackend === "codex" && codexUnavailable()) {
             sendJson({
               type: "error",
@@ -577,7 +583,7 @@ function createConnectionHandler(transport: ClientTransport) {
             });
             break;
           }
-          activeSession = createSession(promptBackend, transport as any, cwd, plugins);
+          activeSession = createSession(promptBackend, transport as any, cwd, plugins, getStoredCodexDriver(savedPromptSession));
           activeSessionId = savedResumeId || null;
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setEffort(pendingEffort);
@@ -841,11 +847,15 @@ function createConnectionHandler(transport: ClientTransport) {
       case "schedule_task": {
         const recurrence = (msg as any).recurrence;
         const backend = ((msg as any).backend === "codex" ? "codex" : "claude") as Backend;
+        const codexDriver = backend === "codex"
+          ? resolveCodexDriver((msg as any).codexDriver)
+          : undefined;
         const task: ScheduledTask = {
           id: crypto.randomUUID(),
           prompt: (msg as any).prompt,
           cwd: (msg as any).cwd,
           backend,
+          ...(codexDriver ? { codexDriver } : {}),
           scheduledTime: (msg as any).scheduledTime,
           createdAt: new Date().toISOString(),
           status: "pending",
@@ -888,6 +898,20 @@ function createConnectionHandler(transport: ClientTransport) {
               task.sessionId = undefined;
             }
             task.backend = nextBackend;
+            if (nextBackend === "codex") {
+              task.codexDriver = resolveCodexDriver((msg as any).codexDriver || task.codexDriver);
+            } else {
+              task.codexDriver = undefined;
+            }
+          }
+          if ((msg as any).codexDriver !== undefined) {
+            const nextDriver = (msg as any).codexDriver === null
+              ? undefined
+              : resolveCodexDriver((msg as any).codexDriver);
+            if (task.backend === "codex" && task.codexDriver && nextDriver && task.codexDriver !== nextDriver) {
+              task.sessionId = undefined;
+            }
+            task.codexDriver = task.backend === "codex" ? nextDriver : undefined;
           }
           if ((msg as any).scheduledTime !== undefined) task.scheduledTime = (msg as any).scheduledTime;
           if ((msg as any).recurrence !== undefined) {
@@ -1607,7 +1631,7 @@ function createConnectionHandler(transport: ClientTransport) {
           // Step 3: Create a new session primed to resume-at this point
           const sessionInfo = getSession(sessionId);
           const cwd = sessionInfo?.cwd || activeSession?.getCwd() || process.env.DEFAULT_CWD || process.env.HOME || "/";
-          activeSession = createSession(sessionInfo?.backend, transport as any, cwd, plugins);
+          activeSession = createSession(sessionInfo?.backend, transport as any, cwd, plugins, getStoredCodexDriver(sessionInfo));
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -1707,7 +1731,7 @@ function createConnectionHandler(transport: ClientTransport) {
           }
 
           // Set up new session ready to resume the fork
-          activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins);
+          activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -1828,7 +1852,7 @@ function createConnectionHandler(transport: ClientTransport) {
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
         }
-        activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins);
+        activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
         activeSession.setTtsEnabled(pendingTtsEnabled);
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -2133,7 +2157,7 @@ const httpServer = http.createServer((req, res) => {
         const ws = existingClient?.ws?.readyState === WebSocket.OPEN
           ? existingClient.ws
           : { readyState: WebSocket.CLOSED, send: () => {} } as any;
-        const session = createSession(sessionInfo.backend, ws, sessionInfo.cwd, plugins);
+        const session = createSession(sessionInfo.backend, ws, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
 
         (session as any)._resumeSessionId = sessionId;
         session.onActivity = () => scheduleBroadcast();
@@ -2618,15 +2642,25 @@ async function checkScheduledTasks(): Promise<void> {
 
       // Determine if we should resume an existing session
       const shouldResume = task.reuseSession && task.sessionId;
+      const reusableSessionInfo = shouldResume && task.sessionId ? getSession(task.sessionId) : undefined;
       const backend = task.backend
-        || (shouldResume && task.sessionId ? getSession(task.sessionId)?.backend : undefined)
+        || reusableSessionInfo?.backend
         || "claude";
       task.backend = backend;
+      const codexDriver = backend === "codex"
+        ? resolveCodexDriver(
+          task.codexDriver
+            || (reusableSessionInfo as any)?.codexDriver
+            || (shouldResume ? "exec" : undefined)
+        )
+        : undefined;
+      if (codexDriver) task.codexDriver = codexDriver;
+      else task.codexDriver = undefined;
       saveScheduledTask(task);
 
       // Create headless session (same pattern as /continue endpoint)
       const ws = { readyState: WebSocket.CLOSED, send: () => {} } as any;
-      const session = createSession(backend, ws, task.cwd, plugins);
+      const session = createSession(backend, ws, task.cwd, plugins, codexDriver);
       session.onActivity = () => scheduleBroadcast();
 
       // If reusing session, set the resume ID so SDK continues that session
@@ -2641,6 +2675,7 @@ async function checkScheduledTasks(): Promise<void> {
       // Track this run
       const currentRun: import("./scheduled-task-store").TaskRun = {
         sessionId: "", // will be filled in
+        ...(codexDriver ? { codexDriver } : {}),
         startedAt: new Date().toISOString(),
         status: "running",
       };

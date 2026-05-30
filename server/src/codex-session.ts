@@ -53,7 +53,7 @@ import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp } from "./codex-app-mcp";
 import { CodexAppServerClient, CodexAppServerNotification } from "./codex-app-server-client";
-import { loadServerSettings } from "./server-settings";
+import { resolveCodexDriver } from "./server-settings";
 
 const now = (): string => new Date().toISOString();
 
@@ -753,6 +753,7 @@ export class CodexSession {
       getSessionId: () => this.sessionId || "",
       getCwd: () => this.cwd,
       getBackend: () => "codex",
+      getCodexDriver: () => this.codexDriver,
       send: (msg) => this.send(msg as ServerMessage),
       appendHistory: (entry) => {
         if (this.sessionId) appendHistory(this.sessionId, entry as HistoryEntry);
@@ -1358,6 +1359,7 @@ export class CodexSession {
             lastActive: now(),
             messagePreview: "",
             backend: "codex",
+            codexDriver: this.codexDriver,
           };
           if (this.replacesSessionId) {
             remapSession(this.replacesSessionId, this.sessionId);
@@ -1834,13 +1836,14 @@ export function createSession(
   ws: WebSocket,
   cwd: string,
   plugins: SocketClaudePlugin[],
+  codexDriver?: CodexDriver,
 ): Session {
   if (backend === "codex") {
     const availability = getCodexAvailability();
     if (!availability.available) {
       throw new Error(`Codex backend is not available on this server: ${availability.reason || "unknown reason"}`);
     }
-    return new CodexSession(ws, cwd, plugins, loadServerSettings().codexDriver);
+    return new CodexSession(ws, cwd, plugins, resolveCodexDriver(codexDriver));
   }
   // Lazy require keeps the cycle (CodexSession → ClaudeSession via type-only
   // import) from blowing up at runtime.

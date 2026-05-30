@@ -2,14 +2,16 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { spawn, ChildProcess } from "child_process";
-import type { Backend, ServerMessage } from "./protocol";
+import type { Backend, CodexDriver, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
+import { resolveCodexDriver } from "./server-settings";
 
 export interface AppToolContext {
   getSessionId(): string;
   getCwd?(): string;
   getBackend?(): Backend;
+  getCodexDriver?(): CodexDriver;
   send(msg: ServerMessage | Record<string, any>): void;
   appendHistory?(entry: Record<string, any>): void;
   getTtsEngine(): "system" | "kokoro_server" | "kokoro_device";
@@ -36,6 +38,7 @@ export interface ScheduleTaskArgs {
   prompt: string;
   cwd: string;
   backend?: Backend;
+  codexDriver?: CodexDriver;
   scheduledTime: string;
   recurrenceType?: "once" | "daily" | "weekly" | "monthly" | "custom";
   customIntervalMs?: number;
@@ -223,11 +226,15 @@ export async function handleScheduleTaskTool(
     intervalMs: recurrenceType === "custom" ? args.customIntervalMs : undefined,
   } : undefined;
 
+  const backend = args.backend || ctx.getBackend?.() || "claude";
   const task: ScheduledTask = {
     id: crypto.randomUUID(),
     prompt: args.prompt,
     cwd: args.cwd,
-    backend: args.backend || ctx.getBackend?.() || "claude",
+    backend,
+    ...(backend === "codex"
+      ? { codexDriver: resolveCodexDriver(args.codexDriver || ctx.getCodexDriver?.()) }
+      : {}),
     scheduledTime: args.scheduledTime,
     createdAt: new Date().toISOString(),
     status: "pending",

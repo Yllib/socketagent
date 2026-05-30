@@ -213,7 +213,13 @@ Acceptance checks:
 
 ## Phase 8: Scheduled And Background Tasks
 
-Make scheduled Codex tasks use the selected driver.
+Make scheduled Codex tasks use the selected driver and make App Server the default Codex driver. Keep `exec` available as the emergency fallback.
+
+Implementation notes:
+- New Codex sessions default to `app-server` when the local Codex install advertises it.
+- Explicit `exec` selection in the app remains supported and persisted.
+- Scheduled Codex tasks persist `codexDriver` at creation time so recurring tasks do not unexpectedly change runtime later.
+- Legacy Codex sessions/tasks without `codexDriver` are treated as `exec` when resumed.
 
 Acceptance checks:
 - One-shot scheduled Codex task runs in App Server mode.
@@ -224,14 +230,11 @@ Acceptance checks:
 ## Phase 9: Rollout
 
 Rollout order:
-1. Ship with `exec` default.
-2. Enable App Server locally through the app toggle.
-3. Test live phone workflows.
-4. Enable App Server on one remote server.
-5. Deploy app only when UI/protocol changes require it.
-6. Make App Server default after stability.
-7. Keep `exec` as fallback until App Server proves reliable.
-8. Remove exec driver only after explicit decision.
+1. App Server is the default when available.
+2. Keep the app toggle so `exec` can be selected for emergency fallback.
+3. Test live phone workflows locally and on one remote server.
+4. Deploy app only when UI/protocol changes require it.
+5. Remove exec driver only after explicit decision.
 
 ## Open Questions
 
@@ -240,4 +243,3 @@ Rollout order:
 - Whether `turn/steer` semantics match CLI app queued-message behavior in all turn phases.
 - How App Server reports usage compared with rollout token_count events.
 - Whether `thread/archive` should replace or augment our existing archive files.
-

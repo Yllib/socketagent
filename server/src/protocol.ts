@@ -283,6 +283,7 @@ export interface ScheduleTaskMessage {
   prompt: string;
   cwd: string;
   backend?: Backend;
+  codexDriver?: CodexDriver;
   scheduledTime: string;
   recurrence?: {
     type: "once" | "daily" | "weekly" | "monthly" | "custom";
@@ -306,6 +307,7 @@ export interface UpdateScheduledTaskMessage {
   prompt?: string;
   cwd?: string;
   backend?: Backend;
+  codexDriver?: CodexDriver | null;
   scheduledTime?: string;
   recurrence?: { type: "once" | "daily" | "weekly" | "monthly" | "custom"; intervalMs?: number } | null;
   reuseSession?: boolean;

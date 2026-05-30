@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import type { Backend } from "./protocol";
+import type { Backend, CodexDriver } from "./protocol";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
@@ -16,6 +16,7 @@ export interface RecurrenceConfig {
 
 export interface TaskRun {
   sessionId: string;
+  codexDriver?: CodexDriver;
   startedAt: string;
   completedAt?: string;
   status: "running" | "completed" | "failed";
@@ -28,6 +29,7 @@ export interface ScheduledTask {
   prompt: string;
   cwd: string;
   backend?: Backend;
+  codexDriver?: CodexDriver;
   scheduledTime: string;
   createdAt: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";

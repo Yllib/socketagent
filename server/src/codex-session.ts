@@ -43,6 +43,7 @@ import { ServerMessage, Backend, SessionInfo, HistoryEntry, CodexDriver } from "
 import { SessionContext, SocketAgentPlugin } from "./plugin-api";
 import {
   saveSession,
+  getSession,
   appendHistory,
   updateSessionActivity,
   updateSessionContextUsage,
@@ -978,6 +979,19 @@ export class CodexSession {
         return;
       }
 
+      case "thread/name/updated": {
+        const sid = String(p?.threadId || this.sessionId || "");
+        const title = String(p?.threadName || "").trim();
+        if (!sid || !title) return;
+        const session = getSession(sid);
+        if (session) {
+          session.title = title;
+          session.lastActive = now();
+          saveSession(session);
+        }
+        return;
+      }
+
       case "item/agentMessage/delta": {
         const sid = this.sessionId;
         if (!sid) return;
@@ -995,6 +1009,40 @@ export class CodexSession {
         const sid = this.sessionId;
         const delta = String(p?.delta ?? "");
         if (sid && delta) this.send({ type: "thinking", content: delta, sessionId: sid } as ServerMessage);
+        return;
+      }
+
+      case "hook/started": {
+        const sid = this.sessionId;
+        const run = p?.run || {};
+        if (!sid) return;
+        this.send({
+          type: "hook_started",
+          hookId: String(run.id || ""),
+          hookName: this.formatAppServerHookName(run),
+          hookEvent: String(run.eventName || ""),
+          sessionId: sid,
+        } as any);
+        return;
+      }
+
+      case "hook/completed": {
+        const sid = this.sessionId;
+        const run = p?.run || {};
+        if (!sid) return;
+        const entries = Array.isArray(run.entries) ? run.entries : [];
+        const stdout = entries.map((e: any) => e?.stdout || e?.output || "").filter(Boolean).join("\n");
+        const stderr = entries.map((e: any) => e?.stderr || e?.error || "").filter(Boolean).join("\n");
+        this.send({
+          type: "hook_response",
+          hookId: String(run.id || ""),
+          hookName: this.formatAppServerHookName(run),
+          hookEvent: String(run.eventName || ""),
+          stdout,
+          stderr,
+          outcome: String(run.status || "completed"),
+          sessionId: sid,
+        } as any);
         return;
       }
 
@@ -1019,6 +1067,25 @@ export class CodexSession {
         return;
       }
 
+      case "item/commandExecution/terminalInteraction": {
+        const sid = this.sessionId;
+        const itemId = p?.itemId;
+        const stdin = String(p?.stdin ?? "");
+        if (!sid || !itemId || !stdin) return;
+        const content = `[stdin] ${stdin}\n`;
+        const key = String(itemId);
+        this.appServerToolOutput.set(key, (this.appServerToolOutput.get(key) || "") + content);
+        this.send({
+          type: "tool_result_chunk",
+          toolUseId: key,
+          content,
+          sessionId: sid,
+          done: false,
+          chunkIndex: 1,
+        } as any);
+        return;
+      }
+
       case "thread/tokenUsage/updated": {
         const usage = this.usageFromAppServerTokenUsage(p?.tokenUsage);
         if (!usage || !this.sessionId) return;
@@ -1029,6 +1096,19 @@ export class CodexSession {
           ...usage,
         } as any);
         updateSessionActivity(this.sessionId, this._lastAssistantText, usage);
+        return;
+      }
+
+      case "turn/plan/updated": {
+        const sid = this.sessionId || p?.threadId;
+        if (!sid) return;
+        this.send({
+          type: "codex_plan",
+          turnId: String(p?.turnId || ""),
+          explanation: typeof p?.explanation === "string" ? p.explanation : "",
+          plan: Array.isArray(p?.plan) ? p.plan : [],
+          sessionId: sid,
+        } as any);
         return;
       }
 
@@ -1045,6 +1125,38 @@ export class CodexSession {
           rateLimitType: p?.rateLimits?.limitName || p?.rateLimits?.limitId || undefined,
           sessionId: sid,
         } as any);
+        return;
+      }
+
+      case "model/rerouted": {
+        const sid = this.sessionId;
+        if (!sid) return;
+        const fromModel = String(p?.fromModel || "unknown");
+        const toModel = String(p?.toModel || "unknown");
+        this.send({
+          type: "task_notification",
+          taskId: String(p?.turnId || "model-rerouted"),
+          status: "completed",
+          summary: `Model rerouted: ${fromModel} -> ${toModel}`,
+          sessionId: sid,
+        } as any);
+        return;
+      }
+
+      case "guardianWarning":
+      case "deprecationNotice":
+      case "windows/worldWritableWarning": {
+        const message = String(p?.message || p?.warning || method);
+        this.send({ type: "error", message } as ServerMessage);
+        return;
+      }
+
+      case "mcpServer/startupStatus/updated": {
+        const name = String(p?.name || "MCP server");
+        const error = p?.error ? String(p.error) : "";
+        if (error) {
+          this.send({ type: "error", message: `${name}: ${error}` } as ServerMessage);
+        }
         return;
       }
 
@@ -1300,6 +1412,61 @@ export class CodexSession {
       return;
     }
 
+    if (item.type === "collabAgentToolCall") {
+      const input = {
+        description: item.prompt || `${item.tool || "Agent"} task`,
+        prompt: item.prompt || "",
+        subagent_type: item.tool || "agent",
+        receiverThreadIds: Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : [],
+        senderThreadId: item.senderThreadId || null,
+        model: item.model || null,
+        reasoningEffort: item.reasoningEffort || null,
+      };
+      if (method === "item/started") {
+        this.send({
+          type: "tool_call",
+          tool: "Agent",
+          input,
+          toolUseId: item.id,
+          sessionId: sid,
+        } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: String(input.description || ""),
+          toolName: "Agent",
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp: now(),
+        });
+      } else {
+        const output = JSON.stringify({
+          status: item.status || "completed",
+          receiverThreadIds: item.receiverThreadIds || [],
+          agentsStates: item.agentsStates || {},
+        }, null, 2);
+        this.send({
+          type: "tool_result",
+          toolUseId: item.id,
+          output,
+          sessionId: sid,
+        } as ServerMessage);
+        this.send({
+          type: "subagent_result",
+          parentToolUseId: item.id,
+          content: output,
+          sessionId: sid,
+        } as any);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
+          timestamp: now(),
+        });
+      }
+      return;
+    }
+
     if (item.type === "dynamicToolCall") {
       const toolName = item.namespace ? `${item.namespace}/${item.tool || "tool"}` : (item.tool || "tool");
       if (method === "item/started") {
@@ -1357,6 +1524,7 @@ export class CodexSession {
           sessionId: sid,
         } as ServerMessage);
       } else {
+        this.sendToolImageForPath(sid, item.id, item.path);
         this.send({
           type: "tool_result",
           toolUseId: item.id,
@@ -1380,6 +1548,7 @@ export class CodexSession {
           sessionId: sid,
         } as ServerMessage);
       } else {
+        if (item.savedPath) this.sendToolImageForPath(sid, item.id, item.savedPath);
         this.send({
           type: "tool_result",
           toolUseId: item.id,
@@ -1388,6 +1557,76 @@ export class CodexSession {
         } as ServerMessage);
       }
       return;
+    }
+
+    if (item.type === "enteredReviewMode" || item.type === "exitedReviewMode") {
+      if (method === "item/completed") {
+        this.send({
+          type: "task_notification",
+          taskId: item.id,
+          status: "completed",
+          summary: item.type === "enteredReviewMode"
+            ? `Entered review mode: ${item.review || ""}`
+            : `Exited review mode: ${item.review || ""}`,
+          sessionId: sid,
+        } as any);
+      }
+      return;
+    }
+  }
+
+  private formatAppServerHookName(run: any): string {
+    const event = String(run?.eventName || "Hook");
+    const sourcePath = String(run?.sourcePath || "");
+    const sourceName = sourcePath ? path.basename(sourcePath) : "";
+    return [event, sourceName].filter(Boolean).join(" ");
+  }
+
+  private sendToolImageForPath(sessionId: string, toolUseId: string, filePath: string): void {
+    if (!filePath) return;
+    const resolved = path.isAbsolute(filePath) ? filePath : path.join(this.cwd, filePath);
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(resolved);
+    } catch {
+      return;
+    }
+    if (!stat.isFile() || stat.size > 20 * 1024 * 1024) return;
+    const mimeType = this.imageMimeType(resolved);
+    if (!mimeType) return;
+    try {
+      const imageData = fs.readFileSync(resolved).toString("base64");
+      this.send({
+        type: "tool_image",
+        toolUseId,
+        imageData,
+        mimeType,
+        filePath: resolved,
+        sessionId,
+      } as any);
+      appendHistory(sessionId, {
+        role: "tool_image",
+        content: "",
+        toolUseId,
+        filePath: resolved,
+        mimeType,
+        timestamp: now(),
+      });
+    } catch (err: any) {
+      console.warn(`[codex app-server] failed to send tool image ${resolved}: ${err?.message || String(err)}`);
+    }
+  }
+
+  private imageMimeType(filePath: string): string | null {
+    switch (path.extname(filePath).toLowerCase()) {
+      case ".png": return "image/png";
+      case ".jpg":
+      case ".jpeg": return "image/jpeg";
+      case ".gif": return "image/gif";
+      case ".webp": return "image/webp";
+      case ".bmp": return "image/bmp";
+      case ".svg": return "image/svg+xml";
+      default: return null;
     }
   }
 

@@ -1711,13 +1711,14 @@ function listCodexSessionsFromStateDb(cwdCandidates: Set<string>, limit: number,
       title,
       first_user_message,
       preview,
+      rollout_path,
+      archived,
       created_at,
       updated_at,
       created_at_ms,
       updated_at_ms
     FROM threads
-    WHERE COALESCE(archived, 0) = 0
-      AND cwd IN (${cwdList})
+    WHERE cwd IN (${cwdList})
     ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC, id DESC
     LIMIT ${safeLimit};
   `;
@@ -1734,6 +1735,8 @@ function listCodexSessionsFromStateDb(cwdCandidates: Set<string>, limit: number,
     for (const row of rows) {
       const sessionId = String(row.id || "");
       if (!sessionId) continue;
+      const rolloutPath = findCodexRolloutFile(sessionId);
+      if (!rolloutPath) continue;
       const tracked = trackedMap.get(sessionId);
       const createdAt = epochToIso(row.created_at_ms ?? row.created_at, nowIso());
       const lastActive = tracked?.lastActive || epochToIso(row.updated_at_ms ?? row.updated_at, createdAt);

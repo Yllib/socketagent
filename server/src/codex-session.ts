@@ -52,8 +52,9 @@ import {
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp } from "./codex-app-mcp";
-import { CodexAppServerClient, CodexAppServerNotification } from "./codex-app-server-client";
+import { CodexAppServerClient, CodexAppServerNotification, CodexAppServerUserInput } from "./codex-app-server-client";
 import { resolveCodexDriver } from "./server-settings";
+import { listSkills, SkillEntry } from "./skills-manager";
 
 const now = (): string => new Date().toISOString();
 
@@ -110,6 +111,18 @@ type CodexEvent =
   | { type: "item.updated"; item: CodexItem }
   | { type: "item.completed"; item: CodexItem };
 
+type QueuedPrompt = {
+  text: string;
+  priority: "now" | "next" | "later";
+  messageId?: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
+
+type PendingAppServerSteer = QueuedPrompt & {
+  uuid: string;
+};
+
 // ─── CodexSession ─────────────────────────────────────────────────────────
 
 export class CodexSession {
@@ -124,6 +137,7 @@ export class CodexSession {
   private appServerAgentText = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
   private appServerFileChangeDiff = new Map<string, string>();
+  private appServerSeenUserMessageItems = new Set<string>();
   private _isCompacting = false;
   private _isRunning = false;
   private _model: string | null = null;
@@ -148,13 +162,8 @@ export class CodexSession {
     contextWindow: number;
   } | null = null;
   private _fileChangeSnapshots = new Map<string, Map<string, string | null>>();
-  private _queuedPrompts: Array<{
-    text: string;
-    priority: "now" | "next" | "later";
-    messageId?: string;
-    resolve: () => void;
-    reject: (error: Error) => void;
-  }> = [];
+  private _queuedPrompts: QueuedPrompt[] = [];
+  private _pendingAppServerSteers: PendingAppServerSteer[] = [];
 
   public onActivity?: () => void;
   public onMonitorOutput?: (text: string) => void;
@@ -284,10 +293,9 @@ export class CodexSession {
   }
 
   /**
-   * Codex runs each turn atomically (prompt → completion via one `codex exec`
-   * subprocess). The CLI has no mid-turn injection surface, so while a turn is
-   * running we queue the prompt and start a follow-up `codex exec resume` turn
-   * as soon as the current subprocess exits.
+   * Codex exec runs each turn atomically, so mid-turn messages are queued for a
+   * follow-up turn. Codex app-server supports mid-turn `turn/steer`; those
+   * messages resolve only once Codex echoes the steered userMessage item.
    */
   async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'now', messageId?: string): Promise<void> {
     if (!this._isRunning) {
@@ -300,28 +308,30 @@ export class CodexSession {
     }
 
     if (this.codexDriver === "app-server" && this.threadId && this.activeAppServerTurnId) {
-      const userMsgUuid = crypto.randomUUID();
-      if (this.sessionId) {
-        appendHistory(this.sessionId, {
-          role: "user",
-          content: text,
-          uuid: userMsgUuid,
-          timestamp: now(),
-        });
-        this.send({
-          type: "user_message_uuid",
-          uuid: userMsgUuid,
-          sessionId: this.sessionId,
-        } as any);
-      }
       try {
         await this.ensureAppServer();
-        await this.appServer!.steerTurn({
-          threadId: this.threadId,
-          expectedTurnId: this.activeAppServerTurnId,
-          input: [{ type: "text", text, text_elements: [] }],
+        return new Promise<void>((resolve, reject) => {
+          const pending: PendingAppServerSteer = {
+            text,
+            priority,
+            messageId,
+            resolve,
+            reject,
+            uuid: crypto.randomUUID(),
+          };
+          this._pendingAppServerSteers.push(pending);
+          try {
+            this.appServer!.steerTurn({
+              threadId: this.threadId!,
+              expectedTurnId: this.activeAppServerTurnId!,
+              input: this.buildAppServerTurnInput(text),
+            }).catch((err: any) => {
+              this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
+            });
+          } catch (err: any) {
+            this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
+          }
         });
-        return;
       } catch (err: any) {
         console.warn(`[codex app-server] turn/steer failed; queueing follow-up: ${err?.message || String(err)}`);
       }
@@ -573,7 +583,7 @@ export class CodexSession {
       const turn = await this.appServer!.startTurn({
         threadId: this.threadId,
         cwd: this.cwd,
-        input: [{ type: "text", text: this.buildCodexTurnText(prompt), text_elements: [] }],
+        input: this.buildAppServerTurnInput(prompt),
       });
       this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
 
@@ -681,6 +691,52 @@ export class CodexSession {
     return `<socketagent_context>\nAdditional SocketAgent instructions:\n${systemPrompt}\n</socketagent_context>\n\n${prompt}`;
   }
 
+  private buildAppServerTurnInput(prompt: string): CodexAppServerUserInput[] {
+    const slashSkill = this.resolveCodexSlashSkill(prompt);
+    if (!slashSkill) {
+      return [{ type: "text", text: this.buildCodexTurnText(prompt), text_elements: [] }];
+    }
+
+    const text = slashSkill.args || `Use the /${slashSkill.skill.name} skill.`;
+    return [
+      {
+        type: "skill",
+        name: slashSkill.skill.name,
+        path: slashSkill.skill.filePath,
+      },
+      {
+        type: "text",
+        text: this.buildCodexTurnText(text),
+        text_elements: [],
+      },
+    ];
+  }
+
+  private resolveCodexSlashSkill(prompt: string): { skill: SkillEntry; args: string } | null {
+    const match = prompt.match(/^\/(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.-]+))(?:\s+([\s\S]*))?$/);
+    if (!match) return null;
+
+    const requestedName = (match[1] || match[2] || match[3]).toLowerCase();
+    const skills = listSkills(this.cwd).filter((skill) =>
+      skill.agent === "codex" &&
+      skill.format === "skill" &&
+      skill.name.toLowerCase() === requestedName
+    );
+    if (skills.length === 0) return null;
+
+    const scopeRank: Record<string, number> = { project: 0, user: 1, plugin: 2 };
+    skills.sort((a, b) => {
+      const scopeCmp = (scopeRank[a.scope] ?? 99) - (scopeRank[b.scope] ?? 99);
+      if (scopeCmp !== 0) return scopeCmp;
+      return a.filePath.localeCompare(b.filePath);
+    });
+
+    return {
+      skill: skills[0],
+      args: (match[4] || "").trim(),
+    };
+  }
+
   private extractThreadId(value: unknown): string | null {
     const v = value as any;
     return v?.thread?.id || v?.threadId || null;
@@ -774,6 +830,7 @@ export class CodexSession {
   abort(): void {
     this._abortRequested = true;
     this.clearQueuedPrompts("Codex turn interrupted");
+    this.clearPendingAppServerSteers("Codex turn interrupted");
     if (this.codexDriver === "app-server") {
       if (this.appServer && this.threadId && this.activeAppServerTurnId) {
         this.appServer.interruptTurn({
@@ -804,13 +861,7 @@ export class CodexSession {
     }
   }
 
-  private dequeueNextPrompt(): {
-    text: string;
-    priority: "now" | "next" | "later";
-    messageId?: string;
-    resolve: () => void;
-    reject: (error: Error) => void;
-  } | null {
+  private dequeueNextPrompt(): QueuedPrompt | null {
     if (this._queuedPrompts.length === 0) return null;
     const nowIdx = this._queuedPrompts.findIndex((p) => p.priority === "now");
     if (nowIdx >= 0) return this._queuedPrompts.splice(nowIdx, 1)[0];
@@ -822,6 +873,66 @@ export class CodexSession {
     for (const prompt of queued) {
       prompt.reject(new Error(reason));
     }
+  }
+
+  private clearPendingAppServerSteers(reason: string): void {
+    const pending = this._pendingAppServerSteers.splice(0);
+    for (const steer of pending) {
+      steer.reject(new Error(reason));
+    }
+  }
+
+  private requeuePendingAppServerSteers(reason: string): void {
+    const pending = [...this._pendingAppServerSteers];
+    for (const steer of pending) {
+      this.requeuePendingAppServerSteer(steer, reason);
+    }
+  }
+
+  private requeuePendingAppServerSteer(steer: PendingAppServerSteer, reason: string): void {
+    const idx = this._pendingAppServerSteers.indexOf(steer);
+    if (idx < 0) {
+      console.warn(`[codex app-server] ${reason} after userMessage dispatch`);
+      return;
+    }
+    this._pendingAppServerSteers.splice(idx, 1);
+    console.warn(`[codex app-server] ${reason}; queueing follow-up`);
+    this._queuedPrompts.push({
+      text: steer.text,
+      priority: steer.priority,
+      messageId: steer.messageId,
+      resolve: steer.resolve,
+      reject: steer.reject,
+    });
+    this.runQueuedPromptIfIdle();
+  }
+
+  private runQueuedPromptIfIdle(): void {
+    if (this._isRunning || this._abortRequested) return;
+    const nextPrompt = this.dequeueNextPrompt();
+    if (!nextPrompt) return;
+    nextPrompt.resolve();
+    void this.runQuery(nextPrompt.text).catch((err) => nextPrompt.reject(err instanceof Error ? err : new Error(String(err))));
+  }
+
+  private acknowledgeNextAppServerSteer(): void {
+    const pending = this._pendingAppServerSteers.shift();
+    if (!pending) return;
+    const sid = this.sessionId;
+    if (sid) {
+      appendHistory(sid, {
+        role: "user",
+        content: pending.text,
+        uuid: pending.uuid,
+        timestamp: now(),
+      });
+      this.send({
+        type: "user_message_uuid",
+        uuid: pending.uuid,
+        sessionId: sid,
+      } as any);
+    }
+    pending.resolve();
   }
 
   private handleAppServerNotification(method: string, params: unknown): void {
@@ -972,6 +1083,7 @@ export class CodexSession {
 
       case "turn/completed": {
         const sid = this.sessionId;
+        this.requeuePendingAppServerSteers("turn completed before steered userMessage was emitted");
         if (sid) {
           const usage = this._lastUsage ?? {
             inputTokens: 0,
@@ -1006,7 +1118,13 @@ export class CodexSession {
     const sid = this.sessionId;
     if (!sid || !item?.id || !item?.type) return;
 
-    if (item.type === "userMessage") return;
+    if (item.type === "userMessage") {
+      if (!this.appServerSeenUserMessageItems.has(item.id)) {
+        this.appServerSeenUserMessageItems.add(item.id);
+        this.acknowledgeNextAppServerSteer();
+      }
+      return;
+    }
 
     if (item.type === "agentMessage" && method === "item/completed") {
       const text = item.text || this.appServerAgentText.get(item.id) || "";

@@ -34,12 +34,24 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, string
       if (idx > 0) {
         const key = line.slice(0, idx).trim();
         const val = line.slice(idx + 1).trim();
-        fm[key] = val;
+        fm[key] = normalizeFrontmatterValue(val);
       }
     }
     body = match[2];
   }
   return { frontmatter: fm, body };
+}
+
+function normalizeFrontmatterValue(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === `"` && last === `"`) || (first === `'` && last === `'`)) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
 }
 
 /** Build markdown file content from frontmatter + body */

@@ -12,11 +12,17 @@ export type CodexAppServerApprovalPolicy =
   | "on-request"
   | "never";
 
-export interface CodexAppServerUserInput {
-  type: "text";
-  text: string;
-  text_elements?: unknown[];
-}
+export type CodexAppServerUserInput =
+  | {
+      type: "text";
+      text: string;
+      text_elements?: unknown[];
+    }
+  | {
+      type: "skill";
+      name: string;
+      path: string;
+    };
 
 export interface CodexAppServerClientInfo {
   name: string;

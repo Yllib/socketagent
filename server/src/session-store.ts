@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { execFileSync } from "child_process";
 import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
 
 const STORE_DIR = path.join(
@@ -1496,16 +1497,120 @@ export function readCodexRolloutContextUsage(sessionId: string): CodexRolloutCon
   };
 }
 
+function cwdLookupCandidates(cwd: string): Set<string> {
+  const candidates = new Set<string>();
+  const add = (p: string) => {
+    if (!p) return;
+    candidates.add(path.resolve(p));
+    candidates.add(path.resolve(p).replace(/\/+$/, ""));
+  };
+  add(cwd);
+  try { add(fs.realpathSync(cwd)); } catch {}
+  try { add(fs.realpathSync.native(cwd)); } catch {}
+  return candidates;
+}
+
+function setsIntersect<T>(a: Set<T>, b: Set<T>): boolean {
+  for (const value of a) {
+    if (b.has(value)) return true;
+  }
+  return false;
+}
+
+function sqlStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function epochToIso(value: unknown, fallback: string): string {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  const ms = n > 10_000_000_000 ? n : n * 1000;
+  return new Date(ms).toISOString();
+}
+
+function listCodexSessionsFromStateDb(cwdCandidates: Set<string>, limit: number, trackedMap: Map<string, SessionInfo>): SdkSessionEntry[] {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
+  if (!fs.existsSync(dbPath) || cwdCandidates.size === 0) return [];
+
+  const cwdList = [...cwdCandidates].map(sqlStringLiteral).join(", ");
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+  const sql = `
+    SELECT
+      id,
+      title,
+      first_user_message,
+      preview,
+      created_at,
+      updated_at,
+      created_at_ms,
+      updated_at_ms
+    FROM threads
+    WHERE COALESCE(archived, 0) = 0
+      AND cwd IN (${cwdList})
+    ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC, id DESC
+    LIMIT ${safeLimit};
+  `;
+
+  try {
+    const raw = execFileSync("sqlite3", ["-json", dbPath, sql], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    }).trim();
+    if (!raw) return [];
+    const rows = JSON.parse(raw) as any[];
+    const results: SdkSessionEntry[] = [];
+    for (const row of rows) {
+      const sessionId = String(row.id || "");
+      if (!sessionId) continue;
+      const tracked = trackedMap.get(sessionId);
+      const createdAt = epochToIso(row.created_at_ms ?? row.created_at, nowIso());
+      const lastActive = tracked?.lastActive || epochToIso(row.updated_at_ms ?? row.updated_at, createdAt);
+      const firstMessage =
+        tracked?.messagePreview ||
+        tracked?.title ||
+        String(row.preview || row.first_user_message || row.title || "Codex session");
+      results.push({
+        sessionId,
+        firstMessage,
+        createdAt,
+        lastActive,
+        tracked: !!tracked,
+        backend: "codex",
+      });
+    }
+    return results;
+  } catch (err: any) {
+    console.warn(`[CodexSessions] state DB lookup failed: ${err?.message || String(err)}`);
+    return [];
+  }
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
 /**
- * List Codex CLI sessions for a given CWD. Codex stores rollouts at
- * ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl with a
- * `session_meta` line at the top containing `id`, `cwd`, `timestamp`. We walk
- * the date-partitioned tree, sort by mtime, and parse the first line of the
- * top `limit*3` candidates (cheap because we only read up to one line).
+ * List Codex sessions for a given CWD. Prefer Codex's SQLite thread index
+ * (`~/.codex/state_5.sqlite`), which is the modern app-server/CLI source of
+ * truth. Fall back to scanning rollout JSONL files for older installs.
  */
 export function listCodexSessions(cwd: string, limit = 30): SdkSessionEntry[] {
   const homeDir = process.env.HOME || require("os").homedir();
   const sessionsDir = path.join(homeDir, ".codex", "sessions");
+  const cwdCandidates = cwdLookupCandidates(cwd);
+
+  const store = readStore();
+  const trackedMap = new Map<string, SessionInfo>();
+  for (const s of store) {
+    if (s.backend === "codex" && setsIntersect(cwdLookupCandidates(s.cwd), cwdCandidates)) {
+      trackedMap.set(s.id, s);
+    }
+  }
+
+  const stateDbSessions = listCodexSessionsFromStateDb(cwdCandidates, limit, trackedMap);
+  if (stateDbSessions.length > 0) return stateDbSessions;
   if (!fs.existsSync(sessionsDir)) return [];
 
   // Walk the date-partitioned tree to gather candidate rollout files.
@@ -1526,24 +1631,16 @@ export function listCodexSessions(cwd: string, limit = 30): SdkSessionEntry[] {
   }
   walk(sessionsDir);
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const scanLimit = limit * 3;
-
-  // Tracked map keyed by codex thread_id (== our SocketAgent session id).
-  const store = readStore();
-  const trackedMap = new Map<string, SessionInfo>();
-  for (const s of store) {
-    if (s.cwd === cwd && s.backend === "codex") trackedMap.set(s.id, s);
-  }
 
   const results: SdkSessionEntry[] = [];
-  for (const { filePath, mtimeMs } of candidates.slice(0, scanLimit)) {
+  for (const { filePath, mtimeMs } of candidates) {
     const firstLine = readFirstLineSync(filePath);
     if (!firstLine) continue;
 
     let meta: any;
     try { meta = JSON.parse(firstLine); } catch { continue; }
     if (meta?.type !== "session_meta" || !meta.payload) continue;
-    if (meta.payload.cwd !== cwd) continue;
+    if (!cwdCandidates.has(path.resolve(String(meta.payload.cwd || "")).replace(/\/+$/, ""))) continue;
 
     const sessionId = meta.payload.id as string | undefined;
     if (!sessionId) continue;

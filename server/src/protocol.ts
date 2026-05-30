@@ -379,7 +379,7 @@ export type ClientMessage =
   | { type: "add_recent_cwd"; cwd: string }
   | { type: "remove_recent_cwd"; cwd: string }
   | { type: "skills_list" }
-  | { type: "skills_save"; name: string; scope: string; format: string; frontmatter: Record<string, string>; body: string; filePath?: string }
+  | { type: "skills_save"; name: string; scope: string; format: string; agent?: "claude" | "codex"; frontmatter: Record<string, string>; body: string; filePath?: string }
   | { type: "skills_delete"; filePath: string }
   | { type: "plugins_list" }
   | { type: "plugins_install"; pluginId: string }

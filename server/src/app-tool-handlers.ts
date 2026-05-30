@@ -6,6 +6,7 @@ import type { Backend, CodexDriver, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { resolveCodexDriver } from "./server-settings";
+import { listSkills, SkillEntry } from "./skills-manager";
 
 export interface AppToolContext {
   getSessionId(): string;
@@ -51,6 +52,16 @@ export interface MonitorArgs {
   timeoutSeconds?: number;
   taskId?: string;
   enabled?: boolean;
+}
+
+export interface SearchSkillsArgs {
+  query?: string;
+  limit?: number;
+}
+
+export interface ReadSkillArgs {
+  name?: string;
+  filePath?: string;
 }
 
 interface AppMonitorState {
@@ -254,6 +265,79 @@ export async function handleScheduleTaskTool(
   const when = scheduledDate.toLocaleString();
   const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
   return { content: [{ type: "text", text: `Task scheduled for ${when}${recurrenceLabel} in ${args.cwd}:\n"${args.prompt.slice(0, 300)}"` }] };
+}
+
+function codexSkillsForContext(ctx: AppToolContext): SkillEntry[] {
+  return listSkills(ctx.getCwd?.()).filter((skill) => skill.agent === "codex" && skill.format === "skill");
+}
+
+function skillSummary(skill: SkillEntry): string {
+  const description = skill.description ? ` - ${skill.description}` : "";
+  return `${skill.name} (${skill.scope})${description}\npath: ${skill.filePath}`;
+}
+
+export async function handleSearchSkillsTool(
+  ctx: AppToolContext,
+  args: SearchSkillsArgs,
+): Promise<McpTextResult> {
+  const query = (args.query || "").trim().toLowerCase();
+  const limit = Math.min(Math.max(Math.floor(args.limit || 10), 1), 25);
+  let skills = codexSkillsForContext(ctx);
+  if (query) {
+    skills = skills.filter((skill) => {
+      const haystack = [
+        skill.name,
+        skill.description,
+        skill.scope,
+        skill.pluginName || "",
+        skill.body.slice(0, 1000),
+      ].join("\n").toLowerCase();
+      return haystack.includes(query);
+    });
+  }
+  skills = skills.slice(0, limit);
+  if (skills.length === 0) {
+    return { content: [{ type: "text", text: "No matching Codex skills found." }] };
+  }
+  return {
+    content: [{
+      type: "text",
+      text: skills.map(skillSummary).join("\n\n"),
+    }],
+  };
+}
+
+export async function handleReadSkillTool(
+  ctx: AppToolContext,
+  args: ReadSkillArgs,
+): Promise<McpTextResult> {
+  const name = (args.name || "").trim().toLowerCase();
+  const filePath = (args.filePath || "").trim();
+  const skills = codexSkillsForContext(ctx);
+  const skill = filePath
+    ? skills.find((candidate) => path.resolve(candidate.filePath) === path.resolve(filePath))
+    : skills.find((candidate) => candidate.name.toLowerCase() === name);
+
+  if (!skill) {
+    return { content: [{ type: "text", text: "Codex skill not found." }], isError: true };
+  }
+
+  const frontmatter = Object.entries(skill.frontmatter)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("\n");
+  const header = [
+    `name: ${skill.name}`,
+    `scope: ${skill.scope}`,
+    `path: ${skill.filePath}`,
+    frontmatter,
+  ].filter(Boolean).join("\n");
+
+  return {
+    content: [{
+      type: "text",
+      text: `---\n${header}\n---\n\n${skill.body}`,
+    }],
+  };
 }
 
 function startMonitorReader(taskId: string): void {

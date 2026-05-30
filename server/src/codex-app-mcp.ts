@@ -7,8 +7,10 @@ import { z } from "zod";
 import {
   AppToolContext,
   handleMonitorTool,
+  handleReadSkillTool,
   handleScheduleReminderTool,
   handleScheduleTaskTool,
+  handleSearchSkillsTool,
   handleSendFileTool,
   handleSpeakTool,
 } from "./app-tool-handlers";
@@ -52,6 +54,32 @@ function createServer(context: AppToolContext): McpServer {
     name: "socketagent-app",
     version: "1.0.0",
   });
+
+  server.registerTool(
+    "SearchSkills",
+    {
+      title: "Search Skills",
+      description: "Search SocketAgent-managed Codex skills by name, description, or body. Use this when a user asks for behavior that may match a reusable skill.",
+      inputSchema: {
+        query: z.string().optional().describe("Search text. Leave empty to list available Codex skills."),
+        limit: z.number().optional().describe("Maximum number of skills to return, 1-25"),
+      },
+    },
+    async (args) => handleSearchSkillsTool(context, args as any),
+  );
+
+  server.registerTool(
+    "ReadSkill",
+    {
+      title: "Read Skill",
+      description: "Read a SocketAgent-managed Codex skill's SKILL.md instructions after finding it with SearchSkills.",
+      inputSchema: {
+        name: z.string().optional().describe("Skill name to read"),
+        filePath: z.string().optional().describe("Exact skill file path returned by SearchSkills"),
+      },
+    },
+    async (args) => handleReadSkillTool(context, args as any),
+  );
 
   server.registerTool(
     "Speak",

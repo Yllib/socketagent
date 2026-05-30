@@ -1381,6 +1381,7 @@ function createConnectionHandler(transport: ClientTransport) {
             name: data.name,
             scope: data.scope,
             format: data.format,
+            agent: data.agent === "codex" ? "codex" : "claude",
             frontmatter: data.frontmatter || {},
             body: data.body || "",
             projectCwd,
@@ -1400,15 +1401,19 @@ function createConnectionHandler(transport: ClientTransport) {
         }
         const home = require("os").homedir();
         const normalized = require("path").resolve(data.filePath);
-        const isUserScope = normalized.startsWith(require("path").join(home, ".claude"));
+        const isUserScope =
+          normalized.startsWith(require("path").join(home, ".claude")) ||
+          normalized.startsWith(require("path").join(home, ".codex"));
         let isProjectScope = false;
         let projectCwd: string | undefined;
         if (activeSession) projectCwd = activeSession.getCwd?.();
         if (projectCwd) {
-          isProjectScope = normalized.startsWith(require("path").join(projectCwd, ".claude"));
+          isProjectScope =
+            normalized.startsWith(require("path").join(projectCwd, ".claude")) ||
+            normalized.startsWith(require("path").join(projectCwd, ".codex"));
         }
         if (!isUserScope && !isProjectScope) {
-          sendJson({ type: "skills_delete_result", ok: false, error: "Cannot delete files outside .claude directories" });
+          sendJson({ type: "skills_delete_result", ok: false, error: "Cannot delete files outside .claude/.codex directories" });
           break;
         }
         const ok = deleteSkill(normalized);
@@ -2397,6 +2402,7 @@ const httpServer = http.createServer((req, res) => {
           name: data.name,
           scope: data.scope,
           format: data.format,
+          agent: data.agent === "codex" ? "codex" : "claude",
           frontmatter: data.frontmatter || {},
           body: data.body || "",
           projectCwd,
@@ -2430,10 +2436,12 @@ const httpServer = http.createServer((req, res) => {
           res.end("Missing filePath");
           return;
         }
-        // Safety: only allow deleting files under ~/.claude/ or project .claude/
+        // Safety: only allow deleting files under ~/.claude, ~/.codex, or project agent dirs
         const home = require("os").homedir();
         const normalized = require("path").resolve(data.filePath);
-        const isUserScope = normalized.startsWith(require("path").join(home, ".claude"));
+        const isUserScope =
+          normalized.startsWith(require("path").join(home, ".claude")) ||
+          normalized.startsWith(require("path").join(home, ".codex"));
         let isProjectScope = false;
         let projectCwd: string | undefined;
         for (const [, session] of activeSessions) {
@@ -2441,11 +2449,13 @@ const httpServer = http.createServer((req, res) => {
           if (cwd) { projectCwd = cwd; break; }
         }
         if (projectCwd) {
-          isProjectScope = normalized.startsWith(require("path").join(projectCwd, ".claude"));
+          isProjectScope =
+            normalized.startsWith(require("path").join(projectCwd, ".claude")) ||
+            normalized.startsWith(require("path").join(projectCwd, ".codex"));
         }
         if (!isUserScope && !isProjectScope) {
           res.writeHead(403);
-          res.end("Cannot delete files outside .claude directories");
+          res.end("Cannot delete files outside .claude/.codex directories");
           return;
         }
         const ok = deleteSkill(normalized);

@@ -128,6 +128,7 @@ export class CodexSession {
   private _isRunning = false;
   private _model: string | null = null;
   private _sandbox: SandboxMode = "danger-full-access";
+  private _appendSystemPrompt = "";
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   private _kokoroVoice = "af_heart";
   private _kokoroSpeed = 1.0;
@@ -216,7 +217,7 @@ export class CodexSession {
   setEffort(_e: string): void {}
   setThinking(_t: unknown): void {}
   setDisallowedTools(_t: string[]): void {}
-  setAppendSystemPrompt(_s: string): void {}
+  setAppendSystemPrompt(s: string): void { this._appendSystemPrompt = s; }
   setForkSource(_id: string): void {}
   setResumeSessionAt(_uuid: string): void {}
   setTtsEnabled(_b: boolean): void {}
@@ -406,6 +407,7 @@ export class CodexSession {
       this._pendingUserPrompt = { text: prompt, uuid: userMsgUuid };
     }
 
+    const codexPrompt = this.buildCodexTurnText(prompt);
     const mcpRegistration = registerCodexAppMcp(this.createAppToolContext());
     const mcpUrl = this.buildCodexMcpUrl(mcpRegistration.token);
     const args = this.threadId
@@ -420,7 +422,7 @@ export class CodexSession {
     this.proc.stdin?.on("error", (err) => {
       console.warn(`[codex] stdin error: ${err.message}`);
     });
-    this.proc.stdin?.end(prompt);
+    this.proc.stdin?.end(codexPrompt);
 
     let stdoutTail = "";
     this.proc.stdout!.setEncoding("utf8");
@@ -571,7 +573,7 @@ export class CodexSession {
       const turn = await this.appServer!.startTurn({
         threadId: this.threadId,
         cwd: this.cwd,
-        input: [{ type: "text", text: prompt, text_elements: [] }],
+        input: [{ type: "text", text: this.buildCodexTurnText(prompt), text_elements: [] }],
       });
       this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
 
@@ -671,6 +673,12 @@ export class CodexSession {
         },
       },
     };
+  }
+
+  private buildCodexTurnText(prompt: string): string {
+    const systemPrompt = this._appendSystemPrompt.trim();
+    if (!systemPrompt) return prompt;
+    return `<socketagent_context>\nAdditional SocketAgent instructions:\n${systemPrompt}\n</socketagent_context>\n\n${prompt}`;
   }
 
   private extractThreadId(value: unknown): string | null {

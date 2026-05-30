@@ -2,9 +2,13 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
+export type SkillAgent = "claude" | "codex";
+
 export interface SkillEntry {
   name: string;
   description: string;
+  /** Agent runtime this entry belongs to. */
+  agent: SkillAgent;
   scope: "user" | "project" | "plugin";
   /** For plugin scope, which plugin it belongs to */
   pluginName?: string;
@@ -48,7 +52,7 @@ function buildFileContent(frontmatter: Record<string, string>, body: string): st
 }
 
 /** Scan a commands directory for *.md files */
-function scanCommandsDir(dir: string, scope: SkillEntry["scope"], pluginName?: string): SkillEntry[] {
+function scanCommandsDir(dir: string, scope: SkillEntry["scope"], agent: SkillAgent, pluginName?: string): SkillEntry[] {
   if (!fs.existsSync(dir)) return [];
   const entries: SkillEntry[] = [];
   try {
@@ -61,6 +65,7 @@ function scanCommandsDir(dir: string, scope: SkillEntry["scope"], pluginName?: s
         entries.push({
           name: file.replace(/\.md$/, ""),
           description: frontmatter.description || "",
+          agent,
           scope,
           pluginName,
           filePath,
@@ -75,11 +80,12 @@ function scanCommandsDir(dir: string, scope: SkillEntry["scope"], pluginName?: s
 }
 
 /** Scan a skills directory for SKILL.md files in subdirectories */
-function scanSkillsDir(dir: string, scope: SkillEntry["scope"], pluginName?: string): SkillEntry[] {
+function scanSkillsDir(dir: string, scope: SkillEntry["scope"], agent: SkillAgent, pluginName?: string): SkillEntry[] {
   if (!fs.existsSync(dir)) return [];
   const entries: SkillEntry[] = [];
   try {
     const subdirs = fs.readdirSync(dir).filter(f => {
+      if (f.startsWith(".")) return false;
       try { return fs.statSync(path.join(dir, f)).isDirectory(); } catch { return false; }
     });
     for (const sub of subdirs) {
@@ -91,6 +97,7 @@ function scanSkillsDir(dir: string, scope: SkillEntry["scope"], pluginName?: str
         entries.push({
           name: frontmatter.name || sub,
           description: frontmatter.description || "",
+          agent,
           scope,
           pluginName,
           filePath,
@@ -104,22 +111,49 @@ function scanSkillsDir(dir: string, scope: SkillEntry["scope"], pluginName?: str
   return entries;
 }
 
+function scanCodexPluginSkills(home: string): SkillEntry[] {
+  const results: SkillEntry[] = [];
+  const cacheBase = path.join(home, ".codex", "plugins", "cache");
+  if (!fs.existsSync(cacheBase)) return results;
+  try {
+    for (const marketplace of fs.readdirSync(cacheBase)) {
+      const marketplaceDir = path.join(cacheBase, marketplace);
+      if (!fs.statSync(marketplaceDir).isDirectory()) continue;
+      for (const pluginName of fs.readdirSync(marketplaceDir)) {
+        const pluginDir = path.join(marketplaceDir, pluginName);
+        if (!fs.statSync(pluginDir).isDirectory()) continue;
+        for (const version of fs.readdirSync(pluginDir)) {
+          const versionDir = path.join(pluginDir, version);
+          if (!fs.statSync(versionDir).isDirectory()) continue;
+          results.push(...scanSkillsDir(path.join(versionDir, "skills"), "plugin", "codex", pluginName));
+        }
+      }
+    }
+  } catch {}
+  return results;
+}
+
 /** List all skills across user, project, and plugin scopes */
 export function listSkills(projectCwd?: string): SkillEntry[] {
   const home = os.homedir();
   const results: SkillEntry[] = [];
 
-  // User-level commands & skills
-  results.push(...scanCommandsDir(path.join(home, ".claude", "commands"), "user"));
-  results.push(...scanSkillsDir(path.join(home, ".claude", "skills"), "user"));
+  // Claude user-level commands & skills
+  results.push(...scanCommandsDir(path.join(home, ".claude", "commands"), "user", "claude"));
+  results.push(...scanSkillsDir(path.join(home, ".claude", "skills"), "user", "claude"));
+
+  // Codex user-level skills. Dot-prefixed directories such as .system are
+  // intentionally hidden from SocketAgent editing.
+  results.push(...scanSkillsDir(path.join(home, ".codex", "skills"), "user", "codex"));
 
   // Project-level commands & skills
   if (projectCwd) {
-    results.push(...scanCommandsDir(path.join(projectCwd, ".claude", "commands"), "project"));
-    results.push(...scanSkillsDir(path.join(projectCwd, ".claude", "skills"), "project"));
+    results.push(...scanCommandsDir(path.join(projectCwd, ".claude", "commands"), "project", "claude"));
+    results.push(...scanSkillsDir(path.join(projectCwd, ".claude", "skills"), "project", "claude"));
+    results.push(...scanSkillsDir(path.join(projectCwd, ".codex", "skills"), "project", "codex"));
   }
 
-  // Plugin commands & skills
+  // Claude plugin commands & skills
   const pluginsBase = path.join(home, ".claude", "plugins", "marketplaces");
   if (fs.existsSync(pluginsBase)) {
     try {
@@ -130,8 +164,8 @@ export function listSkills(projectCwd?: string): SkillEntry[] {
         if (fs.existsSync(pluginsDir)) {
           for (const pluginDir of fs.readdirSync(pluginsDir)) {
             const pBase = path.join(pluginsDir, pluginDir);
-            results.push(...scanCommandsDir(path.join(pBase, "commands"), "plugin", pluginDir));
-            results.push(...scanSkillsDir(path.join(pBase, "skills"), "plugin", pluginDir));
+            results.push(...scanCommandsDir(path.join(pBase, "commands"), "plugin", "claude", pluginDir));
+            results.push(...scanSkillsDir(path.join(pBase, "skills"), "plugin", "claude", pluginDir));
           }
         }
         // external_plugins/ subdirectory
@@ -139,13 +173,15 @@ export function listSkills(projectCwd?: string): SkillEntry[] {
         if (fs.existsSync(extDir)) {
           for (const pluginDir of fs.readdirSync(extDir)) {
             const pBase = path.join(extDir, pluginDir);
-            results.push(...scanCommandsDir(path.join(pBase, "commands"), "plugin", pluginDir));
-            results.push(...scanSkillsDir(path.join(pBase, "skills"), "plugin", pluginDir));
+            results.push(...scanCommandsDir(path.join(pBase, "commands"), "plugin", "claude", pluginDir));
+            results.push(...scanSkillsDir(path.join(pBase, "skills"), "plugin", "claude", pluginDir));
           }
         }
       }
     } catch {}
   }
+
+  results.push(...scanCodexPluginSkills(home));
 
   return results;
 }
@@ -163,6 +199,7 @@ export function getSkill(filePath: string): SkillEntry | null {
     return {
       name,
       description: frontmatter.description || "",
+      agent: filePath.includes(`${path.sep}.codex${path.sep}`) ? "codex" : "claude",
       scope: "user", // caller should know the real scope
       filePath,
       format: isSkill ? "skill" : "command",
@@ -180,6 +217,7 @@ export function saveSkill(opts: {
   name: string;
   scope: "user" | "project";
   format: "command" | "skill";
+  agent?: SkillAgent;
   frontmatter: Record<string, string>;
   body: string;
   projectCwd?: string;
@@ -188,12 +226,13 @@ export function saveSkill(opts: {
   let targetPath = opts.filePath;
 
   if (!targetPath) {
+    const agent = opts.agent || "claude";
     // New file — compute path from scope + format + name
     const baseDir = opts.scope === "user"
-      ? path.join(home, ".claude")
-      : path.join(opts.projectCwd || process.cwd(), ".claude");
+      ? path.join(home, agent === "codex" ? ".codex" : ".claude")
+      : path.join(opts.projectCwd || process.cwd(), agent === "codex" ? ".codex" : ".claude");
 
-    if (opts.format === "skill") {
+    if (opts.format === "skill" || agent === "codex") {
       const dir = path.join(baseDir, "skills", opts.name);
       fs.mkdirSync(dir, { recursive: true });
       targetPath = path.join(dir, "SKILL.md");

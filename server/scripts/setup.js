@@ -7,7 +7,7 @@
  * Preserves existing values on re-run (safe for upgrades).
  * Outputs QR payload JSON on the last line of stdout.
  *
- * Usage: node setup.js --env-file <path> --keys-file <path> --relay-url <url> [--default-cwd <path>] [--port <port>]
+ * Usage: node setup.js --env-file <path> --keys-file <path> --relay-url <url> [--default-cwd <path>] [--port <port>] [--enabled-backends <claude,codex>]
  */
 
 const crypto = require("crypto");
@@ -27,10 +27,11 @@ const keysFile = args["keysfile"] || args["keys-file"];
 const relayUrl = args["relay-url"] || "";
 const defaultCwd = args["default-cwd"] || process.cwd();
 const port = args["port"] || "8085";
+const enabledBackends = args["enabled-backends"] || "";
 
 if (!envFile || !keysFile) {
   console.error(
-    "Usage: node setup.js --envfile <path> --keysfile <path> [--relay-url <url>] [--default-cwd <path>] [--port <port>]"
+    "Usage: node setup.js --envfile <path> --keysfile <path> [--relay-url <url>] [--default-cwd <path>] [--port <port>] [--enabled-backends <claude,codex>]"
   );
   process.exit(1);
 }
@@ -53,12 +54,14 @@ const pairingToken = existingEnv.PAIRING_TOKEN || crypto.randomUUID();
 const envPort = existingEnv.PORT || port;
 const envRelay = existingEnv.RELAY_URL || relayUrl;
 const envCwd = existingEnv.DEFAULT_CWD || defaultCwd;
+const envEnabledBackends = enabledBackends || existingEnv.ENABLED_BACKENDS || "claude,codex";
 
 // --- Write .env ---
 const envContent = [
   `PORT=${envPort}`,
   `AUTH_TOKEN=${authToken}`,
   `DEFAULT_CWD=${envCwd}`,
+  `ENABLED_BACKENDS=${envEnabledBackends}`,
   `RELAY_URL=${envRelay}`,
   `PAIRING_TOKEN=${pairingToken}`,
 ].join("\n") + "\n";

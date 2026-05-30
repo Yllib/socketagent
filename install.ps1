@@ -10,13 +10,18 @@
     Force regeneration of pairing token and relay keys (breaks existing phone pairings).
 .PARAMETER Port
     Server port (default: 8085).
+.PARAMETER Backends
+    Agent backend selection: claude, codex, or both. If omitted, the installer prompts.
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File install.ps1 -Backends codex
 #>
 
 param(
     [switch]$ResetPairing,
-    [int]$Port = 8085
+    [int]$Port = 8085,
+    [string]$Backends = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -69,6 +74,17 @@ function Test-CodexAppServer {
     return $LASTEXITCODE -eq 0
 }
 
+function Convert-BackendSelection($value) {
+    if ($null -eq $value) { $value = "" }
+    $normalized = $value.ToString().ToLowerInvariant().Replace(" ", "")
+    switch ($normalized) {
+        { $_ -in @("1", "codex", "openai") } { return "codex" }
+        { $_ -in @("2", "claude", "anthropic") } { return "claude" }
+        { $_ -in @("3", "both", "all", "claude,codex", "codex,claude") } { return "claude,codex" }
+        default { throw "Invalid backend selection '$value'. Use claude, codex, or both." }
+    }
+}
+
 # ══════════════════════════════════════════════
 #  Banner
 # ══════════════════════════════════════════════
@@ -114,6 +130,21 @@ if ($portInUse) {
         exit 1
     }
 }
+
+Write-Phase "Backend Selection"
+if (-not $Backends) {
+    Write-Host "  Which agent backend(s) should this server use?"
+    Write-Host "    1) Codex only"
+    Write-Host "    2) Claude only"
+    Write-Host "    3) Both Claude and Codex"
+    Write-Host ""
+    $Backends = Read-Host "  Choose [3]"
+    if (-not $Backends) { $Backends = "3" }
+}
+$enabledBackends = Convert-BackendSelection $Backends
+$installClaude = (",$enabledBackends,").Contains(",claude,")
+$installCodex = (",$enabledBackends,").Contains(",codex,")
+Write-Ok "Selected backends: $enabledBackends"
 
 # ══════════════════════════════════════════════
 #  Phase 1: Node.js & Git
@@ -191,7 +222,7 @@ if (-not $nodeInstalled) {
 
     $rawVersion = & node --version 2>$null
     if (-not $rawVersion) {
-        throw "Node.js installation failed. Please install Node.js 18+ manually from https://nodejs.org/"
+        throw "Node.js installation failed. Please install Node.js 22+ manually from https://nodejs.org/"
     }
     Write-Ok "Node.js $rawVersion installed"
 }
@@ -202,26 +233,30 @@ if (-not $nodeInstalled) {
 
 Write-Phase "Phase 2: Claude Code CLI"
 
-$claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
-if ($claudeCmd) {
-    $claudeVer = & claude --version 2>$null
-    Write-Ok "Claude Code CLI already installed ($claudeVer)"
+if (-not $installClaude) {
+    Write-Ok "Skipped (Claude not selected)"
 } else {
-    Write-Host "  Installing Claude Code CLI..."
-    $cliOutput = & npm install -g @anthropic-ai/claude-code 2>&1
-    $cliExit = $LASTEXITCODE
-    $cliOutput | ForEach-Object { Write-Host "    $_" }
-    if ($cliExit -ne 0) {
-        throw "npm install -g @anthropic-ai/claude-code failed (exit code $cliExit)"
-    }
+    $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
+    if ($claudeCmd) {
+        $claudeVer = & claude --version 2>$null
+        Write-Ok "Claude Code CLI already installed ($claudeVer)"
+    } else {
+        Write-Host "  Installing Claude Code CLI..."
+        $cliOutput = & npm install -g @anthropic-ai/claude-code 2>&1
+        $cliExit = $LASTEXITCODE
+        $cliOutput | ForEach-Object { Write-Host "    $_" }
+        if ($cliExit -ne 0) {
+            throw "npm install -g @anthropic-ai/claude-code failed (exit code $cliExit)"
+        }
 
-    Refresh-Path
+        Refresh-Path
 
-    $claudeVer = & claude --version 2>$null
-    if (-not $claudeVer) {
-        throw "Claude Code CLI installation failed. Try running: npm install -g @anthropic-ai/claude-code"
+        $claudeVer = & claude --version 2>$null
+        if (-not $claudeVer) {
+            throw "Claude Code CLI installation failed. Try running: npm install -g @anthropic-ai/claude-code"
+        }
+        Write-Ok "Claude Code CLI installed ($claudeVer)"
     }
-    Write-Ok "Claude Code CLI installed ($claudeVer)"
 }
 
 # ══════════════════════════════════════════════
@@ -230,32 +265,15 @@ if ($claudeCmd) {
 
 Write-Phase "Phase 3: Claude Code Authentication"
 
-$claudeDir = Join-Path $env:USERPROFILE ".claude"
-$credFiles = @(
-    (Join-Path $claudeDir "credentials.json"),
-    (Join-Path $claudeDir ".credentials.json")
-)
-
-$isAuthenticated = $false
-foreach ($f in $credFiles) {
-    if (Test-Path $f) {
-        $isAuthenticated = $true
-        break
-    }
-}
-
-if ($isAuthenticated) {
-    Write-Ok "Claude Code credentials found"
+if (-not $installClaude) {
+    Write-Ok "Skipped (Claude not selected)"
 } else {
-    Write-Warn "Claude Code is not authenticated."
-    Write-Host "  Running 'claude login' -- this will open your browser."
-    Write-Host "  Complete the login, then return to this window."
-    Write-Host ""
-    Read-Host "  Press Enter to start login"
+    $claudeDir = Join-Path $env:USERPROFILE ".claude"
+    $credFiles = @(
+        (Join-Path $claudeDir "credentials.json"),
+        (Join-Path $claudeDir ".credentials.json")
+    )
 
-    & claude login
-
-    # Re-check
     $isAuthenticated = $false
     foreach ($f in $credFiles) {
         if (Test-Path $f) {
@@ -263,10 +281,31 @@ if ($isAuthenticated) {
             break
         }
     }
+
     if ($isAuthenticated) {
-        Write-Ok "Authentication successful"
+        Write-Ok "Claude Code credentials found"
     } else {
-        Write-Warn "Could not verify authentication. You can run 'claude login' later."
+        Write-Warn "Claude Code is not authenticated."
+        Write-Host "  Running 'claude login' -- this will open your browser."
+        Write-Host "  Complete the login, then return to this window."
+        Write-Host ""
+        Read-Host "  Press Enter to start login"
+
+        & claude login
+
+        # Re-check
+        $isAuthenticated = $false
+        foreach ($f in $credFiles) {
+            if (Test-Path $f) {
+                $isAuthenticated = $true
+                break
+            }
+        }
+        if ($isAuthenticated) {
+            Write-Ok "Authentication successful"
+        } else {
+            Write-Warn "Could not verify authentication. You can run 'claude login' later."
+        }
     }
 }
 
@@ -276,38 +315,42 @@ if ($isAuthenticated) {
 
 Write-Phase "Phase 4: OpenAI Codex CLI"
 
-$codexInstalled = $false
-$codexCmd = Get-Command codex -ErrorAction SilentlyContinue
-if ($codexCmd) {
-    $codexVer = & codex --version 2>$null
-    if (Test-CodexAppServer) {
-        Write-Ok "OpenAI Codex CLI already installed ($codexVer)"
-        $codexInstalled = $true
-    } else {
-        Write-Warn "OpenAI Codex CLI found ($codexVer) but app-server is unavailable. Updating..."
-    }
-}
-
-if (-not $codexInstalled) {
-    Write-Host "  Installing OpenAI Codex CLI..."
-    $codexOutput = & npm install -g @openai/codex 2>&1
-    $codexExit = $LASTEXITCODE
-    $codexOutput | ForEach-Object { Write-Host "    $_" }
-    if ($codexExit -ne 0) {
-        throw "npm install -g @openai/codex failed (exit code $codexExit)"
-    }
-
-    Refresh-Path
-
+if (-not $installCodex) {
+    Write-Ok "Skipped (Codex not selected)"
+} else {
+    $codexInstalled = $false
     $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
-    if (-not $codexCmd) {
-        throw "OpenAI Codex CLI installation failed. Try running: npm install -g @openai/codex"
+    if ($codexCmd) {
+        $codexVer = & codex --version 2>$null
+        if (Test-CodexAppServer) {
+            Write-Ok "OpenAI Codex CLI already installed ($codexVer)"
+            $codexInstalled = $true
+        } else {
+            Write-Warn "OpenAI Codex CLI found ($codexVer) but app-server is unavailable. Updating..."
+        }
     }
-    $codexVer = & codex --version 2>$null
-    if (-not (Test-CodexAppServer)) {
-        throw "OpenAI Codex CLI installed, but 'codex app-server' is unavailable. Try running: npm install -g @openai/codex@latest"
+
+    if (-not $codexInstalled) {
+        Write-Host "  Installing OpenAI Codex CLI..."
+        $codexOutput = & npm install -g @openai/codex 2>&1
+        $codexExit = $LASTEXITCODE
+        $codexOutput | ForEach-Object { Write-Host "    $_" }
+        if ($codexExit -ne 0) {
+            throw "npm install -g @openai/codex failed (exit code $codexExit)"
+        }
+
+        Refresh-Path
+
+        $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
+        if (-not $codexCmd) {
+            throw "OpenAI Codex CLI installation failed. Try running: npm install -g @openai/codex"
+        }
+        $codexVer = & codex --version 2>$null
+        if (-not (Test-CodexAppServer)) {
+            throw "OpenAI Codex CLI installed, but 'codex app-server' is unavailable. Try running: npm install -g @openai/codex@latest"
+        }
+        Write-Ok "OpenAI Codex CLI installed ($codexVer)"
     }
-    Write-Ok "OpenAI Codex CLI installed ($codexVer)"
 }
 
 # ══════════════════════════════════════════════
@@ -316,27 +359,31 @@ if (-not $codexInstalled) {
 
 Write-Phase "Phase 5: OpenAI Codex Authentication"
 
-$codexAuthFile = Join-Path (Join-Path $env:USERPROFILE ".codex") "auth.json"
-$null = & codex login status 2>$null
-$codexAuthed = $LASTEXITCODE -eq 0 -or (Test-Path $codexAuthFile)
-
-if ($codexAuthed) {
-    Write-Ok "OpenAI Codex credentials found"
+if (-not $installCodex) {
+    Write-Ok "Skipped (Codex not selected)"
 } else {
-    Write-Warn "OpenAI Codex is not authenticated."
-    Write-Host "  Running 'codex login' -- this will open your browser or show a device login."
-    Write-Host "  Complete the login, then return to this window."
-    Write-Host ""
-    Read-Host "  Press Enter to start login"
-
-    & codex login
-
+    $codexAuthFile = Join-Path (Join-Path $env:USERPROFILE ".codex") "auth.json"
     $null = & codex login status 2>$null
     $codexAuthed = $LASTEXITCODE -eq 0 -or (Test-Path $codexAuthFile)
+
     if ($codexAuthed) {
-        Write-Ok "Codex authentication successful"
+        Write-Ok "OpenAI Codex credentials found"
     } else {
-        Write-Warn "Could not verify Codex authentication. Codex sessions will be hidden until you run 'codex login'."
+        Write-Warn "OpenAI Codex is not authenticated."
+        Write-Host "  Running 'codex login' -- this will open your browser or show a device login."
+        Write-Host "  Complete the login, then return to this window."
+        Write-Host ""
+        Read-Host "  Press Enter to start login"
+
+        & codex login
+
+        $null = & codex login status 2>$null
+        $codexAuthed = $LASTEXITCODE -eq 0 -or (Test-Path $codexAuthFile)
+        if ($codexAuthed) {
+            Write-Ok "Codex authentication successful"
+        } else {
+            Write-Warn "Could not verify Codex authentication. Codex sessions will be hidden until you run 'codex login'."
+        }
     }
 }
 
@@ -389,7 +436,8 @@ $setupOutput = & node $SETUP_SCRIPT `
     --keysfile $KEYS_FILE `
     --relay-url $RELAY_URL `
     --default-cwd $env:USERPROFILE `
-    --port $Port
+    --port $Port `
+    --enabled-backends $enabledBackends
 
 if ($LASTEXITCODE -ne 0) { throw "Configuration generation failed" }
 

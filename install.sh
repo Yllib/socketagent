@@ -10,7 +10,7 @@ set -euo pipefail
 # configuration, and systemd user service.
 #
 # Usage:
-#   bash install.sh [--reset-pairing] [--port PORT]
+#   bash install.sh [--reset-pairing] [--port PORT] [--backends claude|codex|both]
 #
 # Re-running is safe — existing tokens and pairings are preserved.
 
@@ -19,12 +19,17 @@ SERVICE_NAME="socketclaude"
 NODE_MIN_VERSION=22
 PORT=8085
 RESET_PAIRING=false
+BACKENDS=""
+ENABLED_BACKENDS=""
+INSTALL_CLAUDE=false
+INSTALL_CODEX=false
 
 # Parse args
 while [[ $# -gt 0 ]]; do
   case $1 in
     --reset-pairing) RESET_PAIRING=true; shift ;;
     --port) PORT="$2"; shift 2 ;;
+    --backend|--backends) BACKENDS="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -49,6 +54,41 @@ ok()    { echo -e "  ${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}[!]${NC} $1"; }
 fail()  { echo -e "  ${RED}[X]${NC} $1"; }
 
+select_backends() {
+  local value
+  value=$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+
+  if [[ -z "$value" ]]; then
+    phase "Backend Selection"
+    echo "  Which agent backend(s) should this server use?"
+    echo "    1) Codex only"
+    echo "    2) Claude only"
+    echo "    3) Both Claude and Codex"
+    echo ""
+    read -rp "  Choose [3]: " value
+    value=$(echo "${value:-3}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+  fi
+
+  case "$value" in
+    1|codex|openai)
+      ENABLED_BACKENDS="codex"
+      ;;
+    2|claude|anthropic)
+      ENABLED_BACKENDS="claude"
+      ;;
+    3|both|all|claude,codex|codex,claude)
+      ENABLED_BACKENDS="claude,codex"
+      ;;
+    *)
+      fail "Invalid backend selection: ${1:-$value}. Use claude, codex, or both."
+      exit 1
+      ;;
+  esac
+
+  if [[ ",$ENABLED_BACKENDS," == *",claude,"* ]]; then INSTALL_CLAUDE=true; fi
+  if [[ ",$ENABLED_BACKENDS," == *",codex,"* ]]; then INSTALL_CODEX=true; fi
+}
+
 echo ""
 echo -e "  ${CYAN}SocketClaude Installer${NC}"
 echo -e "  ${CYAN}======================${NC}"
@@ -59,6 +99,9 @@ if [[ ! -d "$SERVER_DIR" ]] || [[ ! -f "$SERVER_DIR/package.json" ]]; then
   fail "Cannot find server/package.json. Run this script from the SocketClaude repo root."
   exit 1
 fi
+
+select_backends "$BACKENDS"
+ok "Selected backends: $ENABLED_BACKENDS"
 
 # ══════════════════════════════════════════════
 #  Phase 1: Node.js
@@ -133,17 +176,21 @@ fi
 
 phase "Phase 2: Claude Code CLI"
 
-if command -v claude &>/dev/null; then
-  CLAUDE_VER=$(claude --version 2>/dev/null || echo "unknown")
-  ok "Claude Code CLI already installed ($CLAUDE_VER)"
+if [[ "$INSTALL_CLAUDE" != "true" ]]; then
+  ok "Skipped (Claude not selected)"
 else
-  echo "  Installing Claude Code CLI..."
-  npm install -g @anthropic-ai/claude-code
-  if ! command -v claude &>/dev/null; then
-    fail "Claude Code CLI installation failed. Try: npm install -g @anthropic-ai/claude-code"
-    exit 1
+  if command -v claude &>/dev/null; then
+    CLAUDE_VER=$(claude --version 2>/dev/null || echo "unknown")
+    ok "Claude Code CLI already installed ($CLAUDE_VER)"
+  else
+    echo "  Installing Claude Code CLI..."
+    npm install -g @anthropic-ai/claude-code
+    if ! command -v claude &>/dev/null; then
+      fail "Claude Code CLI installation failed. Try: npm install -g @anthropic-ai/claude-code"
+      exit 1
+    fi
+    ok "Claude Code CLI installed ($(claude --version 2>/dev/null))"
   fi
-  ok "Claude Code CLI installed ($(claude --version 2>/dev/null))"
 fi
 
 # ══════════════════════════════════════════════
@@ -152,21 +199,25 @@ fi
 
 phase "Phase 3: Claude Code Authentication"
 
-CLAUDE_DIR="$HOME/.claude"
-if [[ -f "$CLAUDE_DIR/credentials.json" ]] || [[ -f "$CLAUDE_DIR/.credentials.json" ]]; then
-  ok "Claude Code credentials found"
+if [[ "$INSTALL_CLAUDE" != "true" ]]; then
+  ok "Skipped (Claude not selected)"
 else
-  warn "Claude Code is not authenticated."
-  echo "  Running 'claude login' -- this will open your browser."
-  echo "  Complete the login, then return to this terminal."
-  echo ""
-  read -rp "  Press Enter to start login..."
-  claude login
-
+  CLAUDE_DIR="$HOME/.claude"
   if [[ -f "$CLAUDE_DIR/credentials.json" ]] || [[ -f "$CLAUDE_DIR/.credentials.json" ]]; then
-    ok "Authentication successful"
+    ok "Claude Code credentials found"
   else
-    warn "Could not verify authentication. You can run 'claude login' later."
+    warn "Claude Code is not authenticated."
+    echo "  Running 'claude login' -- this will open your browser."
+    echo "  Complete the login, then return to this terminal."
+    echo ""
+    read -rp "  Press Enter to start login..."
+    claude login
+
+    if [[ -f "$CLAUDE_DIR/credentials.json" ]] || [[ -f "$CLAUDE_DIR/.credentials.json" ]]; then
+      ok "Authentication successful"
+    else
+      warn "Could not verify authentication. You can run 'claude login' later."
+    fi
   fi
 fi
 
@@ -176,32 +227,36 @@ fi
 
 phase "Phase 4: OpenAI Codex CLI"
 
-NEED_CODEX_INSTALL=false
-if command -v codex &>/dev/null; then
-  CODEX_VER=$(codex --version 2>/dev/null || echo "unknown")
-  if codex app-server --help &>/dev/null; then
-    ok "OpenAI Codex CLI already installed ($CODEX_VER)"
+if [[ "$INSTALL_CODEX" != "true" ]]; then
+  ok "Skipped (Codex not selected)"
+else
+  NEED_CODEX_INSTALL=false
+  if command -v codex &>/dev/null; then
+    CODEX_VER=$(codex --version 2>/dev/null || echo "unknown")
+    if codex app-server --help &>/dev/null; then
+      ok "OpenAI Codex CLI already installed ($CODEX_VER)"
+    else
+      warn "OpenAI Codex CLI found ($CODEX_VER) but app-server is unavailable. Updating..."
+      NEED_CODEX_INSTALL=true
+    fi
   else
-    warn "OpenAI Codex CLI found ($CODEX_VER) but app-server is unavailable. Updating..."
+    echo "  Installing OpenAI Codex CLI..."
     NEED_CODEX_INSTALL=true
   fi
-else
-  echo "  Installing OpenAI Codex CLI..."
-  NEED_CODEX_INSTALL=true
-fi
 
-if [[ "$NEED_CODEX_INSTALL" == "true" ]]; then
-  npm install -g @openai/codex
-  hash -r 2>/dev/null
-  if ! command -v codex &>/dev/null; then
-    fail "OpenAI Codex CLI installation failed. Try: npm install -g @openai/codex"
-    exit 1
+  if [[ "$NEED_CODEX_INSTALL" == "true" ]]; then
+    npm install -g @openai/codex
+    hash -r 2>/dev/null
+    if ! command -v codex &>/dev/null; then
+      fail "OpenAI Codex CLI installation failed. Try: npm install -g @openai/codex"
+      exit 1
+    fi
+    if ! codex app-server --help &>/dev/null; then
+      fail "OpenAI Codex CLI installed, but 'codex app-server' is unavailable. Try: npm install -g @openai/codex@latest"
+      exit 1
+    fi
+    ok "OpenAI Codex CLI installed ($(codex --version 2>/dev/null))"
   fi
-  if ! codex app-server --help &>/dev/null; then
-    fail "OpenAI Codex CLI installed, but 'codex app-server' is unavailable. Try: npm install -g @openai/codex@latest"
-    exit 1
-  fi
-  ok "OpenAI Codex CLI installed ($(codex --version 2>/dev/null))"
 fi
 
 # ══════════════════════════════════════════════
@@ -210,21 +265,25 @@ fi
 
 phase "Phase 5: OpenAI Codex Authentication"
 
-CODEX_AUTH_FILE="$HOME/.codex/auth.json"
-if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
-  ok "OpenAI Codex credentials found"
+if [[ "$INSTALL_CODEX" != "true" ]]; then
+  ok "Skipped (Codex not selected)"
 else
-  warn "OpenAI Codex is not authenticated."
-  echo "  Running 'codex login' -- this will open your browser or show a device login."
-  echo "  Complete the login, then return to this terminal."
-  echo ""
-  read -rp "  Press Enter to start login..."
-  codex login || true
-
+  CODEX_AUTH_FILE="$HOME/.codex/auth.json"
   if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
-    ok "Codex authentication successful"
+    ok "OpenAI Codex credentials found"
   else
-    warn "Could not verify Codex authentication. Codex sessions will be hidden until you run 'codex login'."
+    warn "OpenAI Codex is not authenticated."
+    echo "  Running 'codex login' -- this will open your browser or show a device login."
+    echo "  Complete the login, then return to this terminal."
+    echo ""
+    read -rp "  Press Enter to start login..."
+    codex login || true
+
+    if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
+      ok "Codex authentication successful"
+    else
+      warn "Could not verify Codex authentication. Codex sessions will be hidden until you run 'codex login'."
+    fi
   fi
 fi
 
@@ -268,7 +327,8 @@ SETUP_OUTPUT=$(cd "$SERVER_DIR" && node "$SETUP_SCRIPT" \
   --keysfile "$KEYS_FILE" \
   --relay-url "$RELAY_URL" \
   --default-cwd "$HOME" \
-  --port "$PORT")
+  --port "$PORT" \
+  --enabled-backends "$ENABLED_BACKENDS")
 
 # QR payload is the last line
 QR_PAYLOAD=$(echo "$SETUP_OUTPUT" | tail -1)
@@ -295,9 +355,14 @@ NODE_PATH=$(command -v node)
 mkdir -p "$SERVICE_DIR"
 
 NODE_DIR=$(dirname "$NODE_PATH")
-CLAUDE_DIR_BIN=$(dirname "$(command -v claude)")
-CODEX_DIR_BIN=$(dirname "$(command -v codex)")
-SERVICE_PATH="$NODE_DIR:$CLAUDE_DIR_BIN:$CODEX_DIR_BIN:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+SERVICE_PATH="$NODE_DIR"
+if command -v claude &>/dev/null; then
+  SERVICE_PATH="$SERVICE_PATH:$(dirname "$(command -v claude)")"
+fi
+if command -v codex &>/dev/null; then
+  SERVICE_PATH="$SERVICE_PATH:$(dirname "$(command -v codex)")"
+fi
+SERVICE_PATH="$SERVICE_PATH:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=SocketClaude WebSocket Server

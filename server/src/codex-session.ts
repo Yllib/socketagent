@@ -1838,12 +1838,20 @@ export function createSession(
   plugins: SocketClaudePlugin[],
   codexDriver?: CodexDriver,
 ): Session {
-  if (backend === "codex") {
+  const enabled = getEnabledBackendSet();
+  const requestedBackend = backend || (enabled.has("claude") ? "claude" : "codex");
+  if (requestedBackend === "codex") {
+    if (!enabled.has("codex")) {
+      throw new Error("Codex backend is disabled on this server");
+    }
     const availability = getCodexAvailability();
     if (!availability.available) {
       throw new Error(`Codex backend is not available on this server: ${availability.reason || "unknown reason"}`);
     }
     return new CodexSession(ws, cwd, plugins, resolveCodexDriver(codexDriver));
+  }
+  if (!enabled.has("claude")) {
+    throw new Error("Claude backend is disabled on this server");
   }
   // Lazy require keeps the cycle (CodexSession → ClaudeSession via type-only
   // import) from blowing up at runtime.
@@ -1896,6 +1904,19 @@ export async function unarchiveCodexAppServerThread(threadId: string, cwd: strin
 
 let _cachedBackends: Backend[] | null = null;
 let _cachedCodexAvailability: { available: boolean; reason?: string } | null = null;
+
+function getEnabledBackendSet(): Set<Backend> {
+  const raw = (process.env.ENABLED_BACKENDS || "claude,codex").toLowerCase().trim();
+  if (raw === "all" || raw === "both") return new Set<Backend>(["claude", "codex"]);
+
+  const enabled = new Set<Backend>();
+  for (const part of raw.split(",")) {
+    const name = part.trim();
+    if (name === "claude" || name === "anthropic") enabled.add("claude");
+    if (name === "codex" || name === "openai") enabled.add("codex");
+  }
+  return enabled.size > 0 ? enabled : new Set<Backend>(["claude", "codex"]);
+}
 
 export function getCodexAvailability(): { available: boolean; reason?: string } {
   if (_cachedCodexAvailability) return _cachedCodexAvailability;
@@ -1953,14 +1974,17 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
  * once on first call and cached for the process lifetime — install/auth
  * changes require a server restart to take effect, which is acceptable.
  *
- * Claude is always present (the Agent SDK ships with the server). Codex is
- * present iff the `codex` CLI is on PATH AND `~/.codex/auth.json` exists.
+ * Claude is present when enabled (the Agent SDK ships with the server). Codex
+ * is present iff enabled, the `codex` CLI is on PATH, and `~/.codex/auth.json`
+ * exists.
  */
 export function detectAvailableBackends(): Backend[] {
   if (_cachedBackends) return _cachedBackends;
-  const list: Backend[] = ["claude"];
+  const enabled = getEnabledBackendSet();
+  const list: Backend[] = [];
+  if (enabled.has("claude")) list.push("claude");
   try {
-    if (getCodexAvailability().available) list.push("codex");
+    if (enabled.has("codex") && getCodexAvailability().available) list.push("codex");
   } catch (e: any) {
     console.error(`[codex] backend detection failed: ${e?.message || String(e)}`);
   }

@@ -4,7 +4,7 @@ import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
-  ".claude-assistant"
+  ".socketagent"
 );
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
 const HISTORY_DIR = path.join(STORE_DIR, "history");
@@ -1045,7 +1045,7 @@ export interface SdkSessionEntry {
   firstMessage: string;
   createdAt: string;
   lastActive: string;
-  tracked: boolean; // true if already in SocketClaude store
+  tracked: boolean; // true if already in SocketAgent store
   backend?: "claude" | "codex"; // absent on legacy entries; treat as claude
 }
 
@@ -1077,7 +1077,7 @@ function loadPromptHistory(cwd: string): Map<string, string> {
  * List Claude Code SDK sessions for a given CWD.
  * Scans ~/.claude/projects/-{cwd-sanitized}/ for JSONL files.
  * Uses ~/.claude/history.jsonl for session preview text.
- * Includes both tracked (already in SocketClaude store) and untracked sessions.
+ * Includes both tracked (already in SocketAgent store) and untracked sessions.
  */
 export function listSdkSessions(cwd: string, limit = 30): SdkSessionEntry[] {
   const homeDir = process.env.HOME || require("os").homedir();
@@ -1290,10 +1290,10 @@ function buildCodexRolloutRestorePath(sessionId: string, archivePath: string): s
 }
 
 /**
- * Read a codex rollout file and translate it into SocketClaude HistoryEntry
+ * Read a codex rollout file and translate it into SocketAgent HistoryEntry
  * items. Used to backfill chat history when resuming a codex session that
  * we don't already have local history for (e.g., one created via the codex
- * CLI directly, or before this session's machine ran the SocketClaude
+ * CLI directly, or before this session's machine ran the SocketAgent
  * server).
  *
  * Mapping:
@@ -1528,7 +1528,7 @@ export function listCodexSessions(cwd: string, limit = 30): SdkSessionEntry[] {
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   const scanLimit = limit * 3;
 
-  // Tracked map keyed by codex thread_id (== our SocketClaude session id).
+  // Tracked map keyed by codex thread_id (== our SocketAgent session id).
   const store = readStore();
   const trackedMap = new Map<string, SessionInfo>();
   for (const s of store) {

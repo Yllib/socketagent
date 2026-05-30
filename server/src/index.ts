@@ -11,7 +11,7 @@ import { CodexSession, archiveCodexAppServerThread, createSession, Session, dete
 import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
-import { SocketClaudePlugin, PluginContext } from "./plugin-api";
+import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
@@ -81,7 +81,7 @@ if (RELAY_URL && !PAIRING_TOKEN) {
 }
 
 // Load plugins from plugins/ directory
-const plugins: SocketClaudePlugin[] = [];
+const plugins: SocketAgentPlugin[] = [];
 const pluginsDir = path.join(__dirname, "..", "plugins");
 if (fs.existsSync(pluginsDir)) {
   const files = fs.readdirSync(pluginsDir)
@@ -90,7 +90,7 @@ if (fs.existsSync(pluginsDir)) {
   for (const file of files) {
     try {
       const mod = require(path.join(pluginsDir, file));
-      const plugin: SocketClaudePlugin = mod.default || mod;
+      const plugin: SocketAgentPlugin = mod.default || mod;
       if (plugin.name) {
         plugins.push(plugin);
         console.log(`Loaded plugin: ${plugin.name}`);
@@ -361,7 +361,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.detachWebSocket();
         }
         let sessionInfo = getSession(msg.sessionId);
-        // If not in SocketClaude store but cwd is provided, this is an SDK-only
+        // If not in SocketAgent store but cwd is provided, this is an SDK-only
         // session (claude or codex). The caller passes `backend` so we tag the
         // freshly-registered SessionInfo correctly — without it, codex SDK
         // resumes would default to claude and fail on the first prompt.
@@ -377,7 +377,7 @@ function createConnectionHandler(transport: ClientTransport) {
             backend: sdkBackend,
           };
           saveSession(sessionInfo);
-          console.log(`[Resume] Created SocketClaude entry for SDK session ${msg.sessionId} in ${(msg as any).cwd} (backend=${sdkBackend ?? "claude"})`);
+          console.log(`[Resume] Created SocketAgent entry for SDK session ${msg.sessionId} in ${(msg as any).cwd} (backend=${sdkBackend ?? "claude"})`);
         }
         if (!sessionInfo) {
           sendJson({
@@ -1085,7 +1085,7 @@ function createConnectionHandler(transport: ClientTransport) {
           });
           break;
         }
-        sendJson({ type: "error", message: "Manual compact is not supported for this backend through SocketClaude yet" });
+        sendJson({ type: "error", message: "Manual compact is not supported for this backend through SocketAgent yet" });
         break;
       }
 
@@ -2245,7 +2245,7 @@ const httpServer = http.createServer((req, res) => {
       res.end(`Invalid model: ${modelName}. Allowed: ${allowedModels.join(", ")}`);
       return;
     }
-    const modelDir = path.join(require("os").homedir(), ".claude-assistant", "tts-models", modelName);
+    const modelDir = path.join(require("os").homedir(), ".socketagent", "tts-models", modelName);
 
     const fileName = url.searchParams.get("file") || "";
     if (!fileName) {
@@ -2886,7 +2886,7 @@ wss.on("connection", (ws: WebSocket) => {
 function startRelayClient(): void {
   const keysPath = path.join(
     process.env.HOME || require("os").homedir(),
-    ".claude-assistant",
+    ".socketagent",
     "relay-keys.json"
   );
   const keyPair = loadOrCreateKeyPair(keysPath);
@@ -2895,12 +2895,12 @@ function startRelayClient(): void {
   console.log(`[Relay] Connecting to ${RELAY_URL}`);
   console.log(`[Relay] Pairing token: ${PAIRING_TOKEN}`);
 
-  // Display QR code for pairing (format: SC|<token>|<pubkey>)
-  const qrPayload = `SC|${PAIRING_TOKEN}|${pubkeyBase64}`;
+  // Display QR code for pairing (format: SA|<token>|<pubkey>)
+  const qrPayload = `SA|${PAIRING_TOKEN}|${pubkeyBase64}`;
 
   try {
     const qrcode = require("qrcode-terminal");
-    console.log(`\n[Relay] Scan this QR code with SocketClaude app to pair:\n`);
+    console.log(`\n[Relay] Scan this QR code with SocketAgent app to pair:\n`);
     qrcode.generate(qrPayload, { small: true }, (qr: string) => {
       console.log(qr);
     });

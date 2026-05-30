@@ -8,7 +8,7 @@ export interface ServerSettings {
   codexDriver: CodexDriver;
 }
 
-const STORE_DIR = path.join(process.env.HOME || os.homedir(), ".claude-assistant");
+const STORE_DIR = path.join(process.env.HOME || os.homedir(), ".socketagent");
 const SETTINGS_FILE = path.join(STORE_DIR, "server-settings.json");
 const DEFAULT_CODEX_DRIVER: CodexDriver = "app-server";
 

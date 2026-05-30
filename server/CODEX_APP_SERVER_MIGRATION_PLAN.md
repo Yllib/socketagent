@@ -2,14 +2,14 @@
 
 ## Goal
 
-Move SocketClaude's Codex backend from one-shot `codex exec --json` subprocesses to the long-lived `codex app-server` protocol so Codex sessions can support CLI-app-style features such as active-turn steering, richer lifecycle operations, and better live event parity.
+Move SocketAgent's Codex backend from one-shot `codex exec --json` subprocesses to the long-lived `codex app-server` protocol so Codex sessions can support CLI-app-style features such as active-turn steering, richer lifecycle operations, and better live event parity.
 
 The migration must be phased, testable, and reversible. The current `exec` driver remains available until App Server mode is proven stable.
 
 ## Current State
 
 - `server/src/codex-session.ts` drives Codex with `codex exec --json` and `codex exec resume <threadId> --json`.
-- SocketClaude parses JSONL stdout and translates Codex events into existing app messages.
+- SocketAgent parses JSONL stdout and translates Codex events into existing app messages.
 - Mid-turn prompts are locally queued and run as a follow-up `codex exec resume` turn after the current turn exits.
 - Archive/clear/restore and scheduled tasks now carry Codex backend metadata, but they still run through the exec driver.
 
@@ -59,7 +59,7 @@ Responsibilities:
 - Notification event emitter.
 - Timeout handling.
 - Process restart/cleanup.
-- Minimal typed wrappers for methods SocketClaude needs.
+- Minimal typed wrappers for methods SocketAgent needs.
 
 Acceptance checks:
 - Unit test or script with fake line-based server.
@@ -71,7 +71,7 @@ Acceptance checks:
 Add server-persisted Codex driver selection.
 
 Server persistence:
-- Store in `~/.claude-assistant/server-settings.json`:
+- Store in `~/.socketagent/server-settings.json`:
   ```json
   {
     "codexDriver": "exec"
@@ -129,7 +129,7 @@ Acceptance checks:
 
 ## Phase 4: Event Translation Parity
 
-Translate App Server notifications into the existing SocketClaude protocol.
+Translate App Server notifications into the existing SocketAgent protocol.
 
 Important mappings:
 - `item/agentMessage/delta` -> assistant streaming text.
@@ -175,13 +175,13 @@ Acceptance checks:
 - Pending message UI resolves correctly.
 - Fallback queue still works.
 
-## Phase 6: SocketClaude App MCP
+## Phase 6: SocketAgent App MCP
 
 Preserve app tools in App Server mode.
 
 Current exec mode passes:
 ```toml
-mcp_servers.socketclaude_app.url = "http://127.0.0.1:$PORT/codex-mcp/<token>"
+mcp_servers.socketagent_app.url = "http://127.0.0.1:$PORT/codex-mcp/<token>"
 ```
 
 App Server thread methods expose `config`, so App Server mode should pass the equivalent config through `thread/start` and `thread/resume`.
@@ -190,7 +190,7 @@ Acceptance checks:
 - Codex can call `Speak`.
 - Codex can call `SendFile`.
 - Codex can call `ScheduleTask`.
-- App MCP messages carry the correct SocketClaude session id.
+- App MCP messages carry the correct SocketAgent session id.
 - Concurrent Codex sessions do not share the wrong MCP token.
 
 ## Phase 7: Lifecycle Parity

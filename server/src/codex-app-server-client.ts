@@ -335,7 +335,7 @@ export class CodexAppServerClient extends EventEmitter {
       id: msg.id,
       error: {
         code: "unsupported_server_request",
-        message: `SocketClaude does not handle Codex app-server request '${msg.method}' yet`,
+        message: `SocketAgent does not handle Codex app-server request '${msg.method}' yet`,
       },
     });
   }

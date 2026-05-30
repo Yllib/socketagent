@@ -1,9 +1,9 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    SocketClaude Windows Installer
+    SocketAgent Windows Installer
 .DESCRIPTION
-    Installs everything needed to run SocketClaude server on Windows:
+    Installs everything needed to run SocketAgent server on Windows:
     Node.js, Claude Code CLI, OpenAI Codex CLI, server dependencies, configuration, and scheduled task.
     Displays a QR code at the end for phone pairing.
 .PARAMETER ResetPairing
@@ -28,16 +28,16 @@ $ErrorActionPreference = "Stop"
 
 # ── Configuration ──
 $RELAY_URL = "wss://relay.jarofdirt.info"
-$TASK_NAME = "SocketClaude"
+$TASK_NAME = "SocketAgent"
 $NODE_MIN_VERSION = [version]"22.0.0"
 
 # ── Paths ──
 $REPO_ROOT = $PSScriptRoot
 $SERVER_DIR = Join-Path $REPO_ROOT "server"
 $ENV_FILE = Join-Path $SERVER_DIR ".env"
-$DATA_DIR = Join-Path $env:USERPROFILE ".claude-assistant"
+$DATA_DIR = Join-Path $env:USERPROFILE ".socketagent"
 $KEYS_FILE = Join-Path $DATA_DIR "relay-keys.json"
-$LOG_FILE = Join-Path $SERVER_DIR "socketclaude.log"
+$LOG_FILE = Join-Path $SERVER_DIR "socketagent.log"
 $SETUP_SCRIPT = Join-Path (Join-Path $SERVER_DIR "scripts") "setup.js"
 
 $currentPhase = ""
@@ -90,18 +90,18 @@ function Convert-BackendSelection($value) {
 # ══════════════════════════════════════════════
 
 Write-Host ""
-Write-Host "  SocketClaude Installer" -ForegroundColor Cyan
+Write-Host "  SocketAgent Installer" -ForegroundColor Cyan
 Write-Host "  ======================" -ForegroundColor Cyan
 Write-Host ""
 
 # Verify we're in the right directory
 if (-not (Test-Path $SERVER_DIR)) {
-    Write-Fail "Cannot find server/ directory. Run this script from the SocketClaude repo root."
+    Write-Fail "Cannot find server/ directory. Run this script from the SocketAgent repo root."
     exit 1
 }
 
 if (-not (Test-Path (Join-Path $SERVER_DIR "package.json"))) {
-    Write-Fail "Cannot find server/package.json. Is this the SocketClaude repository?"
+    Write-Fail "Cannot find server/package.json. Is this the SocketAgent repository?"
     exit 1
 }
 
@@ -116,7 +116,7 @@ if ($portInUse) {
     if ($existingTask -and $existingTask.State -eq "Running") {
         $ourPids = (Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -in
             (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$TASK_NAME*" -or $_.CommandLine -like "*run-service*" }).ProcessId -or
-            $_.CommandLine -like "*socketclaude*dist*index.js*"
+            $_.CommandLine -like "*socketagent*dist*index.js*"
         }).ProcessId
     }
     $conflictPids = $portInUse.OwningProcess | Where-Object { $_ -notin $ourPids }
@@ -521,12 +521,12 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "SocketClaude WebSocket server" | Out-Null
+    -Description "SocketAgent WebSocket server" | Out-Null
 
 Write-Ok "Registered as scheduled task '$TASK_NAME'"
 
 # Add Windows Firewall rule (requires admin — skip silently if not elevated)
-$fwRuleName = "SocketClaude Server (TCP $Port)"
+$fwRuleName = "SocketAgent Server (TCP $Port)"
 try {
     $existingRule = Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
     if (-not $existingRule) {
@@ -537,7 +537,7 @@ try {
             -Protocol TCP `
             -LocalPort $Port `
             -Profile Private,Domain `
-            -Description "Allow inbound connections to SocketClaude server" | Out-Null
+            -Description "Allow inbound connections to SocketAgent server" | Out-Null
         Write-Ok "Firewall rule added for port $Port (Private/Domain networks)"
     } else {
         Write-Ok "Firewall rule already exists for port $Port"
@@ -572,7 +572,7 @@ if ($null -eq $env:WT_SESSION) {
 }
 
 Write-Host ""
-Write-Host "  Scan this QR code with the SocketClaude app:" -ForegroundColor Cyan
+Write-Host "  Scan this QR code with the SocketAgent app:" -ForegroundColor Cyan
 Write-Host ""
 
 # Generate QR using server's qrcode-terminal package

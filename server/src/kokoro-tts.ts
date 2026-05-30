@@ -4,7 +4,7 @@ import * as os from "os";
 
 const MODEL_DIR = path.join(
   os.homedir(),
-  ".claude-assistant",
+  ".socketagent",
   "tts-models",
   "kokoro-en-v0_19"
 );

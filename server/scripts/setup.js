@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * SocketClaude setup script — generates server configuration.
+ * SocketAgent setup script — generates server configuration.
  *
  * Generates AUTH_TOKEN, PAIRING_TOKEN, NaCl key pair, .env, and relay-keys.json.
  * Preserves existing values on re-run (safe for upgrades).
@@ -100,8 +100,8 @@ if (fs.existsSync(keysFile)) {
 
 // --- Output QR payload on last line (parsed by installer) ---
 // Relay URL is hardcoded in the app — QR only needs token + pubkey.
-// Format: SC|<token>|<pubkey> — plain delimited, no JSON (avoids
+// Format: SA|<token>|<pubkey> — plain delimited, no JSON (avoids
 // PowerShell stripping quotes when passing to qrcode-terminal).
-const qrPayload = `SC|${pairingToken}|${publicKeyB64}`;
+const qrPayload = `SA|${pairingToken}|${publicKeyB64}`;
 
 console.log(qrPayload);

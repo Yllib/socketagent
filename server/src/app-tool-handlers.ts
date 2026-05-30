@@ -344,7 +344,7 @@ export async function handleMonitorTool(
     const command = args.command;
     const description = args.description || command.slice(0, 60);
     const taskId = `monitor-${crypto.randomUUID().slice(0, 8)}`;
-    const outputFile = `/tmp/socketclaude-monitor-${taskId}.log`;
+    const outputFile = `/tmp/socketagent-monitor-${taskId}.log`;
     const fd = fs.openSync(outputFile, "w");
     const child = spawn(command, [], {
       shell: true,

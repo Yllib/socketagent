@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# SocketClaude App Build Script
+# SocketAgent App Build Script
 #
 # Usage:
 #   ./build-app.sh                     # Build APK on remote build machine
@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$REPO_ROOT/app"
 PUBSPEC="$APP_DIR/pubspec.yaml"
 VERSION_FILE="$REPO_ROOT/app-version.json"
-SERVER_REPO="Yllib/socketclaude"
+SERVER_REPO="Yllib/socketagent"
 APK_PATH="$APP_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
 FLUTTER_BIN="${FLUTTER_BIN:-/opt/flutter/bin}"
@@ -22,7 +22,7 @@ export PATH="$FLUTTER_BIN:/home/rdp/Android/Sdk/platform-tools:$PATH"
 
 # ── Remote build config ──
 REMOTE_HOST="billy@4.20.69.69"
-REMOTE_DIR="C:/Users/billy/socketclaude-app-build"
+REMOTE_DIR="C:/Users/billy/socketagent-app-build"
 REMOTE_FLUTTER="C:/Users/billy/Downloads/flutter/flutter/bin/flutter.bat"
 REMOTE_ANDROID_HOME="C:/Users/billy/AppData/Local/Android/Sdk"
 
@@ -129,7 +129,7 @@ git push
 echo "Creating GitHub release v$NEW_VERSION..."
 gh release create "v$NEW_VERSION" "$APK_PATH" \
   --repo "$SERVER_REPO" \
-  --title "SocketClaude v$NEW_VERSION" \
+  --title "SocketAgent v$NEW_VERSION" \
   --notes "App version $NEW_VERSION" \
   --latest
 

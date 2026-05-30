@@ -49,7 +49,7 @@ function unregisterCodexAppMcp(token: string): void {
 
 function createServer(context: AppToolContext): McpServer {
   const server = new McpServer({
-    name: "socketclaude-app",
+    name: "socketagent-app",
     version: "1.0.0",
   });
 
@@ -159,7 +159,7 @@ export async function handleCodexAppMcpRequest(req: IncomingMessage, res: Server
   if (!registration) {
     writeJson(res, 404, {
       jsonrpc: "2.0",
-      error: { code: -32000, message: "Unknown SocketClaude MCP session" },
+      error: { code: -32000, message: "Unknown SocketAgent MCP session" },
       id: null,
     });
     return;

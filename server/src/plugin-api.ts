@@ -34,7 +34,7 @@ export type AnswerResult =
   | { handled: true }
   | { handled: false };
 
-export interface SocketClaudePlugin {
+export interface SocketAgentPlugin {
   name: string;
 
   /** Called once at server startup */

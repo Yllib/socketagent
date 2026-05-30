@@ -2,7 +2,7 @@
 /**
  * Phase 0 probe for the Codex App Server protocol.
  *
- * This script intentionally does not import SocketClaude server code. It is a
+ * This script intentionally does not import SocketAgent server code. It is a
  * standalone smoke test for:
  *   initialize -> thread/start -> turn/start -> turn/steer -> notifications
  *
@@ -185,8 +185,8 @@ async function main() {
   try {
     const init = await send("initialize", {
       clientInfo: {
-        name: "socketclaude-app-server-probe",
-        title: "SocketClaude App Server Probe",
+        name: "socketagent-app-server-probe",
+        title: "SocketAgent App Server Probe",
         version: "0.1.0",
       },
       capabilities: {

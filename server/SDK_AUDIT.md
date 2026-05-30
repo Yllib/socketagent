@@ -1,4 +1,4 @@
-# Claude Agent SDK Audit — SocketClaude
+# Claude Agent SDK Audit — SocketAgent
 
 *Audited against [official SDK docs](https://platform.claude.com/docs/en/agent-sdk/typescript), [changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md). Installed version: 0.2.76. Date: 2026-03-17.*
 

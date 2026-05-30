@@ -14,7 +14,7 @@ import {
 } from "./protocol";
 import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
-import { SocketClaudePlugin, SessionContext } from "./plugin-api";
+import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
   AppToolContext,
   handleScheduleReminderTool,
@@ -115,7 +115,7 @@ export class ClaudeSession {
   constructor(
     private ws: WebSocket,
     private cwd: string,
-    private plugins: SocketClaudePlugin[] = []
+    private plugins: SocketAgentPlugin[] = []
   ) {}
 
   setTtsEnabled(enabled: boolean): void {
@@ -716,7 +716,7 @@ export class ClaudeSession {
       // Enable fine-grained tool output streaming (streams bash output incrementally)
       cleanEnv["CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING"] = "1";
       // Enable bash_progress events in tool_progress (SDK only emits in remote/container mode)
-      cleanEnv["CLAUDE_CODE_CONTAINER_ID"] = "socketclaude";
+      cleanEnv["CLAUDE_CODE_CONTAINER_ID"] = "socketagent";
       // Enable session state change events (idle/running/requires_action)
       cleanEnv["CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS"] = "1";
 

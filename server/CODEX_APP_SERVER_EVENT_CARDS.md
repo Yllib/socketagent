@@ -22,7 +22,7 @@ Observed with `codex app-server` 0.133.0 through `server/scripts/probe-codex-app
   - `turn/diff/updated` contains the turn-level aggregate diff. Keep this as fallback/diagnostics for now because per-item file cards fit the existing UI better.
 
 - `item/started` / `item/completed` with `mcpToolCall`: map to existing MCP cards.
-  - `socketclaude_app` tools keep their short names (`Speak`, `SendFile`, `ScheduleReminder`, etc.).
+  - `socketagent_app` tools keep their short names (`Speak`, `SendFile`, `ScheduleReminder`, etc.).
   - Other MCP tools use `mcp:<server>/<tool>`.
   - `item/mcpToolCall/progress` can stream progress text into the running tool card.
 
@@ -41,7 +41,7 @@ Observed with `codex app-server` 0.133.0 through `server/scripts/probe-codex-app
 ## Currently Ignored Or Deferred
 
 - `mcpServer/startupStatus/updated`: useful for diagnostics, but noisy as a chat card.
-- `remoteControl/status/changed`: not relevant to SocketClaude chat rendering.
+- `remoteControl/status/changed`: not relevant to SocketAgent chat rendering.
 - `rawResponseItem/completed`: useful for debug mode only; includes large developer/user payloads.
 - `turn/plan/updated` and `item/plan/delta`: candidates for a future plan/todo style card.
 - `thread/compacted` / `contextCompaction`: should connect to compact boundary UI when lifecycle parity work starts.

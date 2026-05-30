@@ -7,13 +7,13 @@
  *   - Subprocess lifecycle (spawn, JSONL parse, stderr capture, exit handling)
  *   - thread_id capture + resume across turns
  *   - Sandbox mode (read-only / workspace-write / bypass) controllable per turn
- *   - Translation of codex JSONL events → existing SocketClaude ServerMessage
+ *   - Translation of codex JSONL events → existing SocketAgent ServerMessage
  *
  * Intentionally not supported:
  *   - Questions / answers (no codex equivalent in --json mode)
  *   - Mid-turn message injection (codex runs prompt → completion atomically;
  *     to interrupt, kill the subprocess and start a new turn)
- *   - Plugin-provided MCP servers (Codex gets the SocketClaude app MCP bridge,
+ *   - Plugin-provided MCP servers (Codex gets the SocketAgent app MCP bridge,
  *     but arbitrary plugin MCP injection is not wired here yet)
  *   - Fork / branch / rewind
  *   - Append system prompt (codex uses AGENTS.md, not per-turn)
@@ -40,7 +40,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { ServerMessage, Backend, SessionInfo, HistoryEntry, CodexDriver } from "./protocol";
-import { SessionContext, SocketClaudePlugin } from "./plugin-api";
+import { SessionContext, SocketAgentPlugin } from "./plugin-api";
 import {
   saveSession,
   appendHistory,
@@ -113,7 +113,7 @@ type CodexEvent =
 // ─── CodexSession ─────────────────────────────────────────────────────────
 
 export class CodexSession {
-  private sessionId: string | null = null; // SocketClaude session id (= codex thread_id)
+  private sessionId: string | null = null; // SocketAgent session id (= codex thread_id)
   private threadId: string | null = null;  // codex thread_id (for resume)
   private proc: ChildProcess | null = null;
   private appServer: CodexAppServerClient | null = null;
@@ -170,7 +170,7 @@ export class CodexSession {
   constructor(
     private ws: WebSocket,
     private cwd: string,
-    private _plugins: SocketClaudePlugin[] = [],
+    private _plugins: SocketAgentPlugin[] = [],
     private readonly codexDriver: CodexDriver = "exec",
   ) {}
 
@@ -199,7 +199,7 @@ export class CodexSession {
   }
 
   /**
-   * Maps SocketClaude permission modes onto codex sandbox modes:
+   * Maps SocketAgent permission modes onto codex sandbox modes:
    *   "plan"        → read-only
    *   "default"     → workspace-write
    *   "acceptEdits" → workspace-write (codex doesn't gate edits separately)
@@ -366,7 +366,7 @@ export class CodexSession {
   /**
    * Run a single turn. New thread on first call, resume on subsequent.
    * The second parameter is used when a fresh WebSocket/process resumes an
-   * existing SocketClaude/Codex thread.
+   * existing SocketAgent/Codex thread.
    */
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
     if (this.codexDriver === "app-server") {
@@ -382,7 +382,7 @@ export class CodexSession {
     this._lastAssistantText = "";
 
     // Resume case: index.ts set _resumeSessionId before calling runQuery.
-    // Adopt it as our SocketClaude sessionId so history writes target the
+    // Adopt it as our SocketAgent sessionId so history writes target the
     // right file. (We confirm/replace it when thread.started fires.)
     const resumeTarget = resumeSessionId || this._resumeSessionId;
     if (!this.sessionId && resumeTarget) {
@@ -631,8 +631,8 @@ export class CodexSession {
     if (!this.appServerInitialized) {
       await this.appServer.initialize({
         clientInfo: {
-          name: "socketclaude",
-          title: "SocketClaude",
+          name: "socketagent",
+          title: "SocketAgent",
           version: "1.0.0",
         },
         capabilities: {
@@ -671,7 +671,7 @@ export class CodexSession {
     const mcpUrl = this.buildCodexMcpUrl(this.appServerMcpRegistration.token);
     return {
       mcp_servers: {
-        socketclaude_app: {
+        socketagent_app: {
           url: mcpUrl,
         },
       },
@@ -1171,8 +1171,8 @@ export class CodexSession {
     }
 
     if (item.type === "mcpToolCall") {
-      const isSocketClaudeApp = item.server === "socketclaude_app" || item.server === "socketclaude-app";
-      const toolName = isSocketClaudeApp ? item.tool : `mcp:${item.server}/${item.tool}`;
+      const isSocketAgentApp = item.server === "socketagent_app" || item.server === "socketagent-app";
+      const toolName = isSocketAgentApp ? item.tool : `mcp:${item.server}/${item.tool}`;
       if (method === "item/started") {
         const input = (item.arguments && typeof item.arguments === "object") ? item.arguments : {};
         this.send({
@@ -1335,12 +1335,12 @@ export class CodexSession {
     };
   }
 
-  // ─── Event translation: codex JSONL → SocketClaude ServerMessage ─────
+  // ─── Event translation: codex JSONL → SocketAgent ServerMessage ─────
 
   private handleEvent(evt: CodexEvent): void {
     switch (evt.type) {
       case "thread.started": {
-        // Adopt thread_id as our SocketClaude sessionId. On resume, this
+        // Adopt thread_id as our SocketAgent sessionId. On resume, this
         // should equal the value we already had; on a fresh session, it's
         // the first time we learn the id.
         this.threadId = evt.thread_id;
@@ -1551,7 +1551,7 @@ export class CodexSession {
       return `${filePath}\n${before ?? after}`;
     }
 
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketclaude-codex-diff-"));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-codex-diff-"));
     const beforePath = path.join(tmpDir, "before");
     const afterPath = path.join(tmpDir, "after");
     try {
@@ -1691,11 +1691,11 @@ export class CodexSession {
 
       case "mcp_tool_call": {
         const it = item as Extract<CodexItem, { type: "mcp_tool_call" }>;
-        const isSocketClaudeApp =
-          it.server === "socketclaude_app" ||
-          it.server === "socketclaude-app" ||
-          it.server === "\"socketclaude-app\"";
-        const toolName = isSocketClaudeApp ? it.tool : `mcp:${it.server}/${it.tool}`;
+        const isSocketAgentApp =
+          it.server === "socketagent_app" ||
+          it.server === "socketagent-app" ||
+          it.server === "\"socketagent-app\"";
+        const toolName = isSocketAgentApp ? it.tool : `mcp:${it.server}/${it.tool}`;
         if (lifecycle === "item.started") {
           const input = (it.arguments as Record<string, unknown>) ?? {};
           this.send({
@@ -1705,7 +1705,7 @@ export class CodexSession {
             toolUseId: it.id,
             sessionId: sid,
           } as ServerMessage);
-          if (!isSocketClaudeApp) appendHistory(sid, {
+          if (!isSocketAgentApp) appendHistory(sid, {
             role: "tool_call",
             content: JSON.stringify(input),
             toolName,
@@ -1723,7 +1723,7 @@ export class CodexSession {
             output,
             sessionId: sid,
           } as ServerMessage);
-          if (!isSocketClaudeApp) appendHistory(sid, {
+          if (!isSocketAgentApp) appendHistory(sid, {
             role: "tool_result",
             content: output,
             toolUseId: it.id,
@@ -1782,7 +1782,7 @@ export class CodexSession {
   }
 
   private codexMcpConfigArg(mcpUrl: string): string {
-    return `mcp_servers.socketclaude_app.url="${mcpUrl}"`;
+    return `mcp_servers.socketagent_app.url="${mcpUrl}"`;
   }
 
   private buildExecArgs(mcpUrl: string): string[] {
@@ -1835,7 +1835,7 @@ export function createSession(
   backend: Backend | undefined,
   ws: WebSocket,
   cwd: string,
-  plugins: SocketClaudePlugin[],
+  plugins: SocketAgentPlugin[],
   codexDriver?: CodexDriver,
 ): Session {
   const enabled = getEnabledBackendSet();
@@ -1873,8 +1873,8 @@ async function withStandaloneAppServerClient<T>(
   try {
     await client.initialize({
       clientInfo: {
-        name: "socketclaude",
-        title: "SocketClaude",
+        name: "socketagent",
+        title: "SocketAgent",
         version: "1.0.0",
       },
       capabilities: {

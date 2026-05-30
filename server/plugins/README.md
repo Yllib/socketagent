@@ -1,15 +1,15 @@
-# SocketClaude Plugins
+# SocketAgent Plugins
 
 Drop compiled `.js` plugin files in this directory. They are loaded automatically at server startup.
 
 ## Plugin Interface
 
-Export a default object implementing `SocketClaudePlugin` from `../src/plugin-api`:
+Export a default object implementing `SocketAgentPlugin` from `../src/plugin-api`:
 
 ```typescript
-import { SocketClaudePlugin } from "../src/plugin-api";
+import { SocketAgentPlugin } from "../src/plugin-api";
 
-const myPlugin: SocketClaudePlugin = {
+const myPlugin: SocketAgentPlugin = {
   name: "my-plugin",
 
   // Optional: runs once at server startup

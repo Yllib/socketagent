@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # ══════════════════════════════════════════════
-#  SocketClaude Linux Installer
+#  SocketAgent Linux Installer
 # ══════════════════════════════════════════════
 #
-# Installs everything needed to run SocketClaude server on Linux:
+# Installs everything needed to run SocketAgent server on Linux:
 # Node.js, Claude Code CLI, OpenAI Codex CLI, server dependencies,
 # configuration, and systemd user service.
 #
@@ -15,7 +15,7 @@ set -euo pipefail
 # Re-running is safe — existing tokens and pairings are preserved.
 
 RELAY_URL="wss://relay.jarofdirt.info"
-SERVICE_NAME="socketclaude"
+SERVICE_NAME="socketagent"
 NODE_MIN_VERSION=22
 PORT=8085
 RESET_PAIRING=false
@@ -38,7 +38,7 @@ done
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$REPO_ROOT/server"
 ENV_FILE="$SERVER_DIR/.env"
-DATA_DIR="$HOME/.claude-assistant"
+DATA_DIR="$HOME/.socketagent"
 KEYS_FILE="$DATA_DIR/relay-keys.json"
 SETUP_SCRIPT="$SERVER_DIR/scripts/setup.js"
 
@@ -90,13 +90,13 @@ select_backends() {
 }
 
 echo ""
-echo -e "  ${CYAN}SocketClaude Installer${NC}"
+echo -e "  ${CYAN}SocketAgent Installer${NC}"
 echo -e "  ${CYAN}======================${NC}"
 echo ""
 
 # Verify repo structure
 if [[ ! -d "$SERVER_DIR" ]] || [[ ! -f "$SERVER_DIR/package.json" ]]; then
-  fail "Cannot find server/package.json. Run this script from the SocketClaude repo root."
+  fail "Cannot find server/package.json. Run this script from the SocketAgent repo root."
   exit 1
 fi
 
@@ -365,7 +365,7 @@ fi
 SERVICE_PATH="$SERVICE_PATH:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=SocketClaude WebSocket Server
+Description=SocketAgent WebSocket Server
 After=network-online.target
 Wants=network-online.target
 
@@ -412,7 +412,7 @@ fi
 phase "Phase 9: Phone Pairing"
 
 echo ""
-echo -e "  ${CYAN}Scan this QR code with the SocketClaude app:${NC}"
+echo -e "  ${CYAN}Scan this QR code with the SocketAgent app:${NC}"
 echo ""
 
 # Generate QR using server's qrcode-terminal package

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# restart-server.sh — Restart SocketClaude server with app notifications
+# restart-server.sh — Restart SocketAgent server with app notifications
 #
 # Queries the running server for active sessions before restarting, writes
 # restart notifications to ALL running sessions' history, and resumes them
@@ -18,7 +18,7 @@
 # 5. Waits for the server to come back up
 # 6. Appends "Server restart complete" and continues ALL sessions
 #
-# NOTE: This script escapes the socketclaude service's cgroup on first run
+# NOTE: This script escapes the socketagent service's cgroup on first run
 # (via systemd-run) so it survives the service restart.
 
 set -euo pipefail
@@ -29,19 +29,19 @@ set -euo pipefail
 trap '' PIPE
 
 # ── Escape the service cgroup so we survive the restart ──
-# When called from within the socketclaude service (e.g., via Claude SDK),
+# When called from within the socketagent service (e.g., via Claude SDK),
 # systemd kills everything in the cgroup on restart. Re-launch ourselves
 # under a transient scope unit to escape.
 if [[ -z "${_RESTART_DETACHED:-}" ]]; then
   export _RESTART_DETACHED=1
-  exec systemd-run --user --scope --unit="socketclaude-restart-$$" "$0" "$@"
+  exec systemd-run --user --scope --unit="socketagent-restart-$$" "$0" "$@"
 fi
 
-STORE_DIR="$HOME/.claude-assistant"
+STORE_DIR="$HOME/.socketagent"
 SESSIONS_FILE="$STORE_DIR/sessions.json"
 HISTORY_DIR="$STORE_DIR/history"
 SERVER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SERVICE_NAME="socketclaude"
+SERVICE_NAME="socketagent"
 
 COMPILE=true
 EXTRA_SESSION=""
@@ -128,7 +128,7 @@ check_server() {
   (echo > /dev/tcp/localhost/"$port") 2>/dev/null
 }
 
-echo "=== SocketClaude Server Restart ==="
+echo "=== SocketAgent Server Restart ==="
 echo ""
 
 # Get running sessions from the live server
@@ -216,7 +216,7 @@ systemctl --user restart "$SERVICE_NAME"
 # After restart, the parent process (Claude SDK) is dead, so stdout is a broken
 # pipe. trap '' PIPE prevents SIGPIPE death, but echo still fails with EPIPE and
 # set -e would exit. Redirect all subsequent output to a log file.
-RESTART_LOG="/tmp/socketclaude-restart-$$.log"
+RESTART_LOG="/tmp/socketagent-restart-$$.log"
 exec > "$RESTART_LOG" 2>&1
 echo "  Restart command sent"
 

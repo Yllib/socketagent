@@ -33,6 +33,8 @@ const steerText = argValue(
 );
 const steerDelayMs = Number(argValue("--steer-delay-ms", "2000"));
 const timeoutMs = Number(argValue("--timeout-ms", "60000"));
+const verbose = process.argv.includes("--verbose");
+const experimentalRawEvents = process.argv.includes("--raw-events");
 
 let nextId = 1;
 const pending = new Map();
@@ -91,6 +93,9 @@ function onNotification(method, params) {
     if (params.thread?.id) summary.threadId = params.thread.id;
   }
   console.log(`[notify] ${method} ${JSON.stringify(summary)}`);
+  if (verbose) {
+    console.log(`[notify:full] ${method} ${JSON.stringify(params)}`);
+  }
 
   if (method === "thread/started" && params?.thread?.id) {
     threadId = params.thread.id;
@@ -195,7 +200,7 @@ async function main() {
       cwd,
       sandbox: "danger-full-access",
       approvalPolicy: "never",
-      experimentalRawEvents: false,
+      experimentalRawEvents,
       persistExtendedHistory: false,
     });
     threadId = started.thread?.id;

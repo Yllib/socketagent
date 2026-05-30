@@ -123,6 +123,7 @@ export class CodexSession {
   private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private appServerAgentText = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
+  private appServerFileChangeDiff = new Map<string, string>();
   private pendingAppServerSteeredInputs: Array<{
     resolve: () => void;
     reject: (error: Error) => void;
@@ -812,6 +813,21 @@ export class CodexSession {
         this.activeAppServerTurnId = p?.turn?.id || p?.turnId || this.activeAppServerTurnId;
         return;
 
+      case "thread/status/changed": {
+        const sid = this.sessionId;
+        if (!sid) return;
+        const statusType = p?.status?.type;
+        if (statusType === "active") {
+          this.send({ type: "session_state_changed", state: "running", sessionId: sid } as any);
+        } else if (statusType === "idle") {
+          this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
+        } else if (statusType === "systemError") {
+          this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
+          this.send({ type: "error", message: "Codex app-server entered systemError state", sessionId: sid } as any);
+        }
+        return;
+      }
+
       case "item/agentMessage/delta": {
         const sid = this.sessionId;
         if (!sid) return;
@@ -863,6 +879,59 @@ export class CodexSession {
           ...usage,
         } as any);
         updateSessionActivity(this.sessionId, this._lastAssistantText, usage);
+        return;
+      }
+
+      case "account/rateLimits/updated": {
+        const sid = this.sessionId;
+        const primary = p?.rateLimits?.primary;
+        if (!sid || !primary) return;
+        const utilization = Number(primary.usedPercent ?? 0);
+        this.send({
+          type: "rate_limit_event",
+          status: utilization >= 100 ? "rejected" : utilization >= 85 ? "allowed_warning" : "allowed",
+          utilization,
+          resetsAt: primary.resetsAt ? new Date(Number(primary.resetsAt) * 1000).toISOString() : undefined,
+          rateLimitType: p?.rateLimits?.limitName || p?.rateLimits?.limitId || undefined,
+          sessionId: sid,
+        } as any);
+        return;
+      }
+
+      case "item/fileChange/patchUpdated": {
+        const itemId = p?.itemId;
+        if (!itemId) return;
+        this.appServerFileChangeDiff.set(String(itemId), this.formatAppServerFileChanges(p?.changes));
+        return;
+      }
+
+      case "item/fileChange/outputDelta": {
+        const itemId = p?.itemId;
+        const delta = String(p?.delta ?? "");
+        if (!itemId || !delta) return;
+        const key = String(itemId);
+        this.appServerFileChangeDiff.set(key, (this.appServerFileChangeDiff.get(key) || "") + delta);
+        return;
+      }
+
+      case "turn/diff/updated":
+        // Useful as a turn-level aggregate, but individual fileChange cards are
+        // a better fit for the current chat UI. Keep this as a known no-op.
+        return;
+
+      case "item/mcpToolCall/progress": {
+        const sid = this.sessionId;
+        const itemId = p?.itemId;
+        const message = String(p?.message ?? "");
+        if (!sid || !itemId || !message) return;
+        this.send({
+          type: "tool_result_chunk",
+          toolUseId: String(itemId),
+          content: `${message}\n`,
+          sessionId: sid,
+          done: false,
+          chunkIndex: 1,
+        } as any);
         return;
       }
 
@@ -989,20 +1058,28 @@ export class CodexSession {
         this.send({
           type: "tool_call",
           tool: "ApplyPatch",
-          input: { changes },
+          input: {
+            changes,
+            files: changes.map((c: any) => c?.path || c?.filePath).filter(Boolean),
+          },
           toolUseId: item.id,
           sessionId: sid,
         } as ServerMessage);
         appendHistory(sid, {
           role: "tool_call",
-          content: changes.map((c: any) => `${c.kind || c.type || "change"}: ${c.path || c.filePath || ""}`).join("\n"),
+          content: this.summarizeAppServerFileChanges(changes),
           toolName: "ApplyPatch",
-          toolInput: { changes },
+          toolInput: {
+            changes,
+            files: changes.map((c: any) => c?.path || c?.filePath).filter(Boolean),
+          },
           toolUseId: item.id,
           timestamp: now(),
         });
       } else {
-        const output = changes.map((c: any) => `${c.kind || c.type || "change"}: ${c.path || c.filePath || ""}`).join("\n") || "File changes applied";
+        const output = this.formatAppServerFileChanges(changes)
+          || this.appServerFileChangeDiff.get(item.id)
+          || "File changes applied";
         this.send({
           type: "tool_result",
           toolUseId: item.id,
@@ -1016,6 +1093,7 @@ export class CodexSession {
           toolOutput: output,
           timestamp: now(),
         });
+        this.appServerFileChangeDiff.delete(item.id);
       }
       return;
     }
@@ -1043,7 +1121,133 @@ export class CodexSession {
           sessionId: sid,
         } as ServerMessage);
       }
+      return;
     }
+
+    if (item.type === "dynamicToolCall") {
+      const toolName = item.namespace ? `${item.namespace}/${item.tool || "tool"}` : (item.tool || "tool");
+      if (method === "item/started") {
+        const input = (item.arguments && typeof item.arguments === "object") ? item.arguments : {};
+        this.send({
+          type: "tool_call",
+          tool: toolName,
+          input,
+          toolUseId: item.id,
+          sessionId: sid,
+        } as ServerMessage);
+      } else {
+        const output = item.contentItems
+          ? JSON.stringify(item.contentItems, null, 2)
+          : item.success === false
+            ? "Tool failed"
+            : "Tool completed";
+        this.send({
+          type: "tool_result",
+          toolUseId: item.id,
+          output,
+          sessionId: sid,
+        } as ServerMessage);
+      }
+      return;
+    }
+
+    if (item.type === "webSearch") {
+      if (method === "item/started") {
+        this.send({
+          type: "tool_call",
+          tool: "WebSearch",
+          input: { query: item.query, action: item.action ?? null },
+          toolUseId: item.id,
+          sessionId: sid,
+        } as ServerMessage);
+      } else {
+        this.send({
+          type: "tool_result",
+          toolUseId: item.id,
+          output: item.action ? JSON.stringify(item.action, null, 2) : "Search completed",
+          sessionId: sid,
+        } as ServerMessage);
+      }
+      return;
+    }
+
+    if (item.type === "imageView") {
+      if (method === "item/started") {
+        this.send({
+          type: "tool_call",
+          tool: "ViewImage",
+          input: { path: item.path },
+          toolUseId: item.id,
+          sessionId: sid,
+        } as ServerMessage);
+      } else {
+        this.send({
+          type: "tool_result",
+          toolUseId: item.id,
+          output: item.path || "Image viewed",
+          sessionId: sid,
+        } as ServerMessage);
+      }
+      return;
+    }
+
+    if (item.type === "imageGeneration") {
+      if (method === "item/started") {
+        this.send({
+          type: "tool_call",
+          tool: "ImageGeneration",
+          input: {
+            status: item.status,
+            revisedPrompt: item.revisedPrompt ?? null,
+          },
+          toolUseId: item.id,
+          sessionId: sid,
+        } as ServerMessage);
+      } else {
+        this.send({
+          type: "tool_result",
+          toolUseId: item.id,
+          output: item.savedPath || item.result || item.status || "Image generation completed",
+          sessionId: sid,
+        } as ServerMessage);
+      }
+      return;
+    }
+  }
+
+  private summarizeAppServerFileChanges(changes: any[]): string {
+    return changes
+      .map((change) => {
+        const path = change?.path || change?.filePath || "";
+        const kind = this.appServerFileChangeKind(change?.kind || change?.type);
+        return [kind, path].filter(Boolean).join(": ");
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  private formatAppServerFileChanges(changes: any): string {
+    if (!Array.isArray(changes)) return "";
+    const parts: string[] = [];
+    for (const change of changes) {
+      const path = change?.path || change?.filePath || "";
+      const diff = typeof change?.diff === "string" ? change.diff.trimEnd() : "";
+      if (!diff) continue;
+      if (path && !diff.startsWith("--- ") && !diff.startsWith("diff --git ")) {
+        parts.push(`--- ${path}\n+++ ${path}\n${diff}`);
+      } else {
+        parts.push(diff);
+      }
+    }
+    return parts.join("\n");
+  }
+
+  private appServerFileChangeKind(kind: any): string {
+    if (typeof kind === "string") return kind;
+    if (kind && typeof kind === "object") {
+      return String(kind.type || kind.kind || "change");
+    }
+    return "change";
   }
 
   private usageFromAppServerTokenUsage(tokenUsage: any): NonNullable<CodexSession["_lastUsage"]> | null {

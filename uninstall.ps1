@@ -5,7 +5,7 @@
 .DESCRIPTION
     Stops and removes the SocketClaude scheduled task.
     Optionally removes session data.
-    Does NOT uninstall Node.js or Claude Code CLI.
+    Does NOT uninstall Node.js, Claude Code CLI, or OpenAI Codex CLI.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -59,5 +59,5 @@ if ($removeEnv -eq "y") {
 
 Write-Host ""
 Write-Host "  Uninstall complete." -ForegroundColor Green
-Write-Host "  Node.js and Claude Code CLI were NOT removed." -ForegroundColor Yellow
+Write-Host "  Node.js, Claude Code CLI, and OpenAI Codex CLI were NOT removed." -ForegroundColor Yellow
 Write-Host ""

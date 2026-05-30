@@ -6,8 +6,8 @@ set -euo pipefail
 # ══════════════════════════════════════════════
 #
 # Installs everything needed to run SocketClaude server on Linux:
-# Node.js, Claude Code CLI, server dependencies, configuration,
-# and systemd user service.
+# Node.js, Claude Code CLI, OpenAI Codex CLI, server dependencies,
+# configuration, and systemd user service.
 #
 # Usage:
 #   bash install.sh [--reset-pairing] [--port PORT]
@@ -171,10 +171,68 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 4: Install Dependencies & Build
+#  Phase 4: OpenAI Codex CLI
 # ══════════════════════════════════════════════
 
-phase "Phase 4: Install Dependencies & Build"
+phase "Phase 4: OpenAI Codex CLI"
+
+NEED_CODEX_INSTALL=false
+if command -v codex &>/dev/null; then
+  CODEX_VER=$(codex --version 2>/dev/null || echo "unknown")
+  if codex app-server --help &>/dev/null; then
+    ok "OpenAI Codex CLI already installed ($CODEX_VER)"
+  else
+    warn "OpenAI Codex CLI found ($CODEX_VER) but app-server is unavailable. Updating..."
+    NEED_CODEX_INSTALL=true
+  fi
+else
+  echo "  Installing OpenAI Codex CLI..."
+  NEED_CODEX_INSTALL=true
+fi
+
+if [[ "$NEED_CODEX_INSTALL" == "true" ]]; then
+  npm install -g @openai/codex
+  hash -r 2>/dev/null
+  if ! command -v codex &>/dev/null; then
+    fail "OpenAI Codex CLI installation failed. Try: npm install -g @openai/codex"
+    exit 1
+  fi
+  if ! codex app-server --help &>/dev/null; then
+    fail "OpenAI Codex CLI installed, but 'codex app-server' is unavailable. Try: npm install -g @openai/codex@latest"
+    exit 1
+  fi
+  ok "OpenAI Codex CLI installed ($(codex --version 2>/dev/null))"
+fi
+
+# ══════════════════════════════════════════════
+#  Phase 5: OpenAI Codex Authentication
+# ══════════════════════════════════════════════
+
+phase "Phase 5: OpenAI Codex Authentication"
+
+CODEX_AUTH_FILE="$HOME/.codex/auth.json"
+if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
+  ok "OpenAI Codex credentials found"
+else
+  warn "OpenAI Codex is not authenticated."
+  echo "  Running 'codex login' -- this will open your browser or show a device login."
+  echo "  Complete the login, then return to this terminal."
+  echo ""
+  read -rp "  Press Enter to start login..."
+  codex login || true
+
+  if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
+    ok "Codex authentication successful"
+  else
+    warn "Could not verify Codex authentication. Codex sessions will be hidden until you run 'codex login'."
+  fi
+fi
+
+# ══════════════════════════════════════════════
+#  Phase 6: Install Dependencies & Build
+# ══════════════════════════════════════════════
+
+phase "Phase 6: Install Dependencies & Build"
 
 echo "  Running npm install..."
 (cd "$SERVER_DIR" && npm install)
@@ -185,10 +243,10 @@ echo "  Compiling TypeScript..."
 ok "Server built successfully"
 
 # ══════════════════════════════════════════════
-#  Phase 5: Generate Configuration
+#  Phase 7: Generate Configuration
 # ══════════════════════════════════════════════
 
-phase "Phase 5: Generate Configuration"
+phase "Phase 7: Generate Configuration"
 
 if [[ "$RESET_PAIRING" == "true" ]]; then
   warn "Resetting pairing data..."
@@ -225,10 +283,10 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 6: Register systemd Service
+#  Phase 8: Register systemd Service
 # ══════════════════════════════════════════════
 
-phase "Phase 6: Register systemd Service"
+phase "Phase 8: Register systemd Service"
 
 SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
@@ -237,6 +295,9 @@ NODE_PATH=$(command -v node)
 mkdir -p "$SERVICE_DIR"
 
 NODE_DIR=$(dirname "$NODE_PATH")
+CLAUDE_DIR_BIN=$(dirname "$(command -v claude)")
+CODEX_DIR_BIN=$(dirname "$(command -v codex)")
+SERVICE_PATH="$NODE_DIR:$CLAUDE_DIR_BIN:$CODEX_DIR_BIN:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=SocketClaude WebSocket Server
@@ -250,7 +311,7 @@ ExecStart=$NODE_PATH $SERVER_DIR/dist/index.js
 Restart=on-failure
 RestartSec=5
 Environment=HOME=$HOME
-Environment=PATH=$NODE_DIR:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$SERVICE_PATH
 UnsetEnvironment=CLAUDECODE
 
 [Install]
@@ -280,10 +341,10 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 7: QR Code & Summary
+#  Phase 9: QR Code & Summary
 # ══════════════════════════════════════════════
 
-phase "Phase 7: Phone Pairing"
+phase "Phase 9: Phone Pairing"
 
 echo ""
 echo -e "  ${CYAN}Scan this QR code with the SocketClaude app:${NC}"

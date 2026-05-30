@@ -4,7 +4,7 @@
     SocketClaude Windows Installer
 .DESCRIPTION
     Installs everything needed to run SocketClaude server on Windows:
-    Node.js, Claude Code CLI, server dependencies, configuration, and scheduled task.
+    Node.js, Claude Code CLI, OpenAI Codex CLI, server dependencies, configuration, and scheduled task.
     Displays a QR code at the end for phone pairing.
 .PARAMETER ResetPairing
     Force regeneration of pairing token and relay keys (breaks existing phone pairings).
@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # ── Configuration ──
 $RELAY_URL = "wss://relay.jarofdirt.info"
 $TASK_NAME = "SocketClaude"
-$NODE_MIN_VERSION = [version]"18.0.0"
+$NODE_MIN_VERSION = [version]"22.0.0"
 
 # ── Paths ──
 $REPO_ROOT = $PSScriptRoot
@@ -62,6 +62,11 @@ function Refresh-Path {
 
 function Test-CommandExists($cmd) {
     $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue)
+}
+
+function Test-CodexAppServer {
+    $null = & codex app-server --help 2>$null
+    return $LASTEXITCODE -eq 0
 }
 
 # ══════════════════════════════════════════════
@@ -266,10 +271,80 @@ if ($isAuthenticated) {
 }
 
 # ══════════════════════════════════════════════
-#  Phase 4: Install Dependencies & Build
+#  Phase 4: OpenAI Codex CLI
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 4: Install Dependencies & Build"
+Write-Phase "Phase 4: OpenAI Codex CLI"
+
+$codexInstalled = $false
+$codexCmd = Get-Command codex -ErrorAction SilentlyContinue
+if ($codexCmd) {
+    $codexVer = & codex --version 2>$null
+    if (Test-CodexAppServer) {
+        Write-Ok "OpenAI Codex CLI already installed ($codexVer)"
+        $codexInstalled = $true
+    } else {
+        Write-Warn "OpenAI Codex CLI found ($codexVer) but app-server is unavailable. Updating..."
+    }
+}
+
+if (-not $codexInstalled) {
+    Write-Host "  Installing OpenAI Codex CLI..."
+    $codexOutput = & npm install -g @openai/codex 2>&1
+    $codexExit = $LASTEXITCODE
+    $codexOutput | ForEach-Object { Write-Host "    $_" }
+    if ($codexExit -ne 0) {
+        throw "npm install -g @openai/codex failed (exit code $codexExit)"
+    }
+
+    Refresh-Path
+
+    $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
+    if (-not $codexCmd) {
+        throw "OpenAI Codex CLI installation failed. Try running: npm install -g @openai/codex"
+    }
+    $codexVer = & codex --version 2>$null
+    if (-not (Test-CodexAppServer)) {
+        throw "OpenAI Codex CLI installed, but 'codex app-server' is unavailable. Try running: npm install -g @openai/codex@latest"
+    }
+    Write-Ok "OpenAI Codex CLI installed ($codexVer)"
+}
+
+# ══════════════════════════════════════════════
+#  Phase 5: OpenAI Codex Authentication
+# ══════════════════════════════════════════════
+
+Write-Phase "Phase 5: OpenAI Codex Authentication"
+
+$codexAuthFile = Join-Path (Join-Path $env:USERPROFILE ".codex") "auth.json"
+$null = & codex login status 2>$null
+$codexAuthed = $LASTEXITCODE -eq 0 -or (Test-Path $codexAuthFile)
+
+if ($codexAuthed) {
+    Write-Ok "OpenAI Codex credentials found"
+} else {
+    Write-Warn "OpenAI Codex is not authenticated."
+    Write-Host "  Running 'codex login' -- this will open your browser or show a device login."
+    Write-Host "  Complete the login, then return to this window."
+    Write-Host ""
+    Read-Host "  Press Enter to start login"
+
+    & codex login
+
+    $null = & codex login status 2>$null
+    $codexAuthed = $LASTEXITCODE -eq 0 -or (Test-Path $codexAuthFile)
+    if ($codexAuthed) {
+        Write-Ok "Codex authentication successful"
+    } else {
+        Write-Warn "Could not verify Codex authentication. Codex sessions will be hidden until you run 'codex login'."
+    }
+}
+
+# ══════════════════════════════════════════════
+#  Phase 6: Install Dependencies & Build
+# ══════════════════════════════════════════════
+
+Write-Phase "Phase 6: Install Dependencies & Build"
 
 Write-Host "  Running npm install..."
 Push-Location $SERVER_DIR
@@ -291,10 +366,10 @@ try {
 }
 
 # ══════════════════════════════════════════════
-#  Phase 5: Generate Configuration
+#  Phase 7: Generate Configuration
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 5: Generate Configuration"
+Write-Phase "Phase 7: Generate Configuration"
 
 # Handle --ResetPairing flag
 if ($ResetPairing) {
@@ -331,10 +406,10 @@ if ($isUpgrade) {
 }
 
 # ══════════════════════════════════════════════
-#  Phase 6: Register Scheduled Task
+#  Phase 8: Register Scheduled Task
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 6: Register Windows Service"
+Write-Phase "Phase 8: Register Windows Service"
 
 $nodeExe = (Get-Command node).Source
 $serverScript = Join-Path (Join-Path $SERVER_DIR "dist") "index.js"
@@ -353,9 +428,11 @@ if ($existing) {
 # Generate run-service.bat with restart loop
 # This ensures the server auto-restarts after updates (process.exit(1))
 $batFile = Join-Path $SERVER_DIR "run-service.bat"
+$servicePath = $env:PATH -replace '"', ''
 $batContent = @"
 @echo off
 set "HOME=$env:USERPROFILE"
+set "PATH=$servicePath"
 cd /d "$SERVER_DIR"
 :loop
 "$nodeExe" "$serverScript" >> "$LOG_FILE" 2>&1
@@ -435,10 +512,10 @@ if ($taskInfo.State -eq "Running") {
 }
 
 # ══════════════════════════════════════════════
-#  Phase 7: QR Code & Summary
+#  Phase 9: QR Code & Summary
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 7: Phone Pairing"
+Write-Phase "Phase 9: Phone Pairing"
 
 # Set UTF-8 for QR code rendering in legacy terminals
 if ($null -eq $env:WT_SESSION) {
@@ -494,15 +571,19 @@ Write-Host ""
 
     switch -Wildcard ($currentPhase) {
         "*Node*" {
-            Write-Host "    - Install Node.js 18+ manually: https://nodejs.org/"
+            Write-Host "    - Install Node.js 22+ manually: https://nodejs.org/"
             Write-Host "    - Then re-run this installer"
         }
         "*Claude Code CLI*" {
             Write-Host "    - Check your internet connection"
             Write-Host "    - Try: npm install -g @anthropic-ai/claude-code"
         }
+        "*OpenAI Codex CLI*" {
+            Write-Host "    - Check your internet connection"
+            Write-Host "    - Try: npm install -g @openai/codex"
+        }
         "*Authentication*" {
-            Write-Host "    - Run 'claude login' manually"
+            Write-Host "    - Run 'claude login' or 'codex login' manually"
             Write-Host "    - Then re-run this installer"
         }
         "*Dependencies*" {

@@ -5,6 +5,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as http from "http";
 import * as path from "path";
+import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CodexSession, archiveCodexAppServerThread, createSession, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
@@ -35,6 +36,40 @@ const PROTECTED_FILES_CONFIG = path.join(
 );
 
 type ProtectedFileEntry = { path: string; label?: string };
+type AppVersionInfo = { version: string; url: string };
+
+function parseAppVersionInfo(raw: string): AppVersionInfo | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.version !== "string" || typeof parsed.url !== "string") {
+      return null;
+    }
+    return { version: parsed.version, url: parsed.url };
+  } catch {
+    return null;
+  }
+}
+
+function readLocalAppVersionInfo(): AppVersionInfo | null {
+  if (!GIT_ROOT) return null;
+  const file = path.join(GIT_ROOT, "app-version.json");
+  if (!fs.existsSync(file)) return null;
+  return parseAppVersionInfo(fs.readFileSync(file, "utf8"));
+}
+
+function readRemoteAppVersionInfo(branch: string): AppVersionInfo | null {
+  if (!GIT_ROOT) return null;
+  try {
+    const raw = execFileSync("git", ["show", `origin/${branch}:app-version.json`], {
+      cwd: GIT_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return parseAppVersionInfo(raw);
+  } catch {
+    return null;
+  }
+}
 
 function readProtectedFiles(): ProtectedFileEntry[] {
   try {
@@ -1005,6 +1040,8 @@ function createConnectionHandler(transport: ClientTransport) {
       case "version_check": {
         const { execSync, exec: execCb } = require("child_process");
         const info: any = { type: "version_info", gitAvailable: !!GIT_ROOT, autoUpdateError: lastAutoUpdateError };
+        const localAppVersion = readLocalAppVersionInfo();
+        if (localAppVersion) info.app = localAppVersion;
         if (GIT_ROOT) {
           try {
             const localHash = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
@@ -1024,6 +1061,8 @@ function createConnectionHandler(transport: ClientTransport) {
                   info.remote = { hash: remoteHash, message: remoteMsg, date: remoteDate };
                   info.updateAvailable = localHash !== remoteHash;
                   info.commitsBehind = commitsBehind;
+                  const remoteAppVersion = readRemoteAppVersionInfo(branch);
+                  if (remoteAppVersion) info.app = remoteAppVersion;
                 } else {
                   info.fetchError = err.message;
                 }

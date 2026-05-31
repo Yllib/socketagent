@@ -16,7 +16,8 @@
  *   - Plugin-provided MCP servers (Codex gets the SocketAgent app MCP bridge,
  *     but arbitrary plugin MCP injection is not wired here yet)
  *   - Fork / branch / rewind
- *   - Append system prompt (codex uses AGENTS.md, not per-turn)
+ *   - Claude-style system prompt mutation; SocketAgent extra instructions are
+ *     passed as native Codex developer instructions where supported.
  *   - Compaction / context-window tracking (no JSONL surface)
  *   - Thinking budget config (Codex exposes reasoning effort, wired below)
  *
@@ -275,8 +276,9 @@ export class CodexSession {
   setWebSocket(ws: WebSocket): void { this.ws = ws; }
   detachWebSocket(): void { /* WS reattach is per-message; nothing buffered. */ }
 
-  // ─── No-op shims for ClaudeSession surface area ──────────────────────
-  // Each is meaningful for Claude but has no codex-CLI equivalent.
+  // ─── Shims for ClaudeSession surface area ────────────────────────────
+  // Some are meaningful for Codex, others remain no-ops where Codex has no
+  // matching runtime control.
   setEffort(e: string): void {
     if (e === "low" || e === "medium" || e === "high" || e === "max") {
       this._effort = e;
@@ -519,7 +521,6 @@ export class CodexSession {
       this._pendingUserPrompt = { text: prompt, uuid: userMsgUuid };
     }
 
-    const codexPrompt = this.buildCodexTurnText(prompt);
     const mcpRegistration = registerCodexAppMcp(this.createAppToolContext());
     const mcpUrl = this.buildCodexMcpUrl(mcpRegistration.token);
     const args = this.threadId
@@ -534,7 +535,7 @@ export class CodexSession {
     this.proc.stdin?.on("error", (err) => {
       console.warn(`[codex] stdin error: ${err.message}`);
     });
-    this.proc.stdin?.end(codexPrompt);
+    this.proc.stdin?.end(prompt);
 
     let stdoutTail = "";
     this.proc.stdout!.setEncoding("utf8");
@@ -682,10 +683,12 @@ export class CodexSession {
 
       if (!this.threadId) throw new Error("codex app-server did not return a thread id");
 
+      const collaborationMode = this.codexCollaborationMode();
       const turn = await this.appServer!.startTurn({
         threadId: this.threadId,
         cwd: this.cwd,
         input: this.buildAppServerTurnInput(prompt),
+        ...(collaborationMode ? { collaborationMode } : {}),
       });
       this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
 
@@ -794,9 +797,7 @@ export class CodexSession {
   }
 
   private buildCodexTurnText(prompt: string): string {
-    const systemPrompt = this._appendSystemPrompt.trim();
-    if (!systemPrompt) return prompt;
-    return `<socketagent_context>\nAdditional SocketAgent instructions:\n${systemPrompt}\n</socketagent_context>\n\n${prompt}`;
+    return prompt;
   }
 
   private buildAppServerTurnInput(prompt: string): CodexAppServerUserInput[] {
@@ -2452,6 +2453,28 @@ export class CodexSession {
     return this._effort === "max" ? "high" : this._effort;
   }
 
+  private codexDeveloperInstructions(): string | null {
+    const text = this._appendSystemPrompt.trim();
+    return text.length > 0 ? text : null;
+  }
+
+  private codexCollaborationMode(): Record<string, unknown> | undefined {
+    const developerInstructions = this.codexDeveloperInstructions();
+    if (!developerInstructions) return undefined;
+    return {
+      mode: "default",
+      settings: {
+        developer_instructions: developerInstructions,
+      },
+    };
+  }
+
+  private codexDeveloperInstructionsConfigArg(): string | null {
+    const developerInstructions = this.codexDeveloperInstructions();
+    if (!developerInstructions) return null;
+    return `developer_instructions=${JSON.stringify(developerInstructions)}`;
+  }
+
   private buildExecArgs(mcpUrl: string): string[] {
     const args = [
       "exec",
@@ -2462,6 +2485,8 @@ export class CodexSession {
       "-c", this.codexMcpConfigArg(mcpUrl),
       "-c", `model_reasoning_effort="${this.codexReasoningEffort()}"`,
     ];
+    const developerInstructionsArg = this.codexDeveloperInstructionsConfigArg();
+    if (developerInstructionsArg) args.push("-c", developerInstructionsArg);
     if (this._model) args.push("-m", this._model);
     args.push("-");
     return args;
@@ -2480,6 +2505,8 @@ export class CodexSession {
       "-c", this.codexMcpConfigArg(mcpUrl),
       "-c", `model_reasoning_effort="${this.codexReasoningEffort()}"`,
     ];
+    const developerInstructionsArg = this.codexDeveloperInstructionsConfigArg();
+    if (developerInstructionsArg) args.push("-c", developerInstructionsArg);
     if (this._model) args.push("-m", this._model);
     args.push("-");
     return args;

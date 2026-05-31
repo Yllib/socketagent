@@ -92,6 +92,7 @@ export interface CodexAppServerTurnStartParams {
   threadId: string;
   input: CodexAppServerUserInput[];
   cwd?: string;
+  collaborationMode?: unknown;
   [key: string]: unknown;
 }
 

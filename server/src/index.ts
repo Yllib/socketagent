@@ -1016,7 +1016,7 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "update_scheduled_task": {
         const task = getScheduledTask((msg as any).taskId);
-        if (task && (task.status === "pending" || task.status === "cancelled")) {
+        if (task && (task.status === "pending" || task.status === "cancelled" || task.status === "running")) {
           if ((msg as any).prompt !== undefined) task.prompt = (msg as any).prompt;
           if ((msg as any).cwd !== undefined) task.cwd = (msg as any).cwd;
           if ((msg as any).backend !== undefined) {
@@ -2814,6 +2814,18 @@ function scheduledTaskPrompt(task: ScheduledTask): string {
   ].join("\n");
 }
 
+function applyLatestScheduledTaskEditableFields(task: ScheduledTask): void {
+  const latest = getScheduledTask(task.id);
+  if (!latest || latest.status !== "running") return;
+  task.prompt = latest.prompt;
+  task.cwd = latest.cwd;
+  task.backend = latest.backend;
+  task.codexDriver = latest.codexDriver;
+  task.recurrence = latest.recurrence;
+  task.reuseSession = latest.reuseSession;
+  task.notificationMode = latest.notificationMode;
+}
+
 async function checkScheduledTasks(): Promise<void> {
   const dueTasks = getDueTasks();
   for (const task of dueTasks) {
@@ -2916,12 +2928,14 @@ async function checkScheduledTasks(): Promise<void> {
         task.lastRunAt = new Date().toISOString();
         if (!task.runs) task.runs = [];
         task.runs.push(currentRun);
+        applyLatestScheduledTaskEditableFields(task);
 
         if (activeSessions.get(sid) === session) activeSessions.delete(sid);
         if (activeSessions.get(tempId) === session) activeSessions.delete(tempId);
 
         // For recurring tasks, schedule the next run
-        if (isRecurring) {
+        const runIsRecurring = task.recurrence && task.recurrence.type !== "once";
+        if (runIsRecurring) {
           const nextTime = getNextRunTime(task);
           if (nextTime) {
             task.status = "pending";
@@ -2940,7 +2954,7 @@ async function checkScheduledTasks(): Promise<void> {
         broadcastSessionList();
         if (task.notificationMode !== "quiet") {
           broadcastScheduledTaskNotification(
-            isRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
+            runIsRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
             task.resultSummary || task.prompt,
             task.sessionId || "",
             "completed"
@@ -2961,12 +2975,14 @@ async function checkScheduledTasks(): Promise<void> {
         task.lastRunAt = new Date().toISOString();
         if (!task.runs) task.runs = [];
         task.runs.push(currentRun);
+        applyLatestScheduledTaskEditableFields(task);
 
         activeSessions.delete(tempId);
         if (sid !== tempId) activeSessions.delete(sid);
 
         // For recurring tasks, still schedule next run even if this one failed
-        if (isRecurring) {
+        const runIsRecurring = task.recurrence && task.recurrence.type !== "once";
+        if (runIsRecurring) {
           const nextTime = getNextRunTime(task);
           if (nextTime) {
             task.status = "pending";
@@ -2983,7 +2999,7 @@ async function checkScheduledTasks(): Promise<void> {
         broadcastScheduledTaskList();
         if (task.notificationMode !== "quiet") {
           broadcastScheduledTaskNotification(
-            isRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
+            runIsRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
             currentRun.error || task.prompt,
             task.sessionId || "",
             "failed"

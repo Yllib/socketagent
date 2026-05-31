@@ -239,11 +239,14 @@ function broadcastScheduledTaskNotification(
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
 }
 
-function forwardHeadlessScheduledAgentMessage(data: string): void {
+function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: string): void {
   try {
     const msg = JSON.parse(data);
     if (msg?.type !== "scheduled_task_notification" && msg?.type !== "reminder") {
       return;
+    }
+    if (msg.type === "scheduled_task_notification" && !msg.sessionId && fallbackSessionId) {
+      msg.sessionId = fallbackSessionId;
     }
     const raw = JSON.stringify(msg);
     for (const client of connectedClients) {
@@ -2802,9 +2805,9 @@ function scheduledTaskPrompt(task: ScheduledTask): string {
   return [
     "<socketagent_scheduled_task>",
     "This scheduled task is running in quiet mode.",
-    "Do not send routine completion notifications.",
+    "The user will not automatically be notified on their device when you send a message or complete the task.",
     "If the user should be alerted because something is wrong, important, or requires attention, call NotifyUser with a concise title and body.",
-    "If everything is normal or there is nothing actionable, finish silently.",
+    "Otherwise, follow the users instructions as you normally would, they can see the full session if they open it or click the notification.",
     "</socketagent_scheduled_task>",
     "",
     task.prompt,
@@ -2855,8 +2858,12 @@ async function checkScheduledTasks(): Promise<void> {
       saveScheduledTask(task);
 
       // Create headless session (same pattern as /continue endpoint)
-      const ws = { readyState: WebSocket.OPEN, send: forwardHeadlessScheduledAgentMessage } as any;
-      const session = createSession(backend, ws, task.cwd, plugins, codexDriver);
+      let session: Session;
+      const ws = {
+        readyState: WebSocket.OPEN,
+        send: (data: string) => forwardHeadlessScheduledAgentMessage(data, session?.getSessionId() || task.sessionId || ""),
+      } as any;
+      session = createSession(backend, ws, task.cwd, plugins, codexDriver);
       await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
       session.onActivity = () => scheduleBroadcast();
 
@@ -2934,7 +2941,7 @@ async function checkScheduledTasks(): Promise<void> {
         if (task.notificationMode !== "quiet") {
           broadcastScheduledTaskNotification(
             isRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
-            task.resultSummary || task.prompt.slice(0, 200),
+            task.resultSummary || task.prompt,
             task.sessionId || "",
             "completed"
           );
@@ -2977,7 +2984,7 @@ async function checkScheduledTasks(): Promise<void> {
         if (task.notificationMode !== "quiet") {
           broadcastScheduledTaskNotification(
             isRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
-            currentRun.error || task.prompt.slice(0, 200),
+            currentRun.error || task.prompt,
             task.sessionId || "",
             "failed"
           );

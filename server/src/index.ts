@@ -226,8 +226,13 @@ function broadcastScheduledTaskList(): void {
 }
 
 /** Broadcast a scheduled task notification to all connected clients */
-function broadcastScheduledTaskNotification(title: string, body: string, sessionId: string): void {
-  const msg = JSON.stringify({ type: "scheduled_task_notification", title, body, sessionId });
+function broadcastScheduledTaskNotification(
+  title: string,
+  body: string,
+  sessionId: string,
+  status: "completed" | "failed"
+): void {
+  const msg = JSON.stringify({ type: "scheduled_task_notification", title, body, sessionId, status });
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(msg);
   }
@@ -2784,13 +2789,6 @@ async function checkScheduledTasks(): Promise<void> {
     const runNumber = (task.runCount || 0) + 1;
     console.log(`[Scheduler] Executing task ${task.id} (run #${runNumber}): ${task.prompt.slice(0, 80)}`);
 
-    // Notify clients that task is starting
-    broadcastScheduledTaskNotification(
-      isRecurring ? `Recurring task started (run #${runNumber})` : "Scheduled task started",
-      task.prompt.slice(0, 200),
-      "" // no session ID yet
-    );
-
     try {
       // Verify CWD exists
       if (!fs.existsSync(task.cwd)) {
@@ -2798,7 +2796,7 @@ async function checkScheduledTasks(): Promise<void> {
         task.error = `Directory not found: ${task.cwd}`;
         saveScheduledTask(task);
         broadcastScheduledTaskList();
-        broadcastScheduledTaskNotification("Scheduled task failed", task.error, "");
+        broadcastScheduledTaskNotification("Scheduled task failed", task.error, "", "failed");
         continue;
       }
 
@@ -2900,7 +2898,8 @@ async function checkScheduledTasks(): Promise<void> {
         broadcastScheduledTaskNotification(
           isRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
           task.resultSummary || task.prompt.slice(0, 200),
-          task.sessionId || ""
+          task.sessionId || "",
+          "completed"
         );
         console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
       }).catch((err) => {
@@ -2940,7 +2939,8 @@ async function checkScheduledTasks(): Promise<void> {
         broadcastScheduledTaskNotification(
           isRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
           currentRun.error || task.prompt.slice(0, 200),
-          task.sessionId || ""
+          task.sessionId || "",
+          "failed"
         );
         console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);
       });
@@ -2950,7 +2950,7 @@ async function checkScheduledTasks(): Promise<void> {
       task.error = err.message;
       saveScheduledTask(task);
       broadcastScheduledTaskList();
-      broadcastScheduledTaskNotification("Scheduled task failed", task.error!, "");
+      broadcastScheduledTaskNotification("Scheduled task failed", task.error!, "", "failed");
     }
   }
 }

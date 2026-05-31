@@ -729,6 +729,7 @@ export interface ScheduledTaskNotificationServerMessage {
   title: string;
   body: string;
   sessionId: string;
+  status?: "completed" | "failed";
 }
 
 // SDK event forwarding messages

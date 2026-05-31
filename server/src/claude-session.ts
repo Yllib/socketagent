@@ -17,6 +17,7 @@ import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
   AppToolContext,
+  handleNotifyUserTool,
   handleScheduleReminderTool,
   handleSendFileTool,
   handleSpeakTool,
@@ -781,6 +782,15 @@ export class ClaudeSession {
             async (args) => handleScheduleReminderTool(appToolContext, args)
           ),
           tool(
+            "NotifyUser",
+            "Send an immediate notification to the user's mobile device. Use this when the user needs to know about an important result, especially from quiet scheduled tasks. Do not use for routine success messages unless the user explicitly asked to be notified.",
+            {
+              title: z.string().describe("Short notification title"),
+              body: z.string().describe("Optional notification body. Use empty string if not needed."),
+            },
+            async (args) => handleNotifyUserTool(appToolContext, args)
+          ),
+          tool(
             "ScheduleTask",
             "Schedule a Claude prompt to run automatically at a future time. Creates a new session in the specified directory and executes the prompt when the scheduled time arrives. The server runs 24/7 so the task will execute even if the app is closed. Use this when the user wants to defer a task to run later. Supports recurring schedules (daily, weekly, monthly, or custom interval) and optionally reusing the same session across recurrences.",
             {
@@ -790,6 +800,7 @@ export class ClaudeSession {
               recurrenceType: z.enum(["once", "daily", "weekly", "monthly", "custom"]).optional().describe("How often to repeat. Default: once (no recurrence)"),
               customIntervalMs: z.number().optional().describe("Custom interval in milliseconds (only used when recurrenceType is 'custom')"),
               reuseSession: z.boolean().optional().describe("If true and recurring, reuse the same session for all occurrences instead of creating new ones"),
+              notificationMode: z.enum(["completion", "quiet"]).optional().describe("completion sends the normal completion notification. quiet sends no automatic notifications; the scheduled agent must call NotifyUser if the user should be alerted."),
             },
             async (args) => {
               const scheduledDate = new Date(args.scheduledTime);
@@ -817,6 +828,7 @@ export class ClaudeSession {
                 createdBySessionId: this.sessionId || undefined,
                 recurrence,
                 reuseSession: args.reuseSession || false,
+                notificationMode: args.notificationMode === "quiet" ? "quiet" : "completion",
                 runCount: 0,
                 runs: [],
               };
@@ -830,7 +842,8 @@ export class ClaudeSession {
 
               const when = scheduledDate.toLocaleString();
               const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
-              return { content: [{ type: "text" as const, text: `Task scheduled for ${when}${recurrenceLabel} in ${args.cwd}:\n"${args.prompt.slice(0, 300)}"` }] };
+              const notificationLabel = task.notificationMode === "quiet" ? " Quiet mode is on." : "";
+              return { content: [{ type: "text" as const, text: `Task scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
             }
           ),
           tool(
@@ -1058,7 +1071,7 @@ export class ClaudeSession {
         }
       }
 
-      const toolContext = `You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude session that runs automatically at the specified time. Supports recurring schedules (daily, weekly, monthly, or custom interval) and optionally reusing the same session across recurrences.\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.${ttsInstruction}${pluginContext}`;
+      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude session that runs automatically at the specified time. Supports recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.${ttsInstruction}${pluginContext}`;
 
       // Handle fork: use fork source as resume target + set forkSession flag
       const shouldFork = !!this._forkFromSessionId;

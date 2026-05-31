@@ -40,6 +40,7 @@ export interface ScheduledTask {
   // Recurrence
   recurrence?: RecurrenceConfig;
   reuseSession?: boolean;
+  notificationMode?: "completion" | "quiet";
   runCount?: number;
   lastRunAt?: string;
   // History of all runs (for recurring tasks)

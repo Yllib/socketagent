@@ -230,13 +230,29 @@ function broadcastScheduledTaskNotification(
   title: string,
   body: string,
   sessionId: string,
-  status: "completed" | "failed"
+  status: "completed" | "failed" | "manual"
 ): void {
   const msg = JSON.stringify({ type: "scheduled_task_notification", title, body, sessionId, status });
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(msg);
   }
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
+}
+
+function forwardHeadlessScheduledAgentMessage(data: string): void {
+  try {
+    const msg = JSON.parse(data);
+    if (msg?.type !== "scheduled_task_notification" && msg?.type !== "reminder") {
+      return;
+    }
+    const raw = JSON.stringify(msg);
+    for (const client of connectedClients) {
+      if (client.readyState === WebSocket.OPEN) client.send(raw);
+    }
+    if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
+  } catch {
+    // Ignore non-JSON or unrelated headless session traffic.
+  }
 }
 
 /** Debounced broadcast for intermediate updates during queries */
@@ -969,6 +985,7 @@ function createConnectionHandler(transport: ClientTransport) {
           createdBySessionId: activeSessionId || undefined,
           recurrence: recurrence && recurrence.type !== "once" ? recurrence : undefined,
           reuseSession: (msg as any).reuseSession || false,
+          notificationMode: (msg as any).notificationMode === "quiet" ? "quiet" : "completion",
           runCount: 0,
           runs: [],
         };
@@ -1026,6 +1043,9 @@ function createConnectionHandler(transport: ClientTransport) {
             task.recurrence = rec && rec.type !== "once" ? rec : undefined;
           }
           if ((msg as any).reuseSession !== undefined) task.reuseSession = (msg as any).reuseSession;
+          if ((msg as any).notificationMode !== undefined) {
+            task.notificationMode = (msg as any).notificationMode === "quiet" ? "quiet" : "completion";
+          }
           // Allow re-activating a cancelled task
           if (task.status === "cancelled") task.status = "pending";
           saveScheduledTask(task);
@@ -2777,6 +2797,20 @@ scheduleStatusSync();
 // ── Scheduled task executor ──
 const SCHEDULER_INTERVAL = 30000; // 30s
 
+function scheduledTaskPrompt(task: ScheduledTask): string {
+  if (task.notificationMode !== "quiet") return task.prompt;
+  return [
+    "<socketagent_scheduled_task>",
+    "This scheduled task is running in quiet mode.",
+    "Do not send routine completion notifications.",
+    "If the user should be alerted because something is wrong, important, or requires attention, call NotifyUser with a concise title and body.",
+    "If everything is normal or there is nothing actionable, finish silently.",
+    "</socketagent_scheduled_task>",
+    "",
+    task.prompt,
+  ].join("\n");
+}
+
 async function checkScheduledTasks(): Promise<void> {
   const dueTasks = getDueTasks();
   for (const task of dueTasks) {
@@ -2796,7 +2830,9 @@ async function checkScheduledTasks(): Promise<void> {
         task.error = `Directory not found: ${task.cwd}`;
         saveScheduledTask(task);
         broadcastScheduledTaskList();
-        broadcastScheduledTaskNotification("Scheduled task failed", task.error, "", "failed");
+        if (task.notificationMode !== "quiet") {
+          broadcastScheduledTaskNotification("Scheduled task failed", task.error, "", "failed");
+        }
         continue;
       }
 
@@ -2819,7 +2855,7 @@ async function checkScheduledTasks(): Promise<void> {
       saveScheduledTask(task);
 
       // Create headless session (same pattern as /continue endpoint)
-      const ws = { readyState: WebSocket.CLOSED, send: () => {} } as any;
+      const ws = { readyState: WebSocket.OPEN, send: forwardHeadlessScheduledAgentMessage } as any;
       const session = createSession(backend, ws, task.cwd, plugins, codexDriver);
       await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
       session.onActivity = () => scheduleBroadcast();
@@ -2859,7 +2895,7 @@ async function checkScheduledTasks(): Promise<void> {
       // Use resumeSessionId for session reuse, otherwise undefined for new session
       const resumeId = shouldResume ? task.sessionId : undefined;
 
-      session.runQuery(task.prompt, resumeId).then(() => {
+      session.runQuery(scheduledTaskPrompt(task), resumeId).then(() => {
         clearInterval(registerInterval);
         const sid = session.getSessionId() || tempId;
         task.sessionId = sid;
@@ -2895,12 +2931,14 @@ async function checkScheduledTasks(): Promise<void> {
 
         broadcastScheduledTaskList();
         broadcastSessionList();
-        broadcastScheduledTaskNotification(
-          isRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
-          task.resultSummary || task.prompt.slice(0, 200),
-          task.sessionId || "",
-          "completed"
-        );
+        if (task.notificationMode !== "quiet") {
+          broadcastScheduledTaskNotification(
+            isRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
+            task.resultSummary || task.prompt.slice(0, 200),
+            task.sessionId || "",
+            "completed"
+          );
+        }
         console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
       }).catch((err) => {
         clearInterval(registerInterval);
@@ -2936,12 +2974,14 @@ async function checkScheduledTasks(): Promise<void> {
         saveScheduledTask(task);
 
         broadcastScheduledTaskList();
-        broadcastScheduledTaskNotification(
-          isRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
-          currentRun.error || task.prompt.slice(0, 200),
-          task.sessionId || "",
-          "failed"
-        );
+        if (task.notificationMode !== "quiet") {
+          broadcastScheduledTaskNotification(
+            isRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
+            currentRun.error || task.prompt.slice(0, 200),
+            task.sessionId || "",
+            "failed"
+          );
+        }
         console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);
       });
 
@@ -2950,7 +2990,9 @@ async function checkScheduledTasks(): Promise<void> {
       task.error = err.message;
       saveScheduledTask(task);
       broadcastScheduledTaskList();
-      broadcastScheduledTaskNotification("Scheduled task failed", task.error!, "", "failed");
+      if (task.notificationMode !== "quiet") {
+        broadcastScheduledTaskNotification("Scheduled task failed", task.error!, "", "failed");
+      }
     }
   }
 }

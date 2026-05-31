@@ -291,6 +291,7 @@ export interface ScheduleTaskMessage {
     intervalMs?: number;
   };
   reuseSession?: boolean;
+  notificationMode?: "completion" | "quiet";
 }
 
 export interface ListScheduledTasksMessage {
@@ -312,6 +313,7 @@ export interface UpdateScheduledTaskMessage {
   scheduledTime?: string;
   recurrence?: { type: "once" | "daily" | "weekly" | "monthly" | "custom"; intervalMs?: number } | null;
   reuseSession?: boolean;
+  notificationMode?: "completion" | "quiet";
 }
 
 export interface DeleteScheduledTaskMessage {
@@ -729,7 +731,7 @@ export interface ScheduledTaskNotificationServerMessage {
   title: string;
   body: string;
   sessionId: string;
-  status?: "completed" | "failed";
+  status?: "completed" | "failed" | "manual";
 }
 
 // SDK event forwarding messages

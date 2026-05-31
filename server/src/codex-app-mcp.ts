@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   AppToolContext,
   handleMonitorTool,
+  handleNotifyUserTool,
   handleReadSkillTool,
   handleScheduleReminderTool,
   handleScheduleTaskTool,
@@ -120,6 +121,19 @@ function createServer(context: AppToolContext): McpServer {
   );
 
   server.registerTool(
+    "NotifyUser",
+    {
+      title: "Notify User",
+      description: "Send an immediate notification to the user's mobile device. Use this for important results, especially from quiet scheduled tasks.",
+      inputSchema: {
+        title: z.string().describe("Short notification title"),
+        body: z.string().optional().describe("Optional notification body"),
+      },
+    },
+    async (args) => handleNotifyUserTool(context, args as { title: string; body?: string }),
+  );
+
+  server.registerTool(
     "ScheduleTask",
     {
       title: "Schedule Task",
@@ -131,6 +145,7 @@ function createServer(context: AppToolContext): McpServer {
         recurrenceType: z.enum(["once", "daily", "weekly", "monthly", "custom"]).optional().describe("How often to repeat. Default: once"),
         customIntervalMs: z.number().optional().describe("Custom interval in milliseconds when recurrenceType is custom"),
         reuseSession: z.boolean().optional().describe("If true and recurring, reuse the same session for all occurrences"),
+        notificationMode: z.enum(["completion", "quiet"]).optional().describe("completion sends the normal completion notification. quiet sends no automatic notifications; the scheduled agent must call NotifyUser if the user should be alerted."),
       },
     },
     async (args) => handleScheduleTaskTool(context, args as any),

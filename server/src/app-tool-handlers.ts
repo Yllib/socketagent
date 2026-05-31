@@ -35,6 +35,11 @@ export interface ReminderArgs {
   scheduledTime: string;
 }
 
+export interface NotifyUserArgs {
+  title: string;
+  body?: string;
+}
+
 export interface ScheduleTaskArgs {
   prompt: string;
   cwd: string;
@@ -44,6 +49,7 @@ export interface ScheduleTaskArgs {
   recurrenceType?: "once" | "daily" | "weekly" | "monthly" | "custom";
   customIntervalMs?: number;
   reuseSession?: boolean;
+  notificationMode?: "completion" | "quiet";
 }
 
 export interface MonitorArgs {
@@ -219,6 +225,27 @@ export async function handleScheduleReminderTool(
   return { content: [{ type: "text", text: `Reminder scheduled: "${args.title}" at ${when}` }] };
 }
 
+export async function handleNotifyUserTool(
+  ctx: AppToolContext,
+  args: NotifyUserArgs,
+): Promise<McpTextResult> {
+  const title = args.title.trim();
+  const body = (args.body || "").trim();
+  if (!title) {
+    return { content: [{ type: "text", text: "NotifyUser error: title is required" }], isError: true };
+  }
+
+  ctx.send({
+    type: "scheduled_task_notification",
+    title,
+    body,
+    sessionId: ctx.getSessionId(),
+    status: "manual",
+  } as any);
+
+  return { content: [{ type: "text", text: `Notification sent: "${title}"` }] };
+}
+
 export async function handleScheduleTaskTool(
   ctx: AppToolContext,
   args: ScheduleTaskArgs,
@@ -252,6 +279,7 @@ export async function handleScheduleTaskTool(
     createdBySessionId: ctx.getSessionId() || undefined,
     recurrence,
     reuseSession: args.reuseSession || false,
+    notificationMode: args.notificationMode === "quiet" ? "quiet" : "completion",
     runCount: 0,
     runs: [],
   };
@@ -264,7 +292,8 @@ export async function handleScheduleTaskTool(
 
   const when = scheduledDate.toLocaleString();
   const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
-  return { content: [{ type: "text", text: `Task scheduled for ${when}${recurrenceLabel} in ${args.cwd}:\n"${args.prompt.slice(0, 300)}"` }] };
+  const notificationLabel = task.notificationMode === "quiet" ? " Quiet mode is on." : "";
+  return { content: [{ type: "text", text: `Task scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
 }
 
 function codexSkillsForContext(ctx: AppToolContext): SkillEntry[] {

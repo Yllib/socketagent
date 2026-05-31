@@ -249,6 +249,10 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("thread/read", params);
   }
 
+  async listCollaborationModes(): Promise<unknown> {
+    return this.request("collaborationMode/list", {});
+  }
+
   async request<T = unknown>(
     method: string,
     params: object | undefined,

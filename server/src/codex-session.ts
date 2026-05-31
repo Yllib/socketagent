@@ -46,6 +46,7 @@ import {
   saveSession,
   getSession,
   appendHistory,
+  appendSdkEvent,
   updateSessionActivity,
   updateSessionContextUsage,
   remapSession,
@@ -157,6 +158,7 @@ export class CodexSession {
   private _approvalsReviewer: CodexAppServerApprovalsReviewer = "user";
   private _permissionMode = "bypassPermissions";
   private _appendSystemPrompt = "";
+  private _collaborationMode = "default";
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   private _kokoroVoice = "af_heart";
   private _kokoroSpeed = 1.0;
@@ -202,6 +204,7 @@ export class CodexSession {
     return this._permissionMode;
   }
   get sessionModel(): string | null { return this._model; }
+  get lastUsage(): NonNullable<CodexSession["_lastUsage"]> | null { return this._lastUsage; }
   get activeBackgroundTasks(): Map<string, string> { return new Map(); }
   get lastPreview(): string { return ""; }
   getSessionId(): string | null { return this.sessionId; }
@@ -287,6 +290,13 @@ export class CodexSession {
   setThinking(_t: unknown): void {}
   setDisallowedTools(_t: string[]): void {}
   setAppendSystemPrompt(s: string): void { this._appendSystemPrompt = s; }
+  setCodexCollaborationMode(mode: string): void {
+    const trimmed = (mode || "default").trim();
+    this._collaborationMode = trimmed || "default";
+  }
+  getCodexCollaborationMode(): string {
+    return this._collaborationMode;
+  }
   setForkSource(_id: string): void {}
   setResumeSessionAt(_uuid: string): void {}
   setTtsEnabled(_b: boolean): void {}
@@ -350,6 +360,33 @@ export class CodexSession {
     if (!Number.isFinite(numTurns) || numTurns < 1) throw new Error("Rollback must drop at least one turn");
     await this.ensureAppServer();
     await this.appServer!.rollbackThread(threadId, Math.floor(numTurns));
+  }
+
+  async listCodexCollaborationModes(): Promise<Array<Record<string, unknown>>> {
+    if (this.codexDriver !== "app-server") {
+      return [{ id: "default", name: "Default" }];
+    }
+    await this.ensureAppServer();
+    const result = await this.appServer!.listCollaborationModes();
+    const rawModes = Array.isArray((result as any)?.modes)
+      ? (result as any).modes
+      : Array.isArray((result as any)?.data)
+        ? (result as any).data
+      : Array.isArray(result)
+        ? result
+        : [];
+    const modes: Array<Record<string, unknown>> = rawModes
+      .filter((mode: any) => mode && typeof mode === "object")
+      .map((mode: any) => ({
+        id: String(mode.id || mode.mode || mode.name || "default"),
+        name: String(mode.name || mode.title || mode.id || "Default"),
+        ...(mode.description ? { description: String(mode.description) } : {}),
+      }))
+      .filter((mode: Record<string, unknown>) => typeof mode.id === "string" && mode.id.length > 0);
+    if (!modes.some((mode) => mode.id === "default")) {
+      modes.unshift({ id: "default", name: "Default" });
+    }
+    return modes;
   }
 
   /**
@@ -1180,6 +1217,7 @@ export class CodexSession {
 
   private handleAppServerNotification(method: string, params: unknown): void {
     const p = params as any;
+    this.emitAppServerRawEvent(method, p);
     switch (method) {
       case "thread/started":
         this.adoptAppServerThread(p?.thread?.id || p?.threadId || null);
@@ -1328,6 +1366,15 @@ export class CodexSession {
           sessionId: this.sessionId,
           ...usage,
         } as any);
+        const contextUsage = this.contextUsageFromAppServerUsage(usage);
+        if (contextUsage) {
+          this.send({
+            type: "context_usage",
+            sessionId: this.sessionId,
+            ...contextUsage,
+          } as any);
+          updateSessionContextUsage(this.sessionId, contextUsage);
+        }
         updateSessionActivity(this.sessionId, this._lastAssistantText, usage);
         return;
       }
@@ -1996,6 +2043,38 @@ export class CodexSession {
     };
   }
 
+  private contextUsageFromAppServerUsage(usage: NonNullable<CodexSession["_lastUsage"]>): Record<string, unknown> | null {
+    if (!usage.contextWindow) return null;
+    const totalTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens;
+    return {
+      totalTokens,
+      maxTokens: usage.contextWindow,
+      remainingTokens: Math.max(0, usage.contextWindow - totalTokens),
+      percentUsed: usage.contextWindow > 0 ? totalTokens / usage.contextWindow : 0,
+      categories: [
+        ...(usage.cacheReadTokens > 0 ? [{ name: "Cached", tokens: usage.cacheReadTokens, color: "#89B4FA" }] : []),
+        ...(usage.cacheCreateTokens > 0 ? [{ name: "New cache", tokens: usage.cacheCreateTokens, color: "#A6E3A1" }] : []),
+        ...(usage.inputTokens > 0 ? [{ name: "Uncached", tokens: usage.inputTokens, color: "#F9E2AF" }] : []),
+      ],
+    };
+  }
+
+  private emitAppServerRawEvent(method: string, params: any): void {
+    const sid = String(this.sessionId || params?.threadId || params?.thread?.id || "");
+    const event = {
+      type: "sdk_event",
+      sdkType: "codex_app_server",
+      method,
+      params,
+      sessionId: sid,
+      ts: now(),
+    };
+    if (sid) {
+      appendSdkEvent(sid, event);
+    }
+    this.send(event as any);
+  }
+
   // ─── Event translation: codex JSONL → SocketAgent ServerMessage ─────
 
   private handleEvent(evt: CodexEvent): void {
@@ -2460,12 +2539,12 @@ export class CodexSession {
 
   private codexCollaborationMode(): Record<string, unknown> | undefined {
     const developerInstructions = this.codexDeveloperInstructions();
-    if (!developerInstructions) return undefined;
+    if (!developerInstructions && this._collaborationMode === "default") return undefined;
     return {
-      mode: "default",
-      settings: {
-        developer_instructions: developerInstructions,
-      },
+      mode: this._collaborationMode,
+      ...(developerInstructions
+        ? { settings: { developer_instructions: developerInstructions } }
+        : {}),
     };
   }
 
@@ -2593,6 +2672,18 @@ export async function archiveCodexAppServerThread(threadId: string, cwd: string)
 export async function unarchiveCodexAppServerThread(threadId: string, cwd: string): Promise<void> {
   await withStandaloneAppServerClient(cwd, async (client) => {
     await client.unarchiveThread(threadId);
+  });
+}
+
+export async function compactCodexAppServerThread(threadId: string, cwd: string): Promise<void> {
+  await withStandaloneAppServerClient(cwd, async (client) => {
+    await client.compactThread(threadId);
+  });
+}
+
+export async function rollbackCodexAppServerThread(threadId: string, cwd: string, numTurns: number): Promise<void> {
+  await withStandaloneAppServerClient(cwd, async (client) => {
+    await client.rollbackThread(threadId, numTurns);
   });
 }
 

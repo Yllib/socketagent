@@ -127,6 +127,21 @@ export interface CompactContextMessage {
   sessionId?: string;
 }
 
+export interface CodexRollbackThreadMessage {
+  type: "codex_rollback_thread";
+  sessionId?: string;
+  numTurns: number;
+}
+
+export interface CodexCollaborationModesMessage {
+  type: "codex_collaboration_modes";
+}
+
+export interface SetCodexCollaborationModeMessage {
+  type: "set_codex_collaboration_mode";
+  mode: string;
+}
+
 export interface ArchiveSessionMessage {
   type: "archive_session";
   sessionId: string;
@@ -330,10 +345,13 @@ export type ClientMessage =
   | ListSessionsMessage
   | GetServerSettingsMessage
   | SetCodexDriverMessage
+  | CodexCollaborationModesMessage
+  | SetCodexCollaborationModeMessage
   | DeleteSessionMessage
   | RenameSessionMessage
   | ClearContextMessage
   | CompactContextMessage
+  | CodexRollbackThreadMessage
   | ArchiveSessionMessage
   | AbortMessage
   | InterruptMessage

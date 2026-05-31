@@ -8,7 +8,7 @@ import * as path from "path";
 import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
-import { CodexSession, archiveCodexAppServerThread, createSession, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
+import { CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
@@ -322,6 +322,7 @@ function createConnectionHandler(transport: ClientTransport) {
   let pendingThinking: { type: 'adaptive' } | { type: 'enabled'; budgetTokens: number } | { type: 'disabled' } = { type: 'adaptive' };
   let pendingDisallowedTools: string[] = [];
   let pendingSystemPrompt: string = '';
+  let pendingCodexCollaborationMode = 'default';
 
   // Track active file uploads from the app
   const activeUploads = new Map<string, {
@@ -389,6 +390,7 @@ function createConnectionHandler(transport: ClientTransport) {
         backends: detectAvailableBackends(),
         codexDriver: settings.codexDriver,
         codexDriversAvailable: settings.codexDriversAvailable,
+        codexCollaborationMode: pendingCodexCollaborationMode,
       });
       return;
     }
@@ -398,6 +400,7 @@ function createConnectionHandler(transport: ClientTransport) {
         sendJson({
           type: "server_settings",
           ...getAdvertisedServerSettings(),
+          codexCollaborationMode: pendingCodexCollaborationMode,
         });
         break;
       }
@@ -416,6 +419,47 @@ function createConnectionHandler(transport: ClientTransport) {
           type: "server_settings",
           codexDriver: settings.codexDriver,
           codexDriversAvailable: available,
+          codexCollaborationMode: pendingCodexCollaborationMode,
+        });
+        break;
+      }
+
+      case "codex_collaboration_modes": {
+        const fallback = [{ id: "default", name: "Default" }];
+        if (!(activeSession instanceof CodexSession)) {
+          sendJson({
+            type: "codex_collaboration_modes",
+            modes: fallback,
+            currentMode: pendingCodexCollaborationMode,
+          });
+          break;
+        }
+        activeSession.listCodexCollaborationModes().then((modes) => {
+          sendJson({
+            type: "codex_collaboration_modes",
+            modes: modes.length > 0 ? modes : fallback,
+            currentMode: pendingCodexCollaborationMode,
+          });
+        }).catch((e: any) => {
+          sendJson({
+            type: "codex_collaboration_modes",
+            modes: fallback,
+            currentMode: pendingCodexCollaborationMode,
+            error: e.message || String(e),
+          });
+        });
+        break;
+      }
+
+      case "set_codex_collaboration_mode": {
+        const mode = String((msg as any).mode || "default").trim() || "default";
+        pendingCodexCollaborationMode = mode;
+        if (activeSession instanceof CodexSession) {
+          activeSession.setCodexCollaborationMode(mode);
+        }
+        sendJson({
+          type: "codex_collaboration_mode_changed",
+          mode,
         });
         break;
       }
@@ -453,6 +497,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setThinking(pendingThinking);
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
+        (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
 
         addRecentCwd(cwd);
         sendJson({
@@ -524,6 +569,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setThinking(pendingThinking);
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
+        (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
 
 
         // Register this client so /continue can find the real WebSocket
@@ -712,9 +758,14 @@ function createConnectionHandler(transport: ClientTransport) {
           await restorePersistedPermissionMode(activeSession, savedPromptSession);
           activeSessionId = savedResumeId || null;
           activeSession.setTtsEnabled(pendingTtsEnabled);
+          activeSession.setTtsEngine(pendingTtsEngine);
+          activeSession.setKokoroVoice(pendingKokoroVoice);
+          activeSession.setKokoroSpeed(pendingKokoroSpeed);
           activeSession.setEffort(pendingEffort);
           activeSession.setThinking(pendingThinking);
-  
+          activeSession.setDisallowedTools(pendingDisallowedTools);
+          activeSession.setAppendSystemPrompt(pendingSystemPrompt);
+          (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
         }
 
         // If session is already running, inject the message inline between turns
@@ -1191,8 +1242,20 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "compact_context": {
         const targetSid = (msg as any).sessionId || activeSession?.getSessionId() || activeSessionId;
-        const targetSession = targetSid ? activeSessions.get(targetSid) || activeSession : activeSession;
+        const targetSession = targetSid
+          ? activeSessions.get(targetSid) || (activeSession?.getSessionId() === targetSid ? activeSession : null)
+          : activeSession;
         if (!targetSession) {
+          const sessionInfo = targetSid ? getSession(targetSid) : undefined;
+          if (sessionInfo?.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server") {
+            compactCodexAppServerThread(targetSid, sessionInfo.cwd).then(() => {
+              sendJson({ type: "codex_compact_result", sessionId: targetSid, success: true });
+            }).catch((e: any) => {
+              sendJson({ type: "codex_compact_result", sessionId: targetSid, success: false, error: e.message || String(e) });
+              sendJson({ type: "error", message: `Codex compact failed: ${e.message || String(e)}` });
+            });
+            break;
+          }
           sendJson({ type: "error", message: "No active session to compact" });
           break;
         }
@@ -1201,12 +1264,43 @@ function createConnectionHandler(transport: ClientTransport) {
             sendJson({ type: "error", message: "Codex compaction is only supported in App Server mode" });
             break;
           }
-          targetSession.compactAppServerThread(targetSid || undefined).catch((e: any) => {
+          targetSession.compactAppServerThread(targetSid || undefined).then(() => {
+            sendJson({ type: "codex_compact_result", sessionId: targetSid || "", success: true });
+          }).catch((e: any) => {
+            sendJson({ type: "codex_compact_result", sessionId: targetSid || "", success: false, error: e.message || String(e) });
             sendJson({ type: "error", message: `Codex compact failed: ${e.message || String(e)}` });
           });
           break;
         }
         sendJson({ type: "error", message: "Manual compact is not supported for this backend through SocketAgent yet" });
+        break;
+      }
+
+      case "codex_rollback_thread": {
+        const targetSid = (msg as any).sessionId || activeSession?.getSessionId() || activeSessionId;
+        const numTurns = Math.max(1, Math.floor(Number((msg as any).numTurns || 1)));
+        if (!targetSid) {
+          sendJson({ type: "codex_rollback_result", sessionId: "", success: false, error: "No Codex thread selected" });
+          break;
+        }
+        const targetSession = activeSessions.get(targetSid) || (activeSession?.getSessionId() === targetSid ? activeSession : null);
+        const sessionInfo = getSession(targetSid);
+        const runRollback = targetSession instanceof CodexSession
+          ? targetSession.rollbackAppServerThread(numTurns, targetSid)
+          : sessionInfo?.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server"
+            ? rollbackCodexAppServerThread(targetSid, sessionInfo.cwd, numTurns)
+            : Promise.reject(new Error("Codex rollback is only supported for App Server threads"));
+        runRollback.then(() => {
+          appendHistory(targetSid, {
+            role: "system",
+            content: `Rolled back ${numTurns} Codex turn${numTurns === 1 ? "" : "s"}`,
+            timestamp: new Date().toISOString(),
+          } as any);
+          sendJson({ type: "codex_rollback_result", sessionId: targetSid, success: true, numTurns });
+        }).catch((e: any) => {
+          sendJson({ type: "codex_rollback_result", sessionId: targetSid, success: false, numTurns, error: e.message || String(e) });
+          sendJson({ type: "error", message: `Codex rollback failed: ${e.message || String(e)}` });
+        });
         break;
       }
 
@@ -1713,6 +1807,22 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "get_context_usage": {
+        if (activeSession instanceof CodexSession) {
+          const usage = activeSession.lastUsage;
+          if (usage) {
+            sendJson({
+              type: "context_usage",
+              sessionId: activeSession.getSessionId() || activeSessionId || "",
+              totalTokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens,
+              maxTokens: usage.contextWindow,
+              remainingTokens: Math.max(0, usage.contextWindow - usage.inputTokens - usage.cacheReadTokens - usage.cacheCreateTokens),
+              percentUsed: usage.contextWindow > 0
+                ? (usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens) / usage.contextWindow
+                : 0,
+            });
+          }
+          break;
+        }
         if (activeSession && activeSession.isRunning) {
           (activeSession as any).activeQuery?.getContextUsage().then((ctx: any) => {
             if (ctx) {
@@ -1859,6 +1969,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setThinking(pendingThinking);
           activeSession.setDisallowedTools(pendingDisallowedTools);
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
+          (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
   
           activeSession.setResumeSessionAt(uuid);
           // Store the session ID so the next prompt resumes this session at the rewind point
@@ -1957,6 +2068,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setThinking(pendingThinking);
           activeSession.setDisallowedTools(pendingDisallowedTools);
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
+          (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
   
           (activeSession as any)._resumeSessionId = newSessionId;
 
@@ -2023,6 +2135,7 @@ function createConnectionHandler(transport: ClientTransport) {
             forked.setThinking(pendingThinking);
             forked.setDisallowedTools(pendingDisallowedTools);
             forked.setAppendSystemPrompt(pendingSystemPrompt);
+            forked.setCodexCollaborationMode(pendingCodexCollaborationMode);
             const { threadId: newSessionId } = await forked.forkAppServerThread(sourceId);
             const sourceHistory = getHistory(sourceId);
             appendHistoryBulk(newSessionId, sourceHistory.map((entry) => ({ ...entry })));
@@ -2077,6 +2190,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setThinking(pendingThinking);
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
+        (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
 
         activeSession.setForkSource(sourceId);
         sendJson({

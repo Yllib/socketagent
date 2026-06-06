@@ -318,6 +318,11 @@ export interface CancelScheduledTaskMessage {
   taskId: string;
 }
 
+export interface ExecuteScheduledTaskMessage {
+  type: "execute_scheduled_task";
+  taskId: string;
+}
+
 export interface UpdateScheduledTaskMessage {
   type: "update_scheduled_task";
   taskId: string;
@@ -387,6 +392,7 @@ export type ClientMessage =
   | ScheduleTaskMessage
   | ListScheduledTasksMessage
   | CancelScheduledTaskMessage
+  | ExecuteScheduledTaskMessage
   | UpdateScheduledTaskMessage
   | DeleteScheduledTaskMessage
   | ListArchivesMessage

@@ -150,6 +150,7 @@ export class CodexSession {
   private appServerFileChangePaths = new Map<string, string[]>();
   private appServerSeenUserMessageItems = new Set<string>();
   private _isCompacting = false;
+  private _compactBoundaryEmitted = false;
   private _isRunning = false;
   private _model: string | null = null;
   private _effort: "low" | "medium" | "high" | "max" = "high";
@@ -348,6 +349,7 @@ export class CodexSession {
     if (!threadId) throw new Error("No Codex thread id to compact");
     await this.ensureAppServer();
     this._isCompacting = true;
+    this._compactBoundaryEmitted = false;
     this.send({ type: "compacting", active: true, sessionId: threadId } as any);
     await this.appServer!.compactThread(threadId);
   }
@@ -1257,6 +1259,7 @@ export class CodexSession {
         if (!sid) return;
         this._isCompacting = false;
         this.send({ type: "compacting", active: false, sessionId: sid } as any);
+        this.emitCompactBoundary(sid, "manual");
         return;
       }
 
@@ -1573,21 +1576,12 @@ export class CodexSession {
     if (item.type === "contextCompaction") {
       if (method === "item/started") {
         this._isCompacting = true;
+        this._compactBoundaryEmitted = false;
         this.send({ type: "compacting", active: true, sessionId: sid } as any);
       } else {
         this._isCompacting = false;
         this.send({ type: "compacting", active: false, sessionId: sid } as any);
-        this.send({
-          type: "compact_boundary",
-          trigger: "manual",
-          preTokens: 0,
-          sessionId: sid,
-        } as any);
-        appendHistory(sid, {
-          role: "assistant",
-          content: "[compact_boundary:0:manual]",
-          timestamp: now(),
-        });
+        this.emitCompactBoundary(sid, "manual");
       }
       return;
     }
@@ -2072,6 +2066,29 @@ export class CodexSession {
         ...(usage.inputTokens > 0 ? [{ name: "Uncached", tokens: usage.inputTokens, color: "#F9E2AF" }] : []),
       ],
     };
+  }
+
+  private currentContextTokenTotal(): number {
+    const usage = this._lastUsage;
+    if (!usage) return 0;
+    return Math.max(0, usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens);
+  }
+
+  private emitCompactBoundary(sid: string, trigger: string): void {
+    if (this._compactBoundaryEmitted) return;
+    this._compactBoundaryEmitted = true;
+    const preTokens = this.currentContextTokenTotal();
+    this.send({
+      type: "compact_boundary",
+      trigger,
+      preTokens,
+      sessionId: sid,
+    } as any);
+    appendHistory(sid, {
+      role: "assistant",
+      content: `[compact_boundary:${preTokens}:${trigger}]`,
+      timestamp: now(),
+    });
   }
 
   private emitAppServerRawEvent(method: string, params: any): void {

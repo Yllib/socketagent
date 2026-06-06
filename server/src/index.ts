@@ -1071,6 +1071,22 @@ function createConnectionHandler(transport: ClientTransport) {
         break;
       }
 
+      case "execute_scheduled_task": {
+        const task = getScheduledTask((msg as any).taskId);
+        if (!task) {
+          sendJson({ type: "error", message: "Scheduled task not found" });
+          break;
+        }
+        if (task.status === "running") {
+          sendJson({ type: "error", message: "Scheduled task is already running" });
+          break;
+        }
+        executeScheduledTask(task, "manual").catch((err: any) => {
+          console.error(`[Scheduler] Manual task ${task.id} failed before launch: ${err?.message || err}`);
+        });
+        break;
+      }
+
       case "update_scheduled_task": {
         const task = getScheduledTask((msg as any).taskId);
         if (task && (task.status === "pending" || task.status === "cancelled" || task.status === "running")) {
@@ -1348,7 +1364,9 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "get_archive_history": {
         const { sid, ts } = msg as any;
-        const entries = getArchiveHistory(sid, ts);
+        const entries = isCodexNativeArchiveTs(ts)
+          ? await readCodexAppServerThreadHistory(sid)
+          : getArchiveHistory(sid, ts);
         sendJson({ type: "archive_history", sid, ts, messages: entries });
         break;
       }
@@ -2953,197 +2971,214 @@ function applyLatestScheduledTaskEditableFields(task: ScheduledTask): void {
   task.notificationMode = latest.notificationMode;
 }
 
-async function checkScheduledTasks(): Promise<void> {
-  const dueTasks = getDueTasks();
-  for (const task of dueTasks) {
-    // Mark as running immediately to prevent double-execution
-    task.status = "running";
-    saveScheduledTask(task);
-    broadcastScheduledTaskList();
+function finishManualScheduledTask(task: ScheduledTask, originalStatus: ScheduledTask["status"], success: boolean): void {
+  if (originalStatus === "pending") {
+    task.status = "pending";
+    if (success) task.error = undefined;
+    return;
+  }
+  task.status = success ? "completed" : "failed";
+}
 
-    const isRecurring = task.recurrence && task.recurrence.type !== "once";
-    const runNumber = (task.runCount || 0) + 1;
-    console.log(`[Scheduler] Executing task ${task.id} (run #${runNumber}): ${task.prompt.slice(0, 80)}`);
+async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | "manual" = "scheduled"): Promise<void> {
+  if (task.status === "running") return;
 
-    try {
-      // Verify CWD exists
-      if (!fs.existsSync(task.cwd)) {
-        task.status = "failed";
-        task.error = `Directory not found: ${task.cwd}`;
-        saveScheduledTask(task);
-        broadcastScheduledTaskList();
-        if (task.notificationMode !== "quiet") {
-          broadcastScheduledTaskNotification("Scheduled task failed", task.error, "", "failed");
-        }
-        continue;
-      }
+  const manualRun = trigger === "manual";
+  const originalStatus = task.status;
+  task.status = "running";
+  saveScheduledTask(task);
+  broadcastScheduledTaskList();
 
-      // Determine if we should resume an existing session
-      const shouldResume = task.reuseSession && task.sessionId;
-      const reusableSessionInfo = shouldResume && task.sessionId ? getSession(task.sessionId) : undefined;
-      const backend = task.backend
-        || reusableSessionInfo?.backend
-        || "claude";
-      task.backend = backend;
-      const codexDriver = backend === "codex"
-        ? resolveCodexDriver(
-          task.codexDriver
-            || (reusableSessionInfo as any)?.codexDriver
-            || undefined
-        )
-        : undefined;
-      if (codexDriver) task.codexDriver = codexDriver;
-      else task.codexDriver = undefined;
-      saveScheduledTask(task);
+  const runNumber = (task.runCount || 0) + 1;
+  console.log(`[Scheduler] Executing ${trigger} task ${task.id} (run #${runNumber}): ${task.prompt.slice(0, 80)}`);
 
-      // Create headless session (same pattern as /continue endpoint)
-      let session: Session;
-      const ws = {
-        readyState: WebSocket.OPEN,
-        send: (data: string) => forwardHeadlessScheduledAgentMessage(data, session?.getSessionId() || task.sessionId || ""),
-      } as any;
-      session = createSession(backend, ws, task.cwd, plugins, codexDriver);
-      await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
-      session.onActivity = () => scheduleBroadcast();
-
-      // If reusing session, set the resume ID so SDK continues that session
-      if (shouldResume) {
-        (session as any)._resumeSessionId = task.sessionId;
-        console.log(`[Scheduler] Reusing ${backend} session ${task.sessionId}`);
-      }
-
-      const tempId = `scheduled-${task.id}`;
-      activeSessions.set(tempId, session);
-
-      // Track this run
-      const currentRun: import("./scheduled-task-store").TaskRun = {
-        sessionId: "", // will be filled in
-        ...(codexDriver ? { codexDriver } : {}),
-        startedAt: new Date().toISOString(),
-        status: "running",
-      };
-
-      // Poll for real session ID
-      const registerInterval = setInterval(() => {
-        const sid = session.getSessionId();
-        if (sid && sid !== tempId) {
-          clearInterval(registerInterval);
-          activeSessions.delete(tempId);
-          activeSessions.set(sid, session);
-          task.sessionId = sid;
-          currentRun.sessionId = sid;
-          saveScheduledTask(task);
-          broadcastSessionList();
-        }
-      }, 500);
-      setTimeout(() => clearInterval(registerInterval), 30000);
-
-      // Use resumeSessionId for session reuse, otherwise undefined for new session
-      const resumeId = shouldResume ? task.sessionId : undefined;
-
-      session.runQuery(scheduledTaskPrompt(task), resumeId).then(() => {
-        clearInterval(registerInterval);
-        const sid = session.getSessionId() || tempId;
-        task.sessionId = sid;
-        currentRun.sessionId = sid;
-        currentRun.completedAt = new Date().toISOString();
-        currentRun.status = "completed";
-        currentRun.resultSummary = (session as any)._lastPreview || "Task completed";
-
-        task.resultSummary = currentRun.resultSummary;
-        task.runCount = runNumber;
-        task.lastRunAt = new Date().toISOString();
-        if (!task.runs) task.runs = [];
-        task.runs.push(currentRun);
-        applyLatestScheduledTaskEditableFields(task);
-
-        if (activeSessions.get(sid) === session) activeSessions.delete(sid);
-        if (activeSessions.get(tempId) === session) activeSessions.delete(tempId);
-
-        // For recurring tasks, schedule the next run
-        const runIsRecurring = task.recurrence && task.recurrence.type !== "once";
-        if (runIsRecurring) {
-          const nextTime = getNextRunTime(task);
-          if (nextTime) {
-            task.status = "pending";
-            task.scheduledTime = nextTime;
-            task.error = undefined;
-            console.log(`[Scheduler] Task ${task.id} next run at ${nextTime}`);
-          } else {
-            task.status = "completed";
-          }
-        } else {
-          task.status = "completed";
-        }
-        saveScheduledTask(task);
-
-        broadcastScheduledTaskList();
-        broadcastSessionList();
-        if (task.notificationMode !== "quiet") {
-          broadcastScheduledTaskNotification(
-            runIsRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
-            task.resultSummary || task.prompt,
-            task.sessionId || "",
-            "completed"
-          );
-        }
-        console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
-      }).catch((err) => {
-        clearInterval(registerInterval);
-        const sid = session.getSessionId() || tempId;
-        task.sessionId = sid !== tempId ? sid : undefined;
-        currentRun.sessionId = sid !== tempId ? sid : "";
-        currentRun.completedAt = new Date().toISOString();
-        currentRun.status = "failed";
-        currentRun.error = err.message || "Unknown error";
-
-        task.error = currentRun.error;
-        task.runCount = runNumber;
-        task.lastRunAt = new Date().toISOString();
-        if (!task.runs) task.runs = [];
-        task.runs.push(currentRun);
-        applyLatestScheduledTaskEditableFields(task);
-
-        activeSessions.delete(tempId);
-        if (sid !== tempId) activeSessions.delete(sid);
-
-        // For recurring tasks, still schedule next run even if this one failed
-        const runIsRecurring = task.recurrence && task.recurrence.type !== "once";
-        if (runIsRecurring) {
-          const nextTime = getNextRunTime(task);
-          if (nextTime) {
-            task.status = "pending";
-            task.scheduledTime = nextTime;
-            console.log(`[Scheduler] Task ${task.id} failed but rescheduled for ${nextTime}`);
-          } else {
-            task.status = "failed";
-          }
-        } else {
-          task.status = "failed";
-        }
-        saveScheduledTask(task);
-
-        broadcastScheduledTaskList();
-        if (task.notificationMode !== "quiet") {
-          broadcastScheduledTaskNotification(
-            runIsRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
-            currentRun.error || task.prompt,
-            task.sessionId || "",
-            "failed"
-          );
-        }
-        console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);
-      });
-
-    } catch (err: any) {
-      task.status = "failed";
-      task.error = err.message;
+  try {
+    if (!fs.existsSync(task.cwd)) {
+      task.error = `Directory not found: ${task.cwd}`;
+      if (manualRun) finishManualScheduledTask(task, originalStatus, false);
+      else task.status = "failed";
       saveScheduledTask(task);
       broadcastScheduledTaskList();
       if (task.notificationMode !== "quiet") {
-        broadcastScheduledTaskNotification("Scheduled task failed", task.error!, "", "failed");
+        broadcastScheduledTaskNotification("Scheduled task failed", task.error, "", "failed");
       }
+      return;
     }
+
+    const shouldResume = task.reuseSession && task.sessionId;
+    const reusableSessionInfo = shouldResume && task.sessionId ? getSession(task.sessionId) : undefined;
+    const backend = task.backend
+      || reusableSessionInfo?.backend
+      || "claude";
+    task.backend = backend;
+    const codexDriver = backend === "codex"
+      ? resolveCodexDriver(
+        task.codexDriver
+          || (reusableSessionInfo as any)?.codexDriver
+          || undefined
+      )
+      : undefined;
+    if (codexDriver) task.codexDriver = codexDriver;
+    else task.codexDriver = undefined;
+    saveScheduledTask(task);
+
+    let session: Session;
+    const ws = {
+      readyState: WebSocket.OPEN,
+      send: (data: string) => forwardHeadlessScheduledAgentMessage(data, session?.getSessionId() || task.sessionId || ""),
+    } as any;
+    session = createSession(backend, ws, task.cwd, plugins, codexDriver);
+    await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
+    session.onActivity = () => scheduleBroadcast();
+
+    if (shouldResume) {
+      (session as any)._resumeSessionId = task.sessionId;
+      console.log(`[Scheduler] Reusing ${backend} session ${task.sessionId}`);
+    }
+
+    const tempId = `scheduled-${task.id}`;
+    activeSessions.set(tempId, session);
+
+    const currentRun: import("./scheduled-task-store").TaskRun = {
+      sessionId: "",
+      ...(codexDriver ? { codexDriver } : {}),
+      startedAt: new Date().toISOString(),
+      status: "running",
+    };
+
+    const registerInterval = setInterval(() => {
+      const sid = session.getSessionId();
+      if (sid && sid !== tempId) {
+        clearInterval(registerInterval);
+        activeSessions.delete(tempId);
+        activeSessions.set(sid, session);
+        task.sessionId = sid;
+        currentRun.sessionId = sid;
+        saveScheduledTask(task);
+        broadcastSessionList();
+      }
+    }, 500);
+    setTimeout(() => clearInterval(registerInterval), 30000);
+
+    const resumeId = shouldResume ? task.sessionId : undefined;
+
+    session.runQuery(scheduledTaskPrompt(task), resumeId).then(() => {
+      clearInterval(registerInterval);
+      const sid = session.getSessionId() || tempId;
+      task.sessionId = sid;
+      currentRun.sessionId = sid;
+      currentRun.completedAt = new Date().toISOString();
+      currentRun.status = "completed";
+      currentRun.resultSummary = (session as any)._lastPreview || "Task completed";
+
+      task.resultSummary = currentRun.resultSummary;
+      task.runCount = runNumber;
+      task.lastRunAt = new Date().toISOString();
+      if (!task.runs) task.runs = [];
+      task.runs.push(currentRun);
+      applyLatestScheduledTaskEditableFields(task);
+
+      if (activeSessions.get(sid) === session) activeSessions.delete(sid);
+      if (activeSessions.get(tempId) === session) activeSessions.delete(tempId);
+
+      const runIsRecurring = !manualRun && task.recurrence && task.recurrence.type !== "once";
+      if (manualRun) {
+        finishManualScheduledTask(task, originalStatus, true);
+      } else if (runIsRecurring) {
+        const nextTime = getNextRunTime(task);
+        if (nextTime) {
+          task.status = "pending";
+          task.scheduledTime = nextTime;
+          task.error = undefined;
+          console.log(`[Scheduler] Task ${task.id} next run at ${nextTime}`);
+        } else {
+          task.status = "completed";
+        }
+      } else {
+        task.status = "completed";
+      }
+      saveScheduledTask(task);
+
+      broadcastScheduledTaskList();
+      broadcastSessionList();
+      if (task.notificationMode !== "quiet") {
+        broadcastScheduledTaskNotification(
+          manualRun
+            ? "Scheduled task run complete"
+            : runIsRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
+          task.resultSummary || task.prompt,
+          task.sessionId || "",
+          "completed"
+        );
+      }
+      console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
+    }).catch((err) => {
+      clearInterval(registerInterval);
+      const sid = session.getSessionId() || tempId;
+      task.sessionId = sid !== tempId ? sid : undefined;
+      currentRun.sessionId = sid !== tempId ? sid : "";
+      currentRun.completedAt = new Date().toISOString();
+      currentRun.status = "failed";
+      currentRun.error = err.message || "Unknown error";
+
+      task.error = currentRun.error;
+      task.runCount = runNumber;
+      task.lastRunAt = new Date().toISOString();
+      if (!task.runs) task.runs = [];
+      task.runs.push(currentRun);
+      applyLatestScheduledTaskEditableFields(task);
+
+      activeSessions.delete(tempId);
+      if (sid !== tempId) activeSessions.delete(sid);
+
+      const runIsRecurring = !manualRun && task.recurrence && task.recurrence.type !== "once";
+      if (manualRun) {
+        finishManualScheduledTask(task, originalStatus, false);
+      } else if (runIsRecurring) {
+        const nextTime = getNextRunTime(task);
+        if (nextTime) {
+          task.status = "pending";
+          task.scheduledTime = nextTime;
+          console.log(`[Scheduler] Task ${task.id} failed but rescheduled for ${nextTime}`);
+        } else {
+          task.status = "failed";
+        }
+      } else {
+        task.status = "failed";
+      }
+      saveScheduledTask(task);
+
+      broadcastScheduledTaskList();
+      if (task.notificationMode !== "quiet") {
+        broadcastScheduledTaskNotification(
+          manualRun
+            ? "Scheduled task run failed"
+            : runIsRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
+          currentRun.error || task.prompt,
+          task.sessionId || "",
+          "failed"
+        );
+      }
+      console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);
+    });
+  } catch (err: any) {
+    task.error = err.message;
+    if (manualRun) finishManualScheduledTask(task, originalStatus, false);
+    else task.status = "failed";
+    saveScheduledTask(task);
+    broadcastScheduledTaskList();
+    if (task.notificationMode !== "quiet") {
+      broadcastScheduledTaskNotification("Scheduled task failed", task.error!, "", "failed");
+    }
+  }
+}
+
+async function checkScheduledTasks(): Promise<void> {
+  const dueTasks = getDueTasks();
+  for (const task of dueTasks) {
+    executeScheduledTask(task).catch((err: any) => {
+      console.error(`[Scheduler] Task ${task.id} failed before launch: ${err?.message || err}`);
+    });
   }
 }
 

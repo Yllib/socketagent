@@ -242,6 +242,12 @@ export async function handleNotifyUserTool(
     sessionId: ctx.getSessionId(),
     status: "manual",
   } as any);
+  ctx.appendHistory?.({
+    role: "notification",
+    content: body ? `${title}\n${body}` : title,
+    status: "manual",
+    timestamp: new Date().toISOString(),
+  });
 
   return { content: [{ type: "text", text: `Notification sent: "${title}"` }] };
 }

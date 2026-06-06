@@ -19,7 +19,7 @@ FLUTTER_BIN="${FLUTTER_BIN:-/opt/flutter/bin}"
 export PATH="$FLUTTER_BIN:/home/rdp/Android/Sdk/platform-tools:$PATH"
 
 # ── Remote build config ──
-REMOTE_HOST="billy@10.10.10.188"
+REMOTE_HOST="billy@10.10.10.69"
 REMOTE_DIR="C:/Users/billy/socketagent-app-build"
 REMOTE_FLUTTER="C:/Users/billy/Downloads/flutter/flutter/bin/flutter.bat"
 REMOTE_ANDROID_HOME="C:/Users/billy/AppData/Local/Android/Sdk"

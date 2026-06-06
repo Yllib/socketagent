@@ -734,6 +734,8 @@ export interface ArchiveEntry {
   hasJsonl: boolean;
 }
 
+const CODEX_NATIVE_ARCHIVE_TS_PREFIX = "codex-native-";
+
 const ARCHIVE_SUFFIXES: Array<[string, string]> = [
   ["_codex-rollout.jsonl", "codex-rollout"],
   ["_sdk-events.jsonl", "sdk-events"],
@@ -852,6 +854,20 @@ export function listArchives(): ArchiveEntry[] {
     });
   }
 
+  for (const native of listCodexNativeArchives()) {
+    const existingIdx = entries.findIndex((entry) => entry.sid === native.sid && entry.backend === "codex");
+    if (existingIdx >= 0) {
+      entries[existingIdx] = {
+        ...native,
+        title: entries[existingIdx].title || native.title,
+        messagePreview: entries[existingIdx].messagePreview || native.messagePreview,
+        messageCount: entries[existingIdx].messageCount || native.messageCount,
+      };
+    } else {
+      entries.push(native);
+    }
+  }
+
   return entries.sort((a, b) => b.clearedAt.localeCompare(a.clearedAt));
 }
 
@@ -874,6 +890,26 @@ export function getArchiveHistory(sid: string, ts: string): HistoryEntry[] {
 
 export function restoreArchive(sid: string, ts: string): { ok: true; session: SessionInfo } | { ok: false; reason: string } {
   ensureArchiveDir();
+
+  if (isCodexNativeArchiveTs(ts)) {
+    const native = getCodexThreadSessionInfo(sid);
+    if (!native) return { ok: false, reason: "Codex thread not found" };
+    const restoredAt = new Date().toISOString();
+    const sessions = readStore();
+    const existingIdx = sessions.findIndex((s) => s.id === sid);
+    const restored: SessionInfo = {
+      ...native,
+      lastActive: restoredAt,
+      codexDriver: "app-server",
+    } as SessionInfo;
+    if (existingIdx >= 0) {
+      sessions[existingIdx] = restored;
+    } else {
+      sessions.push(restored);
+    }
+    writeStore(sessions);
+    return { ok: true, session: restored };
+  }
 
   const metaPath = path.join(ARCHIVE_DIR, `${sid}_${ts}_meta.json`);
   const jsonlArchive = path.join(ARCHIVE_DIR, `${sid}_${ts}.jsonl`);
@@ -934,7 +970,12 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     fs.renameSync(jsonlArchive, liveJsonl);
   }
   if (fs.existsSync(codexRolloutArchive)) {
-    const liveCodexRollout = codexRolloutPath || findCodexRolloutFile(sid) || buildCodexRolloutRestorePath(sid, codexRolloutArchive);
+    const homeDir = process.env.HOME || require("os").homedir();
+    const archivedRoot = path.resolve(path.join(homeDir, ".codex", "archived_sessions"));
+    const metaRolloutPath = codexRolloutPath && !path.resolve(codexRolloutPath).startsWith(archivedRoot + path.sep)
+      ? codexRolloutPath
+      : "";
+    const liveCodexRollout = metaRolloutPath || buildCodexRolloutRestorePath(sid, codexRolloutArchive) || findCodexRolloutFile(sid);
     if (!liveCodexRollout) {
       return { ok: false, reason: "cannot determine Codex rollout path for this archive" };
     }
@@ -1005,6 +1046,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
 
 export function deleteArchive(sid: string, ts: string): void {
   ensureArchiveDir();
+  if (isCodexNativeArchiveTs(ts)) return;
   for (const suffix of [".jsonl", "_codex-rollout.jsonl", "_history.json", "_todos.json", "_sdk-events.jsonl", "_meta.json"]) {
     const p = path.join(ARCHIVE_DIR, `${sid}_${ts}${suffix}`);
     if (fs.existsSync(p)) {
@@ -1012,6 +1054,10 @@ export function deleteArchive(sid: string, ts: string): void {
       console.log(`[DeleteArchive] Removed ${sid}_${ts}${suffix}`);
     }
   }
+}
+
+export function isCodexNativeArchiveTs(ts: string): boolean {
+  return ts.startsWith(CODEX_NATIVE_ARCHIVE_TS_PREFIX);
 }
 
 /** On startup, close out any tool_calls that never got a result (e.g. server crashed mid-query) */
@@ -1355,6 +1401,128 @@ function findCodexRolloutPathFromStateDb(sessionId: string): string | null {
     return rolloutPath && fs.existsSync(rolloutPath) ? rolloutPath : null;
   } catch {
     return null;
+  }
+}
+
+export function isCodexThreadArchived(sessionId: string): boolean {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
+  if (!fs.existsSync(dbPath)) return false;
+  const sql = `SELECT archived FROM threads WHERE id = ${sqlStringLiteral(sessionId)} LIMIT 1;`;
+  try {
+    const raw = execFileSync("sqlite3", [dbPath, sql], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    }).trim();
+    return raw === "1";
+  } catch (err: any) {
+    console.warn(`[CodexArchive] failed to read archived state for ${sessionId}: ${err?.message || String(err)}`);
+    return false;
+  }
+}
+
+export function getCodexThreadSessionInfo(sessionId: string): SessionInfo | null {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
+  if (!fs.existsSync(dbPath)) return null;
+  const sql = `
+    SELECT
+      id,
+      title,
+      first_user_message,
+      preview,
+      cwd,
+      created_at,
+      updated_at,
+      created_at_ms,
+      updated_at_ms
+    FROM threads
+    WHERE id = ${sqlStringLiteral(sessionId)}
+    LIMIT 1;
+  `;
+  try {
+    const raw = execFileSync("sqlite3", ["-json", dbPath, sql], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    }).trim();
+    if (!raw) return null;
+    const row = JSON.parse(raw)[0];
+    if (!row?.id || !row?.cwd) return null;
+    const createdAt = epochToIso(row.created_at_ms ?? row.created_at, nowIso());
+    const lastActive = epochToIso(row.updated_at_ms ?? row.updated_at, createdAt);
+    const preview = String(row.preview || row.first_user_message || "");
+    const title = String(row.title || preview.split(/\r?\n/)[0] || "Codex session");
+    return {
+      id: String(row.id),
+      title: title.length > 80 ? title.slice(0, 80) + "…" : title,
+      cwd: String(row.cwd),
+      createdAt,
+      lastActive,
+      messagePreview: preview.slice(0, 200),
+      backend: "codex",
+      codexDriver: "app-server",
+    } as SessionInfo;
+  } catch (err: any) {
+    console.warn(`[CodexArchive] failed to read thread metadata for ${sessionId}: ${err?.message || String(err)}`);
+    return null;
+  }
+}
+
+function listCodexNativeArchives(limit = 200): ArchiveEntry[] {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
+  if (!fs.existsSync(dbPath)) return [];
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+  const sql = `
+    SELECT
+      id,
+      title,
+      first_user_message,
+      preview,
+      cwd,
+      archived_at,
+      created_at,
+      updated_at,
+      created_at_ms,
+      updated_at_ms
+    FROM threads
+    WHERE archived = 1
+    ORDER BY COALESCE(archived_at, updated_at) DESC, id DESC
+    LIMIT ${safeLimit};
+  `;
+  try {
+    const raw = execFileSync("sqlite3", ["-json", dbPath, sql], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    }).trim();
+    if (!raw) return [];
+    const rows = JSON.parse(raw) as any[];
+    return rows.flatMap((row): ArchiveEntry[] => {
+      const sessionId = String(row.id || "");
+      if (!sessionId) return [];
+      const createdAt = epochToIso(row.created_at_ms ?? row.created_at, nowIso());
+      const clearedAt = epochToIso(row.archived_at ?? row.updated_at_ms ?? row.updated_at, createdAt);
+      const preview = String(row.preview || row.first_user_message || "");
+      const title = String(row.title || preview.split(/\r?\n/)[0] || "Codex session");
+      return [{
+        sid: sessionId,
+        ts: `${CODEX_NATIVE_ARCHIVE_TS_PREFIX}${row.archived_at ?? row.updated_at ?? Date.now()}`,
+        title: title.length > 80 ? title.slice(0, 80) + "…" : title,
+        cwd: String(row.cwd || ""),
+        backend: "codex",
+        createdAt,
+        clearedAt,
+        messagePreview: preview.slice(0, 200),
+        messageCount: 0,
+        hasJsonl: true,
+      }];
+    });
+  } catch (err: any) {
+    console.warn(`[CodexArchive] failed to list native Codex archives: ${err?.message || String(err)}`);
+    return [];
   }
 }
 
@@ -1868,7 +2036,7 @@ function listCodexSessionsFromStateDb(cwdCandidates: Set<string>, limit: number,
       created_at_ms,
       updated_at_ms
     FROM threads
-    WHERE cwd IN (${cwdList})
+    WHERE archived = 0 AND cwd IN (${cwdList})
     ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC, id DESC
     LIMIT ${safeLimit};
   `;

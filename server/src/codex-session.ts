@@ -708,10 +708,20 @@ export class CodexSession {
     try {
       const threadConfig = this.buildAppServerThreadParams();
       if (this.threadId) {
-        const resumed = await this.appServer!.resumeThread({
-          ...threadConfig,
-          threadId: this.threadId,
-        });
+        let resumed: unknown;
+        try {
+          resumed = await this.appServer!.resumeThread({
+            ...threadConfig,
+            threadId: this.threadId,
+          });
+        } catch (err: any) {
+          if (!this.isArchivedAppServerError(err)) throw err;
+          await this.appServer!.unarchiveThread(this.threadId);
+          resumed = await this.appServer!.resumeThread({
+            ...threadConfig,
+            threadId: this.threadId,
+          });
+        }
         this.adoptAppServerThread(this.extractThreadId(resumed) || this.threadId);
       } else {
         const started = await this.appServer!.startThread(threadConfig);
@@ -2041,6 +2051,11 @@ export class CodexSession {
       cacheCreateTokens: 0,
       contextWindow: Number(tokenUsage?.modelContextWindow ?? 0),
     };
+  }
+
+  private isArchivedAppServerError(err: any): boolean {
+    const message = String(err?.message || err || "");
+    return message.includes(" is archived") || message.includes("unarchive it first");
   }
 
   private contextUsageFromAppServerUsage(usage: NonNullable<CodexSession["_lastUsage"]>): Record<string, unknown> | null {

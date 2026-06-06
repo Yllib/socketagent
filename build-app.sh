@@ -5,10 +5,8 @@ set -euo pipefail
 #
 # Usage:
 #   ./build-app.sh                     # Build APK on remote build machine
-#   ./build-app.sh --local             # Build APK locally instead of remote
 #   ./build-app.sh --deploy            # Build, bump patch, deploy to GitHub
 #   ./build-app.sh --deploy --bump minor   # Build, bump minor, deploy
-#   ./build-app.sh --local --deploy    # Local build + deploy
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$REPO_ROOT/app"
@@ -21,27 +19,42 @@ FLUTTER_BIN="${FLUTTER_BIN:-/opt/flutter/bin}"
 export PATH="$FLUTTER_BIN:/home/rdp/Android/Sdk/platform-tools:$PATH"
 
 # ── Remote build config ──
-REMOTE_HOST="billy@4.20.69.69"
+REMOTE_HOST="billy@10.10.10.188"
 REMOTE_DIR="C:/Users/billy/socketagent-app-build"
 REMOTE_FLUTTER="C:/Users/billy/Downloads/flutter/flutter/bin/flutter.bat"
 REMOTE_ANDROID_HOME="C:/Users/billy/AppData/Local/Android/Sdk"
 
 BUMP="patch"
 DEPLOY=false
-LOCAL=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --deploy) DEPLOY=true; shift ;;
-    --local) LOCAL=true; shift ;;
+    --local) echo "Local app builds are disabled. Use the remote build machine."; exit 1 ;;
     --bump) BUMP="$2"; shift 2 ;;
-    *) echo "Unknown option: $1"; echo "Usage: $0 [--local] [--deploy] [--bump major|minor|patch]"; exit 1 ;;
+    *) echo "Unknown option: $1"; echo "Usage: $0 [--deploy] [--bump major|minor|patch]"; exit 1 ;;
   esac
 done
 
 # ── Read current version ──
 CURRENT=$(grep '^version:' "$PUBSPEC" | sed 's/version: //' | cut -d+ -f1)
 BUILD=$(grep '^version:' "$PUBSPEC" | sed 's/version: //' | cut -d+ -f2)
+ORIGINAL_VERSION_LINE=$(grep '^version:' "$PUBSPEC")
+VERSION_BUMPED=false
+APP_VERSION_COMMITTED=false
+
+restore_version_on_failure() {
+  local code=$?
+  if $VERSION_BUMPED && ! $APP_VERSION_COMMITTED; then
+    sed -i "s/^version: .*/$ORIGINAL_VERSION_LINE/" "$PUBSPEC"
+    echo "Restored pubspec version after failed build/deploy."
+  fi
+  exit "$code"
+}
+trap restore_version_on_failure ERR
+
+echo "Checking remote build machine ($REMOTE_HOST)..."
+ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "echo ok" >/dev/null
 
 if $DEPLOY; then
   # ── Bump version ──
@@ -56,47 +69,41 @@ if $DEPLOY; then
   NEW_VERSION="$MAJOR.$MINOR.$PATCH"
   echo "Bumping: $CURRENT → $NEW_VERSION+$BUILD"
   sed -i "s/^version: .*/version: $NEW_VERSION+$BUILD/" "$PUBSPEC"
+  VERSION_BUMPED=true
 else
   NEW_VERSION="$CURRENT"
   echo "Building v$CURRENT (no version bump)"
 fi
 
 # ── Build APK ──
-if ! $LOCAL; then
-  echo "Building APK on remote ($REMOTE_HOST)..."
-  BUILD_START=$SECONDS
+echo "Building APK on remote ($REMOTE_HOST)..."
+BUILD_START=$SECONDS
 
-  # Sync app source to remote via tar (Windows SSH doesn't have rsync)
-  echo "  Syncing source..."
-  tar cf - -C "$APP_DIR" \
-    --exclude='build' \
-    --exclude='.dart_tool' \
-    --exclude='.gradle' \
-    --exclude='.idea' \
-    --exclude='*.iml' \
-    --exclude='.flutter-plugins-dependencies' \
-    . | ssh "$REMOTE_HOST" "powershell -Command \"if (-not (Test-Path '$REMOTE_DIR')) { New-Item -ItemType Directory -Path '$REMOTE_DIR' -Force | Out-Null }; Set-Location '$REMOTE_DIR'; tar xf -\""
+# Sync app source to remote via tar (Windows SSH doesn't have rsync)
+echo "  Syncing source..."
+tar cf - -C "$APP_DIR" \
+  --exclude='build' \
+  --exclude='.dart_tool' \
+  --exclude='.gradle' \
+  --exclude='.idea' \
+  --exclude='*.iml' \
+  --exclude='.flutter-plugins-dependencies' \
+  . | ssh "$REMOTE_HOST" "powershell -Command \"if (-not (Test-Path '$REMOTE_DIR')) { New-Item -ItemType Directory -Path '$REMOTE_DIR' -Force | Out-Null }; Set-Location '$REMOTE_DIR'; tar xf -\""
 
-  # Build on remote
-  echo "  Building on remote..."
-  ssh "$REMOTE_HOST" "powershell -Command \"\$env:ANDROID_HOME='$REMOTE_ANDROID_HOME'; Set-Location '$REMOTE_DIR'; & '$REMOTE_FLUTTER' build apk --release 2>&1; \$code=\$LASTEXITCODE; if ((Test-Path 'build/app/outputs/flutter-apk/app-release.apk') -and \$code -ne 0) { Write-Output \\\"Flutter exited with code \$code after producing app-release.apk; continuing.\\\"; exit 0 }; exit \$code\"" | while read -r line; do
-    echo "  [remote] $line"
-  done
+# Build on remote
+echo "  Building on remote..."
+ssh "$REMOTE_HOST" "powershell -Command \"\$env:ANDROID_HOME='$REMOTE_ANDROID_HOME'; Set-Location '$REMOTE_DIR'; & '$REMOTE_FLUTTER' build apk --release 2>&1; \$code=\$LASTEXITCODE; if ((Test-Path 'build/app/outputs/flutter-apk/app-release.apk') -and \$code -ne 0) { Write-Output \\\"Flutter exited with code \$code after producing app-release.apk; continuing.\\\"; exit 0 }; exit \$code\"" | while read -r line; do
+  echo "  [remote] $line"
+done
 
-  # Copy APK back
-  echo "  Copying APK back..."
-  mkdir -p "$(dirname "$APK_PATH")"
-  scp "$REMOTE_HOST:$REMOTE_DIR/build/app/outputs/flutter-apk/app-release.apk" "$APK_PATH"
+# Copy APK back
+echo "  Copying APK back..."
+mkdir -p "$(dirname "$APK_PATH")"
+scp "$REMOTE_HOST:$REMOTE_DIR/build/app/outputs/flutter-apk/app-release.apk" "$APK_PATH"
 
-  ELAPSED=$((SECONDS - BUILD_START))
-  echo "Remote build completed in ${ELAPSED}s"
-  echo "APK: $APK_PATH"
-else
-  echo "Building APK locally..."
-  cd "$APP_DIR"
-  flutter build apk --release
-  echo "APK built: $APK_PATH"
-fi
+ELAPSED=$((SECONDS - BUILD_START))
+echo "Remote build completed in ${ELAPSED}s"
+echo "APK: $APK_PATH"
 
 if ! $DEPLOY; then
   echo ""
@@ -110,6 +117,7 @@ fi
 cd "$APP_DIR"
 git add pubspec.yaml
 git commit -m "Release v$NEW_VERSION" || true
+APP_VERSION_COMMITTED=true
 git push
 
 # ── Update app-version.json and push ──

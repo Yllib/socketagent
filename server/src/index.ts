@@ -225,6 +225,44 @@ function broadcastScheduledTaskList(): void {
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
 }
 
+function relayHttpUrl(): string | null {
+  if (!RELAY_URL) return null;
+  return RELAY_URL.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
+}
+
+function shouldSendPushFallback(): boolean {
+  return connectedClients.size === 0 && !(relayClient?.isPaired);
+}
+
+function maybeSendPushFallback(msg: {
+  type: "scheduled_task_notification";
+  title: string;
+  body: string;
+  sessionId: string;
+  status?: "completed" | "failed" | "manual";
+}): void {
+  if (!shouldSendPushFallback()) return;
+  const httpUrl = relayHttpUrl();
+  if (!httpUrl || !PAIRING_TOKEN) return;
+  fetch(`${httpUrl}/api/push/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      pairingToken: PAIRING_TOKEN,
+      title: msg.title,
+      body: msg.body,
+      sessionId: msg.sessionId,
+      status: msg.status || "manual",
+    }),
+  }).then((res) => {
+    if (!res.ok) {
+      console.warn(`[Push] Relay push failed: HTTP ${res.status}`);
+    }
+  }).catch((err) => {
+    console.warn(`[Push] Relay push error: ${err?.message || err}`);
+  });
+}
+
 /** Broadcast a scheduled task notification to all connected clients */
 function broadcastScheduledTaskNotification(
   title: string,
@@ -232,11 +270,13 @@ function broadcastScheduledTaskNotification(
   sessionId: string,
   status: "completed" | "failed" | "manual"
 ): void {
-  const msg = JSON.stringify({ type: "scheduled_task_notification", title, body, sessionId, status });
+  const payload = { type: "scheduled_task_notification" as const, title, body, sessionId, status };
+  const msg = JSON.stringify(payload);
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(msg);
   }
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
+  maybeSendPushFallback(payload);
 }
 
 function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: string): void {
@@ -253,6 +293,9 @@ function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: 
       if (client.readyState === WebSocket.OPEN) client.send(raw);
     }
     if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
+    if (msg.type === "scheduled_task_notification") {
+      maybeSendPushFallback(msg);
+    }
   } catch {
     // Ignore non-JSON or unrelated headless session traffic.
   }

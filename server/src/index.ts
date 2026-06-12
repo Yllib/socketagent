@@ -9,7 +9,7 @@ import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs } from "./session-store";
+import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendMissingHistoryEntries, updateSessionActivity, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -315,6 +315,28 @@ function scheduleBroadcast(): void {
 function getStoredCodexDriver(sessionInfo: SessionInfo | undefined): CodexDriver | undefined {
   if (sessionInfo?.backend !== "codex") return undefined;
   return resolveCodexDriver((sessionInfo as any).codexDriver);
+}
+
+async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> {
+  if (sessionInfo.backend !== "codex") return [];
+  const driver = getStoredCodexDriver(sessionInfo);
+  const rolloutHistory = readCodexRolloutHistory(sessionInfo.id);
+  let appServerHistory: any[] = [];
+  if (driver === "app-server" || rolloutHistory.length === 0) {
+    appServerHistory = await readCodexAppServerThreadHistory(sessionInfo.id);
+  }
+  const nativeHistory = appServerHistory.length > rolloutHistory.length
+    ? appServerHistory
+    : rolloutHistory;
+  const added = appendMissingHistoryEntries(sessionInfo.id, nativeHistory);
+  if (added.length > 0) {
+    console.log(`[CodexSync] Merged ${added.length}/${nativeHistory.length} native entries for ${sessionInfo.id}`);
+    updateSessionActivity(
+      sessionInfo.id,
+      added[added.length - 1]?.content || sessionInfo.messagePreview || "",
+    );
+  }
+  return added;
 }
 
 /**
@@ -635,6 +657,10 @@ function createConnectionHandler(transport: ClientTransport) {
           ...(activeSession.permissionMode ? { permissionMode: activeSession.permissionMode } : {}),
         });
 
+        const codexSynced = sessionInfo.backend === "codex"
+          ? await syncCodexNativeHistory(sessionInfo)
+          : [];
+
         // Send message history — if session is running, load back to last user prompt
         const isRunning = activeSessions.has(msg.sessionId) && activeSessions.get(msg.sessionId)!.isRunning;
         const page = isRunning
@@ -658,29 +684,8 @@ function createConnectionHandler(transport: ClientTransport) {
           ? allHistory[allHistory.length - 1].timestamp
           : "";
         if (sessionInfo.backend === "codex") {
-          // Codex doesn't write to ~/.claude/projects, so getMissedMessages
-          // would always return []. Instead, when our local history is empty
-          // (e.g., session was created via the codex CLI directly, or this
-          // is a first resume after an install), backfill from the codex
-          // rollout file so the chat doesn't appear as a fresh session.
-          if (allHistory.length === 0) {
-            let fromCodex = readCodexRolloutHistory(msg.sessionId);
-            let source = fromCodex.length > 0 ? "codex rollout" : "codex app-server thread/read";
-            if (fromCodex.length === 0) {
-              fromCodex = await readCodexAppServerThreadHistory(msg.sessionId);
-            }
-            if (fromCodex.length > 0) {
-              console.log(`[Resume] Backfilled ${fromCodex.length} entries from ${source} for ${msg.sessionId}`);
-              appendHistoryBulk(msg.sessionId, fromCodex);
-              sendJson({
-                type: "session_history",
-                sessionId: msg.sessionId,
-                messages: fromCodex,
-                total: fromCodex.length,
-                offset: 0,
-                append: true,
-              });
-            }
+          if (codexSynced.length > 0) {
+            broadcastSessionList();
           }
         } else {
           // When history is empty, use epoch so we sync ALL messages from the JSONL
@@ -847,6 +852,24 @@ function createConnectionHandler(transport: ClientTransport) {
           clearedSessions.delete(resumeId);
           activeSession.replacesSessionId = resumeId;
           resumeId = undefined;
+        }
+
+        if (resumeId) {
+          const resumeSessionInfo = getSession(resumeId);
+          if (resumeSessionInfo?.backend === "codex") {
+            const added = await syncCodexNativeHistory(resumeSessionInfo);
+            if (added.length > 0) {
+              const total = getHistory(resumeId).length;
+              sendJson({
+                type: "session_history",
+                sessionId: resumeId,
+                messages: added,
+                total,
+                offset: Math.max(0, total - added.length),
+                append: true,
+              });
+            }
+          }
         }
 
         (activeSession as any)._resumeSessionId = undefined;

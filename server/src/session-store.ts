@@ -168,6 +168,90 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
   fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
 }
 
+function nativeSyncTextKey(entry: HistoryEntry): string | null {
+  if (entry.role !== "user" && entry.role !== "assistant") return null;
+  const content = String(entry.content ?? "").trim().replace(/\s+/g, " ");
+  if (!content) return null;
+  return `${entry.role}\u0001${content}`;
+}
+
+function nativeSyncEntryKey(entry: HistoryEntry): string {
+  const content = String(entry.content ?? "").trim().replace(/\s+/g, " ");
+  return [
+    entry.role,
+    entry.toolName || "",
+    entry.toolUseId || "",
+    entry.filePath || "",
+    content,
+  ].join("\u0001");
+}
+
+/**
+ * Append only the native transcript suffix that follows the latest local
+ * user/assistant text entry. This is intentionally conservative: if we cannot
+ * anchor the native transcript to the local tail, we do nothing rather than
+ * appending an old transcript chunk to the end of the chat.
+ */
+export function appendNativeHistorySuffix(sessionId: string, nativeEntries: HistoryEntry[]): HistoryEntry[] {
+  if (nativeEntries.length === 0) return [];
+  ensureHistoryDir();
+  const file = historyFile(sessionId);
+  let localEntries: HistoryEntry[] = [];
+  if (fs.existsSync(file)) {
+    try {
+      localEntries = JSON.parse(fs.readFileSync(file, "utf-8"));
+    } catch {
+      localEntries = [];
+    }
+  }
+
+  if (localEntries.length === 0) {
+    fs.writeFileSync(file, JSON.stringify(nativeEntries, null, 2), "utf-8");
+    return nativeEntries;
+  }
+
+  let localAnchorKey: string | null = null;
+  for (let i = localEntries.length - 1; i >= 0; i--) {
+    localAnchorKey = nativeSyncTextKey(localEntries[i]);
+    if (localAnchorKey) break;
+  }
+  if (!localAnchorKey) return [];
+
+  let nativeAnchorIndex = -1;
+  for (let i = nativeEntries.length - 1; i >= 0; i--) {
+    if (nativeSyncTextKey(nativeEntries[i]) === localAnchorKey) {
+      nativeAnchorIndex = i;
+      break;
+    }
+  }
+  if (nativeAnchorIndex < 0) return [];
+
+  const suffix = nativeEntries.slice(nativeAnchorIndex + 1);
+  if (!suffix.some((entry) => nativeSyncTextKey(entry))) return [];
+
+  const localCounts = new Map<string, number>();
+  for (const entry of localEntries) {
+    const key = nativeSyncEntryKey(entry);
+    localCounts.set(key, (localCounts.get(key) || 0) + 1);
+  }
+
+  const missing: HistoryEntry[] = [];
+  for (const entry of suffix) {
+    const key = nativeSyncEntryKey(entry);
+    const count = localCounts.get(key) || 0;
+    if (count > 0) {
+      localCounts.set(key, count - 1);
+    } else {
+      missing.push(entry);
+    }
+  }
+  if (!missing.some((entry) => nativeSyncTextKey(entry))) return [];
+
+  localEntries.push(...missing);
+  fs.writeFileSync(file, JSON.stringify(localEntries, null, 2), "utf-8");
+  return missing;
+}
+
 // Sessions whose user-uuid backfill has already run this process lifetime.
 // Re-running is harmless but doubles the disk reads — once per restart is enough.
 const _backfilledSessions = new Set<string>();

@@ -168,65 +168,6 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
   fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
 }
 
-function historyDedupeKey(entry: HistoryEntry): string {
-  const content = String(entry.content ?? "").trim().replace(/\s+/g, " ");
-  const toolName = entry.toolName || "";
-  const toolUseId = entry.toolUseId || "";
-  const filePath = entry.filePath || "";
-  return [
-    entry.role,
-    toolName,
-    toolUseId,
-    filePath,
-    content,
-  ].join("\u0001");
-}
-
-/**
- * Append history entries that are not already represented locally.
- *
- * Native Codex history is the source of truth when the user also uses the
- * desktop CLI, but SocketAgent history contains extra UI-only cards. This
- * count-based dedupe keeps repeated identical messages when native has more
- * copies than local, while avoiding the common duplicate-on-resume case.
- */
-export function appendMissingHistoryEntries(sessionId: string, nativeEntries: HistoryEntry[]): HistoryEntry[] {
-  if (nativeEntries.length === 0) return [];
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
-  let localEntries: HistoryEntry[] = [];
-  if (fs.existsSync(file)) {
-    try {
-      localEntries = JSON.parse(fs.readFileSync(file, "utf-8"));
-    } catch {
-      localEntries = [];
-    }
-  }
-
-  const localCounts = new Map<string, number>();
-  for (const entry of localEntries) {
-    const key = historyDedupeKey(entry);
-    localCounts.set(key, (localCounts.get(key) || 0) + 1);
-  }
-
-  const missing: HistoryEntry[] = [];
-  for (const entry of nativeEntries) {
-    const key = historyDedupeKey(entry);
-    const count = localCounts.get(key) || 0;
-    if (count > 0) {
-      localCounts.set(key, count - 1);
-    } else {
-      missing.push(entry);
-    }
-  }
-
-  if (missing.length > 0) {
-    localEntries.push(...missing);
-    fs.writeFileSync(file, JSON.stringify(localEntries, null, 2), "utf-8");
-  }
-  return missing;
-}
-
 // Sessions whose user-uuid backfill has already run this process lifetime.
 // Re-running is harmless but doubles the disk reads — once per restart is enough.
 const _backfilledSessions = new Set<string>();

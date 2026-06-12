@@ -496,6 +496,10 @@ export class ClaudeSession {
     if (this._lastSupportedModels) this.send(this._lastSupportedModels);
     if (this._lastSupportedCommands) this.send(this._lastSupportedCommands);
     if (this._lastSupportedAgents) this.send(this._lastSupportedAgents);
+    this.replayPendingInteractions();
+  }
+
+  replayLiveState(): void {
     // Send any thinking accumulated during the current thinking block
     if (this._streamingThinking.length > 0) {
       this.send({
@@ -512,6 +516,9 @@ export class ClaudeSession {
         sessionId: this.sessionId || "",
       });
     }
+  }
+
+  private replayPendingInteractions(): void {
     // Re-send any pending (unanswered) questions so the reconnecting client can respond
     for (const [, pending] of this.pendingQuestions) {
       if (pending.questionData) {

@@ -145,6 +145,7 @@ export class CodexSession {
   private activeAppServerTurnId: string | null = null;
   private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private appServerAgentText = new Map<string, string>();
+  private appServerReasoningText = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
   private appServerFileChangeDiff = new Map<string, string>();
   private appServerFileChangePaths = new Map<string, string[]>();
@@ -278,6 +279,22 @@ export class CodexSession {
   }
 
   setWebSocket(ws: WebSocket): void { this.ws = ws; }
+  replayLiveState(): void {
+    const sid = this.sessionId || "";
+    if (!sid) return;
+
+    for (const content of this.appServerReasoningText.values()) {
+      if (content) {
+        this.send({ type: "thinking", content, sessionId: sid } as ServerMessage);
+      }
+    }
+
+    for (const content of this.appServerAgentText.values()) {
+      if (content) {
+        this.send({ type: "text", content, sessionId: sid } as ServerMessage);
+      }
+    }
+  }
   detachWebSocket(): void { /* WS reattach is per-message; nothing buffered. */ }
 
   // ─── Shims for ClaudeSession surface area ────────────────────────────
@@ -675,6 +692,7 @@ export class CodexSession {
     this._currentPrompt = prompt;
     this._lastAssistantText = "";
     this.appServerAgentText.clear();
+    this.appServerReasoningText.clear();
     this.appServerToolOutput.clear();
 
     const resumeTarget = resumeSessionId || this._resumeSessionId;
@@ -1291,7 +1309,9 @@ export class CodexSession {
       case "item/reasoning/summaryTextDelta":
       case "item/reasoning/textDelta": {
         const sid = this.sessionId;
+        const itemId = p?.itemId || p?.item?.id || "reasoning";
         const delta = String(p?.delta ?? "");
+        if (delta) this.appServerReasoningText.set(itemId, (this.appServerReasoningText.get(itemId) || "") + delta);
         if (sid && delta) this.send({ type: "thinking", content: delta, sessionId: sid } as ServerMessage);
         return;
       }
@@ -1569,7 +1589,9 @@ export class CodexSession {
         ...(Array.isArray(item.summary) ? item.summary : []),
         ...(Array.isArray(item.content) ? item.content : []),
       ].join("\n");
-      if (text) this.send({ type: "thinking", content: text, sessionId: sid } as ServerMessage);
+      const streamed = this.appServerReasoningText.get(item.id) || "";
+      if (text && !streamed) this.send({ type: "thinking", content: text, sessionId: sid } as ServerMessage);
+      if (item.id) this.appServerReasoningText.delete(item.id);
       return;
     }
 

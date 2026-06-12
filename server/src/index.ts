@@ -756,6 +756,13 @@ function createConnectionHandler(transport: ClientTransport) {
           }).catch(() => {});
         }
 
+        // Re-send live assistant/thinking text after session_history. The app
+        // replaces visible chat state on history load, so replaying earlier
+        // can make the already-streamed prefix disappear for late joiners.
+        if (resumeRunning && existing) {
+          existing.replayLiveState?.();
+        }
+
         // Re-send accumulated bash output so the reconnecting client sees live output
         if (resumeRunning && existing) {
           const bashOutput = existing.getAccumulatedBashOutput();

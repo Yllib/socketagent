@@ -28,7 +28,7 @@ SocketAgent command line
 
 Usage:
   socketagent pair [--raw]        Show pairing QR or raw pairing payload
-  socketagent install [args...]   Re-run installer, e.g. --backends both
+  socketagent install [args...]   Re-run server installer, e.g. --backends both
   socketagent status              Show server service status
   socketagent logs                Follow server logs
   socketagent restart             Restart server using the safe restart script
@@ -45,7 +45,7 @@ case "$cmd" in
     exec node "$SERVER_DIR/scripts/show-pairing.js" "$@"
     ;;
   install|setup)
-    exec "$REPO_ROOT/install.sh" "$@"
+    exec "$REPO_ROOT/install-server.sh" "$@"
     ;;
   status)
     exec systemctl --user status "$(detect_service)" "$@"

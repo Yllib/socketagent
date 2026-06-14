@@ -5,10 +5,10 @@ Use Claude Code or OpenAI Codex from your Android phone. SocketAgent pairs a mob
 ## What This Repo Contains
 
 - `server/` - Node.js + TypeScript WebSocket server. It owns pairing, sessions, backend orchestration, MCP/app tools, history, scheduled tasks, and relay connectivity.
-- `install.sh` - Linux installer for Node.js, selected agent CLIs, server config, and a `systemd --user` service.
+- `install.sh` - Linux/WSL installer for Node.js, selected agent CLIs, server config, and a `systemd --user` service.
 - `install.ps1` - Windows installer for Node.js, selected agent CLIs, server config, and a scheduled task.
 - `app-version.json` - Published Android app version metadata.
-- Android app source - public Flutter app repo at <https://github.com/Yllib/socketagent-app>. This repo ships APK releases for normal installs.
+- Android app - APK releases are published from this repo for normal installs. The Flutter app source is not included in this public server repo.
 
 ## Architecture
 
@@ -28,7 +28,7 @@ SocketAgent Server
     \--- Codex backend: OpenAI Codex CLI app-server by default, exec fallback
 ```
 
-The relay forwards encrypted traffic and cannot read your chat or tool output. Local/direct connections can bypass the relay when your phone can reach the server.
+The relay forwards NaCl-encrypted traffic and cannot read your chat or tool output. Local/direct connections bypass the relay when your phone can reach the server and are protected by the server auth token on your LAN or VPN.
 
 ## Agent Backends
 
@@ -75,6 +75,18 @@ Requirements:
 
 ### Linux
 
+One-line install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash
+```
+
+One-line install with a preset backend:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash -s -- --backends codex
+```
+
 Interactive install:
 
 ```bash
@@ -86,12 +98,18 @@ bash install.sh
 Noninteractive backend selection:
 
 ```bash
-bash install.sh --backends both
-bash install.sh --backends codex
-bash install.sh --backends claude
+curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash -s -- --backends both
+curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash -s -- --backends codex
+curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash -s -- --backends claude
 ```
 
 ### Windows
+
+One-line install:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm https://github.com/Yllib/socketagent/archive/master.zip -OutFile socketagent.zip; Expand-Archive socketagent.zip . -Force; cd socketagent-master; .\install.ps1"
+```
 
 Interactive install:
 

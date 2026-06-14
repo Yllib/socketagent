@@ -90,5 +90,6 @@ The deploy script bumps the version in `pubspec.yaml`, builds the APK, commits, 
 
 ## Installers
 - `install.ps1` — Windows installer (Node.js, selected Claude/Codex CLI(s), server deps, scheduled task, QR pairing)
-- `install.sh` — Linux installer (Node.js, selected Claude/Codex CLI(s), server deps, systemd service, QR pairing)
+- `install.sh` — Linux/WSL one-line installer entrypoint (clones/updates repo, then runs `install-server.sh`)
+- `install-server.sh` — Linux server installer (Node.js, selected Claude/Codex CLI(s), server deps, systemd service, QR pairing)
 - `uninstall.ps1` — Windows uninstaller

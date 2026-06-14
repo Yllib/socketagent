@@ -161,6 +161,7 @@ export class CodexSession {
   private _permissionMode = "bypassPermissions";
   private _appendSystemPrompt = "";
   private _collaborationMode = "default";
+  private _ttsEnabled = false;
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   private _kokoroVoice = "af_heart";
   private _kokoroSpeed = 1.0;
@@ -323,7 +324,7 @@ export class CodexSession {
   }
   setForkSource(_id: string): void {}
   setResumeSessionAt(_uuid: string): void {}
-  setTtsEnabled(_b: boolean): void {}
+  setTtsEnabled(b: boolean): void { this._ttsEnabled = b; }
   setTtsEngine(e: string): void {
     if (e === "system" || e === "kokoro_server" || e === "kokoro_device") {
       this._ttsEngine = e;
@@ -2615,8 +2616,18 @@ export class CodexSession {
   }
 
   private codexDeveloperInstructions(): string | null {
-    const text = this._appendSystemPrompt.trim();
-    return text.length > 0 ? text : null;
+    const parts: string[] = [];
+
+    if (this._ttsEnabled) {
+      parts.push(
+        "Text-to-speech is enabled. Before writing your final text response, call the Speak tool once with a concise, natural spoken summary. Keep it brief and conversational; do not read code, URLs, or markdown aloud. If your response is short and simple, speak it nearly verbatim. If it is long or technical, summarize the key points. Always still write your full text response after speaking.",
+      );
+    }
+
+    const appendSystemPrompt = this._appendSystemPrompt.trim();
+    if (appendSystemPrompt.length > 0) parts.push(appendSystemPrompt);
+
+    return parts.length > 0 ? parts.join("\n\n") : null;
   }
 
   private codexCollaborationMode(): Record<string, unknown> | undefined {

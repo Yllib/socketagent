@@ -2652,7 +2652,6 @@ export class CodexSession {
 
   private codexCollaborationMode(): Record<string, unknown> | undefined {
     const developerInstructions = this.codexDeveloperInstructions();
-    if (!developerInstructions && this._collaborationMode === "default") return undefined;
     const model = this.codexModel();
     return {
       mode: this._collaborationMode,

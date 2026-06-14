@@ -312,6 +312,11 @@ function scheduleBroadcast(): void {
   }, 2000);
 }
 
+function notifySessionActivity(): void {
+  scheduleBroadcast();
+  broadcastStatusSync();
+}
+
 function getStoredCodexDriver(sessionInfo: SessionInfo | undefined): CodexDriver | undefined {
   if (sessionInfo?.backend !== "codex") return undefined;
   return resolveCodexDriver((sessionInfo as any).codexDriver);
@@ -467,6 +472,11 @@ function createConnectionHandler(transport: ClientTransport) {
           ...getAdvertisedServerSettings(),
           codexCollaborationMode: pendingCodexCollaborationMode,
         });
+        break;
+      }
+
+      case "get_status_sync": {
+        sendStatusSyncTo(transport as WebSocket);
         break;
       }
 
@@ -879,7 +889,7 @@ function createConnectionHandler(transport: ClientTransport) {
 
         (activeSession as any)._resumeSessionId = undefined;
 
-        activeSession.onActivity = () => scheduleBroadcast();
+        activeSession.onActivity = () => notifySessionActivity();
 
         // Set up monitor output callback — starts a new query when session is idle
         activeSession.onMonitorOutput = (text: string) => {
@@ -891,7 +901,7 @@ function createConnectionHandler(transport: ClientTransport) {
           }
           const monitorSid = activeSession.getSessionId() || undefined;
           console.log(`[Monitor] Starting query for idle session ${monitorSid}`);
-          activeSession.onActivity = () => scheduleBroadcast();
+          activeSession.onActivity = () => notifySessionActivity();
           activeSession.runQuery(text, monitorSid).then(() => {
             const s = activeSession?.getSessionId();
             if (s && activeSessions.get(s) === activeSession) {
@@ -1006,7 +1016,7 @@ function createConnectionHandler(transport: ClientTransport) {
               activeSession.injectMessage(injectedText);
             } else {
               // Resume the existing session with the answer context
-              activeSession.onActivity = () => scheduleBroadcast();
+              activeSession.onActivity = () => notifySessionActivity();
               activeSession.runQuery(injectedText, sid).then(() => {
                 const s = activeSession?.getSessionId();
                 if (s && activeSessions.get(s) === activeSession) {
@@ -2611,7 +2621,7 @@ const httpServer = http.createServer((req, res) => {
         await restorePersistedPermissionMode(session, sessionInfo);
 
         (session as any)._resumeSessionId = sessionId;
-        session.onActivity = () => scheduleBroadcast();
+        session.onActivity = () => notifySessionActivity();
 
         // Register immediately so the app can find it when it reconnects
         activeSessions.set(sessionId, session);
@@ -3118,7 +3128,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     } as any;
     session = createSession(backend, ws, task.cwd, plugins, codexDriver);
     await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
-    session.onActivity = () => scheduleBroadcast();
+    session.onActivity = () => notifySessionActivity();
 
     if (shouldResume) {
       (session as any)._resumeSessionId = task.sessionId;

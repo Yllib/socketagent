@@ -563,6 +563,7 @@ export class CodexSession {
 
     if (this._isRunning) throw new Error("CodexSession already running a turn");
     this._isRunning = true;
+    this.onActivity?.();
     this._abortRequested = false;
     this._stderrBuffer = [];
     this._fileChangeSnapshots.clear();
@@ -658,6 +659,7 @@ export class CodexSession {
         // for this case, so surface it and settle the turn explicitly.
         console.error(`[codex] spawn error: ${err.message}`);
         this._isRunning = false;
+        this.onActivity?.();
         this.send({
           type: "error",
           message: `codex failed to launch: ${err.message}`,
@@ -667,6 +669,7 @@ export class CodexSession {
 
       this.proc!.on("exit", (code, signal) => {
         this._isRunning = false;
+        this.onActivity?.();
         const stderr = this._stderrBuffer.join("");
 
         if (this._abortRequested || signal === "SIGTERM" || signal === "SIGINT") {
@@ -710,6 +713,7 @@ export class CodexSession {
   private async runAppServerQuery(prompt: string, resumeSessionId?: string): Promise<void> {
     if (this._isRunning) throw new Error("CodexSession already running a turn");
     this._isRunning = true;
+    this.onActivity?.();
     this._abortRequested = false;
     this._currentPrompt = prompt;
     this._lastAssistantText = "";
@@ -801,6 +805,7 @@ export class CodexSession {
       this._isRunning = false;
       this.activeAppServerTurnId = null;
       this.appServerTurnSettler = null;
+      this.onActivity?.();
     }
   }
 
@@ -1044,6 +1049,7 @@ export class CodexSession {
       this.appServerTurnSettler?.resolve();
       this.appServerTurnSettler = null;
       this._isRunning = false;
+      this.onActivity?.();
       if (this.sessionId) {
         this.send({
           type: "result",

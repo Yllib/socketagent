@@ -2893,6 +2893,7 @@ export class ClaudeSession {
     } finally {
       this._isRunning = false;
       this.activeQuery = null;
+      this.onActivity?.();
     }
   }
 

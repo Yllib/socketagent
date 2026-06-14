@@ -146,27 +146,57 @@ function historyFile(sessionId: string): string {
   return path.join(HISTORY_DIR, `${sessionId}.json`);
 }
 
-export function appendHistory(sessionId: string, entry: HistoryEntry): void {
+type HistoryCacheEntry = {
+  file: string;
+  size: number;
+  mtimeMs: number;
+  entries: HistoryEntry[];
+};
+
+const historyCache = new Map<string, HistoryCacheEntry>();
+
+function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: boolean } = {}): HistoryEntry[] {
   ensureHistoryDir();
   const file = historyFile(sessionId);
-  let entries: HistoryEntry[] = [];
-  if (fs.existsSync(file)) {
-    entries = JSON.parse(fs.readFileSync(file, "utf-8"));
+  if (!fs.existsSync(file)) {
+    historyCache.delete(sessionId);
+    return [];
   }
-  entries.push(entry);
+
+  if (options.backfillUserUuids) {
+    backfillUserUuids(sessionId);
+  }
+
+  const stat = fs.statSync(file);
+  const cached = historyCache.get(sessionId);
+  if (cached && cached.file === file && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    return cached.entries;
+  }
+
+  const entries = JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[];
+  historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
+  return entries;
+}
+
+function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
+  ensureHistoryDir();
+  const file = historyFile(sessionId);
   fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
+  const stat = fs.statSync(file);
+  historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
+}
+
+export function appendHistory(sessionId: string, entry: HistoryEntry): void {
+  const entries = readHistoryEntries(sessionId);
+  entries.push(entry);
+  writeHistoryEntries(sessionId, entries);
 }
 
 export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[]): void {
   if (newEntries.length === 0) return;
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
-  let entries: HistoryEntry[] = [];
-  if (fs.existsSync(file)) {
-    entries = JSON.parse(fs.readFileSync(file, "utf-8"));
-  }
+  const entries = readHistoryEntries(sessionId);
   entries.push(...newEntries);
-  fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
+  writeHistoryEntries(sessionId, entries);
 }
 
 function nativeSyncTextKey(entry: HistoryEntry): string | null {
@@ -195,19 +225,11 @@ function nativeSyncEntryKey(entry: HistoryEntry): string {
  */
 export function appendNativeHistorySuffix(sessionId: string, nativeEntries: HistoryEntry[]): HistoryEntry[] {
   if (nativeEntries.length === 0) return [];
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
   let localEntries: HistoryEntry[] = [];
-  if (fs.existsSync(file)) {
-    try {
-      localEntries = JSON.parse(fs.readFileSync(file, "utf-8"));
-    } catch {
-      localEntries = [];
-    }
-  }
+  try { localEntries = readHistoryEntries(sessionId); } catch { localEntries = []; }
 
   if (localEntries.length === 0) {
-    fs.writeFileSync(file, JSON.stringify(nativeEntries, null, 2), "utf-8");
+    writeHistoryEntries(sessionId, nativeEntries);
     return nativeEntries;
   }
 
@@ -249,7 +271,7 @@ export function appendNativeHistorySuffix(sessionId: string, nativeEntries: Hist
   if (!missing.some((entry) => nativeSyncTextKey(entry))) return [];
 
   localEntries.push(...missing);
-  fs.writeFileSync(file, JSON.stringify(localEntries, null, 2), "utf-8");
+  writeHistoryEntries(sessionId, localEntries);
   return missing;
 }
 
@@ -296,12 +318,9 @@ export function backfillUserUuids(sessionId: string): void {
   if (_backfilledSessions.has(sessionId)) return;
   _backfilledSessions.add(sessionId);
 
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
-  if (!fs.existsSync(file)) return;
-
   let entries: HistoryEntry[];
-  try { entries = JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return; }
+  try { entries = readHistoryEntries(sessionId, { backfillUserUuids: false }); } catch { return; }
+  if (entries.length === 0) return;
 
   const missingIdx: number[] = [];
   for (let i = 0; i < entries.length; i++) {
@@ -354,23 +373,21 @@ export function backfillUserUuids(sessionId: string): void {
   }
 
   if (changed) {
-    fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
+    writeHistoryEntries(sessionId, entries);
     console.log(`[Backfill] Restored UUIDs for ${sessionId} (${missingIdx.length} candidate entries)`);
   }
 }
 
 /** Assign UUID to the most recent user history entry (for rewind support) */
 export function assignUserUuid(sessionId: string, uuid: string): void {
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
-  if (!fs.existsSync(file)) return;
   try {
-    const entries: HistoryEntry[] = JSON.parse(fs.readFileSync(file, "utf-8"));
+    const entries = readHistoryEntries(sessionId);
+    if (entries.length === 0) return;
     // Walk backwards to find the most recent user entry without a uuid
     for (let i = entries.length - 1; i >= 0; i--) {
       if (entries[i].role === "user" && !entries[i].uuid) {
         entries[i].uuid = uuid;
-        fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
+        writeHistoryEntries(sessionId, entries);
         return;
       }
     }
@@ -379,17 +396,15 @@ export function assignUserUuid(sessionId: string, uuid: string): void {
 
 /** Mark a question entry as answered in the history file */
 export function markQuestionAnswered(sessionId: string, questionId: string): void {
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
-  if (!fs.existsSync(file)) return;
   try {
-    const entries: HistoryEntry[] = JSON.parse(fs.readFileSync(file, "utf-8"));
+    const entries = readHistoryEntries(sessionId);
+    if (entries.length === 0) return;
     const entry = entries.find(
       (e) => e.role === "question" && e.questionId === questionId
     );
     if (entry) {
       entry.answered = true;
-      fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
+      writeHistoryEntries(sessionId, entries);
     }
   } catch (e) {
     console.error(`[History] Error marking question answered: ${e}`);
@@ -397,15 +412,9 @@ export function markQuestionAnswered(sessionId: string, questionId: string): voi
 }
 
 export function getHistory(sessionId: string): HistoryEntry[] {
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
-  if (!fs.existsSync(file)) {
-    return [];
-  }
   // Recover UUIDs on user prompts saved before self-assigned UUIDs (Apr 22 →
   // Apr 27). Once-per-process and a no-op when nothing's missing.
-  backfillUserUuids(sessionId);
-  return JSON.parse(fs.readFileSync(file, "utf-8"));
+  return readHistoryEntries(sessionId, { backfillUserUuids: true });
 }
 
 /**
@@ -497,14 +506,12 @@ export function truncateHistoryAtMessage(
     if (altIdx === -1) return { removed: -1, kept: all.length };
     const kept = all.slice(0, altIdx + 1);
     const removed = all.length - kept.length;
-    const file = historyFile(sessionId);
-    fs.writeFileSync(file, JSON.stringify(kept, null, 2), "utf-8");
+    writeHistoryEntries(sessionId, kept);
     return { removed, kept: kept.length };
   }
   const kept = all.slice(0, idx + 1);
   const removed = all.length - kept.length;
-  const file = historyFile(sessionId);
-  fs.writeFileSync(file, JSON.stringify(kept, null, 2), "utf-8");
+  writeHistoryEntries(sessionId, kept);
   return { removed, kept: kept.length };
 }
 
@@ -1152,10 +1159,10 @@ export function cleanupPendingToolCalls(): void {
 
   const files = fs.readdirSync(HISTORY_DIR).filter((f) => f.endsWith(".json"));
   for (const file of files) {
-    const filePath = path.join(HISTORY_DIR, file);
+    const sessionId = file.replace(/\.json$/, "");
     let entries: HistoryEntry[];
     try {
-      entries = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      entries = readHistoryEntries(sessionId);
     } catch {
       continue;
     }
@@ -1183,7 +1190,7 @@ export function cleanupPendingToolCalls(): void {
     }
 
     if (modified) {
-      fs.writeFileSync(filePath, JSON.stringify(entries, null, 2), "utf-8");
+      writeHistoryEntries(sessionId, entries);
       console.log(`Cleaned up pending tool calls in ${file}`);
     }
   }

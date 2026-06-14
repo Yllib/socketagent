@@ -778,10 +778,12 @@ export class CodexSession {
       if (!this.threadId) throw new Error("codex app-server did not return a thread id");
 
       const collaborationMode = this.codexCollaborationMode();
+      const turnModel = collaborationMode ? this.codexModel() : undefined;
       const turn = await this.appServer!.startTurn({
         threadId: this.threadId,
         cwd: this.cwd,
         input: this.buildAppServerTurnInput(prompt),
+        ...(turnModel ? { model: turnModel } : {}),
         ...(collaborationMode ? { collaborationMode } : {}),
       });
       this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
@@ -864,12 +866,13 @@ export class CodexSession {
     experimentalRawEvents: boolean;
     persistExtendedHistory: boolean;
   } {
+    const model = this.codexModel();
     return {
       cwd: this.cwd,
       sandbox: this._sandbox,
       approvalPolicy: this._approvalPolicy,
       approvalsReviewer: this._approvalsReviewer,
-      ...(this._model ? { model: this._model } : {}),
+      ...(model ? { model } : {}),
       config: this.appServerConfig(),
       experimentalRawEvents: false,
       persistExtendedHistory: false,
@@ -2613,6 +2616,23 @@ export class CodexSession {
 
   private codexReasoningEffort(): "low" | "medium" | "high" {
     return this._effort === "max" ? "high" : this._effort;
+  }
+
+  private codexModel(): string | undefined {
+    if (this._model) return this._model;
+    const envModel = process.env.CODEX_MODEL?.trim();
+    if (envModel) return envModel;
+
+    try {
+      const configPath = path.join(os.homedir(), ".codex", "config.toml");
+      const config = fs.readFileSync(configPath, "utf8");
+      const match = config.match(/^\s*model\s*=\s*["']([^"']+)["']\s*$/m);
+      if (match?.[1]) return match[1];
+    } catch {
+      // Fall through to Codex's current default when config is absent/unreadable.
+    }
+
+    return "gpt-5.5";
   }
 
   private codexDeveloperInstructions(): string | null {

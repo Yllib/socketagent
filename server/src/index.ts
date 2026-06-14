@@ -890,6 +890,14 @@ function createConnectionHandler(transport: ClientTransport) {
         (activeSession as any)._resumeSessionId = undefined;
 
         activeSession.onActivity = () => notifySessionActivity();
+        if (resumeId) {
+          activeSessions.set(resumeId, activeSession);
+          activeSessionId = resumeId;
+          sessionClients.set(resumeId, {
+            ws: transport as WebSocket,
+            setActiveSession: (s: Session) => { activeSession = s; },
+          });
+        }
 
         // Set up monitor output callback — starts a new query when session is idle
         activeSession.onMonitorOutput = (text: string) => {

@@ -179,7 +179,7 @@ fi
 
 # Step 1: Write "restart initiated" to session history
 echo ""
-echo "[1/4] Writing restart notification to history..."
+echo "[1/5] Writing restart notification to history..."
 echo "$ALL_SESSIONS" | while read -r sid; do
   [[ -z "$sid" ]] && continue
   inject_history "$sid" "assistant" "[Server restart initiated — compiling and restarting service...]"
@@ -189,7 +189,7 @@ done
 # Step 2: Compile if requested
 if $COMPILE; then
   echo ""
-  echo "[2/4] Compiling TypeScript..."
+  echo "[2/5] Compiling TypeScript..."
   cd "$SERVER_DIR"
   if npx tsc 2>&1; then
     echo "  Compilation successful"
@@ -209,19 +209,18 @@ if $COMPILE; then
   fi
 else
   echo ""
-  echo "[2/4] Skipping compilation (--no-compile)"
+  echo "[2/5] Skipping compilation (--no-compile)"
 fi
 
 # Step 3: Restart the systemd service
 echo ""
-echo "[3/4] Restarting $SERVICE_NAME service..."
-systemctl --user restart "$SERVICE_NAME"
-
-# After restart, the parent process (Claude SDK) is dead, so stdout is a broken
-# pipe. trap '' PIPE prevents SIGPIPE death, but echo still fails with EPIPE and
-# set -e would exit. Redirect all subsequent output to a log file.
+echo "[3/5] Restarting $SERVICE_NAME service..."
+# After restart, the parent process (Claude/Codex session) is dead, so stdout is
+# a broken pipe. Redirect before invoking systemctl; otherwise systemctl/echo can
+# hit EPIPE and set -e exits before we write completion/continue messages.
 RESTART_LOG="/tmp/socketagent-restart-$$.log"
 exec > "$RESTART_LOG" 2>&1
+systemctl --user restart "$SERVICE_NAME"
 echo "  Restart command sent"
 
 # Write success to history immediately after systemctl returns.
@@ -235,7 +234,7 @@ done
 
 # Step 4: Verify server actually came back up
 echo ""
-echo "[4/4] Verifying server is up..."
+echo "[4/5] Verifying server is up..."
 MAX_WAIT=15
 WAITED=0
 while ! check_server 2>/dev/null; do

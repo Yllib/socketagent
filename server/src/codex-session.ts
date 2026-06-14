@@ -182,6 +182,7 @@ export class CodexSession {
   private _fileChangeSnapshots = new Map<string, Map<string, string | null>>();
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
+  private clientSockets = new Set<WebSocket>();
 
   public onActivity?: () => void;
   public onMonitorOutput?: (text: string) => void;
@@ -195,7 +196,9 @@ export class CodexSession {
     private cwd: string,
     private _plugins: SocketAgentPlugin[] = [],
     private readonly codexDriver: CodexDriver = "exec",
-  ) {}
+  ) {
+    this.attachWebSocket(ws);
+  }
 
   // ─── Public API (subset of ClaudeSession) ────────────────────────────
 
@@ -278,24 +281,27 @@ export class CodexSession {
     });
   }
 
-  setWebSocket(ws: WebSocket): void { this.ws = ws; }
-  replayLiveState(): void {
+  setWebSocket(ws: WebSocket): void { this.attachWebSocket(ws); }
+  replayLiveState(ws: WebSocket = this.ws): void {
     const sid = this.sessionId || "";
     if (!sid) return;
 
     for (const content of this.appServerReasoningText.values()) {
       if (content) {
-        this.send({ type: "thinking", content, sessionId: sid } as ServerMessage);
+        this.sendTo(ws, { type: "thinking", content, sessionId: sid } as ServerMessage);
       }
     }
 
     for (const content of this.appServerAgentText.values()) {
       if (content) {
-        this.send({ type: "text", content, sessionId: sid } as ServerMessage);
+        this.sendTo(ws, { type: "text", content, sessionId: sid } as ServerMessage);
       }
     }
   }
-  detachWebSocket(): void { /* WS reattach is per-message; nothing buffered. */ }
+  detachWebSocket(): void {
+    // Keep attached sockets until they close so a second resume cannot steal
+    // the live stream from an existing app view. The app filters by sessionId.
+  }
 
   // ─── Shims for ClaudeSession surface area ────────────────────────────
   // Some are meaningful for Codex, others remain no-ops where Codex has no
@@ -523,9 +529,25 @@ export class CodexSession {
   }
 
   /** Mirrors ClaudeSession.send — sends a ServerMessage over the WS. */
+  private attachWebSocket(ws: WebSocket): void {
+    this.ws = ws;
+    this.clientSockets.add(ws);
+  }
+
+  private sendTo(ws: WebSocket, msg: ServerMessage): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
+  }
+
   public send(msg: ServerMessage): void {
-    if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+    const payload = JSON.stringify(msg);
+    for (const socket of [...this.clientSockets]) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(payload);
+      } else if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        this.clientSockets.delete(socket);
+      }
     }
   }
 

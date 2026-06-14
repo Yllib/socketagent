@@ -254,6 +254,12 @@ export interface GetContextUsageMessage {
   type: "get_context_usage";
 }
 
+export interface GetSdkEventHistoryMessage {
+  type: "get_sdk_event_history";
+  sessionId?: string;
+  limit?: number;
+}
+
 export interface McpReconnectMessage {
   type: "mcp_reconnect";
   serverName: string;
@@ -374,6 +380,7 @@ export type ClientMessage =
   | SetPermissionModeMessage
   | McpStatusRequestMessage
   | GetContextUsageMessage
+  | GetSdkEventHistoryMessage
   | McpReconnectMessage
   | McpToggleMessage
   | RewindMessage

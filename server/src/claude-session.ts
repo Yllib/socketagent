@@ -103,6 +103,7 @@ export class ClaudeSession {
   private _lastSupportedModels: ServerMessage | null = null;
   private _lastSupportedCommands: ServerMessage | null = null;
   private _lastSupportedAgents: ServerMessage | null = null;
+  private clientSockets = new Set<WebSocket>();
   public onActivity?: () => void;
   public onMonitorOutput?: (text: string) => void;
   // When set, this fresh session replaces an old cleared session — remap the ID in the store
@@ -117,7 +118,9 @@ export class ClaudeSession {
     private ws: WebSocket,
     private cwd: string,
     private plugins: SocketAgentPlugin[] = []
-  ) {}
+  ) {
+    this.attachWebSocket(ws);
+  }
 
   setTtsEnabled(enabled: boolean): void {
     this._ttsEnabled = enabled;
@@ -490,19 +493,19 @@ export class ClaudeSession {
 
   /** Swap the WebSocket so a reconnecting client receives future messages */
   setWebSocket(ws: WebSocket): void {
-    this.ws = ws;
+    this.attachWebSocket(ws);
     // Re-send cached session init and models so app UI populates immediately
-    if (this._lastSessionInit) this.send(this._lastSessionInit);
-    if (this._lastSupportedModels) this.send(this._lastSupportedModels);
-    if (this._lastSupportedCommands) this.send(this._lastSupportedCommands);
-    if (this._lastSupportedAgents) this.send(this._lastSupportedAgents);
-    this.replayPendingInteractions();
+    if (this._lastSessionInit) this.sendTo(ws, this._lastSessionInit);
+    if (this._lastSupportedModels) this.sendTo(ws, this._lastSupportedModels);
+    if (this._lastSupportedCommands) this.sendTo(ws, this._lastSupportedCommands);
+    if (this._lastSupportedAgents) this.sendTo(ws, this._lastSupportedAgents);
+    this.replayPendingInteractions(ws);
   }
 
-  replayLiveState(): void {
+  replayLiveState(ws: WebSocket = this.ws): void {
     // Send any thinking accumulated during the current thinking block
     if (this._streamingThinking.length > 0) {
-      this.send({
+      this.sendTo(ws, {
         type: "thinking",
         content: this._streamingThinking,
         sessionId: this.sessionId || "",
@@ -510,7 +513,7 @@ export class ClaudeSession {
     }
     // Send any text accumulated during the current streaming response
     if (this._streamingText.length > 0) {
-      this.send({
+      this.sendTo(ws, {
         type: "text",
         content: this._streamingText,
         sessionId: this.sessionId || "",
@@ -518,18 +521,18 @@ export class ClaudeSession {
     }
   }
 
-  private replayPendingInteractions(): void {
+  private replayPendingInteractions(ws: WebSocket = this.ws): void {
     // Re-send any pending (unanswered) questions so the reconnecting client can respond
     for (const [, pending] of this.pendingQuestions) {
       if (pending.questionData) {
-        this.send(pending.questionData);
+        this.sendTo(ws, pending.questionData);
       }
     }
     // Send active subagent tasks so the app can render SubAgentCards
     const activeSubagents = this.getActiveSubagents();
     if (activeSubagents.length > 0) {
       console.log(`[Resume] Sending ${activeSubagents.length} active subagents`);
-      this.send({
+      this.sendTo(ws, {
         type: "active_subagents",
         tasks: activeSubagents,
         sessionId: this.sessionId || "",
@@ -540,12 +543,30 @@ export class ClaudeSession {
   /** Detach the WebSocket so this session stops sending to the client.
    *  The session continues running in the background (history is still logged). */
   detachWebSocket(): void {
-    this.ws = { readyState: WebSocket.CLOSED, send: () => {} } as any;
+    // Live output is session-scoped and the app filters by sessionId. Keep
+    // attached sockets until they close so reconnects/probes don't steal the
+    // stream from another visible client.
+  }
+
+  private attachWebSocket(ws: WebSocket): void {
+    this.ws = ws;
+    this.clientSockets.add(ws);
+  }
+
+  private sendTo(ws: WebSocket, msg: ServerMessage): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
   }
 
   public send(msg: ServerMessage): void {
-    if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+    const payload = JSON.stringify(msg);
+    for (const socket of [...this.clientSockets]) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(payload);
+      } else if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        this.clientSockets.delete(socket);
+      }
     }
   }
 

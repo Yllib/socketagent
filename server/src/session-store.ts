@@ -695,8 +695,8 @@ export function appendSdkEvent(sessionId: string, event: Record<string, any>): v
   fs.appendFileSync(sdkEventsFile(sessionId), line, "utf-8");
 }
 
-/** Read all SDK events for a session */
-export function getSdkEvents(sessionId: string): Record<string, any>[] {
+/** Read recent SDK events for a session. Raw history can be huge, so cap it. */
+export function getSdkEvents(sessionId: string, limit = 300): Record<string, any>[] {
   ensureSdkEventsDir();
   const file = sdkEventsFile(sessionId);
   if (!fs.existsSync(file)) return [];
@@ -705,6 +705,7 @@ export function getSdkEvents(sessionId: string): Record<string, any>[] {
     return content
       .split("\n")
       .filter(Boolean)
+      .slice(-Math.max(1, limit))
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .filter(Boolean) as Record<string, any>[];
   } catch {

@@ -9,7 +9,7 @@ import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs } from "./session-store";
+import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -712,16 +712,6 @@ function createConnectionHandler(transport: ClientTransport) {
           }
         }
 
-        // Send SDK event history for raw debug mode
-        const sdkEvents = getSdkEvents(msg.sessionId);
-        if (sdkEvents.length > 0) {
-          sendJson({
-            type: "sdk_event_history",
-            sessionId: msg.sessionId,
-            events: sdkEvents,
-          });
-        }
-
         // Restore last usage data if available
         if ((sessionInfo as any).lastUsage) {
           sendJson({
@@ -768,7 +758,7 @@ function createConnectionHandler(transport: ClientTransport) {
         // replaces visible chat state on history load, so replaying earlier
         // can make the already-streamed prefix disappear for late joiners.
         if (resumeRunning && existing) {
-          existing.replayLiveState?.();
+          existing.replayLiveState?.(transport as any);
         }
 
         // Re-send accumulated bash output so the reconnecting client sees live output
@@ -1946,6 +1936,24 @@ function createConnectionHandler(transport: ClientTransport) {
             }
           }).catch(() => {});
         }
+        break;
+      }
+
+      case "get_sdk_event_history": {
+        const targetSid = (msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId;
+        if (!targetSid) {
+          sendJson({ type: "sdk_event_history", sessionId: "", events: [], total: 0, limit: 0 } as any);
+          break;
+        }
+        const rawLimit = Number((msg as any).limit || 300);
+        const limit = Math.max(1, Math.min(1000, Math.floor(rawLimit)));
+        sendJson({
+          type: "sdk_event_history",
+          sessionId: targetSid,
+          events: getSdkEvents(targetSid, limit),
+          total: getSdkEventCount(targetSid),
+          limit,
+        } as any);
         break;
       }
 

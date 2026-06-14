@@ -28,13 +28,21 @@ set -euo pipefail
 # the script before it can write the success message to history.
 trap '' PIPE
 
-# ── Escape the service cgroup so we survive the restart ──
-# When called from within the socketagent service (e.g., via Claude SDK),
-# systemd kills everything in the cgroup on restart. Re-launch ourselves
-# under a transient scope unit to escape.
+# -- Escape the service cgroup so we survive the restart --
+# When called from within the socketagent service (e.g., via Claude/Codex),
+# systemd kills everything in the service cgroup on restart. Re-launch the real
+# restart worker as a transient user service, not a scope, so it has an
+# independent cgroup and can continue after socketagent/socketclaude restarts.
 if [[ -z "${_RESTART_DETACHED:-}" ]]; then
-  export _RESTART_DETACHED=1
-  exec systemd-run --user --scope --unit="socketagent-restart-$$" "$0" "$@"
+  SCRIPT_PATH="$(readlink -f "$0")"
+  UNIT_NAME="socketagent-restart-$$"
+  systemd-run --user \
+    --unit="$UNIT_NAME" \
+    --collect \
+    --setenv="_RESTART_DETACHED=1" \
+    "$SCRIPT_PATH" "$@"
+  echo "Restart job scheduled as ${UNIT_NAME}.service"
+  exit 0
 fi
 
 STORE_DIR="$HOME/.claude-assistant"

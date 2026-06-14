@@ -657,10 +657,6 @@ function createConnectionHandler(transport: ClientTransport) {
           ...(activeSession.permissionMode ? { permissionMode: activeSession.permissionMode } : {}),
         });
 
-        const codexSynced = sessionInfo.backend === "codex"
-          ? await syncCodexNativeHistory(sessionInfo)
-          : [];
-
         // Send message history — if session is running, load back to last user prompt
         const isRunning = activeSessions.has(msg.sessionId) && activeSessions.get(msg.sessionId)!.isRunning;
         const page = isRunning
@@ -684,9 +680,21 @@ function createConnectionHandler(transport: ClientTransport) {
           ? allHistory[allHistory.length - 1].timestamp
           : "";
         if (sessionInfo.backend === "codex") {
-          if (codexSynced.length > 0) {
+          syncCodexNativeHistory(sessionInfo).then((added) => {
+            if (added.length === 0) return;
+            const total = getHistory(msg.sessionId).length;
+            sendJson({
+              type: "session_history",
+              sessionId: msg.sessionId,
+              messages: added,
+              total,
+              offset: Math.max(0, total - added.length),
+              append: true,
+            });
             broadcastSessionList();
-          }
+          }).catch((err) => {
+            console.warn(`[CodexSync] background native history sync failed for ${msg.sessionId}: ${err?.message || err}`);
+          });
         } else {
           // When history is empty, use epoch so we sync ALL messages from the JSONL
           const missed = getMissedMessages(msg.sessionId, sessionInfo.cwd, lastTimestamp || "1970-01-01T00:00:00Z");

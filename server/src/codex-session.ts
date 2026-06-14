@@ -2653,11 +2653,14 @@ export class CodexSession {
   private codexCollaborationMode(): Record<string, unknown> | undefined {
     const developerInstructions = this.codexDeveloperInstructions();
     if (!developerInstructions && this._collaborationMode === "default") return undefined;
+    const model = this.codexModel();
     return {
       mode: this._collaborationMode,
-      ...(developerInstructions
-        ? { settings: { developer_instructions: developerInstructions } }
-        : {}),
+      settings: {
+        model,
+        reasoning_effort: this.codexReasoningEffort(),
+        developer_instructions: developerInstructions ?? null,
+      },
     };
   }
 

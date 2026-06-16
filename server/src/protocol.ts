@@ -435,6 +435,7 @@ export interface TextServerMessage {
   type: "text";
   content: string;
   sessionId: string;
+  streamId?: string;
   parentToolUseId?: string | null;
   uuid?: string;
 }

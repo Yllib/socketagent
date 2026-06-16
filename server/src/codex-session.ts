@@ -293,9 +293,9 @@ export class CodexSession {
       }
     }
 
-    for (const content of this.appServerAgentText.values()) {
+    for (const [streamId, content] of this.appServerAgentText.entries()) {
       if (content) {
-        this.sendTo(ws, { type: "text", content, sessionId: sid } as ServerMessage);
+        this.sendTo(ws, { type: "text", content, sessionId: sid, streamId } as ServerMessage);
       }
     }
   }
@@ -1329,11 +1329,11 @@ export class CodexSession {
       case "item/agentMessage/delta": {
         const sid = this.sessionId;
         if (!sid) return;
-        const itemId = p?.itemId || p?.item?.id || "agent";
+        const itemId = String(p?.itemId || p?.item?.id || "agent");
         const delta = String(p?.delta ?? "");
         this.appServerAgentText.set(itemId, (this.appServerAgentText.get(itemId) || "") + delta);
         if (delta) {
-          this.send({ type: "text", content: delta, sessionId: sid } as ServerMessage);
+          this.send({ type: "text", content: delta, sessionId: sid, streamId: itemId } as ServerMessage);
         }
         return;
       }

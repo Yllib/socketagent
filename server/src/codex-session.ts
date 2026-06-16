@@ -809,6 +809,7 @@ export class CodexSession {
       this.activeAppServerTurnId = null;
       this.appServerTurnSettler = null;
       this.onActivity?.();
+      await this.stopAppServerClient();
     }
   }
 
@@ -854,6 +855,28 @@ export class CodexSession {
       });
       this.appServerInitialized = true;
     }
+  }
+
+  private async stopAppServerClient(): Promise<void> {
+    const client = this.appServer;
+    this.appServer = null;
+    this.appServerInitialized = false;
+    if (this.appServerMcpRegistration) {
+      this.appServerMcpRegistration.unregister();
+      this.appServerMcpRegistration = null;
+    }
+    if (!client) return;
+    try {
+      await client.stop();
+    } catch (err: any) {
+      console.warn(`[codex app-server] cleanup failed: ${err?.message || err}`);
+    } finally {
+      client.removeAllListeners();
+    }
+  }
+
+  async dispose(): Promise<void> {
+    await this.stopAppServerClient();
   }
 
   private buildAppServerThreadParams(): {
@@ -1061,6 +1084,7 @@ export class CodexSession {
           sessionId: this.sessionId,
         } as ServerMessage);
       }
+      void this.stopAppServerClient();
       return;
     }
     if (this.proc && !this.proc.killed) {

@@ -1224,6 +1224,11 @@ export class CodexSession {
           return;
         }
 
+        case "mcpServer/elicitation/request": {
+          await this.handleMcpServerElicitation(params, respond);
+          return;
+        }
+
         default:
           console.warn(`[codex app-server] unsupported server request: ${method}`);
           respond({
@@ -1242,6 +1247,36 @@ export class CodexSession {
         },
       });
     }
+  }
+
+  private async handleMcpServerElicitation(
+    params: Record<string, any>,
+    respond: CodexAppServerRequestResponder,
+  ): Promise<void> {
+    const serverName = String(params.serverName || params.server_name || params.name || "");
+    const normalizedServerName = serverName.toLowerCase().replace(/-/g, "_");
+    const request = params.request && typeof params.request === "object" ? params.request : {};
+    const requestMethod = String((request as any).method || "");
+    const requestParams = (request as any).params && typeof (request as any).params === "object"
+      ? (request as any).params
+      : {};
+    const message = String((requestParams as any).message || "");
+    const isSocketAgentAppServer = normalizedServerName === "socketagent_app"
+      || normalizedServerName === "socketagent"
+      || serverName === "SocketAgent";
+
+    if (isSocketAgentAppServer) {
+      console.log(
+        `[codex app-server] accepted MCP elicitation server=${serverName || "unknown"} method=${requestMethod || "unknown"} message=${message.slice(0, 160)}`,
+      );
+      respond({ result: { action: "accept", content: {} } });
+      return;
+    }
+
+    console.warn(
+      `[codex app-server] declined MCP elicitation server=${serverName || "unknown"} method=${requestMethod || "unknown"} message=${message.slice(0, 160)}`,
+    );
+    respond({ result: { action: "cancel" } });
   }
 
   private async canApproveAppServerTool(

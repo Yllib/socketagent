@@ -749,7 +749,7 @@ function createConnectionHandler(transport: ClientTransport) {
         sendJson({
           type: "status",
           sessionId: msg.sessionId,
-          running: resumeRunning,
+          running: resumeRunning || resumeCompacting,
           compacting: resumeCompacting,
           ...(activeToolInfo ? { activeToolUseId: activeToolInfo.toolUseId } : {}),
           ...(resumePermMode ? { permissionMode: resumePermMode } : {}),
@@ -3019,7 +3019,7 @@ function buildStatusSyncMessage(): string {
   }
   return JSON.stringify({
     type: "status_sync",
-    running: anyRunning,
+    running: anyRunning || compactingSessions.length > 0,
     runningSessions,
     compactingSessions,
     serverStartedAt: SERVER_STARTED_AT,

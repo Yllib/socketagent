@@ -231,7 +231,11 @@ function relayHttpUrl(): string | null {
 }
 
 function shouldSendPushFallback(): boolean {
-  return connectedClients.size === 0 && !(relayClient?.isPaired);
+  // A paired relay socket only proves the encrypted channel exists. On Android
+  // the app may be backgrounded enough that socket-delivered notification
+  // messages are not surfaced, so quiet scheduled task alerts still need FCM
+  // when no direct local WebSocket client is attached.
+  return connectedClients.size === 0;
 }
 
 function maybeSendPushFallback(msg: {
@@ -254,10 +258,13 @@ function maybeSendPushFallback(msg: {
       sessionId: msg.sessionId,
       status: msg.status || "manual",
     }),
-  }).then((res) => {
+  }).then(async (res) => {
+    const text = await res.text().catch(() => "");
     if (!res.ok) {
-      console.warn(`[Push] Relay push failed: HTTP ${res.status}`);
+      console.warn(`[Push] Relay push failed: HTTP ${res.status}${text ? ` ${text}` : ""}`);
+      return;
     }
+    console.log(`[Push] Relay push sent for session=${msg.sessionId || "none"} title=${msg.title.slice(0, 80)}${text ? ` result=${text}` : ""}`);
   }).catch((err) => {
     console.warn(`[Push] Relay push error: ${err?.message || err}`);
   });

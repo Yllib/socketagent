@@ -230,6 +230,21 @@ function relayHttpUrl(): string | null {
   return RELAY_URL.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
 }
 
+function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPubkey: string } | undefined {
+  if (!RELAY_URL || !PAIRING_TOKEN) return undefined;
+  const keysPath = path.join(
+    process.env.HOME || require("os").homedir(),
+    ".claude-assistant",
+    "relay-keys.json"
+  );
+  const keyPair = loadOrCreateKeyPair(keysPath);
+  return {
+    relayUrl: RELAY_URL,
+    pairingToken: PAIRING_TOKEN,
+    serverPubkey: toBase64(keyPair.publicKey),
+  };
+}
+
 function shouldSendPushFallback(): boolean {
   // A paired relay socket only proves the encrypted channel exists. On Android
   // the app may be backgrounded enough that socket-delivered notification
@@ -468,6 +483,7 @@ function createConnectionHandler(transport: ClientTransport) {
         codexDriver: settings.codexDriver,
         codexDriversAvailable: settings.codexDriversAvailable,
         codexCollaborationMode: pendingCodexCollaborationMode,
+        relayPairing: relayPairingInfo(),
       });
       return;
     }

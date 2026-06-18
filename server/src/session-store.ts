@@ -64,6 +64,7 @@ export function remapSession(oldId: string, newId: string): void {
   const session = sessions.find((s) => s.id === oldId);
   if (session) {
     session.id = newId;
+    delete (session as any).contextClearedAt;
     session.lastActive = new Date().toISOString();
     writeStore(sessions);
     console.log(`[Remap] Session ${oldId} → ${newId}`);
@@ -792,13 +793,14 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
   // 5. Write a metadata sidecar so restore can recover the title/cwd
   // even after the session row has been remapped to a new SDK session id.
   if (session) {
+    const clearedAt = new Date().toISOString();
     const metaName = `${sessionId}_${ts}_meta.json`;
     const meta = {
       sid: sessionId,
       title: session.title,
       cwd: session.cwd,
       createdAt: session.createdAt,
-      clearedAt: new Date().toISOString(),
+      clearedAt,
       ...(session.backend ? { backend: session.backend } : {}),
       ...((session as any).codexDriver ? { codexDriver: (session as any).codexDriver } : {}),
       ...(codexRolloutPath ? { codexRolloutPath } : {}),
@@ -809,6 +811,7 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
     // 6. Update session metadata to reflect the clear
     session.messagePreview = "(context cleared)";
     session.lastActive = new Date().toISOString();
+    (session as any).contextClearedAt = clearedAt;
     delete (session as any).lastContextUsage;
     writeStore(sessions);
   }

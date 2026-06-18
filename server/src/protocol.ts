@@ -555,6 +555,8 @@ export interface SessionInfo {
   codexDriver?: CodexDriver;
   /** Last selected permission mode for this session. */
   permissionMode?: string;
+  /** Set after clear-context until the next fresh backend session replaces this id. */
+  contextClearedAt?: string;
 }
 
 export interface ErrorServerMessage {

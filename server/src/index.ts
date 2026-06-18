@@ -344,6 +344,10 @@ function getStoredCodexDriver(sessionInfo: SessionInfo | undefined): CodexDriver
   return resolveCodexDriver((sessionInfo as any).codexDriver);
 }
 
+function isContextClearedSession(sessionInfo: SessionInfo | undefined, sessionId: string): boolean {
+  return !!sessionInfo?.contextClearedAt || clearedSessions.has(sessionId);
+}
+
 async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> {
   if (sessionInfo.backend !== "codex") return [];
   const driver = getStoredCodexDriver(sessionInfo);
@@ -646,7 +650,8 @@ function createConnectionHandler(transport: ClientTransport) {
           });
           break;
         }
-        if (sessionInfo.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server" && isCodexThreadArchived(msg.sessionId)) {
+        const contextCleared = isContextClearedSession(sessionInfo, msg.sessionId);
+        if (!contextCleared && sessionInfo.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server" && isCodexThreadArchived(msg.sessionId)) {
           await unarchiveCodexAppServerThread(msg.sessionId, sessionInfo.cwd).catch((err) => {
             console.warn(`[Resume] Codex app-server thread/unarchive failed for ${msg.sessionId}: ${err.message || err}`);
           });
@@ -712,7 +717,7 @@ function createConnectionHandler(transport: ClientTransport) {
         const lastTimestamp = allHistory.length > 0
           ? allHistory[allHistory.length - 1].timestamp
           : "";
-        if (sessionInfo.backend === "codex") {
+        if (sessionInfo.backend === "codex" && !contextCleared) {
           syncCodexNativeHistory(sessionInfo).then((added) => {
             if (added.length === 0) return;
             const total = getHistory(msg.sessionId).length;
@@ -728,6 +733,8 @@ function createConnectionHandler(transport: ClientTransport) {
           }).catch((err) => {
             console.warn(`[CodexSync] background native history sync failed for ${msg.sessionId}: ${err?.message || err}`);
           });
+        } else if (sessionInfo.backend === "codex" && contextCleared) {
+          console.log(`[Resume] Skipping Codex native history sync for cleared session ${msg.sessionId}`);
         } else {
           // When history is empty, use epoch so we sync ALL messages from the JSONL
           const missed = getMissedMessages(msg.sessionId, sessionInfo.cwd, lastTimestamp || "1970-01-01T00:00:00Z");
@@ -884,8 +891,11 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.getSessionId() ||
           undefined;
 
-        // If context was cleared, don't resume — start fresh
-        if (resumeId && clearedSessions.has(resumeId)) {
+        // If context was cleared, don't resume — start fresh. The in-memory
+        // set covers the current process; contextClearedAt covers restarts
+        // between the clear and the user's next prompt.
+        const resumeSessionInfo = resumeId ? getSession(resumeId) : undefined;
+        if (resumeId && isContextClearedSession(resumeSessionInfo, resumeId)) {
           console.log(`[Clear] Session ${resumeId} was cleared, starting fresh (no resume)`);
           clearedSessions.delete(resumeId);
           activeSession.replacesSessionId = resumeId;
@@ -893,7 +903,6 @@ function createConnectionHandler(transport: ClientTransport) {
         }
 
         if (resumeId) {
-          const resumeSessionInfo = getSession(resumeId);
           if (resumeSessionInfo?.backend === "codex") {
             const added = await syncCodexNativeHistory(resumeSessionInfo);
             if (added.length > 0) {

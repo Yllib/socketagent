@@ -205,6 +205,14 @@ export class CodexSession {
 
   get isRunning(): boolean { return this._isRunning; }
   get isCompacting(): boolean { return this._isCompacting; }
+  get isBusy(): boolean {
+    return this._isRunning
+      || this._isCompacting
+      || this.appServerTurnSettler !== null
+      || this._pendingUserPrompt !== null
+      || this._queuedPrompts.length > 0
+      || this._pendingAppServerSteers.length > 0;
+  }
   get driver(): CodexDriver { return this.codexDriver; }
   get permissionMode(): string | null {
     return this._permissionMode;

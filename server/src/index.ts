@@ -168,6 +168,19 @@ const activeSessions: Map<string, Session> = new Map();
 // Sessions whose context has been cleared — next query should NOT pass resume
 const clearedSessions: Set<string> = new Set();
 
+function sessionIsBusy(session: Session): boolean {
+  if (typeof (session as any).isBusy === "boolean") return (session as any).isBusy;
+  return session.isRunning || (session as any).isCompacting === true;
+}
+
+function autoUpdateBlockReason(): string | null {
+  for (const [, session] of activeSessions) {
+    if (sessionIsBusy(session)) {
+      return "sessions are running";
+    }
+  }
+  return null;
+}
 
 // Track all connected WebSocket clients for broadcasting
 const connectedClients = new Set<WebSocket>();
@@ -189,7 +202,7 @@ function getEnrichedSessions(): SessionInfo[] {
     .filter(s => !taskSessionIds.has(s.id))
     .map(s => {
       const active = activeSessions.get(s.id);
-      if (active && active.isRunning) {
+      if (active && sessionIsBusy(active)) {
         return {
           ...s,
           running: true,
@@ -2706,7 +2719,7 @@ const httpServer = http.createServer((req, res) => {
     }
     const running: string[] = [];
     for (const [sid, session] of activeSessions) {
-      if (session.isRunning) running.push(sid);
+      if (sessionIsBusy(session)) running.push(sid);
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ sessions: running }));
@@ -3035,8 +3048,11 @@ function buildStatusSyncMessage(): string {
   const backgroundTaskIds: string[] = [];
   const sessionModels: Record<string, string> = {};
   for (const [sid, session] of activeSessions) {
-    if (session.isRunning) {
+    const busy = sessionIsBusy(session);
+    if (busy) {
       anyRunning = true;
+    }
+    if (busy) {
       runningSessions.push(sid);
     }
     if (session.isCompacting) {
@@ -3070,7 +3086,7 @@ function scheduleStatusSync(): void {
 
   let anyRunning = false;
   for (const [, session] of activeSessions) {
-    if (session.isRunning) { anyRunning = true; break; }
+    if (sessionIsBusy(session)) { anyRunning = true; break; }
   }
 
   const interval = anyRunning ? STATUS_SYNC_RUNNING_INTERVAL : STATUS_SYNC_IDLE_INTERVAL;
@@ -3606,12 +3622,10 @@ async function checkForUpdates(): Promise<void> {
 
     if (remote === lastApplied) return; // Already applied this remote version
 
-    // Check if any sessions are actively running
-    for (const [, session] of activeSessions) {
-      if (session.isRunning) {
-        console.log(`[Auto-update] Update available (${remote.substring(0, 7)}) but sessions are running, deferring...`);
-        return;
-      }
+    const blockReason = autoUpdateBlockReason();
+    if (blockReason) {
+      console.log(`[Auto-update] Update available (${remote.substring(0, 7)}) but ${blockReason}, deferring...`);
+      return;
     }
 
     console.log(`[Auto-update] Pulling to ${remote.substring(0, 7)}...`);

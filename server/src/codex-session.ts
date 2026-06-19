@@ -525,7 +525,14 @@ export class CodexSession {
 
       case "mcp": {
         await this.ensureAppServer();
-        const result = await this.appServer!.listMcpServerStatus(threadId || undefined);
+        let result: any;
+        try {
+          result = await this.appServer!.listMcpServerStatus(threadId || undefined);
+        } catch (err: any) {
+          const message = err?.message || String(err);
+          if (!threadId || !message.includes("thread not found")) throw err;
+          result = await this.appServer!.listMcpServerStatus(undefined);
+        }
         const servers = Array.isArray((result as any)?.data) ? (result as any).data : [];
         const summary = servers.length === 0
           ? "No Codex MCP servers reported."

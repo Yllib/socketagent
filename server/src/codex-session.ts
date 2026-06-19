@@ -133,6 +133,65 @@ type PendingAppServerSteer = QueuedPrompt & {
   uuid: string;
 };
 
+export type CodexSlashCommand = {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  availability?: "app-server" | "any";
+};
+
+export const CODEX_NATIVE_SLASH_COMMANDS: CodexSlashCommand[] = [
+  {
+    name: "status",
+    description: "Show Codex session status.",
+    availability: "any",
+  },
+  {
+    name: "compact",
+    description: "Compact the current Codex thread.",
+    availability: "app-server",
+  },
+  {
+    name: "goal",
+    description: "View, set, pause, resume, or clear the current goal.",
+    argumentHint: "[text|pause|resume|clear]",
+    availability: "app-server",
+  },
+  {
+    name: "review",
+    description: "Review uncommitted changes, or review with custom instructions.",
+    argumentHint: "[instructions]",
+    availability: "app-server",
+  },
+  {
+    name: "mcp",
+    description: "Show configured Codex MCP server status.",
+    availability: "app-server",
+  },
+  {
+    name: "model",
+    description: "Show available models or set the active model.",
+    argumentHint: "[model]",
+    availability: "app-server",
+  },
+  {
+    name: "permissions",
+    description: "Show or set Codex permission mode.",
+    argumentHint: "[ask|yolo|super-yolo|read-only]",
+    availability: "any",
+  },
+  {
+    name: "archive",
+    description: "Archive the current Codex thread.",
+    availability: "app-server",
+  },
+  {
+    name: "fork",
+    description: "Fork the current Codex thread.",
+    availability: "app-server",
+  },
+];
+
 // ─── CodexSession ─────────────────────────────────────────────────────────
 
 export class CodexSession {
@@ -394,6 +453,187 @@ export class CodexSession {
     if (!Number.isFinite(numTurns) || numTurns < 1) throw new Error("Rollback must drop at least one turn");
     await this.ensureAppServer();
     await this.appServer!.rollbackThread(threadId, Math.floor(numTurns));
+  }
+
+  async executeCodexSlashCommand(name: string, args = ""): Promise<void> {
+    const command = name.trim().replace(/^\//, "").toLowerCase();
+    const commandArgs = args.trim();
+    const threadId = this.threadId || this.sessionId || this._resumeSessionId || "";
+    const commandDef = CODEX_NATIVE_SLASH_COMMANDS.find((candidate) => candidate.name === command);
+    if (!commandDef) {
+      throw new Error(`Unsupported Codex slash command: /${command}`);
+    }
+    if (commandDef.availability === "app-server" && this.codexDriver !== "app-server") {
+      throw new Error(`/${command} requires Codex App Server mode`);
+    }
+
+    switch (command) {
+      case "status": {
+        const lines = [
+          `Thread: ${threadId || "not started"}`,
+          `CWD: ${this.cwd}`,
+          `Driver: ${this.codexDriver}`,
+          `Model: ${this._model || "default"}`,
+          `Effort: ${this._effort}`,
+          `Permissions: ${this._permissionMode}`,
+          `State: ${this._isCompacting ? "compacting" : this._isRunning ? "running" : "idle"}`,
+        ];
+        this.emitSlashCommandResult(command, lines.join("\n"));
+        return;
+      }
+
+      case "compact": {
+        await this.compactAppServerThread(threadId);
+        this.emitSlashCommandResult(command, "Codex thread compaction started.");
+        return;
+      }
+
+      case "goal": {
+        if (!threadId) throw new Error("No Codex thread id for /goal");
+        await this.ensureAppServer();
+        if (!commandArgs) {
+          const result = await this.appServer!.getGoal(threadId);
+          const goal = (result as any)?.goal;
+          this.emitSlashCommandResult(
+            command,
+            goal
+              ? `Goal: ${goal.objective || ""}\nStatus: ${goal.status || "unknown"}`
+              : "No active goal.",
+          );
+          return;
+        }
+        const action = commandArgs.toLowerCase();
+        if (action === "clear") {
+          await this.appServer!.clearGoal(threadId);
+          this.emitSlashCommandResult(command, "Goal cleared.");
+          return;
+        }
+        if (action === "pause" || action === "paused") {
+          await this.appServer!.setGoal(threadId, { status: "paused" });
+          this.emitSlashCommandResult(command, "Goal paused.");
+          return;
+        }
+        if (action === "resume" || action === "active") {
+          await this.appServer!.setGoal(threadId, { status: "active" });
+          this.emitSlashCommandResult(command, "Goal resumed.");
+          return;
+        }
+        await this.appServer!.setGoal(threadId, { objective: commandArgs, status: "active" });
+        this.emitSlashCommandResult(command, `Goal set: ${commandArgs}`);
+        return;
+      }
+
+      case "review": {
+        if (!threadId) throw new Error("No Codex thread id for /review");
+        await this.ensureAppServer();
+        await this.appServer!.startReview(threadId, commandArgs);
+        this.emitSlashCommandResult(command, "Codex review started.");
+        return;
+      }
+
+      case "mcp": {
+        await this.ensureAppServer();
+        const result = await this.appServer!.listMcpServerStatus(threadId || undefined);
+        const servers = Array.isArray((result as any)?.data) ? (result as any).data : [];
+        const summary = servers.length === 0
+          ? "No Codex MCP servers reported."
+          : servers.map((server: any) => {
+              const status = server.status || server.startupStatus || server.state || "unknown";
+              const name = server.name || server.serverName || "unnamed";
+              return `${name}: ${typeof status === "string" ? status : JSON.stringify(status)}`;
+            }).join("\n");
+        this.emitSlashCommandResult(command, summary);
+        return;
+      }
+
+      case "model": {
+        if (commandArgs) {
+          await this.setModel(commandArgs.split(/\s+/)[0]);
+          this.emitSlashCommandResult(command, `Model set to ${this._model}.`);
+          return;
+        }
+        await this.ensureAppServer();
+        const result = await this.appServer!.listModels();
+        const models = Array.isArray((result as any)?.data) ? (result as any).data : [];
+        const names = models
+          .filter((model: any) => model && model.hidden !== true)
+          .slice(0, 12)
+          .map((model: any) => model.displayName ? `${model.id || model.model}: ${model.displayName}` : String(model.id || model.model || "unknown"));
+        this.emitSlashCommandResult(command, names.length > 0 ? names.join("\n") : `Current model: ${this._model || "default"}`);
+        return;
+      }
+
+      case "permissions": {
+        if (!commandArgs) {
+          this.emitSlashCommandResult(command, `Current permission mode: ${this._permissionMode}`);
+          return;
+        }
+        const normalized = this.normalizeSlashPermissionMode(commandArgs);
+        await this.setPermissionMode(normalized);
+        this.emitSlashCommandResult(command, `Permission mode set to ${this._permissionMode}.`);
+        return;
+      }
+
+      case "archive": {
+        if (!threadId) throw new Error("No Codex thread id for /archive");
+        await this.ensureAppServer();
+        await this.appServer!.archiveThread(threadId);
+        this.emitSlashCommandResult(command, "Codex thread archived.");
+        return;
+      }
+
+      default:
+        throw new Error(`Unsupported Codex slash command: /${command}`);
+    }
+  }
+
+  private normalizeSlashPermissionMode(value: string): string {
+    const mode = value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+    switch (mode) {
+      case "ask":
+      case "default":
+      case "workspace":
+      case "workspace-write":
+        return "default";
+      case "read-only":
+      case "readonly":
+      case "plan":
+        return "plan";
+      case "yolo":
+      case "auto":
+      case "bypass":
+      case "bypass-permissions":
+        return "bypassPermissions";
+      case "super-yolo":
+      case "superyolo":
+      case "never":
+        return "superYolo";
+      default:
+        throw new Error(`Unknown permission mode '${value}'. Use ask, yolo, super-yolo, or read-only.`);
+    }
+  }
+
+  private emitSlashCommandResult(command: string, summary: string, status: "completed" | "failed" | "stopped" = "completed"): void {
+    const sid = this.threadId || this.sessionId || this._resumeSessionId || "";
+    const taskId = `codex_slash_${command}_${crypto.randomUUID()}`;
+    const content = `/${command}\n${summary}`;
+    if (sid) {
+      appendHistory(sid, {
+        role: "notification",
+        content,
+        status,
+        originToolUseId: `codex_slash_${command}`,
+        timestamp: now(),
+      });
+    }
+    this.send({
+      type: "task_notification",
+      taskId,
+      status,
+      summary: content,
+      sessionId: sid,
+      parentToolUseId: `codex_slash_${command}`,
+    } as any);
   }
 
   async listCodexCollaborationModes(): Promise<Array<Record<string, unknown>>> {

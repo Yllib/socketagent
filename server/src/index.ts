@@ -8,7 +8,7 @@ import * as path from "path";
 import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
-import { CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
+import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
@@ -1737,11 +1737,51 @@ function createConnectionHandler(transport: ClientTransport) {
           console.log(`[skills_list] Scanning skills in ${projectCwd}...`);
           const skills = listSkills(projectCwd);
           console.log(`[skills_list] Found ${skills.length} skills, sending response`);
-          sendJson({ type: "skills_list", skills, projectCwd });
+          sendJson({ type: "skills_list", skills, projectCwd, codexSlashCommands: CODEX_NATIVE_SLASH_COMMANDS });
         } catch (e: any) {
           console.error(`[skills_list] Error: ${e.message || e}`);
-          sendJson({ type: "skills_list", skills: [], projectCwd: "", error: e.message || String(e) });
+          sendJson({ type: "skills_list", skills: [], projectCwd: "", codexSlashCommands: CODEX_NATIVE_SLASH_COMMANDS, error: e.message || String(e) });
         }
+        break;
+      }
+
+      case "codex_slash_command": {
+        const name = String((msg as any).name || "").replace(/^\//, "").trim();
+        const args = String((msg as any).args || "");
+        const targetSid = String((msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId || "");
+        const target = targetSid
+          ? activeSessions.get(targetSid) || (activeSession?.getSessionId?.() === targetSid ? activeSession : null)
+          : activeSession;
+        if (!(target instanceof CodexSession)) {
+          sendJson({ type: "error", message: "No active Codex session for slash command" });
+          break;
+        }
+        target.executeCodexSlashCommand(name, args).then(() => {
+          sendJson({ type: "codex_slash_command_result", sessionId: targetSid, name, success: true });
+          broadcastSessionList();
+        }).catch((e: any) => {
+          const message = e.message || String(e);
+          console.error(`[codex_slash_command] /${name} failed: ${message}`);
+          const sessionId = targetSid || target.getSessionId?.() || "";
+          if (sessionId) {
+            appendHistory(sessionId, {
+              role: "notification",
+              content: `/${name || "command"}\nFailed: ${message}`,
+              status: "failed",
+              originToolUseId: `codex_slash_${name || "command"}`,
+              timestamp: new Date().toISOString(),
+            } as any);
+          }
+          sendJson({
+            type: "task_notification",
+            taskId: `codex_slash_${name || "command"}_${crypto.randomUUID()}`,
+            status: "failed",
+            summary: `/${name || "command"}\nFailed: ${message}`,
+            sessionId,
+            parentToolUseId: `codex_slash_${name || "command"}`,
+          });
+          sendJson({ type: "codex_slash_command_result", sessionId, name, success: false, error: message });
+        });
         break;
       }
 
@@ -2830,7 +2870,7 @@ const httpServer = http.createServer((req, res) => {
     if (!projectCwd) projectCwd = DEFAULT_CWD;
     const skills = listSkills(projectCwd);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ skills, projectCwd }));
+    res.end(JSON.stringify({ skills, projectCwd, codexSlashCommands: CODEX_NATIVE_SLASH_COMMANDS }));
     return;
   }
 

@@ -241,6 +241,33 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("thread/compact/start", { threadId });
   }
 
+  async getGoal(threadId: string): Promise<unknown> {
+    return this.request("thread/goal/get", { threadId });
+  }
+
+  async setGoal(threadId: string, params: { objective?: string; status?: string; tokenBudget?: number | null }): Promise<unknown> {
+    return this.request("thread/goal/set", { threadId, ...params });
+  }
+
+  async clearGoal(threadId: string): Promise<unknown> {
+    return this.request("thread/goal/clear", { threadId });
+  }
+
+  async startReview(threadId: string, instructions?: string): Promise<unknown> {
+    const target = instructions && instructions.trim()
+      ? { type: "custom", instructions: instructions.trim() }
+      : { type: "uncommittedChanges" };
+    return this.request("review/start", { threadId, target, delivery: "inline" });
+  }
+
+  async listMcpServerStatus(threadId?: string): Promise<unknown> {
+    return this.request("mcpServerStatus/list", { threadId, limit: 50 });
+  }
+
+  async listModels(): Promise<unknown> {
+    return this.request("model/list", { limit: 50 });
+  }
+
   async rollbackThread(threadId: string, numTurns: number): Promise<unknown> {
     return this.request("thread/rollback", { threadId, numTurns });
   }

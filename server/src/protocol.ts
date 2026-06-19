@@ -414,6 +414,7 @@ export type ClientMessage =
   | { type: "add_recent_cwd"; cwd: string }
   | { type: "remove_recent_cwd"; cwd: string }
   | { type: "skills_list" }
+  | { type: "codex_slash_command"; name: string; args?: string; sessionId?: string }
   | { type: "skills_save"; name: string; scope: string; format: string; agent?: "claude" | "codex"; frontmatter: Record<string, string>; body: string; filePath?: string }
   | { type: "skills_delete"; filePath: string }
   | { type: "protected_files_list"; requestId?: string }

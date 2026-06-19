@@ -18,6 +18,7 @@ import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { getAdvertisedServerSettings, getCodexDriversAvailable, resolveCodexDriver, setCodexDriver } from "./server-settings";
+import { isPushConfigured, registerPushToken, sendPushNotification } from "./push-notifications";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -238,11 +239,6 @@ function broadcastScheduledTaskList(): void {
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
 }
 
-function relayHttpUrl(): string | null {
-  if (!RELAY_URL) return null;
-  return RELAY_URL.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
-}
-
 function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPubkey: string } | undefined {
   if (!RELAY_URL || !PAIRING_TOKEN) return undefined;
   const keysPath = path.join(
@@ -258,43 +254,29 @@ function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPub
   };
 }
 
-function shouldSendPushFallback(): boolean {
-  // A paired relay socket only proves the encrypted channel exists. On Android
-  // the app may be backgrounded enough that socket-delivered notification
-  // messages are not surfaced, so quiet scheduled task alerts still need FCM
-  // when no direct local WebSocket client is attached.
+function shouldSendPushNotification(): boolean {
   return connectedClients.size === 0;
 }
 
-function maybeSendPushFallback(msg: {
+function maybeSendPushNotification(msg: {
   type: "scheduled_task_notification";
   title: string;
   body: string;
   sessionId: string;
   status?: "completed" | "failed" | "manual";
 }): void {
-  if (!shouldSendPushFallback()) return;
-  const httpUrl = relayHttpUrl();
-  if (!httpUrl || !PAIRING_TOKEN) return;
-  fetch(`${httpUrl}/api/push/send`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      pairingToken: PAIRING_TOKEN,
-      title: msg.title,
-      body: msg.body,
-      sessionId: msg.sessionId,
-      status: msg.status || "manual",
-    }),
-  }).then(async (res) => {
-    const text = await res.text().catch(() => "");
-    if (!res.ok) {
-      console.warn(`[Push] Relay push failed: HTTP ${res.status}${text ? ` ${text}` : ""}`);
-      return;
+  if (!shouldSendPushNotification()) return;
+  sendPushNotification({
+    title: msg.title,
+    body: msg.body,
+    sessionId: msg.sessionId,
+    status: msg.status || "manual",
+  }).then((result) => {
+    if (result.attempted > 0) {
+      console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for session=${msg.sessionId || "none"} title=${msg.title.slice(0, 80)}`);
     }
-    console.log(`[Push] Relay push sent for session=${msg.sessionId || "none"} title=${msg.title.slice(0, 80)}${text ? ` result=${text}` : ""}`);
   }).catch((err) => {
-    console.warn(`[Push] Relay push error: ${err?.message || err}`);
+    console.warn(`[Push] FCM push error: ${err?.message || err}`);
   });
 }
 
@@ -311,7 +293,7 @@ function broadcastScheduledTaskNotification(
     if (client.readyState === WebSocket.OPEN) client.send(msg);
   }
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
-  maybeSendPushFallback(payload);
+  maybeSendPushNotification(payload);
 }
 
 function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: string): void {
@@ -329,7 +311,7 @@ function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: 
     }
     if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
     if (msg.type === "scheduled_task_notification") {
-      maybeSendPushFallback(msg);
+      maybeSendPushNotification(msg);
     }
   } catch {
     // Ignore non-JSON or unrelated headless session traffic.
@@ -501,11 +483,30 @@ function createConnectionHandler(transport: ClientTransport) {
         codexDriversAvailable: settings.codexDriversAvailable,
         codexCollaborationMode: pendingCodexCollaborationMode,
         relayPairing: relayPairingInfo(),
+        pushNotifications: {
+          directFcm: true,
+          configured: isPushConfigured(),
+        },
       });
       return;
     }
 
     switch (msg.type) {
+      case "register_push_token": {
+        const token = typeof msg.fcmToken === "string" ? msg.fcmToken : "";
+        if (token.trim()) {
+          registerPushToken(
+            token,
+            typeof msg.platform === "string" ? msg.platform : "android",
+            typeof msg.appServerId === "string" ? msg.appServerId : undefined,
+          );
+          sendJson({ type: "push_token_registered" });
+        } else {
+          sendJson({ type: "error", message: "Missing FCM token" });
+        }
+        break;
+      }
+
       case "get_server_settings": {
         sendJson({
           type: "server_settings",

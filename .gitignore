@@ -32,6 +32,7 @@ server/tools/
 
 # Auth/credential files
 *.tokens.json
+server/.secrets/
 
 # OS
 .DS_Store

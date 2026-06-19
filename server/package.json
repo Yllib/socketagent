@@ -12,6 +12,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.116",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^16.4.7",
+    "firebase-admin": "^13.10.0",
     "node-pty": "^1.1.0",
     "qrcode-terminal": "^0.12.0",
     "sherpa-onnx-node": "^1.12.25",

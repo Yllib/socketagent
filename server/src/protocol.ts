@@ -198,6 +198,13 @@ export interface ClientCapabilitiesMessage {
   binaryEnvelope?: boolean;
 }
 
+export interface RegisterPushTokenMessage {
+  type: "register_push_token";
+  fcmToken: string;
+  platform?: string;
+  appServerId?: string;
+}
+
 export interface SetEffortMessage {
   type: "set_effort";
   effort: "low" | "medium" | "high" | "max";
@@ -396,6 +403,7 @@ export type ClientMessage =
   | UploadChunkMessage
   | UploadChunkBinMessage
   | ClientCapabilitiesMessage
+  | RegisterPushTokenMessage
   | ScheduleTaskMessage
   | ListScheduledTasksMessage
   | CancelScheduledTaskMessage

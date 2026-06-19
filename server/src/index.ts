@@ -1749,20 +1749,26 @@ function createConnectionHandler(transport: ClientTransport) {
         const name = String((msg as any).name || "").replace(/^\//, "").trim();
         const args = String((msg as any).args || "");
         const targetSid = String((msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId || "");
+        const activeMatchesTarget = !!activeSession && (
+          activeSession.getSessionId?.() === targetSid ||
+          activeSessionId === targetSid ||
+          (activeSession as any)._resumeSessionId === targetSid
+        );
         const target = targetSid
-          ? activeSessions.get(targetSid) || (activeSession?.getSessionId?.() === targetSid ? activeSession : null)
+          ? activeSessions.get(targetSid) || (activeMatchesTarget ? activeSession : null)
           : activeSession;
         if (!(target instanceof CodexSession)) {
           sendJson({ type: "error", message: "No active Codex session for slash command" });
           break;
         }
+        const resultSessionId = targetSid || target.getSessionId?.() || (target as any)._resumeSessionId || "";
         target.executeCodexSlashCommand(name, args).then(() => {
-          sendJson({ type: "codex_slash_command_result", sessionId: targetSid, name, success: true });
+          sendJson({ type: "codex_slash_command_result", sessionId: resultSessionId, name, success: true });
           broadcastSessionList();
         }).catch((e: any) => {
           const message = e.message || String(e);
           console.error(`[codex_slash_command] /${name} failed: ${message}`);
-          const sessionId = targetSid || target.getSessionId?.() || "";
+          const sessionId = resultSessionId;
           if (sessionId) {
             appendHistory(sessionId, {
               role: "notification",

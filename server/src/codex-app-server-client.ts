@@ -268,6 +268,18 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("model/list", { limit: 50 });
   }
 
+  async readConfig(cwd?: string): Promise<unknown> {
+    return this.request("config/read", { cwd, includeLayers: false });
+  }
+
+  async readAccountRateLimits(): Promise<unknown> {
+    return this.request("account/rateLimits/read", {});
+  }
+
+  async readAccountUsage(): Promise<unknown> {
+    return this.request("account/usage/read", {});
+  }
+
   async rollbackThread(threadId: string, numTurns: number): Promise<unknown> {
     return this.request("thread/rollback", { threadId, numTurns });
   }

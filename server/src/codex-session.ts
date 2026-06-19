@@ -469,16 +469,7 @@ export class CodexSession {
 
     switch (command) {
       case "status": {
-        const lines = [
-          `Thread: ${threadId || "not started"}`,
-          `CWD: ${this.cwd}`,
-          `Driver: ${this.codexDriver}`,
-          `Model: ${this._model || "default"}`,
-          `Effort: ${this._effort}`,
-          `Permissions: ${this._permissionMode}`,
-          `State: ${this._isCompacting ? "compacting" : this._isRunning ? "running" : "idle"}`,
-        ];
-        this.emitSlashCommandResult(command, lines.join("\n"));
+        this.emitSlashCommandResult(command, await this.buildStatusSummary(threadId));
         return;
       }
 
@@ -538,9 +529,12 @@ export class CodexSession {
         const summary = servers.length === 0
           ? "No Codex MCP servers reported."
           : servers.map((server: any) => {
-              const status = server.status || server.startupStatus || server.state || "unknown";
+              const status = server.authStatus || server.status || server.startupStatus || server.state || "unknown";
               const name = server.name || server.serverName || "unnamed";
-              return `${name}: ${typeof status === "string" ? status : JSON.stringify(status)}`;
+              const toolCount = server.tools && typeof server.tools === "object" ? Object.keys(server.tools).length : 0;
+              const resourceCount = Array.isArray(server.resources) ? server.resources.length : 0;
+              const templateCount = Array.isArray(server.resourceTemplates) ? server.resourceTemplates.length : 0;
+              return `${name}: ${this.formatMcpAuthStatus(status)} (${toolCount} tools, ${resourceCount} resources, ${templateCount} templates)`;
             }).join("\n");
         this.emitSlashCommandResult(command, summary);
         return;
@@ -558,19 +552,27 @@ export class CodexSession {
         const names = models
           .filter((model: any) => model && model.hidden !== true)
           .slice(0, 12)
-          .map((model: any) => model.displayName ? `${model.id || model.model}: ${model.displayName}` : String(model.id || model.model || "unknown"));
+          .map((model: any) => {
+            const id = String(model.id || model.model || "unknown");
+            const display = model.displayName ? ` (${model.displayName})` : "";
+            const current = id === this._model || (!this._model && model.isDefault) ? " current" : "";
+            const tier = Array.isArray(model.serviceTiers) && model.serviceTiers.length > 0
+              ? `; tiers: ${model.serviceTiers.map((tier: any) => tier.name || tier.id).filter(Boolean).join(", ")}`
+              : "";
+            return `${id}${display}${current}${tier}`;
+          });
         this.emitSlashCommandResult(command, names.length > 0 ? names.join("\n") : `Current model: ${this._model || "default"}`);
         return;
       }
 
       case "permissions": {
         if (!commandArgs) {
-          this.emitSlashCommandResult(command, `Current permission mode: ${this._permissionMode}`);
+          this.emitSlashCommandResult(command, `Current permission mode: ${this.formatPermissionMode(this._permissionMode)}`);
           return;
         }
         const normalized = this.normalizeSlashPermissionMode(commandArgs);
         await this.setPermissionMode(normalized);
-        this.emitSlashCommandResult(command, `Permission mode set to ${this._permissionMode}.`);
+        this.emitSlashCommandResult(command, `Permission mode set to ${this.formatPermissionMode(this._permissionMode)}.`);
         return;
       }
 
@@ -611,6 +613,170 @@ export class CodexSession {
       default:
         throw new Error(`Unknown permission mode '${value}'. Use ask, yolo, super-yolo, or read-only.`);
     }
+  }
+
+  private async buildStatusSummary(threadId: string): Promise<string> {
+    const lines: string[] = [];
+    let config: any = null;
+    let thread: any = null;
+    let rateLimits: any = null;
+    let usage: any = null;
+
+    if (this.codexDriver === "app-server") {
+      await this.ensureAppServer();
+      const [configResult, threadResult, limitsResult, usageResult] = await Promise.allSettled([
+        this.appServer!.readConfig(this.cwd),
+        threadId ? this.appServer!.readThread({ threadId, includeTurns: false }) : Promise.resolve(null),
+        this.appServer!.readAccountRateLimits(),
+        this.appServer!.readAccountUsage(),
+      ]);
+      if (configResult.status === "fulfilled") config = (configResult.value as any)?.config || null;
+      if (threadResult.status === "fulfilled") thread = (threadResult.value as any)?.thread || null;
+      if (limitsResult.status === "fulfilled") rateLimits = limitsResult.value;
+      if (usageResult.status === "fulfilled") usage = usageResult.value;
+    }
+
+    const threadStatus = thread?.status?.type
+      || (this._isCompacting ? "compacting" : this._isRunning ? "running" : "idle");
+    const model = this._model || config?.model || "default";
+    const effort = config?.model_reasoning_effort || this._effort;
+
+    lines.push(`Thread: ${threadId || "not started"}`);
+    if (thread?.name) lines.push(`Title: ${thread.name}`);
+    lines.push(`State: ${threadStatus}`);
+    lines.push(`CWD: ${thread?.cwd || this.cwd}`);
+    lines.push(`Driver: ${this.codexDriver}`);
+    lines.push(`Model: ${model}`);
+    lines.push(`Effort: ${effort || "default"}`);
+    if (config?.service_tier) lines.push(`Service tier: ${config.service_tier}`);
+    lines.push(`Permissions: ${this.formatPermissionMode(this._permissionMode)}`);
+    if (config?.sandbox_mode || config?.approval_policy) {
+      lines.push(`Codex policy: sandbox=${this.formatScalar(config.sandbox_mode || "default")}, approvals=${this.formatScalar(config.approval_policy || "default")}`);
+    }
+
+    const limitLines = this.formatRateLimitSummary(rateLimits);
+    if (limitLines.length > 0) {
+      lines.push("");
+      lines.push("Limits:");
+      lines.push(...limitLines);
+    }
+
+    const usageLines = this.formatUsageSummary(usage);
+    if (usageLines.length > 0) {
+      lines.push("");
+      lines.push("Usage:");
+      lines.push(...usageLines);
+    }
+
+    return lines.join("\n");
+  }
+
+  private formatRateLimitSummary(value: any): string[] {
+    if (!value) return [];
+    const byId = value.rateLimitsByLimitId && typeof value.rateLimitsByLimitId === "object"
+      ? Object.values(value.rateLimitsByLimitId)
+      : [];
+    const limits = (byId.length > 0 ? byId : [value.rateLimits]).filter(Boolean) as any[];
+    return limits.slice(0, 4).map((limit) => {
+      const label = limit.limitName || limit.limitId || "Codex";
+      const plan = limit.planType ? `; plan ${limit.planType}` : "";
+      const primary = this.formatRateLimitWindow("primary", limit.primary);
+      const secondary = this.formatRateLimitWindow("secondary", limit.secondary);
+      const credits = limit.credits
+        ? `; credits ${limit.credits.unlimited ? "unlimited" : String(limit.credits.balance ?? "0")}`
+        : "";
+      const reached = limit.rateLimitReachedType ? `; reached ${this.formatScalar(limit.rateLimitReachedType)}` : "";
+      return `- ${label}: ${[primary, secondary].filter(Boolean).join("; ")}${plan}${credits}${reached}`;
+    });
+  }
+
+  private formatRateLimitWindow(label: string, window: any): string {
+    if (!window) return "";
+    const used = Number.isFinite(Number(window.usedPercent)) ? `${Math.round(Number(window.usedPercent))}%` : "unknown";
+    const duration = this.formatWindowDuration(window.windowDurationMins);
+    const reset = this.formatResetTime(window.resetsAt);
+    return `${label} ${used}${duration ? `/${duration}` : ""}${reset ? `, resets ${reset}` : ""}`;
+  }
+
+  private formatUsageSummary(value: any): string[] {
+    const summary = value?.summary;
+    if (!summary) return [];
+    const lines = [
+      `- Lifetime tokens: ${this.formatNumber(summary.lifetimeTokens)}`,
+      `- Peak daily tokens: ${this.formatNumber(summary.peakDailyTokens)}`,
+      `- Current streak: ${this.formatNumber(summary.currentStreakDays)} days`,
+      `- Longest streak: ${this.formatNumber(summary.longestStreakDays)} days`,
+    ];
+    const today = this.localDateKey();
+    const todayBucket = Array.isArray(value.dailyUsageBuckets)
+      ? value.dailyUsageBuckets.find((bucket: any) => bucket?.startDate === today)
+      : null;
+    if (todayBucket) {
+      lines.splice(1, 0, `- Today: ${this.formatNumber(todayBucket.tokens)} tokens`);
+    }
+    return lines;
+  }
+
+  private formatWindowDuration(minutes: unknown): string {
+    const mins = Number(minutes);
+    if (!Number.isFinite(mins) || mins <= 0) return "";
+    if (mins % 1440 === 0) return `${mins / 1440}d`;
+    if (mins % 60 === 0) return `${mins / 60}h`;
+    return `${mins}m`;
+  }
+
+  private formatResetTime(epochSeconds: unknown): string {
+    const seconds = Number(epochSeconds);
+    if (!Number.isFinite(seconds) || seconds <= 0) return "";
+    const date = new Date(seconds * 1000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  private formatNumber(value: unknown): string {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "unknown";
+    return new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(n);
+  }
+
+  private formatScalar(value: unknown): string {
+    if (value === null || value === undefined) return "default";
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+    return JSON.stringify(value);
+  }
+
+  private formatPermissionMode(mode: unknown): string {
+    switch (mode) {
+      case "plan":
+        return "Read Only";
+      case "default":
+        return "Ask";
+      case "bypassPermissions":
+        return "Yolo";
+      case "superYolo":
+        return "Super Yolo";
+      default:
+        return this.formatScalar(mode);
+    }
+  }
+
+  private formatMcpAuthStatus(status: unknown): string {
+    switch (status) {
+      case "bearerToken":
+        return "authenticated";
+      case "oauth":
+        return "OAuth";
+      case "none":
+        return "no auth";
+      default:
+        return this.formatScalar(status);
+    }
+  }
+
+  private localDateKey(): string {
+    const date = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
   }
 
   private emitSlashCommandResult(command: string, summary: string, status: "completed" | "failed" | "stopped" = "completed"): void {

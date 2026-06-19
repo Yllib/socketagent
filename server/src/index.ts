@@ -1775,14 +1775,18 @@ function createConnectionHandler(transport: ClientTransport) {
               content: `/${name || "command"}\nFailed: ${message}`,
               status: "failed",
               originToolUseId: `codex_slash_${name || "command"}`,
+              commandName: name || "command",
+              commandPayload: { error: message },
               timestamp: new Date().toISOString(),
             } as any);
           }
           sendJson({
-            type: "task_notification",
+            type: "codex_command_result",
             taskId: `codex_slash_${name || "command"}_${crypto.randomUUID()}`,
+            command: name || "command",
             status: "failed",
             summary: `/${name || "command"}\nFailed: ${message}`,
+            payload: { error: message },
             sessionId,
             parentToolUseId: `codex_slash_${name || "command"}`,
           });

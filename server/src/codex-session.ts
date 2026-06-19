@@ -469,7 +469,8 @@ export class CodexSession {
 
     switch (command) {
       case "status": {
-        this.emitSlashCommandResult(command, await this.buildStatusSummary(threadId));
+        const result = await this.buildStatusResult(threadId);
+        this.emitSlashCommandResult(command, result.summary, "completed", result.payload);
         return;
       }
 
@@ -536,7 +537,15 @@ export class CodexSession {
               const templateCount = Array.isArray(server.resourceTemplates) ? server.resourceTemplates.length : 0;
               return `${name}: ${this.formatMcpAuthStatus(status)} (${toolCount} tools, ${resourceCount} resources, ${templateCount} templates)`;
             }).join("\n");
-        this.emitSlashCommandResult(command, summary);
+        this.emitSlashCommandResult(command, summary, "completed", {
+          servers: servers.map((server: any) => ({
+            name: String(server.name || server.serverName || "unnamed"),
+            authStatus: this.formatMcpAuthStatus(server.authStatus || server.status || server.startupStatus || server.state || "unknown"),
+            toolCount: server.tools && typeof server.tools === "object" ? Object.keys(server.tools).length : 0,
+            resourceCount: Array.isArray(server.resources) ? server.resources.length : 0,
+            templateCount: Array.isArray(server.resourceTemplates) ? server.resourceTemplates.length : 0,
+          })),
+        });
         return;
       }
 
@@ -561,18 +570,35 @@ export class CodexSession {
               : "";
             return `${id}${display}${current}${tier}`;
           });
-        this.emitSlashCommandResult(command, names.length > 0 ? names.join("\n") : `Current model: ${this._model || "default"}`);
+        this.emitSlashCommandResult(command, names.length > 0 ? names.join("\n") : `Current model: ${this._model || "default"}`, "completed", {
+          models: models
+            .filter((model: any) => model && model.hidden !== true)
+            .slice(0, 12)
+            .map((model: any) => ({
+              id: String(model.id || model.model || "unknown"),
+              displayName: String(model.displayName || model.id || model.model || "unknown"),
+              description: String(model.description || ""),
+              current: String(model.id || model.model || "") === this._model || (!this._model && model.isDefault === true),
+              tiers: Array.isArray(model.serviceTiers) ? model.serviceTiers.map((tier: any) => tier.name || tier.id).filter(Boolean) : [],
+            })),
+        });
         return;
       }
 
       case "permissions": {
         if (!commandArgs) {
-          this.emitSlashCommandResult(command, `Current permission mode: ${this.formatPermissionMode(this._permissionMode)}`);
+          this.emitSlashCommandResult(command, `Current permission mode: ${this.formatPermissionMode(this._permissionMode)}`, "completed", {
+            mode: this._permissionMode,
+            label: this.formatPermissionMode(this._permissionMode),
+          });
           return;
         }
         const normalized = this.normalizeSlashPermissionMode(commandArgs);
         await this.setPermissionMode(normalized);
-        this.emitSlashCommandResult(command, `Permission mode set to ${this.formatPermissionMode(this._permissionMode)}.`);
+        this.emitSlashCommandResult(command, `Permission mode set to ${this.formatPermissionMode(this._permissionMode)}.`, "completed", {
+          mode: this._permissionMode,
+          label: this.formatPermissionMode(this._permissionMode),
+        });
         return;
       }
 
@@ -615,7 +641,7 @@ export class CodexSession {
     }
   }
 
-  private async buildStatusSummary(threadId: string): Promise<string> {
+  private async buildStatusResult(threadId: string): Promise<{ summary: string; payload: Record<string, unknown> }> {
     const lines: string[] = [];
     let config: any = null;
     let thread: any = null;
@@ -654,6 +680,7 @@ export class CodexSession {
       lines.push(`Codex policy: sandbox=${this.formatScalar(config.sandbox_mode || "default")}, approvals=${this.formatScalar(config.approval_policy || "default")}`);
     }
 
+    const limitPayload = this.buildRateLimitPayload(rateLimits);
     const limitLines = this.formatRateLimitSummary(rateLimits);
     if (limitLines.length > 0) {
       lines.push("");
@@ -661,6 +688,7 @@ export class CodexSession {
       lines.push(...limitLines);
     }
 
+    const usagePayload = this.buildUsagePayload(usage);
     const usageLines = this.formatUsageSummary(usage);
     if (usageLines.length > 0) {
       lines.push("");
@@ -668,7 +696,74 @@ export class CodexSession {
       lines.push(...usageLines);
     }
 
-    return lines.join("\n");
+    return {
+      summary: lines.join("\n"),
+      payload: {
+        thread: {
+          id: threadId || "",
+          title: thread?.name || "",
+          state: threadStatus,
+          cwd: thread?.cwd || this.cwd,
+        },
+        config: {
+          driver: this.codexDriver,
+          model,
+          effort: effort || "default",
+          serviceTier: config?.service_tier || "",
+          permissionMode: this._permissionMode,
+          permissionLabel: this.formatPermissionMode(this._permissionMode),
+          sandbox: config?.sandbox_mode || "default",
+          approvals: config?.approval_policy || "default",
+        },
+        limits: limitPayload,
+        usage: usagePayload,
+      },
+    };
+  }
+
+  private buildRateLimitPayload(value: any): Array<Record<string, unknown>> {
+    if (!value) return [];
+    const byId = value.rateLimitsByLimitId && typeof value.rateLimitsByLimitId === "object"
+      ? Object.values(value.rateLimitsByLimitId)
+      : [];
+    const limits = (byId.length > 0 ? byId : [value.rateLimits]).filter(Boolean) as any[];
+    return limits.slice(0, 4).map((limit) => ({
+      label: String(limit.limitName || limit.limitId || "Codex"),
+      plan: limit.planType ? String(limit.planType) : "",
+      credits: limit.credits
+        ? (limit.credits.unlimited ? "unlimited" : String(limit.credits.balance ?? "0"))
+        : "",
+      reached: limit.rateLimitReachedType ? this.formatScalar(limit.rateLimitReachedType) : "",
+      primary: this.buildRateLimitWindowPayload(limit.primary),
+      secondary: this.buildRateLimitWindowPayload(limit.secondary),
+    }));
+  }
+
+  private buildRateLimitWindowPayload(window: any): Record<string, unknown> | null {
+    if (!window) return null;
+    const usedPercent = Number(window.usedPercent);
+    return {
+      usedPercent: Number.isFinite(usedPercent) ? usedPercent : null,
+      window: this.formatWindowDuration(window.windowDurationMins),
+      resetsAt: Number.isFinite(Number(window.resetsAt)) ? Number(window.resetsAt) : null,
+      resetLabel: this.formatResetTime(window.resetsAt),
+    };
+  }
+
+  private buildUsagePayload(value: any): Record<string, unknown> {
+    const summary = value?.summary;
+    if (!summary) return {};
+    const today = this.localDateKey();
+    const todayBucket = Array.isArray(value.dailyUsageBuckets)
+      ? value.dailyUsageBuckets.find((bucket: any) => bucket?.startDate === today)
+      : null;
+    return {
+      lifetimeTokens: Number(summary.lifetimeTokens),
+      todayTokens: todayBucket ? Number(todayBucket.tokens) : null,
+      peakDailyTokens: Number(summary.peakDailyTokens),
+      currentStreakDays: Number(summary.currentStreakDays),
+      longestStreakDays: Number(summary.longestStreakDays),
+    };
   }
 
   private formatRateLimitSummary(value: any): string[] {
@@ -779,7 +874,12 @@ export class CodexSession {
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
   }
 
-  private emitSlashCommandResult(command: string, summary: string, status: "completed" | "failed" | "stopped" = "completed"): void {
+  private emitSlashCommandResult(
+    command: string,
+    summary: string,
+    status: "completed" | "failed" | "stopped" = "completed",
+    payload: Record<string, unknown> = {},
+  ): void {
     const sid = this.threadId || this.sessionId || this._resumeSessionId || "";
     const taskId = `codex_slash_${command}_${crypto.randomUUID()}`;
     const content = `/${command}\n${summary}`;
@@ -789,14 +889,18 @@ export class CodexSession {
         content,
         status,
         originToolUseId: `codex_slash_${command}`,
+        commandName: command,
+        commandPayload: payload,
         timestamp: now(),
       });
     }
     this.send({
-      type: "task_notification",
+      type: "codex_command_result",
       taskId,
+      command,
       status,
       summary: content,
+      payload,
       sessionId: sid,
       parentToolUseId: `codex_slash_${command}`,
     } as any);

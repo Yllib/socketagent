@@ -622,6 +622,8 @@ export interface HistoryEntry {
   // Notification fields (role === "notification")
   status?: string;
   originToolUseId?: string;
+  commandName?: string;
+  commandPayload?: Record<string, unknown>;
   // Permission mode fields (role === "permission_mode")
   permissionMode?: string;
 }
@@ -692,6 +694,17 @@ export interface TaskNotificationServerMessage {
   sessionId: string;
   parentToolUseId?: string | null;
   uuid?: string;
+}
+
+export interface CodexCommandResultServerMessage {
+  type: "codex_command_result";
+  taskId: string;
+  command: string;
+  status: "completed" | "failed" | "stopped" | string;
+  summary: string;
+  payload: Record<string, unknown>;
+  sessionId: string;
+  parentToolUseId?: string | null;
 }
 
 export interface ToolSummaryServerMessage {
@@ -927,6 +940,7 @@ export type ServerMessage =
   | ReminderServerMessage
   | CompactBoundaryServerMessage
   | TaskNotificationServerMessage
+  | CodexCommandResultServerMessage
   | ToolSummaryServerMessage
   | SessionForkedServerMessage
   | RewindConversationResultServerMessage

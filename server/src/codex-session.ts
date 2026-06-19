@@ -54,7 +54,7 @@ import {
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
-import { registerCodexAppMcp } from "./codex-app-mcp";
+import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
 import {
   CodexAppServerApprovalPolicy,
   CodexAppServerApprovalsReviewer,
@@ -525,26 +525,32 @@ export class CodexSession {
 
       case "mcp": {
         await this.ensureAppServer();
+        this.appServerConfig();
         const result = await this.appServer!.listMcpServerStatus(undefined);
         const servers = Array.isArray((result as any)?.data) ? (result as any).data : [];
-        const summary = servers.length === 0
+        const displayServers = servers.map((server: any) => ({
+          name: String(server.name || server.serverName || "unnamed"),
+          authStatus: this.formatMcpAuthStatus(server.authStatus || server.status || server.startupStatus || server.state || "unknown"),
+          toolCount: server.tools && typeof server.tools === "object" ? Object.keys(server.tools).length : 0,
+          resourceCount: Array.isArray(server.resources) ? server.resources.length : 0,
+          templateCount: Array.isArray(server.resourceTemplates) ? server.resourceTemplates.length : 0,
+          tools: server.tools && typeof server.tools === "object" ? Object.keys(server.tools) : [],
+        }));
+        if (!displayServers.some((server: any) => server.name === "socketagent_app")) {
+          displayServers.unshift({
+            name: "socketagent_app",
+            authStatus: this.appServerMcpRegistration ? "registered" : "configured",
+            toolCount: SOCKETAGENT_APP_TOOLS.length,
+            resourceCount: 0,
+            templateCount: 0,
+            tools: SOCKETAGENT_APP_TOOLS.map((tool) => tool.name),
+          });
+        }
+        const summary = displayServers.length === 0
           ? "No Codex MCP servers reported."
-          : servers.map((server: any) => {
-              const status = server.authStatus || server.status || server.startupStatus || server.state || "unknown";
-              const name = server.name || server.serverName || "unnamed";
-              const toolCount = server.tools && typeof server.tools === "object" ? Object.keys(server.tools).length : 0;
-              const resourceCount = Array.isArray(server.resources) ? server.resources.length : 0;
-              const templateCount = Array.isArray(server.resourceTemplates) ? server.resourceTemplates.length : 0;
-              return `${name}: ${this.formatMcpAuthStatus(status)} (${toolCount} tools, ${resourceCount} resources, ${templateCount} templates)`;
-            }).join("\n");
+          : displayServers.map((server: any) => `${server.name}: ${server.authStatus} (${server.toolCount} tools, ${server.resourceCount} resources, ${server.templateCount} templates)`).join("\n");
         this.emitSlashCommandResult(command, summary, "completed", {
-          servers: servers.map((server: any) => ({
-            name: String(server.name || server.serverName || "unnamed"),
-            authStatus: this.formatMcpAuthStatus(server.authStatus || server.status || server.startupStatus || server.state || "unknown"),
-            toolCount: server.tools && typeof server.tools === "object" ? Object.keys(server.tools).length : 0,
-            resourceCount: Array.isArray(server.resources) ? server.resources.length : 0,
-            templateCount: Array.isArray(server.resourceTemplates) ? server.resourceTemplates.length : 0,
-          })),
+          servers: displayServers,
         });
         return;
       }
@@ -3214,6 +3220,10 @@ export class CodexSession {
 
   private codexDeveloperInstructions(): string | null {
     const parts: string[] = [];
+
+    parts.push(
+      `SocketAgent app tools are available through the MCP server named socketagent_app: ${SOCKETAGENT_APP_TOOLS.map((tool) => tool.name).join(", ")}. Use SendFile with an absolute file_path when the user asks you to send, share, or transfer a file to their phone. Use NotifyUser for important phone push notifications, ScheduleReminder for device reminders, ScheduleTask for scheduled agent work, Monitor for background command monitoring, and Speak only when text-to-speech is enabled or requested. If a SocketAgent app tool is not immediately visible, use tool discovery for socketagent_app instead of telling the user it must be loaded.`,
+    );
 
     if (this._ttsEnabled) {
       parts.push(

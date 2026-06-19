@@ -16,6 +16,46 @@ import {
   handleSpeakTool,
 } from "./app-tool-handlers";
 
+export interface SocketAgentAppToolManifest {
+  name: string;
+  description: string;
+}
+
+export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
+  {
+    name: "SendFile",
+    description: "Send a file to the user's mobile device for download.",
+  },
+  {
+    name: "Speak",
+    description: "Speak concise text aloud to the user through app text-to-speech.",
+  },
+  {
+    name: "ScheduleReminder",
+    description: "Schedule a reminder notification on the user's mobile device.",
+  },
+  {
+    name: "NotifyUser",
+    description: "Send an immediate push notification to the user's mobile device.",
+  },
+  {
+    name: "ScheduleTask",
+    description: "Schedule a Claude or Codex prompt to run later or recur.",
+  },
+  {
+    name: "Monitor",
+    description: "Start or stop a background shell command monitor.",
+  },
+  {
+    name: "SearchSkills",
+    description: "Search SocketAgent-managed Codex skills.",
+  },
+  {
+    name: "ReadSkill",
+    description: "Read a SocketAgent-managed Codex skill's instructions.",
+  },
+];
+
 interface CodexMcpRegistration {
   token: string;
   context: AppToolContext;

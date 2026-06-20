@@ -117,6 +117,68 @@ export interface CreateCwdMessage {
   path: string;
 }
 
+export interface FileManagerListMessage {
+  type: "file_manager_list";
+  requestId?: string;
+  path?: string;
+  includeHidden?: boolean;
+}
+
+export interface FileManagerSetProtectedMessage {
+  type: "file_manager_set_protected";
+  requestId?: string;
+  path: string;
+  protected: boolean;
+  label?: string;
+  pattern?: "exact" | "directory";
+}
+
+export interface FileManagerDownloadMessage {
+  type: "file_manager_download";
+  requestId?: string;
+  path: string;
+  fileId?: string;
+}
+
+export interface FileManagerReadTextMessage {
+  type: "file_manager_read_text";
+  requestId?: string;
+  path: string;
+  maxBytes?: number;
+}
+
+export interface FileManagerMkdirMessage {
+  type: "file_manager_mkdir";
+  requestId?: string;
+  path: string;
+}
+
+export interface FileManagerRenameMessage {
+  type: "file_manager_rename";
+  requestId?: string;
+  fromPath: string;
+  toName: string;
+}
+
+export interface FileManagerDeleteMessage {
+  type: "file_manager_delete";
+  requestId?: string;
+  path: string;
+  recursive?: boolean;
+}
+
+export interface FileManagerUploadStartMessage {
+  type: "file_manager_upload_start";
+  requestId?: string;
+  uploadId: string;
+  targetDir: string;
+  fileName: string;
+  fileSize: number;
+  totalChunks: number;
+  chunkSize: number;
+  conflictPolicy?: "fail" | "rename" | "overwrite";
+}
+
 export interface ClearContextMessage {
   type: "clear_context";
   sessionId: string;
@@ -399,6 +461,14 @@ export type ClientMessage =
   | LoadMoreHistoryMessage
   | CheckCwdMessage
   | CreateCwdMessage
+  | FileManagerListMessage
+  | FileManagerSetProtectedMessage
+  | FileManagerDownloadMessage
+  | FileManagerReadTextMessage
+  | FileManagerMkdirMessage
+  | FileManagerRenameMessage
+  | FileManagerDeleteMessage
+  | FileManagerUploadStartMessage
   | UploadStartMessage
   | UploadChunkMessage
   | UploadChunkBinMessage
@@ -677,6 +747,66 @@ export interface UploadCompleteServerMessage {
   serverPath: string;
 }
 
+export interface FileManagerEntry {
+  name: string;
+  path: string;
+  kind: "directory" | "file" | "symlink" | "other";
+  size?: number;
+  modifiedAt?: string;
+  hidden: boolean;
+  extension?: string;
+  mimeType?: string;
+  mediaKind?: "image" | "video" | "audio" | "text" | "archive" | "code" | "other";
+  protected: boolean;
+  protectedLabel?: string;
+}
+
+export interface FileManagerListResultServerMessage {
+  type: "file_manager_list_result";
+  requestId?: string;
+  ok: boolean;
+  path: string;
+  parentPath?: string;
+  entries: FileManagerEntry[];
+  roots: Array<{ label: string; path: string }>;
+  error?: string;
+}
+
+export interface FileManagerProtectedResultServerMessage {
+  type: "file_manager_protected_result";
+  requestId?: string;
+  ok: boolean;
+  path: string;
+  protected: boolean;
+  entry?: { path: string; label?: string };
+  removed?: { path: string; label?: string };
+  entries?: Array<{ path: string; label?: string }>;
+  error?: string;
+}
+
+export interface FileManagerOperationResultServerMessage {
+  type: "file_manager_operation_result";
+  requestId?: string;
+  operation: "download" | "mkdir" | "rename" | "delete" | "upload_start";
+  ok: boolean;
+  path?: string;
+  newPath?: string;
+  fileId?: string;
+  uploadId?: string;
+  error?: string;
+}
+
+export interface FileManagerTextResultServerMessage {
+  type: "file_manager_text_result";
+  requestId?: string;
+  ok: boolean;
+  path: string;
+  content?: string;
+  truncated?: boolean;
+  bytesRead?: number;
+  error?: string;
+}
+
 export interface ReminderServerMessage {
   type: "reminder";
   title: string;
@@ -945,6 +1075,10 @@ export type ServerMessage =
   | FileChunkServerMessage
   | FileCompleteServerMessage
   | UploadCompleteServerMessage
+  | FileManagerListResultServerMessage
+  | FileManagerProtectedResultServerMessage
+  | FileManagerOperationResultServerMessage
+  | FileManagerTextResultServerMessage
   | ReminderServerMessage
   | CompactBoundaryServerMessage
   | TaskNotificationServerMessage

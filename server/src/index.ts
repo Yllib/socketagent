@@ -19,6 +19,8 @@ import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, r
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { getAdvertisedServerSettings, getCodexDriversAvailable, resolveCodexDriver, setCodexDriver } from "./server-settings";
 import { isPushConfigured, registerPushToken, sendPushNotification } from "./push-notifications";
+import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
+import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -30,13 +32,6 @@ process.on("unhandledRejection", (reason) => {
 
 const PORT = parseInt(process.env.PORT || "8085", 10);
 const DEFAULT_CWD = process.env.DEFAULT_CWD || process.cwd();
-const PROTECTED_FILES_CONFIG = path.join(
-  process.env.HOME || "/home/rdp",
-  ".socketagent",
-  "protected-files.json"
-);
-
-type ProtectedFileEntry = { path: string; label?: string };
 type AppVersionInfo = { version: string; url: string };
 
 function parseAppVersionInfo(raw: string): AppVersionInfo | null {
@@ -70,25 +65,6 @@ function readRemoteAppVersionInfo(branch: string): AppVersionInfo | null {
   } catch {
     return null;
   }
-}
-
-function readProtectedFiles(): ProtectedFileEntry[] {
-  try {
-    if (!fs.existsSync(PROTECTED_FILES_CONFIG)) return [];
-    const raw = fs.readFileSync(PROTECTED_FILES_CONFIG, "utf-8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter((entry) => entry && typeof entry.path === "string")
-      : [];
-  } catch (err: any) {
-    console.error(`[protected-files] Failed to read config: ${err.message || err}`);
-    return [];
-  }
-}
-
-function writeProtectedFiles(entries: ProtectedFileEntry[]): void {
-  fs.mkdirSync(path.dirname(PROTECTED_FILES_CONFIG), { recursive: true });
-  fs.writeFileSync(PROTECTED_FILES_CONFIG, JSON.stringify(entries, null, 2), "utf-8");
 }
 
 // ── .env migrations (run once on startup, before reading config) ──
@@ -467,6 +443,83 @@ function createConnectionHandler(transport: ClientTransport) {
   function codexUnavailableMessage(prefix = "Codex backend is not available on this server"): string {
     const availability = getCodexAvailability();
     return `${prefix}: ${availability.reason || "unknown reason"}`;
+  }
+
+  function sendFileChunks(filePath: string, fileId?: string): void {
+    if (!filePath || !fs.existsSync(filePath)) {
+      sendJson({
+        type: "error",
+        message: `File not found: ${filePath}`,
+      });
+      return;
+    }
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) {
+      sendJson({ type: "error", message: `Not a file: ${filePath}` });
+      return;
+    }
+    const transferId = fileId || crypto.randomUUID();
+    const fileName = path.basename(filePath);
+    const CHUNK_SIZE = 512 * 1024; // 512KB
+    const totalChunks = Math.ceil(stat.size / CHUNK_SIZE);
+    console.log(`Sending file in ${totalChunks} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
+
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buf = Buffer.alloc(CHUNK_SIZE);
+      for (let i = 0; i < totalChunks; i++) {
+        const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, i * CHUNK_SIZE);
+        const chunk = buf.subarray(0, bytesRead).toString("base64");
+        sendJson({
+          type: "file_chunk",
+          fileId: transferId,
+          fileName,
+          fileSize: stat.size,
+          chunkIndex: i,
+          totalChunks,
+          data: chunk,
+        });
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    sendJson({
+      type: "file_complete",
+      fileId: transferId,
+      fileName,
+    });
+    console.log(`File transfer complete: ${fileName}`);
+  }
+
+  function resolveUploadTarget(targetDir: string, fileNameInput: string, conflictPolicy: string): string {
+    const roots = getFileManagerRoots(DEFAULT_CWD);
+    const dir = resolveFileManagerPath(targetDir, DEFAULT_CWD);
+    assertFileManagerPathAllowed(dir, roots);
+    const dirStat = fs.statSync(dir);
+    if (!dirStat.isDirectory()) throw new Error(`Upload target is not a directory: ${dir}`);
+
+    const fileName = path.basename(fileNameInput || "upload");
+    if (!fileName || fileName === "." || fileName === "..") throw new Error("Invalid file name");
+    let filePath = path.join(dir, fileName);
+    if (!fs.existsSync(filePath)) return filePath;
+
+    if (conflictPolicy === "overwrite") {
+      if (fs.statSync(filePath).isDirectory()) throw new Error(`Cannot overwrite directory: ${filePath}`);
+      return filePath;
+    }
+    if (conflictPolicy === "fail") {
+      throw new Error(`File already exists: ${filePath}`);
+    }
+
+    const ext = path.extname(fileName);
+    const base = path.basename(fileName, ext);
+    let counter = 1;
+    while (fs.existsSync(filePath)) {
+      filePath = path.join(dir, `${base} (${counter})${ext}`);
+      counter++;
+    }
+    return filePath;
   }
 
   async function handleMessage(msg: ClientMessage): Promise<void> {
@@ -2522,45 +2575,259 @@ function createConnectionHandler(transport: ClientTransport) {
         break;
       }
 
-      case "request_file": {
-        const filePath = (msg as any).filePath as string;
-        const fileId = (msg as any).fileId as string;
-        if (!filePath || !fs.existsSync(filePath)) {
+      case "file_manager_list" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        try {
+          const listing = listFileManagerDirectory({
+            dirPath: (msg as any).path as string | undefined,
+            includeHidden: (msg as any).includeHidden === true,
+            defaultCwd: DEFAULT_CWD,
+          });
           sendJson({
-            type: "error",
-            message: `File not found: ${filePath}`,
+            type: "file_manager_list_result",
+            requestId,
+            ok: true,
+            ...listing,
+          });
+        } catch (e: any) {
+          sendJson({
+            type: "file_manager_list_result",
+            requestId,
+            ok: false,
+            path: (msg as any).path || DEFAULT_CWD,
+            entries: [],
+            roots: [],
+            error: e.message || String(e),
+          });
+        }
+        break;
+      }
+
+      case "file_manager_set_protected" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const filePath = String((msg as any).path || "").trim();
+        const protect = (msg as any).protected === true;
+        const label = String((msg as any).label || "").trim();
+        const pattern = (msg as any).pattern === "directory" ? "directory" : "exact";
+        if (!filePath) {
+          sendJson({
+            type: "file_manager_protected_result",
+            requestId,
+            ok: false,
+            path: filePath,
+            protected: false,
+            error: "Missing path",
           });
           break;
         }
-        const stat = fs.statSync(filePath);
-        const fileName = path.basename(filePath);
-        const CHUNK_SIZE = 512 * 1024; // 512KB
-        const totalChunks = Math.ceil(stat.size / CHUNK_SIZE);
-        console.log(`Sending file in ${totalChunks} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
-
-        const fd = fs.openSync(filePath, "r");
-        const buf = Buffer.alloc(CHUNK_SIZE);
-        for (let i = 0; i < totalChunks; i++) {
-          const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, i * CHUNK_SIZE);
-          const chunk = buf.subarray(0, bytesRead).toString("base64");
+        try {
+          const result = protect
+            ? setProtectedFile(filePath, true, { label, pattern })
+            : removeMatchingProtection(filePath);
           sendJson({
-            type: "file_chunk",
-            fileId,
-            fileName,
-            fileSize: stat.size,
-            chunkIndex: i,
-            totalChunks,
-            data: chunk,
+            type: "file_manager_protected_result",
+            requestId,
+            ok: true,
+            path: filePath,
+            protected: protect,
+            ...(result.entry ? { entry: result.entry } : {}),
+            ...(result.removed ? { removed: result.removed } : {}),
+            entries: result.entries,
+          });
+        } catch (e: any) {
+          sendJson({
+            type: "file_manager_protected_result",
+            requestId,
+            ok: false,
+            path: filePath,
+            protected: !protect,
+            error: e.message || String(e),
           });
         }
-        fs.closeSync(fd);
+        break;
+      }
 
-        sendJson({
-          type: "file_complete",
-          fileId,
-          fileName,
-        });
-        console.log(`File transfer complete: ${fileName}`);
+      case "request_file": {
+        const filePath = (msg as any).filePath as string;
+        const fileId = (msg as any).fileId as string;
+        sendFileChunks(filePath, fileId);
+        break;
+      }
+
+      case "file_manager_download" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const filePath = String((msg as any).path || "");
+        const fileId = (msg as any).fileId as string || `fm_${crypto.randomUUID()}`;
+        try {
+          const roots = getFileManagerRoots(DEFAULT_CWD);
+          const resolved = resolveFileManagerPath(filePath, DEFAULT_CWD);
+          assertFileManagerPathAllowed(resolved, roots);
+          if (!filePath || !fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+            throw new Error(!filePath ? "Missing path" : `Not a file: ${resolved}`);
+          }
+          sendJson({
+            type: "file_manager_operation_result",
+            requestId,
+            operation: "download",
+            ok: true,
+            path: resolved,
+            fileId,
+          });
+          sendFileChunks(resolved, fileId);
+        } catch (e: any) {
+          sendJson({
+            type: "file_manager_operation_result",
+            requestId,
+            operation: "download",
+            ok: false,
+            path: filePath,
+            error: e.message || String(e),
+          });
+        }
+        break;
+      }
+
+      case "file_manager_read_text" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const filePath = String((msg as any).path || "");
+        try {
+          const roots = getFileManagerRoots(DEFAULT_CWD);
+          const resolved = resolveFileManagerPath(filePath, DEFAULT_CWD);
+          assertFileManagerPathAllowed(resolved, roots);
+          const stat = fs.statSync(resolved);
+          if (!stat.isFile()) throw new Error(`Not a file: ${resolved}`);
+          const requestedMax = Number((msg as any).maxBytes || 512 * 1024);
+          const maxBytes = Math.min(Math.max(requestedMax, 1024), 1024 * 1024);
+          const fd = fs.openSync(resolved, "r");
+          try {
+            const buffer = Buffer.alloc(Math.min(stat.size, maxBytes + 1));
+            const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+            const truncated = bytesRead > maxBytes || stat.size > maxBytes;
+            const content = buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString("utf8");
+            sendJson({
+              type: "file_manager_text_result",
+              requestId,
+              ok: true,
+              path: resolved,
+              content,
+              truncated,
+              bytesRead: Math.min(bytesRead, maxBytes),
+            });
+          } finally {
+            fs.closeSync(fd);
+          }
+        } catch (e: any) {
+          sendJson({
+            type: "file_manager_text_result",
+            requestId,
+            ok: false,
+            path: filePath,
+            error: e.message || String(e),
+          });
+        }
+        break;
+      }
+
+      case "file_manager_mkdir" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const targetPath = String((msg as any).path || "");
+        try {
+          const roots = getFileManagerRoots(DEFAULT_CWD);
+          const resolved = resolveFileManagerPath(targetPath, DEFAULT_CWD);
+          assertFileManagerPathAllowed(resolved, roots);
+          fs.mkdirSync(resolved, { recursive: true });
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "mkdir", ok: true, path: resolved });
+        } catch (e: any) {
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "mkdir", ok: false, path: targetPath, error: e.message || String(e) });
+        }
+        break;
+      }
+
+      case "file_manager_rename" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const fromPath = String((msg as any).fromPath || "");
+        const toName = String((msg as any).toName || "");
+        try {
+          const roots = getFileManagerRoots(DEFAULT_CWD);
+          const resolvedFrom = resolveFileManagerPath(fromPath, DEFAULT_CWD);
+          assertFileManagerPathAllowed(resolvedFrom, roots);
+          const cleanName = path.basename(toName);
+          if (!cleanName || cleanName !== toName || cleanName === "." || cleanName === "..") {
+            throw new Error("Invalid destination name");
+          }
+          const resolvedTo = path.join(path.dirname(resolvedFrom), cleanName);
+          assertFileManagerPathAllowed(resolvedTo, roots);
+          if (fs.existsSync(resolvedTo)) throw new Error(`Destination already exists: ${resolvedTo}`);
+          fs.renameSync(resolvedFrom, resolvedTo);
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "rename", ok: true, path: resolvedFrom, newPath: resolvedTo });
+        } catch (e: any) {
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "rename", ok: false, path: fromPath, error: e.message || String(e) });
+        }
+        break;
+      }
+
+      case "file_manager_delete" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const targetPath = String((msg as any).path || "");
+        const recursive = (msg as any).recursive === true;
+        try {
+          const roots = getFileManagerRoots(DEFAULT_CWD);
+          const resolved = resolveFileManagerPath(targetPath, DEFAULT_CWD);
+          assertFileManagerPathAllowed(resolved, roots);
+          const stat = fs.lstatSync(resolved);
+          if (stat.isDirectory() && !recursive) {
+            fs.rmdirSync(resolved);
+          } else if (stat.isDirectory()) {
+            fs.rmSync(resolved, { recursive: true, force: false });
+          } else {
+            fs.unlinkSync(resolved);
+          }
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "delete", ok: true, path: resolved });
+        } catch (e: any) {
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "delete", ok: false, path: targetPath, error: e.message || String(e) });
+        }
+        break;
+      }
+
+      case "file_manager_upload_start" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const uploadId = String((msg as any).uploadId || "");
+        try {
+          const filePath = resolveUploadTarget(
+            String((msg as any).targetDir || ""),
+            String((msg as any).fileName || "upload"),
+            String((msg as any).conflictPolicy || "rename"),
+          );
+          const fd = fs.openSync(filePath, "w");
+          activeUploads.set(uploadId, {
+            fd,
+            filePath,
+            fileName: path.basename(filePath),
+            receivedChunks: 0,
+            totalChunks: (msg as any).totalChunks,
+            chunkSize: (msg as any).chunkSize || 512 * 1024,
+            totalBytes: (msg as any).fileSize,
+            bytesReceived: 0,
+            lastProgressEmit: 0,
+          });
+          sendJson({
+            type: "file_manager_operation_result",
+            requestId,
+            operation: "upload_start",
+            ok: true,
+            path: filePath,
+            uploadId,
+          });
+        } catch (e: any) {
+          sendJson({
+            type: "file_manager_operation_result",
+            requestId,
+            operation: "upload_start",
+            ok: false,
+            error: e.message || String(e),
+            uploadId,
+          });
+        }
         break;
       }
 

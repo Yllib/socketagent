@@ -55,6 +55,7 @@ import {
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
+import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 import {
   CodexAppServerApprovalPolicy,
   CodexAppServerApprovalsReviewer,
@@ -3224,6 +3225,8 @@ export class CodexSession {
     parts.push(
       `SocketAgent app tools are available through the MCP server named socketagent_app: ${SOCKETAGENT_APP_TOOLS.map((tool) => tool.name).join(", ")}. Use SendFile with an absolute file_path when the user asks you to send, share, or transfer a file to their phone. Use NotifyUser for important phone push notifications, ScheduleReminder for device reminders, ScheduleTask for scheduled agent work, Monitor for background command monitoring, and Speak only when text-to-speech is enabled or requested. If a SocketAgent app tool is not immediately visible, use tool discovery for socketagent_app instead of telling the user it must be loaded.`,
     );
+
+    parts.push(SOCKETAGENT_FILE_LINK_INSTRUCTIONS);
 
     if (this._ttsEnabled) {
       parts.push(

@@ -6,11 +6,13 @@ import type { CodexDriver } from "./protocol";
 
 export interface ServerSettings {
   codexDriver: CodexDriver;
+  defaultCwd: string;
 }
 
 const STORE_DIR = path.join(process.env.HOME || os.homedir(), ".claude-assistant");
 const SETTINGS_FILE = path.join(STORE_DIR, "server-settings.json");
 const DEFAULT_CODEX_DRIVER: CodexDriver = "app-server";
+const BOOT_DEFAULT_CWD = path.resolve(process.env.DEFAULT_CWD || process.cwd());
 
 let cachedSettings: ServerSettings | null = null;
 let cachedDriversAvailable: CodexDriver[] | null = null;
@@ -23,11 +25,16 @@ function normalizeDriver(value: unknown): CodexDriver {
   return value === "app-server" ? "app-server" : "exec";
 }
 
+function normalizeDefaultCwd(value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "") return BOOT_DEFAULT_CWD;
+  return path.resolve(value.trim());
+}
+
 export function loadServerSettings(): ServerSettings {
   if (cachedSettings) return cachedSettings;
   ensureStoreDir();
   if (!fs.existsSync(SETTINGS_FILE)) {
-    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER };
+    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER, defaultCwd: BOOT_DEFAULT_CWD };
     return cachedSettings;
   }
 
@@ -35,18 +42,21 @@ export function loadServerSettings(): ServerSettings {
     const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")) as Partial<ServerSettings>;
     cachedSettings = {
       codexDriver: normalizeDriver(raw.codexDriver),
+      defaultCwd: normalizeDefaultCwd(raw.defaultCwd),
     };
   } catch (err: any) {
     console.warn(`[settings] Failed to read server settings: ${err?.message || String(err)}`);
-    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER };
+    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER, defaultCwd: BOOT_DEFAULT_CWD };
   }
   return cachedSettings;
 }
 
 export function saveServerSettings(settings: ServerSettings): ServerSettings {
   ensureStoreDir();
+  const previous = loadServerSettings();
   cachedSettings = {
-    codexDriver: normalizeDriver(settings.codexDriver),
+    codexDriver: normalizeDriver(settings.codexDriver ?? previous.codexDriver),
+    defaultCwd: normalizeDefaultCwd(settings.defaultCwd ?? previous.defaultCwd),
   };
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(cachedSettings, null, 2), "utf-8");
   return cachedSettings;
@@ -54,6 +64,14 @@ export function saveServerSettings(settings: ServerSettings): ServerSettings {
 
 export function setCodexDriver(driver: CodexDriver): ServerSettings {
   return saveServerSettings({ ...loadServerSettings(), codexDriver: normalizeDriver(driver) });
+}
+
+export function setDefaultCwd(defaultCwd: string): ServerSettings {
+  return saveServerSettings({ ...loadServerSettings(), defaultCwd: normalizeDefaultCwd(defaultCwd) });
+}
+
+export function getDefaultCwd(): string {
+  return loadServerSettings().defaultCwd;
 }
 
 export function getCodexDriversAvailable(): CodexDriver[] {
@@ -94,6 +112,7 @@ export function getAdvertisedServerSettings(): ServerSettings & { codexDriversAv
   const fallback = codexDriversAvailable.includes(DEFAULT_CODEX_DRIVER) ? DEFAULT_CODEX_DRIVER : "exec";
   return {
     codexDriver: codexDriversAvailable.includes(settings.codexDriver) ? settings.codexDriver : fallback,
+    defaultCwd: settings.defaultCwd,
     codexDriversAvailable,
   };
 }

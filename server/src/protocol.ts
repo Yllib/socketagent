@@ -55,6 +55,11 @@ export interface SetCodexDriverMessage {
   driver: CodexDriver;
 }
 
+export interface SetServerSettingsMessage {
+  type: "set_server_settings";
+  defaultCwd?: string;
+}
+
 export interface DeleteSessionMessage {
   type: "delete_session";
   sessionId: string;
@@ -425,6 +430,7 @@ export type ClientMessage =
   | ListSessionsMessage
   | GetServerSettingsMessage
   | SetCodexDriverMessage
+  | SetServerSettingsMessage
   | CodexCollaborationModesMessage
   | SetCodexCollaborationModeMessage
   | DeleteSessionMessage
@@ -654,6 +660,7 @@ export interface ServerCapabilitiesMessage {
 export interface ServerSettingsMessage {
   type: "server_settings";
   codexDriver: CodexDriver;
+  defaultCwd: string;
   codexDriversAvailable: CodexDriver[];
 }
 

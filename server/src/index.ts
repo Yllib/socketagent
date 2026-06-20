@@ -17,7 +17,7 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
-import { getAdvertisedServerSettings, getCodexDriversAvailable, resolveCodexDriver, setCodexDriver } from "./server-settings";
+import { getAdvertisedServerSettings, getCodexDriversAvailable, getDefaultCwd, resolveCodexDriver, setCodexDriver, setDefaultCwd } from "./server-settings";
 import { isPushConfigured, registerPushToken, sendPushNotification } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
@@ -31,7 +31,6 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const PORT = parseInt(process.env.PORT || "8085", 10);
-const DEFAULT_CWD = process.env.DEFAULT_CWD || process.cwd();
 type AppVersionInfo = { version: string; url: string };
 
 function parseAppVersionInfo(raw: string): AppVersionInfo | null {
@@ -493,8 +492,8 @@ function createConnectionHandler(transport: ClientTransport) {
   }
 
   function resolveUploadTarget(targetDir: string, fileNameInput: string, conflictPolicy: string): string {
-    const roots = getFileManagerRoots(DEFAULT_CWD);
-    const dir = resolveFileManagerPath(targetDir, DEFAULT_CWD);
+    const roots = getFileManagerRoots(getDefaultCwd());
+    const dir = resolveFileManagerPath(targetDir, getDefaultCwd());
     assertFileManagerPathAllowed(dir, roots);
     const dirStat = fs.statSync(dir);
     if (!dirStat.isDirectory()) throw new Error(`Upload target is not a directory: ${dir}`);
@@ -587,9 +586,29 @@ function createConnectionHandler(transport: ClientTransport) {
         sendJson({
           type: "server_settings",
           codexDriver: settings.codexDriver,
+          defaultCwd: settings.defaultCwd,
           codexDriversAvailable: available,
           codexCollaborationMode: pendingCodexCollaborationMode,
         });
+        break;
+      }
+
+      case "set_server_settings": {
+        try {
+          if (typeof (msg as any).defaultCwd === "string") {
+            setDefaultCwd((msg as any).defaultCwd);
+          }
+          sendJson({
+            type: "server_settings",
+            ...getAdvertisedServerSettings(),
+            codexCollaborationMode: pendingCodexCollaborationMode,
+          });
+        } catch (e: any) {
+          sendJson({
+            type: "error",
+            message: `Failed to update server settings: ${e.message || String(e)}`,
+          });
+        }
         break;
       }
 
@@ -644,7 +663,7 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "new_session": {
-        const cwd = msg.cwd || DEFAULT_CWD;
+        const cwd = msg.cwd || getDefaultCwd();
         if (msg.backend === "codex" && codexUnavailable()) {
           sendJson({
             type: "error",
@@ -900,7 +919,7 @@ function createConnectionHandler(transport: ClientTransport) {
         }
 
         if (!activeSession) {
-          let cwd = DEFAULT_CWD;
+          let cwd = getDefaultCwd();
           const savedResumeId = msg.sessionId;
           if (savedResumeId) {
             const savedSession = getSession(savedResumeId);
@@ -1073,7 +1092,7 @@ function createConnectionHandler(transport: ClientTransport) {
           ? activeSession.getSessionContext()
           : {
               sessionId: activeSessionId || "",
-              cwd: DEFAULT_CWD,
+              cwd: getDefaultCwd(),
               send: (m: any) => sendJson(m),
               appendHistory: () => {},
               pendingQuestions: new Map(),
@@ -1564,7 +1583,7 @@ function createConnectionHandler(transport: ClientTransport) {
         try {
           if (isCodexNativeArchiveTs(ts)) {
             const existing = getSession(sid);
-            await unarchiveCodexAppServerThread(sid, existing?.cwd || DEFAULT_CWD).catch((err) => {
+            await unarchiveCodexAppServerThread(sid, existing?.cwd || getDefaultCwd()).catch((err) => {
               throw new Error(`Codex native unarchive failed: ${err.message || err}`);
             });
           }
@@ -1787,7 +1806,7 @@ function createConnectionHandler(transport: ClientTransport) {
           if (activeSession) {
             projectCwd = activeSession.getCwd?.();
           }
-          if (!projectCwd) projectCwd = DEFAULT_CWD;
+          if (!projectCwd) projectCwd = getDefaultCwd();
           console.log(`[skills_list] Scanning skills in ${projectCwd}...`);
           const skills = listSkills(projectCwd);
           console.log(`[skills_list] Found ${skills.length} skills, sending response`);
@@ -1858,7 +1877,7 @@ function createConnectionHandler(transport: ClientTransport) {
         try {
           let projectCwd: string | undefined;
           if (activeSession) projectCwd = activeSession.getCwd?.();
-          if (!projectCwd) projectCwd = DEFAULT_CWD;
+          if (!projectCwd) projectCwd = getDefaultCwd();
           const savedPath = saveSkill({
             filePath: data.filePath || undefined,
             name: data.name,
@@ -2245,7 +2264,7 @@ function createConnectionHandler(transport: ClientTransport) {
 
           // Step 3: Create a new session primed to resume-at this point
           const sessionInfo = getSession(sessionId);
-          const cwd = sessionInfo?.cwd || activeSession?.getCwd() || process.env.DEFAULT_CWD || process.env.HOME || "/";
+          const cwd = sessionInfo?.cwd || activeSession?.getCwd() || getDefaultCwd() || process.env.HOME || "/";
           activeSession = createSession(sessionInfo?.backend, transport as any, cwd, plugins, getStoredCodexDriver(sessionInfo));
           await restorePersistedPermissionMode(activeSession, sessionInfo);
           activeSession.setTtsEnabled(pendingTtsEnabled);
@@ -2548,7 +2567,7 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "list_directory" as any: {
-        const listPath = (msg as any).path as string || DEFAULT_CWD;
+        const listPath = (msg as any).path as string || getDefaultCwd();
         try {
           const resolvedPath = path.resolve(listPath);
           const entries = fs.readdirSync(resolvedPath, { withFileTypes: true });
@@ -2581,7 +2600,7 @@ function createConnectionHandler(transport: ClientTransport) {
           const listing = listFileManagerDirectory({
             dirPath: (msg as any).path as string | undefined,
             includeHidden: (msg as any).includeHidden === true,
-            defaultCwd: DEFAULT_CWD,
+            defaultCwd: getDefaultCwd(),
           });
           sendJson({
             type: "file_manager_list_result",
@@ -2594,7 +2613,7 @@ function createConnectionHandler(transport: ClientTransport) {
             type: "file_manager_list_result",
             requestId,
             ok: false,
-            path: (msg as any).path || DEFAULT_CWD,
+            path: (msg as any).path || getDefaultCwd(),
             entries: [],
             roots: [],
             error: e.message || String(e),
@@ -2659,8 +2678,8 @@ function createConnectionHandler(transport: ClientTransport) {
         const filePath = String((msg as any).path || "");
         const fileId = (msg as any).fileId as string || `fm_${crypto.randomUUID()}`;
         try {
-          const roots = getFileManagerRoots(DEFAULT_CWD);
-          const resolved = resolveFileManagerPath(filePath, DEFAULT_CWD);
+          const roots = getFileManagerRoots(getDefaultCwd());
+          const resolved = resolveFileManagerPath(filePath, getDefaultCwd());
           assertFileManagerPathAllowed(resolved, roots);
           if (!filePath || !fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
             throw new Error(!filePath ? "Missing path" : `Not a file: ${resolved}`);
@@ -2691,8 +2710,8 @@ function createConnectionHandler(transport: ClientTransport) {
         const requestId = (msg as any).requestId as string | undefined;
         const filePath = String((msg as any).path || "");
         try {
-          const roots = getFileManagerRoots(DEFAULT_CWD);
-          const resolved = resolveFileManagerPath(filePath, DEFAULT_CWD);
+          const roots = getFileManagerRoots(getDefaultCwd());
+          const resolved = resolveFileManagerPath(filePath, getDefaultCwd());
           assertFileManagerPathAllowed(resolved, roots);
           const stat = fs.statSync(resolved);
           if (!stat.isFile()) throw new Error(`Not a file: ${resolved}`);
@@ -2732,8 +2751,8 @@ function createConnectionHandler(transport: ClientTransport) {
         const requestId = (msg as any).requestId as string | undefined;
         const targetPath = String((msg as any).path || "");
         try {
-          const roots = getFileManagerRoots(DEFAULT_CWD);
-          const resolved = resolveFileManagerPath(targetPath, DEFAULT_CWD);
+          const roots = getFileManagerRoots(getDefaultCwd());
+          const resolved = resolveFileManagerPath(targetPath, getDefaultCwd());
           assertFileManagerPathAllowed(resolved, roots);
           fs.mkdirSync(resolved, { recursive: true });
           sendJson({ type: "file_manager_operation_result", requestId, operation: "mkdir", ok: true, path: resolved });
@@ -2748,8 +2767,8 @@ function createConnectionHandler(transport: ClientTransport) {
         const fromPath = String((msg as any).fromPath || "");
         const toName = String((msg as any).toName || "");
         try {
-          const roots = getFileManagerRoots(DEFAULT_CWD);
-          const resolvedFrom = resolveFileManagerPath(fromPath, DEFAULT_CWD);
+          const roots = getFileManagerRoots(getDefaultCwd());
+          const resolvedFrom = resolveFileManagerPath(fromPath, getDefaultCwd());
           assertFileManagerPathAllowed(resolvedFrom, roots);
           const cleanName = path.basename(toName);
           if (!cleanName || cleanName !== toName || cleanName === "." || cleanName === "..") {
@@ -2771,8 +2790,8 @@ function createConnectionHandler(transport: ClientTransport) {
         const targetPath = String((msg as any).path || "");
         const recursive = (msg as any).recursive === true;
         try {
-          const roots = getFileManagerRoots(DEFAULT_CWD);
-          const resolved = resolveFileManagerPath(targetPath, DEFAULT_CWD);
+          const roots = getFileManagerRoots(getDefaultCwd());
+          const resolved = resolveFileManagerPath(targetPath, getDefaultCwd());
           assertFileManagerPathAllowed(resolved, roots);
           const stat = fs.lstatSync(resolved);
           if (stat.isDirectory() && !recursive) {
@@ -2838,7 +2857,7 @@ function createConnectionHandler(transport: ClientTransport) {
         const totalChunks = msg.totalChunks;
         const chunkSize = (msg as any).chunkSize || 512 * 1024;
 
-        const cwd = activeSession?.getCwd() || DEFAULT_CWD;
+        const cwd = activeSession?.getCwd() || getDefaultCwd();
         const uploadDir = path.join(cwd, ".uploads");
         if (!fs.existsSync(uploadDir)) {
           fs.mkdirSync(uploadDir, { recursive: true });
@@ -3145,7 +3164,7 @@ const httpServer = http.createServer((req, res) => {
       const cwd = session.getCwd?.();
       if (cwd) { projectCwd = cwd; break; }
     }
-    if (!projectCwd) projectCwd = DEFAULT_CWD;
+    if (!projectCwd) projectCwd = getDefaultCwd();
     const skills = listSkills(projectCwd);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ skills, projectCwd, codexSlashCommands: CODEX_NATIVE_SLASH_COMMANDS }));
@@ -3176,7 +3195,7 @@ const httpServer = http.createServer((req, res) => {
           const cwd = session.getCwd?.();
           if (cwd) { projectCwd = cwd; break; }
         }
-        if (!projectCwd) projectCwd = DEFAULT_CWD;
+        if (!projectCwd) projectCwd = getDefaultCwd();
         const savedPath = saveSkill({
           filePath: data.filePath || undefined,
           name: data.name,
@@ -3279,7 +3298,7 @@ let relayConnectionHandler: ReturnType<typeof createConnectionHandler> | null = 
 
 httpServer.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT} (WebSocket + HTTP)`);
-  console.log(`Default working directory: ${DEFAULT_CWD}`);
+  console.log(`Default working directory: ${getDefaultCwd()}`);
   console.log(`Available backends: ${detectAvailableBackends().join(", ")}`);
 
   // Initialize plugins
@@ -3297,7 +3316,7 @@ httpServer.listen(PORT, async () => {
       }
     },
     getPort: () => PORT,
-    getDefaultCwd: () => DEFAULT_CWD,
+    getDefaultCwd: () => getDefaultCwd(),
   };
   for (const plugin of plugins) {
     if (plugin.init) {

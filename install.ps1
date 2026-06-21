@@ -184,13 +184,20 @@ if ($gitCmd) {
     Write-Ok "Git already installed ($gitVer)"
 } else {
     Write-Host "  Git is required for auto-updates. Installing..."
+    $gitInstalledWithWinget = $false
     if (Test-CommandExists "winget") {
-        & winget install Git.Git --accept-source-agreements --accept-package-agreements --silent
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
-            throw "winget install Git failed (exit code $LASTEXITCODE)"
+        Write-Host "  Installing Git via winget..."
+        $wingetOutput = & winget install Git.Git --accept-source-agreements --accept-package-agreements --silent 2>&1
+        $wingetExit = $LASTEXITCODE
+        if ($wingetExit -eq 0 -or $wingetExit -eq -1978335189) {
+            $gitInstalledWithWinget = $true
+        } else {
+            Write-Warn "winget install Git failed (exit code $wingetExit). Falling back to direct installer."
+            $wingetOutput | ForEach-Object { Write-Host "    $_" }
         }
-    } else {
-        Write-Host "  winget not found. Downloading Git installer..."
+    }
+    if (-not $gitInstalledWithWinget) {
+        Write-Host "  Downloading Git installer..."
         $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/Git-2.47.1.2-64-bit.exe"
         $gitPath = Join-Path $env:TEMP "git-installer.exe"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -226,15 +233,21 @@ if ($nodeCmd) {
 }
 
 if (-not $nodeInstalled) {
+    $nodeInstalledWithWinget = $false
     if (Test-CommandExists "winget") {
         Write-Host "  Installing Node.js via winget..."
-        & winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+        $wingetOutput = & winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent 2>&1
+        $wingetExit = $LASTEXITCODE
+        if ($wingetExit -eq 0 -or $wingetExit -eq -1978335189) {
             # -1978335189 = "already installed" in winget
-            throw "winget install failed (exit code $LASTEXITCODE)"
+            $nodeInstalledWithWinget = $true
+        } else {
+            Write-Warn "winget install Node.js failed (exit code $wingetExit). Falling back to direct installer."
+            $wingetOutput | ForEach-Object { Write-Host "    $_" }
         }
-    } else {
-        Write-Host "  winget not found. Downloading Node.js installer..."
+    }
+    if (-not $nodeInstalledWithWinget) {
+        Write-Host "  Downloading Node.js installer..."
         $msiUrl = "https://nodejs.org/dist/v22.14.0/node-v22.14.0-x64.msi"
         $msiPath = Join-Path $env:TEMP "nodejs-installer.msi"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

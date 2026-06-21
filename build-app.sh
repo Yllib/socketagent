@@ -123,7 +123,7 @@ fi
 
 # ── Commit app repo ──
 cd "$APP_DIR"
-git add pubspec.yaml
+git add -A
 git commit -m "Release v$NEW_VERSION" || true
 APP_VERSION_COMMITTED=true
 git push

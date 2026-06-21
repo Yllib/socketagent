@@ -41,6 +41,15 @@ ENV_FILE="$SERVER_DIR/.env"
 DATA_DIR="$HOME/.claude-assistant"
 KEYS_FILE="$DATA_DIR/relay-keys.json"
 SETUP_SCRIPT="$SERVER_DIR/scripts/setup.js"
+USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
+NPM_GLOBAL_DIR="${SOCKETAGENT_NPM_GLOBAL_DIR:-$HOME/.local/share/socketagent/npm-global}"
+
+if [[ -x "$USER_NODE_DIR/bin/node" ]]; then
+  export PATH="$USER_NODE_DIR/bin:$PATH"
+fi
+mkdir -p "$NPM_GLOBAL_DIR/bin"
+export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$NPM_GLOBAL_DIR}"
+export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
 
 # Colors
 RED='\033[0;31m'
@@ -65,6 +74,26 @@ prompt_read() {
     exit 1
   fi
   printf -v "$__resultvar" '%s' "$value"
+}
+
+ensure_shell_path() {
+  local path_entry="$1"
+  local label="$2"
+  case ":$PATH:" in
+    *":$path_entry:"*) return ;;
+  esac
+
+  local shell_rc="$HOME/.profile"
+  if [[ -n "${SHELL:-}" && "$(basename "$SHELL")" == "bash" ]]; then
+    shell_rc="$HOME/.bashrc"
+  fi
+
+  if [[ -f "$shell_rc" ]] && ! grep -q "$path_entry" "$shell_rc"; then
+    printf '\n# %s\nexport PATH="%s:$PATH"\n' "$label" "$path_entry" >> "$shell_rc"
+    ok "Added $path_entry to PATH in $shell_rc"
+  else
+    warn "Add this to your shell profile if needed: export PATH=\"$path_entry:\$PATH\""
+  fi
 }
 
 select_backends() {
@@ -172,7 +201,7 @@ if [[ "$NEED_NODE_INSTALL" == "true" ]]; then
     *) fail "Unsupported architecture: $ARCH"; exit 1 ;;
   esac
 
-  NODE_INSTALL_DIR="/usr/local"
+  NODE_INSTALL_DIR="$USER_NODE_DIR"
   NODE_TARBALL="node-v22.22.1-linux-${NODE_ARCH}.tar.xz"
   NODE_URL="https://nodejs.org/dist/v22.22.1/${NODE_TARBALL}"
 
@@ -180,12 +209,15 @@ if [[ "$NEED_NODE_INSTALL" == "true" ]]; then
   curl -fSL --progress-bar -o "/tmp/${NODE_TARBALL}" "$NODE_URL"
 
   echo "  Installing to ${NODE_INSTALL_DIR}..."
-  sudo tar -xJf "/tmp/${NODE_TARBALL}" -C "$NODE_INSTALL_DIR" --strip-components=1
+  rm -rf "$NODE_INSTALL_DIR"
+  mkdir -p "$NODE_INSTALL_DIR"
+  tar -xJf "/tmp/${NODE_TARBALL}" -C "$NODE_INSTALL_DIR" --strip-components=1
   rm -f "/tmp/${NODE_TARBALL}"
 
   # Refresh PATH
   hash -r 2>/dev/null
-  export PATH="/usr/local/bin:$PATH"
+  export PATH="$NODE_INSTALL_DIR/bin:$PATH"
+  ensure_shell_path "$NODE_INSTALL_DIR/bin" "SocketAgent Node.js"
 
   if ! command -v node &>/dev/null; then
     fail "Node.js installation failed. Install manually: https://nodejs.org/"
@@ -207,6 +239,7 @@ if ! command -v npm &>/dev/null; then
   fail "npm not found despite Node.js being installed. Check your PATH."
   exit 1
 fi
+ensure_shell_path "$NPM_CONFIG_PREFIX/bin" "SocketAgent npm global tools"
 
 # ══════════════════════════════════════════════
 #  Phase 2: Claude Code CLI

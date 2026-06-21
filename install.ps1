@@ -65,6 +65,47 @@ function Refresh-Path {
                 [System.Environment]::GetEnvironmentVariable("PATH", "User")
 }
 
+function Test-PathListContains($pathList, $directory) {
+    if (-not $pathList -or -not $directory) { return $false }
+    $needle = $directory.TrimEnd("\")
+    foreach ($part in $pathList.Split(";")) {
+        if ($part.TrimEnd("\") -ieq $needle) { return $true }
+    }
+    return $false
+}
+
+function Add-DirectoryToPath($directory, [bool]$persistUser = $false) {
+    if (-not $directory -or -not (Test-Path $directory)) { return }
+    if (-not (Test-PathListContains $env:PATH $directory)) {
+        $env:PATH = "$env:PATH;$directory"
+    }
+    if ($persistUser) {
+        $userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        if (-not (Test-PathListContains $userPath $directory)) {
+            $newPath = if ($userPath) { "$userPath;$directory" } else { $directory }
+            [System.Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
+            Write-Ok "Added $directory to user PATH"
+        }
+    }
+}
+
+function Ensure-NpmGlobalBinOnPath {
+    if (-not (Test-CommandExists "npm")) { return }
+    $prefixResult = Invoke-NativeCapture { npm prefix -g }
+    if ($prefixResult.ExitCode -ne 0) { return }
+    $prefix = ($prefixResult.Output | Where-Object { $_ } | Select-Object -First 1).ToString().Trim()
+    if ($prefix) {
+        Add-DirectoryToPath $prefix $true
+    }
+}
+
+function Add-CommandDirectoryToPath($commandName) {
+    $cmd = Get-Command $commandName -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) {
+        Add-DirectoryToPath (Split-Path $cmd.Source -Parent) $true
+    }
+}
+
 function Test-CommandExists($cmd) {
     $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue)
 }
@@ -336,6 +377,7 @@ if (-not $nodeInstalled) {
     }
     Write-Ok "Node.js $rawVersion installed"
 }
+Ensure-NpmGlobalBinOnPath
 
 # ══════════════════════════════════════════════
 #  Phase 2: Claude Code CLI
@@ -368,6 +410,7 @@ if (-not $installClaude) {
         }
         Write-Ok "Claude Code CLI installed ($claudeVer)"
     }
+    Add-CommandDirectoryToPath "claude"
 }
 
 # ══════════════════════════════════════════════
@@ -452,6 +495,7 @@ if (-not $installCodex) {
         }
 
         Refresh-Path
+        Ensure-NpmGlobalBinOnPath
 
         $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
         if (-not $codexCmd) {
@@ -463,6 +507,7 @@ if (-not $installCodex) {
         }
         Write-Ok "OpenAI Codex CLI installed ($codexVer)"
     }
+    Add-CommandDirectoryToPath "codex"
 }
 
 # ══════════════════════════════════════════════
@@ -599,6 +644,15 @@ if ($existing) {
 # This ensures the server auto-restarts after updates (process.exit(1))
 $batFile = Join-Path $SERVER_DIR "run-service.bat"
 $servicePath = $env:PATH -replace '"', ''
+foreach ($commandName in @("claude", "codex")) {
+    $cmd = Get-Command $commandName -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) {
+        $cmdDir = (Split-Path $cmd.Source -Parent) -replace '"', ''
+        if (-not (Test-PathListContains $servicePath $cmdDir)) {
+            $servicePath = "$servicePath;$cmdDir"
+        }
+    }
+}
 $batContent = @"
 @echo off
 set "HOME=$env:USERPROFILE"

@@ -3,6 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import type { CodexDriver } from "./protocol";
+import { buildCodexProcessEnv } from "./codex-env";
 
 export interface ServerSettings {
   codexDriver: CodexDriver;
@@ -13,9 +14,10 @@ const STORE_DIR = path.join(process.env.HOME || os.homedir(), ".claude-assistant
 const SETTINGS_FILE = path.join(STORE_DIR, "server-settings.json");
 const DEFAULT_CODEX_DRIVER: CodexDriver = "app-server";
 const BOOT_DEFAULT_CWD = path.resolve(process.env.DEFAULT_CWD || process.cwd());
+const CODEX_DRIVER_CACHE_MS = 5000;
 
 let cachedSettings: ServerSettings | null = null;
-let cachedDriversAvailable: CodexDriver[] | null = null;
+let cachedDriversAvailable: { checkedAt: number; value: CodexDriver[] } | null = null;
 
 function ensureStoreDir(): void {
   if (!fs.existsSync(STORE_DIR)) fs.mkdirSync(STORE_DIR, { recursive: true });
@@ -75,21 +77,28 @@ export function getDefaultCwd(): string {
 }
 
 export function getCodexDriversAvailable(): CodexDriver[] {
-  if (cachedDriversAvailable) return cachedDriversAvailable;
+  const now = Date.now();
+  if (cachedDriversAvailable && now - cachedDriversAvailable.checkedAt < CODEX_DRIVER_CACHE_MS) {
+    return cachedDriversAvailable.value;
+  }
+  const cache = (value: CodexDriver[]): CodexDriver[] => {
+    cachedDriversAvailable = { checkedAt: Date.now(), value };
+    return value;
+  };
+
   const codexProbe = spawnSync("codex", ["--version"], {
     encoding: "utf8",
     timeout: 3000,
     stdio: ["ignore", "pipe", "pipe"],
+    env: buildCodexProcessEnv(),
   });
   if (codexProbe.status !== 0) {
-    cachedDriversAvailable = [];
-    return cachedDriversAvailable;
+    return cache([]);
   }
 
   const authPath = path.join(process.env.HOME || os.homedir(), ".codex", "auth.json");
   if (!fs.existsSync(authPath)) {
-    cachedDriversAvailable = [];
-    return cachedDriversAvailable;
+    return cache([]);
   }
 
   const drivers: CodexDriver[] = ["exec"];
@@ -97,13 +106,13 @@ export function getCodexDriversAvailable(): CodexDriver[] {
     const result = spawnSync("codex", ["app-server", "--help"], {
       encoding: "utf8",
       timeout: 3000,
+      env: buildCodexProcessEnv(),
     });
     if (result.status === 0) drivers.push("app-server");
   } catch {
     // Leave app-server absent; exec remains the stable fallback.
   }
-  cachedDriversAvailable = drivers;
-  return cachedDriversAvailable;
+  return cache(drivers);
 }
 
 export function getAdvertisedServerSettings(): ServerSettings & { codexDriversAvailable: CodexDriver[] } {

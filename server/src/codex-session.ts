@@ -64,6 +64,7 @@ import {
   CodexAppServerRequestResponder,
   CodexAppServerUserInput,
 } from "./codex-app-server-client";
+import { buildCodexProcessEnv } from "./codex-env";
 import { resolveCodexDriver } from "./server-settings";
 import { listSkills, SkillEntry } from "./skills-manager";
 
@@ -1134,7 +1135,7 @@ export class CodexSession {
 
     this.proc = spawn("codex", args, {
       cwd: this.cwd, // resume relies on this — it does NOT inherit cwd from the original session
-      env: process.env,
+      env: buildCodexProcessEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.proc.stdin?.on("error", (err) => {
@@ -1342,7 +1343,7 @@ export class CodexSession {
     if (!this.appServer) {
       this.appServer = new CodexAppServerClient({
         cwd: this.cwd,
-        env: process.env,
+        env: buildCodexProcessEnv(),
         requestTimeoutMs: 60_000,
         startupTimeoutMs: 30_000,
       });
@@ -3394,8 +3395,8 @@ export async function rollbackCodexAppServerThread(threadId: string, cwd: string
 
 // ─── Backend availability detection ─────────────────────────────────────────
 
-let _cachedBackends: Backend[] | null = null;
-let _cachedCodexAvailability: { available: boolean; reason?: string } | null = null;
+const CODEX_AVAILABILITY_CACHE_MS = 5000;
+let _cachedCodexAvailability: { checkedAt: number; value: { available: boolean; reason?: string } } | null = null;
 
 function getEnabledBackendSet(): Set<Backend> {
   const raw = (process.env.ENABLED_BACKENDS || "claude,codex").toLowerCase().trim();
@@ -3411,67 +3412,71 @@ function getEnabledBackendSet(): Set<Backend> {
 }
 
 export function getCodexAvailability(): { available: boolean; reason?: string } {
-  if (_cachedCodexAvailability) return _cachedCodexAvailability;
+  const now = Date.now();
+  if (_cachedCodexAvailability && now - _cachedCodexAvailability.checkedAt < CODEX_AVAILABILITY_CACHE_MS) {
+    return _cachedCodexAvailability.value;
+  }
+
+  const cache = (value: { available: boolean; reason?: string }): { available: boolean; reason?: string } => {
+    _cachedCodexAvailability = { checkedAt: Date.now(), value };
+    return value;
+  };
+
   try {
     const result = spawnSync("codex", ["--version"], {
       timeout: 3000,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      env: buildCodexProcessEnv(),
     });
 
     if (result.error) {
       const code = (result.error as NodeJS.ErrnoException).code;
-      _cachedCodexAvailability = {
+      return cache({
         available: false,
         reason: code === "ENOENT"
           ? "Codex CLI was not found on PATH"
           : `Codex CLI probe failed: ${result.error.message}`,
-      };
-      return _cachedCodexAvailability;
+      });
     }
 
     if (result.status !== 0) {
       const detail = (result.stderr || result.stdout || "").trim();
-      _cachedCodexAvailability = {
+      return cache({
         available: false,
         reason: detail
           ? `Codex CLI probe exited ${result.status}: ${detail.slice(0, 300)}`
           : `Codex CLI probe exited ${result.status}`,
-      };
-      return _cachedCodexAvailability;
+      });
     }
 
     const home = process.env.HOME || os.homedir();
     if (!fs.existsSync(path.join(home, ".codex", "auth.json"))) {
-      _cachedCodexAvailability = {
+      return cache({
         available: false,
         reason: "Codex CLI is installed but ~/.codex/auth.json is missing",
-      };
-      return _cachedCodexAvailability;
+      });
     }
 
-    _cachedCodexAvailability = { available: true };
-    return _cachedCodexAvailability;
+    return cache({ available: true });
   } catch (e: any) {
-    _cachedCodexAvailability = {
+    return cache({
       available: false,
       reason: `Codex availability check failed: ${e?.message || String(e)}`,
-    };
-    return _cachedCodexAvailability;
+    });
   }
 }
 
 /**
- * Returns the list of agent backends this server can drive. Result is computed
- * once on first call and cached for the process lifetime — install/auth
- * changes require a server restart to take effect, which is acceptable.
+ * Returns the list of agent backends this server can drive. Codex availability
+ * is rechecked on a short cache window so install/auth fixes can be picked up
+ * without a SocketAgent restart.
  *
  * Claude is present when enabled (the Agent SDK ships with the server). Codex
  * is present iff enabled, the `codex` CLI is on PATH, and `~/.codex/auth.json`
  * exists.
  */
 export function detectAvailableBackends(): Backend[] {
-  if (_cachedBackends) return _cachedBackends;
   const enabled = getEnabledBackendSet();
   const list: Backend[] = [];
   if (enabled.has("claude")) list.push("claude");
@@ -3480,6 +3485,5 @@ export function detectAvailableBackends(): Backend[] {
   } catch (e: any) {
     console.error(`[codex] backend detection failed: ${e?.message || String(e)}`);
   }
-  _cachedBackends = list;
   return list;
 }

@@ -74,6 +74,30 @@ function Test-CodexAppServer {
     return $LASTEXITCODE -eq 0
 }
 
+function Invoke-NativeCapture {
+    param(
+        [Parameter(Mandatory=$true)]
+        [scriptblock]$Command
+    )
+
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $Command 2>&1
+        $exitCode = $LASTEXITCODE
+    } catch {
+        $output = @($_.Exception.Message)
+        $exitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 }
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+
+    return [pscustomobject]@{
+        Output = @($output)
+        ExitCode = $exitCode
+    }
+}
+
 function Test-CodexAuthenticated {
     $authCandidates = @()
     if ($env:CODEX_HOME) {
@@ -91,17 +115,9 @@ function Test-CodexAuthenticated {
         return $false
     }
 
-    $oldPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $output = & codex login status 2>&1
-        $exitCode = $LASTEXITCODE
-    } catch {
-        $output = @($_.Exception.Message)
-        $exitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 }
-    } finally {
-        $ErrorActionPreference = $oldPreference
-    }
+    $result = Invoke-NativeCapture { codex login status }
+    $output = $result.Output
+    $exitCode = $result.ExitCode
 
     if ($exitCode -eq 0) {
         return $true
@@ -241,8 +257,9 @@ if ($gitCmd) {
     $gitInstalledWithWinget = $false
     if (Test-CommandExists "winget") {
         Write-Host "  Installing Git via winget..."
-        $wingetOutput = & winget install Git.Git --accept-source-agreements --accept-package-agreements --silent 2>&1
-        $wingetExit = $LASTEXITCODE
+        $wingetResult = Invoke-NativeCapture { winget install Git.Git --accept-source-agreements --accept-package-agreements --silent }
+        $wingetOutput = $wingetResult.Output
+        $wingetExit = $wingetResult.ExitCode
         if ($wingetExit -eq 0 -or $wingetExit -eq -1978335189) {
             $gitInstalledWithWinget = $true
         } else {
@@ -290,8 +307,9 @@ if (-not $nodeInstalled) {
     $nodeInstalledWithWinget = $false
     if (Test-CommandExists "winget") {
         Write-Host "  Installing Node.js via winget..."
-        $wingetOutput = & winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent 2>&1
-        $wingetExit = $LASTEXITCODE
+        $wingetResult = Invoke-NativeCapture { winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent }
+        $wingetOutput = $wingetResult.Output
+        $wingetExit = $wingetResult.ExitCode
         if ($wingetExit -eq 0 -or $wingetExit -eq -1978335189) {
             # -1978335189 = "already installed" in winget
             $nodeInstalledWithWinget = $true
@@ -334,8 +352,9 @@ if (-not $installClaude) {
         Write-Ok "Claude Code CLI already installed ($claudeVer)"
     } else {
         Write-Host "  Installing Claude Code CLI..."
-        $cliOutput = & npm install -g @anthropic-ai/claude-code 2>&1
-        $cliExit = $LASTEXITCODE
+        $cliResult = Invoke-NativeCapture { npm install -g @anthropic-ai/claude-code }
+        $cliOutput = $cliResult.Output
+        $cliExit = $cliResult.ExitCode
         $cliOutput | ForEach-Object { Write-Host "    $_" }
         if ($cliExit -ne 0) {
             throw "npm install -g @anthropic-ai/claude-code failed (exit code $cliExit)"
@@ -424,8 +443,9 @@ if (-not $installCodex) {
 
     if (-not $codexInstalled) {
         Write-Host "  Installing OpenAI Codex CLI..."
-        $codexOutput = & npm install -g @openai/codex 2>&1
-        $codexExit = $LASTEXITCODE
+        $codexResult = Invoke-NativeCapture { npm install -g @openai/codex }
+        $codexOutput = $codexResult.Output
+        $codexExit = $codexResult.ExitCode
         $codexOutput | ForEach-Object { Write-Host "    $_" }
         if ($codexExit -ne 0) {
             throw "npm install -g @openai/codex failed (exit code $codexExit)"
@@ -488,15 +508,17 @@ Write-Phase "Phase 6: Install Dependencies & Build"
 Write-Host "  Running npm install..."
 Push-Location $SERVER_DIR
 try {
-    $npmOutput = & npm install 2>&1
-    $npmExit = $LASTEXITCODE
+    $npmResult = Invoke-NativeCapture { npm install }
+    $npmOutput = $npmResult.Output
+    $npmExit = $npmResult.ExitCode
     $npmOutput | ForEach-Object { Write-Host "    $_" }
     if ($npmExit -ne 0) { throw "npm install failed (exit code $npmExit)" }
     Write-Ok "Dependencies installed"
 
     Write-Host "  Compiling TypeScript..."
-    $tscOutput = & npx tsc 2>&1
-    $tscExit = $LASTEXITCODE
+    $tscResult = Invoke-NativeCapture { npx tsc }
+    $tscOutput = $tscResult.Output
+    $tscExit = $tscResult.ExitCode
     $tscOutput | ForEach-Object { Write-Host "    $_" }
     if ($tscExit -ne 0) { throw "TypeScript compilation failed (exit code $tscExit)" }
     Write-Ok "Server built successfully"

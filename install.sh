@@ -40,6 +40,9 @@ EOF
 fi
 
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install-server.sh" && -d "$SCRIPT_DIR/server" ]]; then
+  if [[ -r /dev/tty ]]; then
+    exec bash "$SCRIPT_DIR/install-server.sh" "$@" </dev/tty
+  fi
   exec bash "$SCRIPT_DIR/install-server.sh" "$@"
 fi
 
@@ -73,4 +76,7 @@ else
 fi
 
 cd "$INSTALL_DIR"
+if [[ -r /dev/tty ]]; then
+  exec bash ./install-server.sh "$@" </dev/tty
+fi
 exec bash ./install-server.sh "$@"

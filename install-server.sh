@@ -54,6 +54,19 @@ ok()    { echo -e "  ${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}[!]${NC} $1"; }
 fail()  { echo -e "  ${RED}[X]${NC} $1"; }
 
+prompt_read() {
+  local prompt="$1"
+  local __resultvar="$2"
+  local value=""
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" value </dev/tty
+  elif ! read -r -p "$prompt" value; then
+    fail "Interactive input is unavailable. Re-run with --backends claude, --backends codex, or --backends both."
+    exit 1
+  fi
+  printf -v "$__resultvar" '%s' "$value"
+}
+
 select_backends() {
   local value
   value=$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
@@ -65,7 +78,7 @@ select_backends() {
     echo "    2) Claude only"
     echo "    3) Both Claude and Codex"
     echo ""
-    read -rp "  Choose [3]: " value
+    prompt_read "  Choose [3]: " value
     value=$(echo "${value:-3}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
   fi
 
@@ -235,7 +248,7 @@ else
     echo "  Running 'claude login' -- this will open your browser."
     echo "  Complete the login, then return to this terminal."
     echo ""
-    read -rp "  Press Enter to start login..."
+    prompt_read "  Press Enter to start login..." _
     claude login
 
     if [[ -f "$CLAUDE_DIR/credentials.json" ]] || [[ -f "$CLAUDE_DIR/.credentials.json" ]]; then
@@ -301,7 +314,7 @@ else
     echo "  Running 'codex login' -- this will open your browser or show a device login."
     echo "  Complete the login, then return to this terminal."
     echo ""
-    read -rp "  Press Enter to start login..."
+    prompt_read "  Press Enter to start login..." _
     codex login || true
 
     if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then

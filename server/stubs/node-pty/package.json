@@ -1,0 +1,6 @@
+{
+  "name": "node-pty",
+  "version": "0.0.0-socketagent-stub",
+  "main": "index.js",
+  "types": "index.d.ts"
+}

@@ -444,7 +444,22 @@ function createConnectionHandler(transport: ClientTransport) {
     return `${prefix}: ${availability.reason || "unknown reason"}`;
   }
 
-  function sendFileChunks(filePath: string, fileId?: string): void {
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function waitForFileSendBackpressure(): Promise<void> {
+    const maxBufferedBytes = 2 * 1024 * 1024;
+    while (transport.readyState === WebSocket.OPEN) {
+      const bufferedAmount = Number((transport as any).bufferedAmount || 0);
+      if (!Number.isFinite(bufferedAmount) || bufferedAmount <= maxBufferedBytes) {
+        return;
+      }
+      await sleep(25);
+    }
+  }
+
+  async function sendFileChunks(filePath: string, fileId?: string): Promise<void> {
     if (!filePath || !fs.existsSync(filePath)) {
       sendJson({
         type: "error",
@@ -459,7 +474,7 @@ function createConnectionHandler(transport: ClientTransport) {
     }
     const transferId = fileId || crypto.randomUUID();
     const fileName = path.basename(filePath);
-    const CHUNK_SIZE = 512 * 1024; // 512KB
+    const CHUNK_SIZE = 256 * 1024; // Keep base64 JSON frames modest for mobile links.
     const totalChunks = Math.ceil(stat.size / CHUNK_SIZE);
     console.log(`Sending file in ${totalChunks} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
 
@@ -467,6 +482,11 @@ function createConnectionHandler(transport: ClientTransport) {
     try {
       const buf = Buffer.alloc(CHUNK_SIZE);
       for (let i = 0; i < totalChunks; i++) {
+        if (transport.readyState !== WebSocket.OPEN) {
+          console.warn(`File transfer aborted, socket closed: ${fileName} (id=${transferId}, chunk=${i}/${totalChunks})`);
+          return;
+        }
+        await waitForFileSendBackpressure();
         const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, i * CHUNK_SIZE);
         const chunk = buf.subarray(0, bytesRead).toString("base64");
         sendJson({
@@ -478,11 +498,13 @@ function createConnectionHandler(transport: ClientTransport) {
           totalChunks,
           data: chunk,
         });
+        await sleep(4);
       }
     } finally {
       fs.closeSync(fd);
     }
 
+    await waitForFileSendBackpressure();
     sendJson({
       type: "file_complete",
       fileId: transferId,
@@ -2669,7 +2691,7 @@ function createConnectionHandler(transport: ClientTransport) {
       case "request_file": {
         const filePath = (msg as any).filePath as string;
         const fileId = (msg as any).fileId as string;
-        sendFileChunks(filePath, fileId);
+        await sendFileChunks(filePath, fileId);
         break;
       }
 
@@ -2692,7 +2714,7 @@ function createConnectionHandler(transport: ClientTransport) {
             path: resolved,
             fileId,
           });
-          sendFileChunks(resolved, fileId);
+          await sendFileChunks(resolved, fileId);
         } catch (e: any) {
           sendJson({
             type: "file_manager_operation_result",

@@ -111,8 +111,8 @@ function Test-CommandExists($cmd) {
 }
 
 function Test-CodexAppServer {
-    $null = & codex app-server --help 2>$null
-    return $LASTEXITCODE -eq 0
+    $result = Invoke-NativeCapture { codex app-server --help }
+    return $result.ExitCode -eq 0
 }
 
 function Invoke-NativeCapture {
@@ -176,6 +176,23 @@ function Invoke-CodexLogin {
         return $LASTEXITCODE
     } catch {
         Write-Warn "codex login reported: $($_.Exception.Message)"
+        if ($null -ne $LASTEXITCODE) {
+            return $LASTEXITCODE
+        }
+        return 1
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+}
+
+function Invoke-ClaudeLogin {
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & claude login
+        return $LASTEXITCODE
+    } catch {
+        Write-Warn "claude login reported: $($_.Exception.Message)"
         if ($null -ne $LASTEXITCODE) {
             return $LASTEXITCODE
         }
@@ -315,7 +332,10 @@ if ($gitCmd) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $gitUrl -OutFile $gitPath -UseBasicParsing
         Write-Host "  Running Git installer (may request admin)..."
-        Start-Process $gitPath -ArgumentList "/VERYSILENT /NORESTART" -Verb RunAs -Wait
+        $gitProc = Start-Process $gitPath -ArgumentList "/VERYSILENT /NORESTART" -Verb RunAs -Wait -PassThru
+        if ($gitProc.ExitCode -ne 0) {
+            throw "Git installer failed or was canceled (exit code $($gitProc.ExitCode))"
+        }
     }
 
     Refresh-Path
@@ -366,7 +386,10 @@ if (-not $nodeInstalled) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
         Write-Host "  Running Node.js installer (may request admin)..."
-        Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn" -Verb RunAs -Wait
+        $nodeProc = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn" -Verb RunAs -Wait -PassThru
+        if ($nodeProc.ExitCode -ne 0) {
+            throw "Node.js installer failed or was canceled (exit code $($nodeProc.ExitCode))"
+        }
     }
 
     Refresh-Path
@@ -445,7 +468,10 @@ if (-not $installClaude) {
         Write-Host ""
         Read-Host "  Press Enter to start login"
 
-        & claude login
+        $claudeLoginExit = Invoke-ClaudeLogin
+        if ($claudeLoginExit -ne 0) {
+            Write-Warn "claude login exited with code $claudeLoginExit; checking for credentials anyway."
+        }
 
         # Re-check
         $isAuthenticated = $false
@@ -598,15 +624,18 @@ if ($ResetPairing) {
 
 $isUpgrade = Test-Path $ENV_FILE
 
-$setupOutput = & node $SETUP_SCRIPT `
-    --envfile $ENV_FILE `
-    --keysfile $KEYS_FILE `
-    --relay-url $RELAY_URL `
-    --default-cwd $env:USERPROFILE `
-    --port $Port `
-    --enabled-backends $enabledBackends
+$setupResult = Invoke-NativeCapture {
+    node $SETUP_SCRIPT `
+        --envfile $ENV_FILE `
+        --keysfile $KEYS_FILE `
+        --relay-url $RELAY_URL `
+        --default-cwd $env:USERPROFILE `
+        --port $Port `
+        --enabled-backends $enabledBackends
+}
+$setupOutput = $setupResult.Output
 
-if ($LASTEXITCODE -ne 0) { throw "Configuration generation failed" }
+if ($setupResult.ExitCode -ne 0) { throw "Configuration generation failed (exit code $($setupResult.ExitCode))" }
 
 # QR payload is the last line of output
 $qrPayload = ($setupOutput | Select-Object -Last 1)
@@ -672,9 +701,6 @@ $action = New-ScheduledTaskAction `
     -Argument "/c `"$batFile`"" `
     -WorkingDirectory $SERVER_DIR
 
-# Trigger: at system startup (runs whether user is logged in or not)
-$trigger = New-ScheduledTaskTrigger -AtStartup
-
 # Settings: run indefinitely, restart on failure, allow on battery
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -685,21 +711,52 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -StartWhenAvailable
 
-# Principal: current user, S4U logon (runs without active desktop session)
-$principal = New-ScheduledTaskPrincipal `
-    -UserId $env:USERNAME `
-    -LogonType S4U `
-    -RunLevel Limited
+$registeredTaskMode = "startup"
+try {
+    # Preferred: current user, S4U logon, at startup. This runs without an
+    # active desktop session, but some Windows account/policy setups reject it.
+    $startupTrigger = New-ScheduledTaskTrigger -AtStartup
+    $startupPrincipal = New-ScheduledTaskPrincipal `
+        -UserId $env:USERNAME `
+        -LogonType S4U `
+        -RunLevel Limited
 
-Register-ScheduledTask `
-    -TaskName $TASK_NAME `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Principal $principal `
-    -Description "SocketAgent WebSocket server" | Out-Null
+    Register-ScheduledTask `
+        -TaskName $TASK_NAME `
+        -Action $action `
+        -Trigger $startupTrigger `
+        -Settings $settings `
+        -Principal $startupPrincipal `
+        -Description "SocketAgent WebSocket server" | Out-Null
+} catch {
+    Write-Warn "Could not register startup task using S4U: $($_.Exception.Message)"
+    Write-Warn "Falling back to an interactive logon task for this Windows account."
+    $partialTask = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
+    if ($partialTask) {
+        Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false
+    }
 
-Write-Ok "Registered as scheduled task '$TASK_NAME'"
+    $registeredTaskMode = "logon"
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
+    $logonPrincipal = New-ScheduledTaskPrincipal `
+        -UserId $env:USERNAME `
+        -LogonType Interactive `
+        -RunLevel Limited
+
+    Register-ScheduledTask `
+        -TaskName $TASK_NAME `
+        -Action $action `
+        -Trigger $logonTrigger `
+        -Settings $settings `
+        -Principal $logonPrincipal `
+        -Description "SocketAgent WebSocket server" | Out-Null
+}
+
+if ($registeredTaskMode -eq "startup") {
+    Write-Ok "Registered as scheduled task '$TASK_NAME' (startup)"
+} else {
+    Write-Ok "Registered as scheduled task '$TASK_NAME' (logon fallback)"
+}
 
 # Add Windows Firewall rule (requires admin — skip silently if not elevated)
 $fwRuleName = "SocketAgent Server (TCP $Port)"
@@ -723,8 +780,14 @@ try {
 }
 
 # Start immediately
-Start-ScheduledTask -TaskName $TASK_NAME
-Write-Host "  Starting server..."
+try {
+    Start-ScheduledTask -TaskName $TASK_NAME
+    Write-Host "  Starting server..."
+} catch {
+    Write-Warn "Could not start scheduled task: $($_.Exception.Message)"
+    Write-Warn "Starting server directly for this session; it will start from the task on next logon/startup."
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batFile`"" -WindowStyle Hidden | Out-Null
+}
 Start-Sleep -Seconds 3
 
 $taskInfo = Get-ScheduledTask -TaskName $TASK_NAME

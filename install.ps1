@@ -74,6 +74,60 @@ function Test-CodexAppServer {
     return $LASTEXITCODE -eq 0
 }
 
+function Test-CodexAuthenticated {
+    $authCandidates = @()
+    if ($env:CODEX_HOME) {
+        $authCandidates += (Join-Path $env:CODEX_HOME "auth.json")
+    }
+    $authCandidates += (Join-Path (Join-Path $env:USERPROFILE ".codex") "auth.json")
+
+    foreach ($authFile in $authCandidates) {
+        if ($authFile -and (Test-Path $authFile)) {
+            return $true
+        }
+    }
+
+    if (-not (Test-CommandExists "codex")) {
+        return $false
+    }
+
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & codex login status 2>&1
+        $exitCode = $LASTEXITCODE
+    } catch {
+        $output = @($_.Exception.Message)
+        $exitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 }
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+
+    if ($exitCode -eq 0) {
+        return $true
+    }
+
+    $text = ($output | Out-String)
+    return ($text -match "(?im)^\s*(Logged in|Authenticated)\b") -or ($text -match "ChatGPT")
+}
+
+function Invoke-CodexLogin {
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & codex login
+        return $LASTEXITCODE
+    } catch {
+        Write-Warn "codex login reported: $($_.Exception.Message)"
+        if ($null -ne $LASTEXITCODE) {
+            return $LASTEXITCODE
+        }
+        return 1
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+}
+
 function Convert-BackendSelection($value) {
     if ($null -eq $value) { $value = "" }
     $normalized = $value.ToString().ToLowerInvariant().Replace(" ", "")
@@ -400,9 +454,7 @@ Write-Phase "Phase 5: OpenAI Codex Authentication"
 if (-not $installCodex) {
     Write-Ok "Skipped (Codex not selected)"
 } else {
-    $codexAuthFile = Join-Path (Join-Path $env:USERPROFILE ".codex") "auth.json"
-    $null = & codex login status 2>$null
-    $codexAuthed = $LASTEXITCODE -eq 0 -or (Test-Path $codexAuthFile)
+    $codexAuthed = Test-CodexAuthenticated
 
     if ($codexAuthed) {
         Write-Ok "OpenAI Codex credentials found"
@@ -413,10 +465,12 @@ if (-not $installCodex) {
         Write-Host ""
         Read-Host "  Press Enter to start login"
 
-        & codex login
+        $codexLoginExit = Invoke-CodexLogin
+        if ($codexLoginExit -ne 0) {
+            Write-Warn "codex login exited with code $codexLoginExit; checking for credentials anyway."
+        }
 
-        $null = & codex login status 2>$null
-        $codexAuthed = $LASTEXITCODE -eq 0 -or (Test-Path $codexAuthFile)
+        $codexAuthed = Test-CodexAuthenticated
         if ($codexAuthed) {
             Write-Ok "Codex authentication successful"
         } else {

@@ -505,14 +505,22 @@ if (-not $installCodex) {
 
 Write-Phase "Phase 6: Install Dependencies & Build"
 
-Write-Host "  Running npm install..."
 Push-Location $SERVER_DIR
 try {
-    $npmResult = Invoke-NativeCapture { npm install }
+    $packageLock = Join-Path $SERVER_DIR "package-lock.json"
+    if (Test-Path $packageLock) {
+        Write-Host "  Running npm ci..."
+        $npmResult = Invoke-NativeCapture { npm ci }
+        $installLabel = "npm ci"
+    } else {
+        Write-Host "  Running npm install..."
+        $npmResult = Invoke-NativeCapture { npm install }
+        $installLabel = "npm install"
+    }
     $npmOutput = $npmResult.Output
     $npmExit = $npmResult.ExitCode
     $npmOutput | ForEach-Object { Write-Host "    $_" }
-    if ($npmExit -ne 0) { throw "npm install failed (exit code $npmExit)" }
+    if ($npmExit -ne 0) { throw "$installLabel failed (exit code $npmExit)" }
     Write-Ok "Dependencies installed"
 
     Write-Host "  Compiling TypeScript..."

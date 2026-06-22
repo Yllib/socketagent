@@ -17,6 +17,7 @@ export interface PromptMessage {
   text: string;
   sessionId?: string;
   cwd?: string;
+  codexFastMode?: boolean;
 }
 
 export interface RetractQueuedPromptMessage {
@@ -277,6 +278,11 @@ export interface SetEffortMessage {
   effort: "low" | "medium" | "high" | "max";
 }
 
+export interface SetCodexFastModeMessage {
+  type: "set_codex_fast_mode";
+  enabled: boolean;
+}
+
 export interface SetThinkingMessage {
   type: "set_thinking";
   thinking:
@@ -445,6 +451,7 @@ export type ClientMessage =
   | SetTtsEngineMessage
   | RequestTtsAudioMessage
   | SetEffortMessage
+  | SetCodexFastModeMessage
   | SetThinkingMessage
   | SetDisallowedToolsMessage
   | SetSystemPromptMessage

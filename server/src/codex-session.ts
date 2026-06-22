@@ -127,6 +127,7 @@ type QueuedPrompt = {
   text: string;
   priority: "now" | "next" | "later";
   messageId?: string;
+  fastMode?: boolean;
   resolve: () => void;
   reject: (error: Error) => void;
 };
@@ -140,6 +141,10 @@ export type CodexSlashCommand = {
   description: string;
   argumentHint?: string;
   availability?: "app-server" | "any";
+};
+
+type CodexRunOptions = {
+  fastMode?: boolean;
 };
 
 export const CODEX_NATIVE_SLASH_COMMANDS: CodexSlashCommand[] = [
@@ -216,6 +221,7 @@ export class CodexSession {
   private _isRunning = false;
   private _model: string | null = null;
   private _effort: "low" | "medium" | "high" | "max" = "high";
+  private _fastMode = false;
   private _sandbox: SandboxMode = "danger-full-access";
   private _approvalPolicy: CodexAppServerApprovalPolicy = "never";
   private _approvalsReviewer: CodexAppServerApprovalsReviewer = "user";
@@ -381,6 +387,7 @@ export class CodexSession {
       this._effort = e;
     }
   }
+  setCodexFastMode(enabled: boolean): void { this._fastMode = enabled; }
   setThinking(_t: unknown): void {}
   setDisallowedTools(_t: string[]): void {}
   setAppendSystemPrompt(s: string): void { this._appendSystemPrompt = s; }
@@ -682,6 +689,7 @@ export class CodexSession {
     lines.push(`Driver: ${this.codexDriver}`);
     lines.push(`Model: ${model}`);
     lines.push(`Effort: ${effort || "default"}`);
+    lines.push(`Fast mode: ${this._fastMode ? "on" : "off"}`);
     if (config?.service_tier) lines.push(`Service tier: ${config.service_tier}`);
     lines.push(`Permissions: ${this.formatPermissionMode(this._permissionMode)}`);
     if (config?.sandbox_mode || config?.approval_policy) {
@@ -946,11 +954,11 @@ export class CodexSession {
    * follow-up turn. Codex app-server supports mid-turn `turn/steer`; those
    * messages resolve only once Codex echoes the steered userMessage item.
    */
-  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'now', messageId?: string): Promise<void> {
+  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'now', messageId?: string, options: CodexRunOptions = {}): Promise<void> {
     if (!this._isRunning) {
       // Race: turn finished between the client deciding to queue and us
       // receiving the message. Just run it directly.
-      void this.runQuery(text).catch((err) => {
+      void this.runQueryWithOptions(text, undefined, options).catch((err) => {
         console.error(`[codex] direct-run injected message failed: ${err.message}`);
       });
       return;
@@ -964,6 +972,7 @@ export class CodexSession {
             text,
             priority,
             messageId,
+            fastMode: options.fastMode,
             resolve,
             reject,
             uuid: crypto.randomUUID(),
@@ -996,7 +1005,7 @@ export class CodexSession {
       console.warn(`[codex app-server] no active turn for injection; queueing follow-up (thread=${this.threadId || ""}, turn=${this.activeAppServerTurnId || ""}, priority=${priority}, messageId=${messageId || ""})`);
     }
     return new Promise<void>((resolve, reject) => {
-      this._queuedPrompts.push({ text, priority, messageId, resolve, reject });
+      this._queuedPrompts.push({ text, priority, messageId, fastMode: options.fastMode, resolve, reject });
     });
   }
 
@@ -1083,6 +1092,19 @@ export class CodexSession {
    * The second parameter is used when a fresh WebSocket/process resumes an
    * existing SocketAgent/Codex thread.
    */
+  async runQueryWithOptions(prompt: string, resumeSessionId?: string, options: CodexRunOptions = {}): Promise<void> {
+    if (options.fastMode === undefined) {
+      return this.runQuery(prompt, resumeSessionId);
+    }
+    const previousFastMode = this._fastMode;
+    this._fastMode = options.fastMode;
+    try {
+      return await this.runQuery(prompt, resumeSessionId);
+    } finally {
+      this._fastMode = previousFastMode;
+    }
+  }
+
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
     if (this.codexDriver === "app-server") {
       return this.runAppServerQuery(prompt, resumeSessionId);
@@ -1216,7 +1238,7 @@ export class CodexSession {
           const nextPrompt = this.dequeueNextPrompt();
           if (nextPrompt) {
             nextPrompt.resolve();
-            this.runQuery(nextPrompt.text, this.sessionId ?? undefined)
+            this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, { fastMode: nextPrompt.fastMode })
               .then(settleResolve)
               .catch(settleReject);
             return;
@@ -1433,7 +1455,7 @@ export class CodexSession {
       this.appServerMcpRegistration = registerCodexAppMcp(this.createAppToolContext());
     }
     const mcpUrl = this.buildCodexMcpUrl(this.appServerMcpRegistration.token);
-    return {
+    const config: Record<string, unknown> = {
       model_reasoning_effort: this.codexReasoningEffort(),
       mcp_servers: {
         socketagent_app: {
@@ -1441,6 +1463,11 @@ export class CodexSession {
         },
       },
     };
+    if (this._fastMode) {
+      config.service_tier = "fast";
+      config.features = { fast_mode: true };
+    }
+    return config;
   }
 
   private buildCodexTurnText(prompt: string): string {
@@ -1662,6 +1689,7 @@ export class CodexSession {
       text: steer.text,
       priority: steer.priority,
       messageId: steer.messageId,
+      fastMode: steer.fastMode,
       resolve: steer.resolve,
       reject: steer.reject,
     });
@@ -1673,7 +1701,8 @@ export class CodexSession {
     const nextPrompt = this.dequeueNextPrompt();
     if (!nextPrompt) return;
     nextPrompt.resolve();
-    void this.runQuery(nextPrompt.text).catch((err) => nextPrompt.reject(err instanceof Error ? err : new Error(String(err))));
+    void this.runQueryWithOptions(nextPrompt.text, undefined, { fastMode: nextPrompt.fastMode })
+      .catch((err) => nextPrompt.reject(err instanceof Error ? err : new Error(String(err))));
   }
 
   private acknowledgeNextAppServerSteer(): void {
@@ -3260,6 +3289,12 @@ export class CodexSession {
     return `developer_instructions=${JSON.stringify(developerInstructions)}`;
   }
 
+  private codexFastModeConfigArgs(): string[] {
+    return this._fastMode
+      ? ["-c", `service_tier="fast"`, "-c", "features.fast_mode=true"]
+      : [];
+  }
+
   private buildExecArgs(mcpUrl: string): string[] {
     const args = [
       "exec",
@@ -3270,6 +3305,7 @@ export class CodexSession {
       "-c", this.codexMcpConfigArg(mcpUrl),
       "-c", `model_reasoning_effort="${this.codexReasoningEffort()}"`,
     ];
+    args.push(...this.codexFastModeConfigArgs());
     const developerInstructionsArg = this.codexDeveloperInstructionsConfigArg();
     if (developerInstructionsArg) args.push("-c", developerInstructionsArg);
     if (this._model) args.push("-m", this._model);
@@ -3290,6 +3326,7 @@ export class CodexSession {
       "-c", this.codexMcpConfigArg(mcpUrl),
       "-c", `model_reasoning_effort="${this.codexReasoningEffort()}"`,
     ];
+    args.push(...this.codexFastModeConfigArgs());
     const developerInstructionsArg = this.codexDeveloperInstructionsConfigArg();
     if (developerInstructionsArg) args.push("-c", developerInstructionsArg);
     if (this._model) args.push("-m", this._model);

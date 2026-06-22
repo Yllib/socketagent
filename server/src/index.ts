@@ -389,6 +389,7 @@ function createConnectionHandler(transport: ClientTransport) {
   let pendingDisallowedTools: string[] = [];
   let pendingSystemPrompt: string = '';
   let pendingCodexCollaborationMode = 'default';
+  let pendingCodexFastMode = false;
 
   // Track active file uploads from the app
   const activeUploads = new Map<string, {
@@ -708,6 +709,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
         (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
+        (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
 
         addRecentCwd(cwd);
         sendJson({
@@ -787,6 +789,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
         (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
+        (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
 
 
         // Register this client so /continue can find the real WebSocket
@@ -926,6 +929,9 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "prompt": {
+        const promptCodexFastMode = typeof (msg as any).codexFastMode === "boolean"
+          ? Boolean((msg as any).codexFastMode)
+          : undefined;
         if (msg.sessionId) {
           const runningForPrompt = activeSessions.get(msg.sessionId);
           if (runningForPrompt && activeSession !== runningForPrompt) {
@@ -973,6 +979,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setDisallowedTools(pendingDisallowedTools);
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
           (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
+          (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
         }
 
         // If session is already running, inject the message inline between turns
@@ -980,7 +987,10 @@ function createConnectionHandler(transport: ClientTransport) {
           const priority = (msg as any).priority || 'now';
           const messageId = (msg as any).messageId || '';
           console.log(`[Inject] Session running, injecting user message inline (priority=${priority}, messageId=${messageId})`);
-          activeSession.injectMessage(msg.text, priority, messageId).then(() => {
+          const injectOptions = activeSession instanceof CodexSession
+            ? { fastMode: promptCodexFastMode ?? pendingCodexFastMode }
+            : undefined;
+          (activeSession as any).injectMessage(msg.text, priority, messageId, injectOptions).then(() => {
             // Acknowledge injection so the app can promote the pending message
             sendJson({ type: "injection_ack", messageId });
           }).catch((e: any) => {
@@ -1061,7 +1071,13 @@ function createConnectionHandler(transport: ClientTransport) {
           });
         };
 
-        activeSession.runQuery(msg.text, resumeId).then(() => {
+        const runOptions = activeSession instanceof CodexSession
+          ? { fastMode: promptCodexFastMode ?? pendingCodexFastMode }
+          : undefined;
+        const runPromise = (activeSession as any).runQueryWithOptions
+          ? (activeSession as any).runQueryWithOptions(msg.text, resumeId, runOptions)
+          : activeSession.runQuery(msg.text, resumeId);
+        runPromise.then(() => {
           const sid = activeSession?.getSessionId();
           if (sid && activeSessions.get(sid) === activeSession) {
             // Keep session in pool if auth login is pending
@@ -1073,7 +1089,7 @@ function createConnectionHandler(transport: ClientTransport) {
             }
           }
           broadcastSessionList();
-        }).catch((err) => {
+        }).catch((err: any) => {
           sendJson({
             type: "error",
             message: err.message || "Query failed",
@@ -1745,6 +1761,15 @@ function createConnectionHandler(transport: ClientTransport) {
         break;
       }
 
+      case "set_codex_fast_mode": {
+        pendingCodexFastMode = Boolean((msg as any).enabled);
+        if (activeSession instanceof CodexSession) {
+          activeSession.setCodexFastMode(pendingCodexFastMode);
+        }
+        console.log(`Codex fast mode ${pendingCodexFastMode ? "enabled" : "disabled"} (session ${activeSession ? 'active' : 'pending'})`);
+        break;
+      }
+
       case "set_thinking": {
         const thinking = (msg as any).thinking;
         if (thinking && ['adaptive', 'enabled', 'disabled'].includes(thinking.type)) {
@@ -2298,6 +2323,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setDisallowedTools(pendingDisallowedTools);
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
           (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
+          (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
   
           activeSession.setResumeSessionAt(uuid);
           // Store the session ID so the next prompt resumes this session at the rewind point
@@ -2397,6 +2423,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setDisallowedTools(pendingDisallowedTools);
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
           (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
+          (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
   
           (activeSession as any)._resumeSessionId = newSessionId;
 
@@ -2464,6 +2491,7 @@ function createConnectionHandler(transport: ClientTransport) {
             forked.setDisallowedTools(pendingDisallowedTools);
             forked.setAppendSystemPrompt(pendingSystemPrompt);
             forked.setCodexCollaborationMode(pendingCodexCollaborationMode);
+            forked.setCodexFastMode(pendingCodexFastMode);
             const { threadId: newSessionId } = await forked.forkAppServerThread(sourceId);
             const sourceHistory = getHistory(sourceId);
             appendHistoryBulk(newSessionId, sourceHistory.map((entry) => ({ ...entry })));
@@ -2519,6 +2547,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
         (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
+        (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
 
         activeSession.setForkSource(sourceId);
         sendJson({

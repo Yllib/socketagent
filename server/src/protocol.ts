@@ -682,6 +682,12 @@ export interface SessionCreatedServerMessage {
   permissionMode?: string;
 }
 
+export interface SessionArchiveFailedServerMessage {
+  type: "session_archive_failed";
+  sessionId: string;
+  error: string;
+}
+
 export interface HistoryEntry {
   role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "permission_mode";
   content: string;
@@ -1084,6 +1090,7 @@ export type ServerMessage =
   | ServerCapabilitiesMessage
   | ServerSettingsMessage
   | SessionCreatedServerMessage
+  | SessionArchiveFailedServerMessage
   | SessionHistoryServerMessage
   | StatusServerMessage
   | CompactingServerMessage

@@ -1614,6 +1614,10 @@ function createConnectionHandler(transport: ClientTransport) {
       case "archive_session": {
         const sid = (msg as any).sessionId as string;
         const sessionInfo = getSession(sid);
+        if (!sessionInfo) {
+          sendJson({ type: "session_archive_failed", sessionId: sid, error: "Session not found" });
+          break;
+        }
         if (sessionInfo) {
           const running = activeSessions.get(sid);
           if (running) {
@@ -1624,7 +1628,8 @@ function createConnectionHandler(transport: ClientTransport) {
             try {
               await archiveCodexAppServerThread(sid, sessionInfo.cwd);
             } catch (err: any) {
-              sendJson({ type: "error", message: `Codex archive failed: ${err.message || err}` });
+              const message = `Codex archive failed: ${err.message || err}`;
+              sendJson({ type: "session_archive_failed", sessionId: sid, error: message });
               break;
             }
             deleteSession(sid);

@@ -220,7 +220,7 @@ export class CodexSession {
   private _compactBoundaryEmitted = false;
   private _isRunning = false;
   private _model: string | null = null;
-  private _effort: "low" | "medium" | "high" | "max" = "high";
+  private _effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh" = "high";
   private _fastMode = false;
   private _sandbox: SandboxMode = "danger-full-access";
   private _approvalPolicy: CodexAppServerApprovalPolicy = "never";
@@ -383,7 +383,7 @@ export class CodexSession {
   // Some are meaningful for Codex, others remain no-ops where Codex has no
   // matching runtime control.
   setEffort(e: string): void {
-    if (e === "low" || e === "medium" || e === "high" || e === "max") {
+    if (e === "minimal" || e === "low" || e === "medium" || e === "high" || e === "max" || e === "xhigh") {
       this._effort = e;
     }
   }
@@ -656,7 +656,7 @@ export class CodexSession {
     }
   }
 
-  private async buildStatusResult(threadId: string): Promise<{ summary: string; payload: Record<string, unknown> }> {
+  async buildStatusResult(threadId: string): Promise<{ summary: string; payload: Record<string, unknown> }> {
     const lines: string[] = [];
     let config: any = null;
     let thread: any = null;
@@ -725,7 +725,8 @@ export class CodexSession {
           driver: this.codexDriver,
           model,
           effort: effort || "default",
-          serviceTier: config?.service_tier || "",
+          serviceTier: this._fastMode ? "fast" : config?.service_tier || "",
+          fastMode: this._fastMode,
           permissionMode: this._permissionMode,
           permissionLabel: this.formatPermissionMode(this._permissionMode),
           sandbox: config?.sandbox_mode || "default",
@@ -1344,7 +1345,9 @@ export class CodexSession {
         this._isRunning = false;
         this.activeAppServerTurnId = null;
         this.appServerTurnSettler = null;
-        await this.runAppServerQuery(nextPrompt.text, this.sessionId ?? undefined);
+        await this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, {
+          fastMode: nextPrompt.fastMode,
+        });
       }
     } catch (err: any) {
       this.send({
@@ -3228,7 +3231,7 @@ export class CodexSession {
     return `mcp_servers.socketagent_app.url="${mcpUrl}"`;
   }
 
-  private codexReasoningEffort(): "low" | "medium" | "high" {
+  private codexReasoningEffort(): string {
     return this._effort === "max" ? "high" : this._effort;
   }
 

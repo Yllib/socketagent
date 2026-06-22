@@ -275,7 +275,7 @@ export interface RegisterPushTokenMessage {
 
 export interface SetEffortMessage {
   type: "set_effort";
-  effort: "low" | "medium" | "high" | "max";
+  effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh";
 }
 
 export interface SetCodexFastModeMessage {
@@ -501,6 +501,7 @@ export type ClientMessage =
   | { type: "version_check" }
   | { type: "force_update" }
   | { type: "get_status_sync" }
+  | { type: "get_codex_status" }
   | { type: "get_recent_cwds" }
   | { type: "add_recent_cwd"; cwd: string }
   | { type: "remove_recent_cwd"; cwd: string }

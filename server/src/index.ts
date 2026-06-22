@@ -384,7 +384,7 @@ function createConnectionHandler(transport: ClientTransport) {
   let pendingTtsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   let pendingKokoroVoice = "af_heart";
   let pendingKokoroSpeed = 1.0;
-  let pendingEffort: 'low' | 'medium' | 'high' | 'max' = 'high';
+  let pendingEffort: 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh' = 'high';
   let pendingThinking: { type: 'adaptive' } | { type: 'enabled'; budgetTokens: number } | { type: 'disabled' } = { type: 'adaptive' };
   let pendingDisallowedTools: string[] = [];
   let pendingSystemPrompt: string = '';
@@ -704,7 +704,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
         activeSession.setKokoroSpeed(pendingKokoroSpeed);
-        activeSession.setEffort(pendingEffort);
+        activeSession.setEffort(pendingEffort as any);
         activeSession.setThinking(pendingThinking);
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
@@ -784,7 +784,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
         activeSession.setKokoroSpeed(pendingKokoroSpeed);
-        activeSession.setEffort(pendingEffort);
+        activeSession.setEffort(pendingEffort as any);
         activeSession.setThinking(pendingThinking);
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
@@ -974,7 +974,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
           activeSession.setKokoroSpeed(pendingKokoroSpeed);
-          activeSession.setEffort(pendingEffort);
+          activeSession.setEffort(pendingEffort as any);
           activeSession.setThinking(pendingThinking);
           activeSession.setDisallowedTools(pendingDisallowedTools);
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
@@ -1751,7 +1751,7 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "set_effort": {
         const effort = (msg as any).effort as string;
-        if (['low', 'medium', 'high', 'max'].includes(effort)) {
+        if (['minimal', 'low', 'medium', 'high', 'max', 'xhigh'].includes(effort)) {
           pendingEffort = effort as any;
           if (activeSession) {
             activeSession.setEffort(effort as any);
@@ -2172,6 +2172,28 @@ function createConnectionHandler(transport: ClientTransport) {
         break;
       }
 
+      case "get_codex_status": {
+        if (activeSession instanceof CodexSession) {
+          try {
+            const threadId = activeSession.getSessionId() || activeSessionId || "";
+            const result = await activeSession.buildStatusResult(threadId);
+            sendJson({
+              type: "codex_status",
+              sessionId: threadId,
+              summary: result.summary,
+              payload: result.payload,
+            });
+          } catch (e: any) {
+            sendJson({
+              type: "codex_status",
+              sessionId: activeSession.getSessionId() || activeSessionId || "",
+              error: e.message || String(e),
+            });
+          }
+        }
+        break;
+      }
+
       case "get_sdk_event_history": {
         const targetSid = (msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId;
         if (!targetSid) {
@@ -2318,7 +2340,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
           activeSession.setKokoroSpeed(pendingKokoroSpeed);
-          activeSession.setEffort(pendingEffort);
+          activeSession.setEffort(pendingEffort as any);
           activeSession.setThinking(pendingThinking);
           activeSession.setDisallowedTools(pendingDisallowedTools);
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
@@ -2418,7 +2440,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
           activeSession.setKokoroSpeed(pendingKokoroSpeed);
-          activeSession.setEffort(pendingEffort);
+          activeSession.setEffort(pendingEffort as any);
           activeSession.setThinking(pendingThinking);
           activeSession.setDisallowedTools(pendingDisallowedTools);
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
@@ -2486,7 +2508,7 @@ function createConnectionHandler(transport: ClientTransport) {
             forked.setTtsEngine(pendingTtsEngine);
             forked.setKokoroVoice(pendingKokoroVoice);
             forked.setKokoroSpeed(pendingKokoroSpeed);
-            forked.setEffort(pendingEffort);
+            forked.setEffort(pendingEffort as any);
             forked.setThinking(pendingThinking);
             forked.setDisallowedTools(pendingDisallowedTools);
             forked.setAppendSystemPrompt(pendingSystemPrompt);
@@ -2542,7 +2564,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
         activeSession.setKokoroSpeed(pendingKokoroSpeed);
-        activeSession.setEffort(pendingEffort);
+        activeSession.setEffort(pendingEffort as any);
         activeSession.setThinking(pendingThinking);
         activeSession.setDisallowedTools(pendingDisallowedTools);
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);

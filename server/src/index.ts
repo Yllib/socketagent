@@ -9,7 +9,7 @@ import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeCodex, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, renameCodexNativeThread } from "./session-store";
+import { listSessionsWithNativeCodex, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, renameCodexNativeThread, invalidateCodexNativeListCache } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -737,6 +737,7 @@ function createConnectionHandler(transport: ClientTransport) {
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
         }
+        const resumeCwd = (msg as any).cwd || getDefaultCwd();
         let sessionInfo = getSession(msg.sessionId);
         // If not in SocketAgent store but cwd is provided, this is an SDK-only
         // session (claude or codex). The caller passes `backend` so we tag the
@@ -745,7 +746,7 @@ function createConnectionHandler(transport: ClientTransport) {
         if (!sessionInfo) {
           const nativeCodex = await getCodexNativeThreadSessionInfo(
             msg.sessionId,
-            (msg as any).cwd || getDefaultCwd(),
+            resumeCwd,
           );
           if (nativeCodex) {
             sessionInfo = nativeCodex;
@@ -753,12 +754,19 @@ function createConnectionHandler(transport: ClientTransport) {
             console.log(`[Resume] Created SocketAgent entry for native Codex thread ${msg.sessionId} in ${nativeCodex.cwd}`);
           }
         }
+        if (!sessionInfo && isCodexThreadArchived(msg.sessionId)) {
+          deleteSession(msg.sessionId);
+          invalidateCodexNativeListCache();
+          sendJson({ type: "session_archived", sessionId: msg.sessionId });
+          broadcastSessionList();
+          break;
+        }
         if (!sessionInfo && (msg as any).cwd) {
           const sdkBackend = ((msg as any).backend as "claude" | "codex" | undefined);
           sessionInfo = {
             id: msg.sessionId,
             title: "Untitled",
-            cwd: (msg as any).cwd,
+            cwd: resumeCwd,
             createdAt: new Date().toISOString(),
             lastActive: new Date().toISOString(),
             messagePreview: "",
@@ -766,7 +774,7 @@ function createConnectionHandler(transport: ClientTransport) {
             ...(sdkBackend === "codex" ? { codexDriver: resolveCodexDriver(undefined) } : {}),
           };
           saveSession(sessionInfo);
-          console.log(`[Resume] Created SocketAgent entry for SDK session ${msg.sessionId} in ${(msg as any).cwd} (backend=${sdkBackend ?? "claude"})`);
+          console.log(`[Resume] Created SocketAgent entry for SDK session ${msg.sessionId} in ${resumeCwd} (backend=${sdkBackend ?? "claude"})`);
         }
         if (!sessionInfo) {
           sendJson({
@@ -775,18 +783,26 @@ function createConnectionHandler(transport: ClientTransport) {
           });
           break;
         }
+        const contextCleared = isContextClearedSession(sessionInfo, msg.sessionId);
+        if (!contextCleared && sessionInfo.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server" && isCodexThreadArchived(msg.sessionId)) {
+          const running = activeSessions.get(msg.sessionId);
+          if (running) {
+            running.abort();
+            activeSessions.delete(msg.sessionId);
+          }
+          deleteSession(msg.sessionId);
+          invalidateCodexNativeListCache();
+          console.log(`[Resume] Refusing to resume archived native Codex thread ${msg.sessionId}`);
+          sendJson({ type: "session_archived", sessionId: msg.sessionId });
+          broadcastSessionList();
+          break;
+        }
         if (sessionInfo.backend === "codex" && codexUnavailable()) {
           sendJson({
             type: "error",
             message: codexUnavailableMessage("This is a Codex session, but Codex is not available on this server"),
           });
           break;
-        }
-        const contextCleared = isContextClearedSession(sessionInfo, msg.sessionId);
-        if (!contextCleared && sessionInfo.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server" && isCodexThreadArchived(msg.sessionId)) {
-          await unarchiveCodexAppServerThread(msg.sessionId, sessionInfo.cwd).catch((err) => {
-            console.warn(`[Resume] Codex app-server thread/unarchive failed for ${msg.sessionId}: ${err.message || err}`);
-          });
         }
 
         // Check if this session is still running in the background
@@ -1533,6 +1549,9 @@ function createConnectionHandler(transport: ClientTransport) {
               .catch((err) => {
                 console.warn(`[ClearContext] Codex app-server thread/archive failed for ${sid}: ${err.message || err}`);
               });
+            if (archivedByAppServer) {
+              invalidateCodexNativeListCache();
+            }
             if (archivedByAppServer && !(sessionInfo as any).codexDriver) {
               (sessionInfo as any).codexDriver = "app-server";
               saveSession(sessionInfo);
@@ -1632,6 +1651,7 @@ function createConnectionHandler(transport: ClientTransport) {
               sendJson({ type: "session_archive_failed", sessionId: sid, error: message });
               break;
             }
+            invalidateCodexNativeListCache();
             deleteSession(sid);
             console.log(`Archived Codex thread ${sid} through native Codex archive`);
             sendJson({ type: "session_archived", sessionId: sid });
@@ -1681,6 +1701,7 @@ function createConnectionHandler(transport: ClientTransport) {
               await unarchiveCodexAppServerThread(sid, result.session.cwd).catch((err) => {
                 console.warn(`[RestoreArchive] Codex app-server thread/unarchive failed for ${sid}: ${err.message || err}`);
               });
+              invalidateCodexNativeListCache();
             }
             sendJson({ type: "archive_restored", sid, ts, session: result.session });
             broadcastSessionList();

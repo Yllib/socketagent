@@ -1168,7 +1168,7 @@ let codexNativeArchivesCache:
   | { at: number; archives: ArchiveEntry[] }
   | null = null;
 
-function invalidateCodexNativeListCache(): void {
+export function invalidateCodexNativeListCache(): void {
   codexNativeSessionsCache = null;
   codexNativeArchivesCache = null;
 }
@@ -1216,6 +1216,13 @@ function codexThreadTitle(thread: any): string {
 
 function codexThreadPreview(thread: any): string {
   return String(thread?.preview || "").trim().slice(0, 200);
+}
+
+function codexThreadPayloadIsArchived(thread: any): boolean {
+  const archived = (thread as any)?.archived;
+  if (archived === true || archived === 1 || archived === "1") return true;
+  if (typeof archived === "string" && archived.toLowerCase() === "true") return true;
+  return false;
 }
 
 function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInfo | null {
@@ -1334,6 +1341,17 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
       continue;
     }
 
+    if (
+      session.backend === "codex"
+      && (session as any).codexDriver === "app-server"
+      && !(session as any).contextClearedAt
+      && isCodexThreadArchived(session.id)
+    ) {
+      deleteSession(session.id);
+      console.log(`[CodexThreads] Removed archived native Codex session ${session.id} from SocketAgent store`);
+      continue;
+    }
+
     merged.push(session);
   }
 
@@ -1374,13 +1392,18 @@ export async function listArchivesWithNativeCodex(useCache = true): Promise<Arch
 }
 
 export async function getCodexNativeThreadSessionInfo(sessionId: string, cwd = getDefaultProcessCwd()): Promise<SessionInfo | null> {
+  if (isCodexThreadArchived(sessionId)) {
+    return null;
+  }
   try {
     return await withCodexThreadListClient(cwd, async (client) => {
       const response = await client.readThread({ threadId: sessionId, includeTurns: false }) as any;
+      if (codexThreadPayloadIsArchived(response?.thread)) return null;
       return codexThreadToSessionInfo(response?.thread);
     });
   } catch (err: any) {
     console.warn(`[CodexThreads] thread/read failed for ${sessionId}: ${err?.message || String(err)}`);
+    if (isCodexThreadArchived(sessionId)) return null;
     return getCodexThreadSessionInfo(sessionId);
   }
 }

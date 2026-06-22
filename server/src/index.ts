@@ -1632,10 +1632,22 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "archive_session": {
         const sid = (msg as any).sessionId as string;
-        const sessionInfo = getSession(sid);
+        let sessionInfo = getSession(sid);
         if (!sessionInfo) {
-          sendJson({ type: "session_archive_failed", sessionId: sid, error: "Session not found" });
-          break;
+          if (isCodexThreadArchived(sid)) {
+            deleteSession(sid);
+            invalidateCodexNativeListCache();
+            console.log(`[Archive] Native Codex thread ${sid} is already archived`);
+            sendJson({ type: "session_archived", sessionId: sid });
+            broadcastSessionList();
+            break;
+          }
+          sessionInfo = await getCodexNativeThreadSessionInfo(sid, getDefaultCwd()) || undefined;
+          if (!sessionInfo) {
+            console.warn(`[Archive] Session ${sid} not found in SocketAgent store or native Codex threads`);
+            sendJson({ type: "session_archive_failed", sessionId: sid, error: "Session not found" });
+            break;
+          }
         }
         if (sessionInfo) {
           const running = activeSessions.get(sid);
@@ -1647,7 +1659,16 @@ function createConnectionHandler(transport: ClientTransport) {
             try {
               await archiveCodexAppServerThread(sid, sessionInfo.cwd);
             } catch (err: any) {
+              if (isCodexThreadArchived(sid)) {
+                console.warn(`[Archive] Codex archive reported an error after ${sid} was archived: ${err.message || err}`);
+                invalidateCodexNativeListCache();
+                deleteSession(sid);
+                sendJson({ type: "session_archived", sessionId: sid });
+                broadcastSessionList();
+                break;
+              }
               const message = `Codex archive failed: ${err.message || err}`;
+              console.warn(`[Archive] ${message} (${sid})`);
               sendJson({ type: "session_archive_failed", sessionId: sid, error: message });
               break;
             }

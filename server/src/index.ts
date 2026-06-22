@@ -140,12 +140,6 @@ if (fs.existsSync(pluginsDir)) {
 
 // Track all connected WebSocket clients for broadcasting
 const connectedClients = new Set<WebSocket>();
-let lastClientActivityAt = Date.now();
-const AUTO_UPDATE_CLIENT_IDLE_GRACE_MS = 2 * 60 * 1000;
-
-function noteClientActivity(): void {
-  lastClientActivityAt = Date.now();
-}
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
@@ -158,24 +152,20 @@ function sessionIsBusy(session: Session): boolean {
   return session.isRunning || (session as any).isCompacting === true;
 }
 
+function describeActiveSessions(): string {
+  return Array.from(activeSessions.entries())
+    .map(([sid, session]) => `${sid}:${sessionIsBusy(session) ? "busy" : "idle"}`)
+    .join(", ");
+}
+
 function autoUpdateBlockReason(): string | null {
   if (activeSessions.size > 0) {
     for (const [, session] of activeSessions) {
       if (sessionIsBusy(session)) {
-        return `sessions are running (${activeSessions.size})`;
+        return `sessions are running (${describeActiveSessions()})`;
       }
     }
-    return `sessions are active (${activeSessions.size})`;
-  }
-  if (connectedClients.size > 0) {
-    return `clients are connected (${connectedClients.size})`;
-  }
-  const idleMs = Date.now() - lastClientActivityAt;
-  if (idleMs < AUTO_UPDATE_CLIENT_IDLE_GRACE_MS) {
-    const remainingSeconds = Math.ceil(
-      (AUTO_UPDATE_CLIENT_IDLE_GRACE_MS - idleMs) / 1000,
-    );
-    return `recent client activity (${remainingSeconds}s grace)`;
+    return `sessions are active (${describeActiveSessions()})`;
   }
   return null;
 }
@@ -3870,7 +3860,6 @@ setTimeout(checkScheduledTasks, 5000);
 // ── Direct WebSocket connections ──
 wss.on("connection", (ws: WebSocket) => {
   console.log("Client connected (authenticated)");
-  noteClientActivity();
   connectedClients.add(ws);
 
   // Send immediate status so the app knows server state right away
@@ -3881,7 +3870,6 @@ wss.on("connection", (ws: WebSocket) => {
   ws.on("message", async (data: Buffer, isBinary: boolean) => {
     let msg: ClientMessage;
 
-    noteClientActivity();
     console.log(`[WS Recv] isBinary=${isBinary} bytes=${data.length}`);
     if (isBinary) {
       // Direct-WS binary frame — currently only used for upload chunks.
@@ -3973,7 +3961,6 @@ function startRelayClient(): void {
     pairingToken: PAIRING_TOKEN,
     keyPair,
     onMessage: (msg: ClientMessage) => {
-      noteClientActivity();
       if (!relayConnectionHandler) {
         // Create handler on first message (phone just paired)
         relayConnectionHandler = createConnectionHandler(relayClient!.getVirtualSocket() as any);

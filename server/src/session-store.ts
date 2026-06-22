@@ -1157,6 +1157,7 @@ export function isCodexNativeArchiveTs(ts: string): boolean {
 }
 
 const CODEX_THREAD_LIST_SOURCE_KINDS = ["cli", "vscode", "appServer", "unknown"];
+const CODEX_THREAD_LOOKUP_SOURCE_KINDS = ["cli", "exec", "vscode", "appServer", "unknown"];
 const CODEX_THREAD_LIST_LIMIT = 500;
 const CODEX_NATIVE_LIST_CACHE_MS = 10_000;
 
@@ -1333,14 +1334,6 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
       continue;
     }
 
-    const isCodexAppServer =
-      session.backend === "codex" && (session.codexDriver === "app-server" || !session.codexDriver);
-    if (isCodexAppServer) {
-      if (session.contextClearedAt) {
-        merged.push(session);
-      }
-      continue;
-    }
     merged.push(session);
   }
 
@@ -1360,7 +1353,7 @@ export async function listArchivesWithNativeCodex(useCache = true): Promise<Arch
         archived: true,
         sortKey: "updated_at",
         sortDirection: "desc",
-        sourceKinds: CODEX_THREAD_LIST_SOURCE_KINDS,
+        sourceKinds: CODEX_THREAD_LOOKUP_SOURCE_KINDS,
         useStateDbOnly: true,
       });
       nativeArchives = threads.flatMap((thread): ArchiveEntry[] => {
@@ -1438,7 +1431,7 @@ export async function listCodexNativeSdkSessions(cwd: string, limit = 30): Promi
     limit: Math.max(1, Math.min(200, Math.floor(limit))),
     sortKey: "updated_at",
     sortDirection: "desc",
-    sourceKinds: CODEX_THREAD_LIST_SOURCE_KINDS,
+    sourceKinds: CODEX_THREAD_LOOKUP_SOURCE_KINDS,
     useStateDbOnly: true,
   });
   return threads.flatMap((thread): SdkSessionEntry[] => {

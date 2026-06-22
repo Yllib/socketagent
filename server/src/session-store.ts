@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { execFileSync } from "child_process";
 import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
-import { CodexAppServerClient } from "./codex-app-server-client";
+import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
 
 const STORE_DIR = path.join(
@@ -1154,6 +1154,306 @@ export function deleteArchive(sid: string, ts: string): void {
 
 export function isCodexNativeArchiveTs(ts: string): boolean {
   return ts.startsWith(CODEX_NATIVE_ARCHIVE_TS_PREFIX);
+}
+
+const CODEX_THREAD_LIST_SOURCE_KINDS = ["cli", "vscode", "appServer", "unknown"];
+const CODEX_THREAD_LIST_LIMIT = 500;
+const CODEX_NATIVE_LIST_CACHE_MS = 10_000;
+
+let codexNativeSessionsCache:
+  | { at: number; sessions: SessionInfo[] }
+  | null = null;
+let codexNativeArchivesCache:
+  | { at: number; archives: ArchiveEntry[] }
+  | null = null;
+
+function invalidateCodexNativeListCache(): void {
+  codexNativeSessionsCache = null;
+  codexNativeArchivesCache = null;
+}
+
+async function withCodexThreadListClient<T>(
+  cwd: string,
+  fn: (client: CodexAppServerClient) => Promise<T>,
+): Promise<T> {
+  const client = new CodexAppServerClient({
+    cwd,
+    env: process.env,
+    requestTimeoutMs: 20_000,
+    startupTimeoutMs: 20_000,
+  });
+  try {
+    await client.initialize({
+      clientInfo: {
+        name: "socketagent",
+        title: "SocketAgent",
+        version: "1.0.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+        requestAttestation: false,
+      },
+    });
+    return await fn(client);
+  } finally {
+    await client.stop().catch(() => {});
+  }
+}
+
+function unixSecondsToIso(value: unknown, fallback = nowIso()): string {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return new Date(n * 1000).toISOString();
+}
+
+function codexThreadTitle(thread: any): string {
+  const raw = String(thread?.name || thread?.preview || "").trim();
+  const firstLine = raw.split(/\r?\n/)[0].trim();
+  const title = firstLine || "Codex session";
+  return title.length > 80 ? title.slice(0, 80) + "…" : title;
+}
+
+function codexThreadPreview(thread: any): string {
+  return String(thread?.preview || "").trim().slice(0, 200);
+}
+
+function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInfo | null {
+  const id = String(thread?.id || thread?.threadId || "").trim();
+  const cwd = String(thread?.cwd || stored?.cwd || "").trim();
+  if (!id || !cwd) return null;
+  const createdAt = unixSecondsToIso(thread?.createdAt, stored?.createdAt || nowIso());
+  const lastActive = unixSecondsToIso(thread?.updatedAt, stored?.lastActive || createdAt);
+  const preview = codexThreadPreview(thread);
+  return {
+    ...(stored || {}),
+    id,
+    title: codexThreadTitle(thread),
+    cwd,
+    createdAt,
+    lastActive,
+    messagePreview: preview || stored?.messagePreview || "",
+    backend: "codex",
+    codexDriver: "app-server",
+  } as SessionInfo;
+}
+
+function codexThreadToArchiveEntry(thread: any): ArchiveEntry | null {
+  const session = codexThreadToSessionInfo(thread);
+  if (!session) return null;
+  const archivedAt = unixSecondsToIso((thread as any)?.archivedAt, session.lastActive);
+  return {
+    sid: session.id,
+    ts: `${CODEX_NATIVE_ARCHIVE_TS_PREFIX}${Math.floor(new Date(archivedAt).getTime() / 1000) || Date.now()}`,
+    title: session.title,
+    cwd: session.cwd,
+    backend: "codex",
+    createdAt: session.createdAt,
+    clearedAt: archivedAt,
+    messagePreview: session.messagePreview,
+    messageCount: 0,
+    hasJsonl: true,
+  };
+}
+
+async function listAllCodexThreads(params: CodexAppServerThreadListParams): Promise<any[]> {
+  return withCodexThreadListClient(getDefaultProcessCwd(), async (client) => {
+    const maxRows = Math.max(
+      1,
+      Math.min(CODEX_THREAD_LIST_LIMIT, Math.floor(Number(params.limit ?? CODEX_THREAD_LIST_LIMIT))),
+    );
+    const threads: any[] = [];
+    let cursor: string | null | undefined = params.cursor ?? null;
+    do {
+      const response = await client.listThreads({
+        ...params,
+        cursor,
+        limit: Math.max(1, Math.min(maxRows - threads.length, maxRows)),
+      }) as any;
+      const page = Array.isArray(response?.data) ? response.data : [];
+      threads.push(...page);
+      cursor = response?.nextCursor || null;
+    } while (cursor && threads.length < maxRows);
+    return threads.slice(0, maxRows);
+  });
+}
+
+function getDefaultProcessCwd(): string {
+  return process.cwd();
+}
+
+async function listCodexNativeSessionsFromAppServer(useCache = true): Promise<SessionInfo[]> {
+  const nowMs = Date.now();
+  if (useCache && codexNativeSessionsCache && nowMs - codexNativeSessionsCache.at < CODEX_NATIVE_LIST_CACHE_MS) {
+    return codexNativeSessionsCache.sessions;
+  }
+
+  const stored = readStore();
+  const storedById = new Map(stored.map((s) => [s.id, s]));
+  const threads = await listAllCodexThreads({
+    archived: false,
+    sortKey: "updated_at",
+    sortDirection: "desc",
+    sourceKinds: CODEX_THREAD_LIST_SOURCE_KINDS,
+    useStateDbOnly: true,
+  });
+  const sessions = threads.flatMap((thread): SessionInfo[] => {
+    const id = String(thread?.id || "");
+    const info = codexThreadToSessionInfo(thread, storedById.get(id));
+    return info ? [info] : [];
+  });
+  codexNativeSessionsCache = { at: nowMs, sessions };
+  return sessions;
+}
+
+export async function listSessionsWithNativeCodex(useCache = true): Promise<SessionInfo[]> {
+  const stored = listSessions();
+  let native: SessionInfo[];
+  try {
+    native = await listCodexNativeSessionsFromAppServer(useCache);
+  } catch (err: any) {
+    console.warn(`[CodexThreads] native session list failed: ${err?.message || String(err)}`);
+    return stored;
+  }
+
+  const nativeById = new Map(native.map((s) => [s.id, s]));
+  const merged: SessionInfo[] = [];
+  for (const session of stored) {
+    const nativeSession = nativeById.get(session.id);
+    if (nativeSession) {
+      merged.push({
+        ...session,
+        ...nativeSession,
+        lastUsage: session.lastUsage,
+        scheduledTaskId: session.scheduledTaskId,
+        permissionMode: session.permissionMode,
+        contextClearedAt: session.contextClearedAt,
+        ...(session as any).lastContextUsage ? { lastContextUsage: (session as any).lastContextUsage } : {},
+      } as SessionInfo);
+      nativeById.delete(session.id);
+      continue;
+    }
+
+    const isCodexAppServer =
+      session.backend === "codex" && (session.codexDriver === "app-server" || !session.codexDriver);
+    if (isCodexAppServer) {
+      if (session.contextClearedAt) {
+        merged.push(session);
+      }
+      continue;
+    }
+    merged.push(session);
+  }
+
+  merged.push(...nativeById.values());
+  return merged.sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
+}
+
+export async function listArchivesWithNativeCodex(useCache = true): Promise<ArchiveEntry[]> {
+  const legacy = listArchives();
+  const nowMs = Date.now();
+  let nativeArchives: ArchiveEntry[];
+  if (useCache && codexNativeArchivesCache && nowMs - codexNativeArchivesCache.at < CODEX_NATIVE_LIST_CACHE_MS) {
+    nativeArchives = codexNativeArchivesCache.archives;
+  } else {
+    try {
+      const threads = await listAllCodexThreads({
+        archived: true,
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        sourceKinds: CODEX_THREAD_LIST_SOURCE_KINDS,
+        useStateDbOnly: true,
+      });
+      nativeArchives = threads.flatMap((thread): ArchiveEntry[] => {
+        const entry = codexThreadToArchiveEntry(thread);
+        return entry ? [entry] : [];
+      });
+      codexNativeArchivesCache = { at: nowMs, archives: nativeArchives };
+    } catch (err: any) {
+      console.warn(`[CodexThreads] native archive list failed: ${err?.message || String(err)}`);
+      nativeArchives = listCodexNativeArchives();
+    }
+  }
+
+  const byKey = new Map<string, ArchiveEntry>();
+  for (const entry of legacy) byKey.set(`${entry.backend || ""}:${entry.sid}`, entry);
+  for (const entry of nativeArchives) byKey.set(`codex:${entry.sid}`, entry);
+  return [...byKey.values()].sort((a, b) => b.clearedAt.localeCompare(a.clearedAt));
+}
+
+export async function getCodexNativeThreadSessionInfo(sessionId: string, cwd = getDefaultProcessCwd()): Promise<SessionInfo | null> {
+  try {
+    return await withCodexThreadListClient(cwd, async (client) => {
+      const response = await client.readThread({ threadId: sessionId, includeTurns: false }) as any;
+      return codexThreadToSessionInfo(response?.thread);
+    });
+  } catch (err: any) {
+    console.warn(`[CodexThreads] thread/read failed for ${sessionId}: ${err?.message || String(err)}`);
+    return getCodexThreadSessionInfo(sessionId);
+  }
+}
+
+export async function restoreCodexNativeArchive(sessionId: string, cwd = getDefaultProcessCwd()): Promise<{ ok: true; session: SessionInfo } | { ok: false; reason: string }> {
+  try {
+    const session = await withCodexThreadListClient(cwd, async (client) => {
+      const response = await client.unarchiveThread(sessionId) as any;
+      const fromResponse = codexThreadToSessionInfo(response?.thread);
+      if (fromResponse) return fromResponse;
+      const read = await client.readThread({ threadId: sessionId, includeTurns: false }) as any;
+      return codexThreadToSessionInfo(read?.thread);
+    });
+    if (!session) return { ok: false, reason: "Codex thread not found" };
+    saveSession({ ...session, lastActive: nowIso(), codexDriver: "app-server" } as SessionInfo);
+    invalidateCodexNativeListCache();
+    return { ok: true, session: getSession(sessionId) || session };
+  } catch (err: any) {
+    return { ok: false, reason: err?.message || String(err) };
+  }
+}
+
+export async function renameCodexNativeThread(sessionId: string, cwd: string, title: string): Promise<void> {
+  await withCodexThreadListClient(cwd || getDefaultProcessCwd(), async (client) => {
+    await client.setThreadName(sessionId, title);
+  });
+  const session = getSession(sessionId);
+  if (session) {
+    session.title = title;
+    session.lastActive = nowIso();
+    saveSession(session);
+  }
+  invalidateCodexNativeListCache();
+}
+
+export async function listCodexNativeSdkSessions(cwd: string, limit = 30): Promise<SdkSessionEntry[]> {
+  const cwdCandidates = cwdLookupCandidates(cwd);
+  const trackedMap = new Map<string, SessionInfo>();
+  for (const s of readStore()) {
+    if (s.backend === "codex" && setsIntersect(cwdLookupCandidates(s.cwd), cwdCandidates)) {
+      trackedMap.set(s.id, s);
+    }
+  }
+
+  const threads = await listAllCodexThreads({
+    archived: false,
+    cwd: [...cwdCandidates],
+    limit: Math.max(1, Math.min(200, Math.floor(limit))),
+    sortKey: "updated_at",
+    sortDirection: "desc",
+    sourceKinds: CODEX_THREAD_LIST_SOURCE_KINDS,
+    useStateDbOnly: true,
+  });
+  return threads.flatMap((thread): SdkSessionEntry[] => {
+    const id = String(thread?.id || "");
+    const info = codexThreadToSessionInfo(thread, trackedMap.get(id));
+    if (!id || !info) return [];
+    return [{
+      sessionId: id,
+      firstMessage: info.messagePreview || info.title || "Codex session",
+      createdAt: info.createdAt,
+      lastActive: info.lastActive,
+      tracked: trackedMap.has(id),
+      backend: "codex",
+    }];
+  });
 }
 
 /** On startup, close out any tool_calls that never got a result (e.g. server crashed mid-query) */

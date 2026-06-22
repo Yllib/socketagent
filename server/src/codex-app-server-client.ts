@@ -113,6 +113,24 @@ export interface CodexAppServerThreadReadParams {
   includeTurns: boolean;
 }
 
+export interface CodexAppServerThreadListParams {
+  archived?: boolean | null;
+  cursor?: string | null;
+  cwd?: string | string[] | null;
+  limit?: number | null;
+  modelProviders?: string[] | null;
+  searchTerm?: string | null;
+  sortDirection?: "asc" | "desc" | null;
+  sortKey?: "created_at" | "updated_at" | null;
+  sourceKinds?: string[] | null;
+  useStateDbOnly?: boolean;
+}
+
+export interface CodexAppServerThreadLoadedListParams {
+  cursor?: string | null;
+  limit?: number | null;
+}
+
 export interface CodexAppServerNotification<T = unknown> {
   method: string;
   params: T;
@@ -286,6 +304,18 @@ export class CodexAppServerClient extends EventEmitter {
 
   async readThread(params: CodexAppServerThreadReadParams): Promise<unknown> {
     return this.request("thread/read", params);
+  }
+
+  async listThreads(params: CodexAppServerThreadListParams = {}): Promise<unknown> {
+    return this.request("thread/list", params);
+  }
+
+  async listLoadedThreads(params: CodexAppServerThreadLoadedListParams = {}): Promise<unknown> {
+    return this.request("thread/loaded/list", params);
+  }
+
+  async setThreadName(threadId: string, name: string): Promise<unknown> {
+    return this.request("thread/name/set", { threadId, name });
   }
 
   async listCollaborationModes(): Promise<unknown> {

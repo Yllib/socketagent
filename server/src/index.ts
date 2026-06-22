@@ -9,7 +9,7 @@ import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchives, getArchiveHistory, restoreArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs } from "./session-store";
+import { listSessionsWithNativeCodex, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, renameCodexNativeThread } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -170,11 +170,18 @@ interface SessionClient {
 }
 const sessionClients = new Map<string, SessionClient>();
 
-/** Enrich stored sessions with live data from active sessions */
-function getEnrichedSessions(): SessionInfo[] {
-  const sessions = listSessions();
+/** Enrich stored/native sessions with live data from active sessions */
+async function getEnrichedSessions(): Promise<SessionInfo[]> {
+  const sessions = await listSessionsWithNativeCodex();
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  for (const sid of activeSessions.keys()) {
+    if (!byId.has(sid)) {
+      const stored = getSession(sid);
+      if (stored) byId.set(sid, stored);
+    }
+  }
   const taskSessionIds = getScheduledTaskSessionIds();
-  return sessions
+  return [...byId.values()]
     .filter(s => !taskSessionIds.has(s.id))
     .map(s => {
       const active = activeSessions.get(s.id);
@@ -191,17 +198,21 @@ function getEnrichedSessions(): SessionInfo[] {
 }
 
 /** Broadcast current session list to all connected clients */
-function broadcastSessionList(): void {
-  const enriched = getEnrichedSessions();
-  const msg = JSON.stringify({ type: "session_list", sessions: enriched });
-  for (const client of connectedClients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(msg);
+async function broadcastSessionList(): Promise<void> {
+  try {
+    const enriched = await getEnrichedSessions();
+    const msg = JSON.stringify({ type: "session_list", sessions: enriched });
+    for (const client of connectedClients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(msg);
+      }
     }
-  }
-  // Also send to relay client if paired
-  if (relayConnectionHandler) {
-    relayConnectionHandler.sendRaw(msg);
+    // Also send to relay client if paired
+    if (relayConnectionHandler) {
+      relayConnectionHandler.sendRaw(msg);
+    }
+  } catch (err: any) {
+    console.warn(`[Sessions] failed to broadcast session list: ${err?.message || err}`);
   }
 }
 
@@ -731,6 +742,17 @@ function createConnectionHandler(transport: ClientTransport) {
         // session (claude or codex). The caller passes `backend` so we tag the
         // freshly-registered SessionInfo correctly — without it, codex SDK
         // resumes would default to claude and fail on the first prompt.
+        if (!sessionInfo) {
+          const nativeCodex = await getCodexNativeThreadSessionInfo(
+            msg.sessionId,
+            (msg as any).cwd || getDefaultCwd(),
+          );
+          if (nativeCodex) {
+            sessionInfo = nativeCodex;
+            saveSession(sessionInfo);
+            console.log(`[Resume] Created SocketAgent entry for native Codex thread ${msg.sessionId} in ${nativeCodex.cwd}`);
+          }
+        }
         if (!sessionInfo && (msg as any).cwd) {
           const sdkBackend = ((msg as any).backend as "claude" | "codex" | undefined);
           sessionInfo = {
@@ -1199,7 +1221,7 @@ function createConnectionHandler(transport: ClientTransport) {
       case "list_sessions": {
         sendJson({
           type: "session_list",
-          sessions: getEnrichedSessions(),
+          sessions: await getEnrichedSessions(),
         });
         break;
       }
@@ -1235,7 +1257,13 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
         const claudeSessions = listSdkSessions(cwd);
-        const codexSessions = listCodexSessions(cwd);
+        let codexSessions;
+        try {
+          codexSessions = await listCodexNativeSdkSessions(cwd);
+        } catch (err: any) {
+          console.warn(`[SdkSessions] Codex native thread/list failed for ${cwd}: ${err?.message || err}`);
+          codexSessions = listCodexSessions(cwd);
+        }
         // Merge and sort by lastActive desc so the most recent is on top
         // regardless of which backend produced it.
         const sessions = [...claudeSessions, ...codexSessions].sort((a, b) =>
@@ -1260,10 +1288,22 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "rename_session": {
-        const session = getSession(msg.sessionId);
+        let session = getSession(msg.sessionId);
+        if (!session) {
+          const nativeCodex = await getCodexNativeThreadSessionInfo(msg.sessionId, getDefaultCwd());
+          if (nativeCodex) {
+            session = nativeCodex;
+            saveSession(session);
+          }
+        }
         if (session) {
           session.title = msg.title;
           saveSession(session);
+          if (session.backend === "codex" && getStoredCodexDriver(session) === "app-server") {
+            renameCodexNativeThread(msg.sessionId, session.cwd, msg.title).catch((err) => {
+              console.warn(`[Rename] Codex native thread/name/set failed for ${msg.sessionId}: ${err.message || err}`);
+            });
+          }
           console.log(`Renamed session ${msg.sessionId} to "${msg.title}"`);
           broadcastSessionList();
         }
@@ -1603,7 +1643,7 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "list_archives": {
-        sendJson({ type: "archive_list", archives: listArchives() });
+        sendJson({ type: "archive_list", archives: await listArchivesWithNativeCodex() });
         break;
       }
 
@@ -1621,9 +1661,14 @@ function createConnectionHandler(transport: ClientTransport) {
         try {
           if (isCodexNativeArchiveTs(ts)) {
             const existing = getSession(sid);
-            await unarchiveCodexAppServerThread(sid, existing?.cwd || getDefaultCwd()).catch((err) => {
-              throw new Error(`Codex native unarchive failed: ${err.message || err}`);
-            });
+            const result = await restoreCodexNativeArchive(sid, existing?.cwd || getDefaultCwd());
+            if (result.ok) {
+              sendJson({ type: "archive_restored", sid, ts, session: result.session });
+              broadcastSessionList();
+            } else {
+              sendJson({ type: "archive_restore_failed", sid, ts, reason: result.reason });
+            }
+            break;
           }
           const result = restoreArchive(sid, ts);
           if (result.ok) {
@@ -1646,9 +1691,14 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "delete_archive": {
         const { sid, ts } = msg as any;
+        if (isCodexNativeArchiveTs(ts)) {
+          sendJson({ type: "error", message: "Codex native archives cannot be permanently deleted through SocketAgent yet. Unarchive or keep them archived." });
+          sendJson({ type: "archive_list", archives: await listArchivesWithNativeCodex(false) });
+          break;
+        }
         deleteArchive(sid, ts);
         sendJson({ type: "archive_deleted", sid, ts });
-        sendJson({ type: "archive_list", archives: listArchives() });
+        sendJson({ type: "archive_list", archives: await listArchivesWithNativeCodex(false) });
         break;
       }
 

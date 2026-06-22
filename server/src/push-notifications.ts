@@ -113,6 +113,10 @@ export async function sendPushNotification(
 
   const response = await getMessaging().sendEachForMulticast({
     tokens,
+    notification: {
+      title: payload.title,
+      body: payload.body || "",
+    },
     data: {
       title: payload.title,
       body: payload.body || "",
@@ -122,6 +126,12 @@ export async function sendPushNotification(
     },
     android: {
       priority: "high",
+      notification: {
+        channelId: "session_alerts",
+        priority: "high",
+        defaultSound: true,
+        defaultVibrateTimings: true,
+      },
     },
   });
 

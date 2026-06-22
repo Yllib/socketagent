@@ -230,7 +230,7 @@ function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPub
 }
 
 function shouldSendPushNotification(): boolean {
-  return connectedClients.size === 0;
+  return true;
 }
 
 function maybeSendPushNotification(msg: {

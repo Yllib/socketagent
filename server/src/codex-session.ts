@@ -3385,11 +3385,16 @@ async function withStandaloneAppServerClient<T>(
   cwd: string,
   fn: (client: CodexAppServerClient) => Promise<T>,
 ): Promise<T> {
+  const clientCwd = resolveStandaloneAppServerCwd(cwd);
   const client = new CodexAppServerClient({
-    cwd,
+    cwd: clientCwd,
     env: process.env,
     requestTimeoutMs: 60_000,
     startupTimeoutMs: 30_000,
+  });
+  client.on("error", () => {
+    // The pending JSON-RPC request also rejects; this listener prevents EventEmitter
+    // from treating spawn failures as uncaught exceptions.
   });
   try {
     await client.initialize({
@@ -3407,6 +3412,24 @@ async function withStandaloneAppServerClient<T>(
   } finally {
     await client.stop().catch(() => {});
   }
+}
+
+function resolveStandaloneAppServerCwd(cwd: string): string {
+  const candidates = [cwd, process.cwd(), os.homedir(), "/tmp"];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+        if (candidate !== cwd) {
+          console.warn(`[codex app-server] cwd missing for standalone request (${cwd}); using ${candidate}`);
+        }
+        return candidate;
+      }
+    } catch {
+      // Try the next fallback.
+    }
+  }
+  return process.cwd();
 }
 
 export async function archiveCodexAppServerThread(threadId: string, cwd: string): Promise<void> {

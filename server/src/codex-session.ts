@@ -3261,6 +3261,19 @@ export class CodexSession {
 
     parts.push(SOCKETAGENT_FILE_LINK_INSTRUCTIONS);
 
+    const emailToolsPath = path.resolve(__dirname, "..", "tools", "email-tools.js");
+    if (fs.existsSync(emailToolsPath)) {
+      parts.push(
+        `Outlook email/calendar CLI is available at ${emailToolsPath}. Use it when the user asks to work with Outlook mail, attachments, drafts, sends, or calendar data. Examples: \`node ${emailToolsPath} list 10\`, \`node ${emailToolsPath} read <email-id>\`, \`node ${emailToolsPath} search <query> [count]\`, \`node ${emailToolsPath} attachments <email-id>\`, \`node ${emailToolsPath} download-attachment <email-id> <attachment-id-or-name> [output-dir]\`, \`node ${emailToolsPath} agenda\`, and \`node ${emailToolsPath} events [days] [count]\`. Sending commands require user approval.`,
+      );
+    }
+
+    for (const plugin of this._plugins) {
+      if (!plugin.toolContextFragment) continue;
+      const fragment = plugin.toolContextFragment();
+      if (fragment) parts.push(fragment);
+    }
+
     if (this._ttsEnabled) {
       parts.push(
         "Text-to-speech is enabled. Before writing your final text response, call the Speak tool once with a concise, natural spoken summary. Keep it brief and conversational; do not read code, URLs, or markdown aloud. If your response is short and simple, speak it nearly verbatim. If it is long or technical, summarize the key points. Always still write your full text response after speaking.",

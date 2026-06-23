@@ -73,7 +73,9 @@ export function getFileManagerRoots(defaultCwd: string): FileManagerRoot[] {
     .map((p, i) => ({ label: `Root ${i + 1}`, path: p }));
   if (configured.length > 0) return uniqueRoots(configured);
 
+  const filesystemRoot = path.parse(os.homedir()).root || path.parse(defaultCwd).root || path.sep;
   return uniqueRoots([
+    { label: "Filesystem", path: filesystemRoot },
     { label: "Home", path: os.homedir() },
     { label: "Default", path: defaultCwd },
   ]);

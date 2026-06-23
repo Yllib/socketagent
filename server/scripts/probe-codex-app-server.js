@@ -14,7 +14,61 @@
  */
 
 const { spawn } = require("child_process");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
+
+function pathKey(env) {
+  return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
+}
+
+function candidateCodexDirs(env) {
+  const home = env.HOME || os.homedir();
+  if (process.platform !== "win32") {
+    return [
+      path.join(home, ".local", "share", "socketagent", "npm-global", "bin"),
+      path.join(home, ".local", "bin"),
+    ];
+  }
+  const appData = env.APPDATA || (home ? path.join(home, "AppData", "Roaming") : "");
+  const localAppData = env.LOCALAPPDATA || (home ? path.join(home, "AppData", "Local") : "");
+  return [
+    appData && path.join(appData, "npm"),
+    localAppData && path.join(localAppData, "npm"),
+    localAppData && path.join(localAppData, "Programs", "nodejs"),
+    env.ProgramFiles && path.join(env.ProgramFiles, "nodejs"),
+    env["ProgramFiles(x86)"] && path.join(env["ProgramFiles(x86)"], "nodejs"),
+  ].filter(Boolean);
+}
+
+function resolveCodexSpawn(args) {
+  const env = { ...process.env };
+  const key = pathKey(env);
+  const parts = (env[key] || "").split(path.delimiter).filter(Boolean);
+  for (const dir of candidateCodexDirs(env)) {
+    if (fs.existsSync(dir) && !parts.some((part) => path.resolve(part).toLowerCase() === path.resolve(dir).toLowerCase())) {
+      parts.push(dir);
+    }
+  }
+  env[key] = parts.join(path.delimiter);
+  if (key !== "PATH") env.PATH = env[key];
+
+  const names = process.platform === "win32" ? ["codex.exe", "codex.cmd", "codex.bat", "codex"] : ["codex"];
+  for (const dir of parts) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) {
+        return {
+          command: candidate,
+          args,
+          env,
+          shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(candidate),
+        };
+      }
+    }
+  }
+  return { command: "codex", args, env, shell: process.platform === "win32" };
+}
 
 function argValue(name, fallback) {
   const idx = process.argv.indexOf(name);
@@ -45,9 +99,11 @@ let sawCompleted = false;
 let watchdog = null;
 let shutdownTimer = null;
 
-const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+const codex = resolveCodexSpawn(["app-server", "--listen", "stdio://"]);
+const child = spawn(codex.command, codex.args, {
   cwd,
-  env: process.env,
+  env: codex.env,
+  shell: codex.shell,
   stdio: ["pipe", "pipe", "pipe"],
 });
 

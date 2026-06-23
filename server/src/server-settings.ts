@@ -3,7 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import type { CodexDriver } from "./protocol";
-import { buildCodexProcessEnv } from "./codex-env";
+import { buildCodexSpawn } from "./codex-env";
 
 export interface ServerSettings {
   codexDriver: CodexDriver;
@@ -86,11 +86,13 @@ export function getCodexDriversAvailable(): CodexDriver[] {
     return value;
   };
 
-  const codexProbe = spawnSync("codex", ["--version"], {
+  const codexVersion = buildCodexSpawn(["--version"]);
+  const codexProbe = spawnSync(codexVersion.command, codexVersion.args, {
     encoding: "utf8",
     timeout: 3000,
     stdio: ["ignore", "pipe", "pipe"],
-    env: buildCodexProcessEnv(),
+    env: codexVersion.env,
+    shell: codexVersion.shell,
   });
   if (codexProbe.status !== 0) {
     return cache([]);
@@ -103,10 +105,12 @@ export function getCodexDriversAvailable(): CodexDriver[] {
 
   const drivers: CodexDriver[] = ["exec"];
   try {
-    const result = spawnSync("codex", ["app-server", "--help"], {
+    const appServerHelp = buildCodexSpawn(["app-server", "--help"]);
+    const result = spawnSync(appServerHelp.command, appServerHelp.args, {
       encoding: "utf8",
       timeout: 3000,
-      env: buildCodexProcessEnv(),
+      env: appServerHelp.env,
+      shell: appServerHelp.shell,
     });
     if (result.status === 0) drivers.push("app-server");
   } catch {

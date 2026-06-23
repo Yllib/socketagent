@@ -49,6 +49,7 @@ export interface CodexAppServerOptions {
   env?: NodeJS.ProcessEnv;
   command?: string;
   args?: string[];
+  shell?: boolean;
   requestTimeoutMs?: number;
   startupTimeoutMs?: number;
   stderrTailBytes?: number;
@@ -188,6 +189,7 @@ export class CodexAppServerClient extends EventEmitter {
     this.proc = spawn(command, args, {
       cwd: this.options.cwd,
       env: this.options.env ?? process.env,
+      shell: this.options.shell,
       stdio: ["pipe", "pipe", "pipe"],
     });
 

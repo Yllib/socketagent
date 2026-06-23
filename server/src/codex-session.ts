@@ -64,7 +64,7 @@ import {
   CodexAppServerRequestResponder,
   CodexAppServerUserInput,
 } from "./codex-app-server-client";
-import { buildCodexProcessEnv } from "./codex-env";
+import { buildCodexSpawn } from "./codex-env";
 import { resolveCodexDriver } from "./server-settings";
 import { listSkills, SkillEntry } from "./skills-manager";
 
@@ -1156,9 +1156,11 @@ export class CodexSession {
       ? this.buildResumeArgs(this.threadId, mcpUrl)
       : this.buildExecArgs(mcpUrl);
 
-    this.proc = spawn("codex", args, {
+    const codex = buildCodexSpawn(args);
+    this.proc = spawn(codex.command, codex.args, {
       cwd: this.cwd, // resume relies on this — it does NOT inherit cwd from the original session
-      env: buildCodexProcessEnv(),
+      env: codex.env,
+      shell: codex.shell,
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.proc.stdin?.on("error", (err) => {
@@ -1366,9 +1368,13 @@ export class CodexSession {
 
   private async ensureAppServer(): Promise<void> {
     if (!this.appServer) {
+      const codex = buildCodexSpawn(["app-server", "--listen", "stdio://"]);
       this.appServer = new CodexAppServerClient({
         cwd: this.cwd,
-        env: buildCodexProcessEnv(),
+        command: codex.command,
+        args: codex.args,
+        env: codex.env,
+        shell: codex.shell,
         requestTimeoutMs: 60_000,
         startupTimeoutMs: 30_000,
       });
@@ -3413,9 +3419,13 @@ async function withStandaloneAppServerClient<T>(
   fn: (client: CodexAppServerClient) => Promise<T>,
 ): Promise<T> {
   const clientCwd = resolveStandaloneAppServerCwd(cwd);
+  const codex = buildCodexSpawn(["app-server", "--listen", "stdio://"]);
   const client = new CodexAppServerClient({
     cwd: clientCwd,
-    env: process.env,
+    command: codex.command,
+    args: codex.args,
+    env: codex.env,
+    shell: codex.shell,
     requestTimeoutMs: 60_000,
     startupTimeoutMs: 30_000,
   });
@@ -3513,11 +3523,13 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
   };
 
   try {
-    const result = spawnSync("codex", ["--version"], {
+    const codex = buildCodexSpawn(["--version"]);
+    const result = spawnSync(codex.command, codex.args, {
       timeout: 3000,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      env: buildCodexProcessEnv(),
+      env: codex.env,
+      shell: codex.shell,
     });
 
     if (result.error) {

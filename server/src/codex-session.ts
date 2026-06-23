@@ -3268,6 +3268,20 @@ export class CodexSession {
       );
     }
 
+    const ibsToolsPath = path.resolve(__dirname, "..", "tools", "ibs-tools.js");
+    if (fs.existsSync(ibsToolsPath)) {
+      parts.push(
+        `IBS/JCI Installation Information System CLI is available at ${ibsToolsPath}. Use it when the user asks about IBS contracts, job summaries, cost schedules, labor schedules, or current IBS contract lists. Examples: \`node ${ibsToolsPath} summary <job-id>\`, \`node ${ibsToolsPath} costs <job-id>\`, \`node ${ibsToolsPath} labor <job-id>\`, and \`node ${ibsToolsPath} list\`. It requires a valid IBS browser-cookie session; if expired, trigger IBS auth through the SocketAgent app.`,
+      );
+    }
+
+    const oneDriveToolsPath = path.resolve(__dirname, "..", "tools", "onedrive-tools.js");
+    if (fs.existsSync(oneDriveToolsPath)) {
+      parts.push(
+        `OneDrive/SharePoint CLI is available at ${oneDriveToolsPath}. Use it when the user asks to list, search, download, upload, or inspect OneDrive/SharePoint/project-drive files. Examples: \`node ${oneDriveToolsPath} ls [folder-path]\`, \`node ${oneDriveToolsPath} search <query>\`, \`node ${oneDriveToolsPath} download <remote-path> [output-path]\`, \`node ${oneDriveToolsPath} find-project <project-number>\`, \`node ${oneDriveToolsPath} drive-ls <drive-id> [folder-path]\`, and \`node ${oneDriveToolsPath} drive-upload <local> <drive-id> <path>\`. Upload/write operations should only be done when clearly requested.`,
+      );
+    }
+
     for (const plugin of this._plugins) {
       if (!plugin.toolContextFragment) continue;
       const fragment = plugin.toolContextFragment();

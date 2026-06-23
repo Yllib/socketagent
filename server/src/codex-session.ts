@@ -216,6 +216,7 @@ export class CodexSession {
   private appServerFileChangeDiff = new Map<string, string>();
   private appServerFileChangePaths = new Map<string, string[]>();
   private appServerSeenUserMessageItems = new Set<string>();
+  private appServerSuppressedMcpStartupErrors = new Set<string>();
   private _isCompacting = false;
   private _compactBoundaryEmitted = false;
   private _isRunning = false;
@@ -883,6 +884,19 @@ export class CodexSession {
       default:
         return this.formatScalar(status);
     }
+  }
+
+  private shouldSurfaceMcpStartupError(name: string, error: string): boolean {
+    if (!error) return false;
+    return name === "socketagent_app";
+  }
+
+  private logSuppressedMcpStartupError(name: string, error: string): void {
+    const key = `${name}\n${error}`;
+    if (this.appServerSuppressedMcpStartupErrors.has(key)) return;
+    this.appServerSuppressedMcpStartupErrors.add(key);
+    const sid = this.threadId || this.sessionId || this._resumeSessionId || "pending";
+    console.warn(`[codex mcp] optional MCP server "${name}" failed to start for session ${sid}: ${error}`);
   }
 
   private localDateKey(): string {
@@ -2133,7 +2147,11 @@ export class CodexSession {
         const name = String(p?.name || "MCP server");
         const error = p?.error ? String(p.error) : "";
         if (error) {
-          this.send({ type: "error", message: `${name}: ${error}` } as ServerMessage);
+          if (this.shouldSurfaceMcpStartupError(name, error)) {
+            this.send({ type: "error", message: `${name}: ${error}` } as ServerMessage);
+          } else {
+            this.logSuppressedMcpStartupError(name, error);
+          }
         }
         return;
       }

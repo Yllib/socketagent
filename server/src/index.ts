@@ -1172,11 +1172,28 @@ function createConnectionHandler(transport: ClientTransport) {
       case "answer": {
         const qId = msg.questionId as string;
         let answerHandled = false;
+        const requestedSessionId =
+          typeof (msg as any).sessionId === "string" && (msg as any).sessionId.trim()
+            ? (msg as any).sessionId.trim()
+            : undefined;
+        const activeSid = activeSession?.getSessionId()
+          || (activeSession as any)?._resumeSessionId
+          || activeSessionId
+          || undefined;
+        const answerSession = requestedSessionId
+          ? activeSessions.get(requestedSessionId)
+            || (activeSid === requestedSessionId ? activeSession : undefined)
+          : activeSession;
+        const answerSid = answerSession?.getSessionId()
+          || (answerSession as any)?._resumeSessionId
+          || requestedSessionId
+          || activeSid
+          || undefined;
         // Get session context if available, or build a minimal one for plugin-only answers
-        const sessionCtx = activeSession
-          ? activeSession.getSessionContext()
+        const sessionCtx = answerSession
+          ? answerSession.getSessionContext()
           : {
-              sessionId: activeSessionId || "",
+              sessionId: answerSid || "",
               cwd: getDefaultCwd(),
               send: (m: any) => sendJson(m),
               appendHistory: () => {},
@@ -1189,19 +1206,13 @@ function createConnectionHandler(transport: ClientTransport) {
             if (result.handled) {
               answerHandled = true;
               sendJson({ type: "question_answered", questionId: qId });
-              if (activeSession) {
-                const sid = activeSession.getSessionId()
-                  || (activeSession as any)._resumeSessionId
-                  || activeSessionId
-                  || undefined;
-                if (sid) markQuestionAnswered(sid, qId);
-              }
+              if (answerSid) markQuestionAnswered(answerSid, qId);
               break;
             }
           }
         }
-        if (!answerHandled && activeSession) {
-          const resolved = activeSession.resolveQuestion(qId, msg.answers);
+        if (!answerHandled && answerSession) {
+          const resolved = answerSession.resolveQuestion(qId, msg.answers);
           if (!resolved) {
             // Question promise is gone (e.g. after server restart) — inject as prompt
             const answers = msg.answers as Record<string, string>;
@@ -1214,23 +1225,20 @@ function createConnectionHandler(transport: ClientTransport) {
             // Confirm to app that the question was handled (so card marks as answered)
             sendJson({ type: "question_answered", questionId: qId });
             // Resolve the session ID — check all sources (same as prompt handler)
-            const sid = activeSession.getSessionId()
-              || (activeSession as any)._resumeSessionId
-              || activeSessionId
-              || undefined;
+            const sid = answerSid;
             // Mark as answered in history even though promise is gone
             if (sid) {
               markQuestionAnswered(sid, qId);
             }
             // If a query is running, inject mid-conversation; otherwise resume with answer
-            if (activeSession.isRunning) {
-              activeSession.injectMessage(injectedText);
+            if (answerSession.isRunning) {
+              answerSession.injectMessage(injectedText);
             } else {
               // Resume the existing session with the answer context
-              activeSession.onActivity = () => notifySessionActivity();
-              activeSession.runQuery(injectedText, sid).then(() => {
-                const s = activeSession?.getSessionId();
-                if (s && activeSessions.get(s) === activeSession) {
+              answerSession.onActivity = () => notifySessionActivity();
+              answerSession.runQuery(injectedText, sid).then(() => {
+                const s = answerSession?.getSessionId();
+                if (s && activeSessions.get(s) === answerSession) {
                   activeSessions.delete(s);
                     }
                 broadcastSessionList();

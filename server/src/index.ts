@@ -653,6 +653,11 @@ function createConnectionHandler(transport: ClientTransport) {
         }
 
         activeBackendInstalls.add(backend);
+        sendProgress({
+          phase: "install",
+          status: "running",
+          message: `Starting ${backend === "codex" ? "Codex" : backend} backend repair...`,
+        });
         void runBackendInstall({
           backend,
           reinstall,
@@ -1541,7 +1546,16 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "version_check": {
         const { execSync, exec: execCb } = require("child_process");
-        const info: any = { type: "version_info", gitAvailable: !!GIT_ROOT, autoUpdateError: lastAutoUpdateError };
+        const info: any = {
+          type: "version_info",
+          gitAvailable: !!GIT_ROOT,
+          autoUpdateError: lastAutoUpdateError,
+          running: {
+            hash: SERVER_GIT_HASH || undefined,
+            startedAt: SERVER_STARTED_AT,
+            pid: process.pid,
+          },
+        };
         const localAppVersion = readLocalAppVersionInfo();
         if (localAppVersion) info.app = localAppVersion;
         if (GIT_ROOT) {
@@ -1551,6 +1565,14 @@ function createConnectionHandler(transport: ClientTransport) {
             const localMsg = execSync("git log -1 --format=%s", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
             const localDate = execSync("git log -1 --format=%ci", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
             info.local = { hash: localHash, branch, message: localMsg, date: localDate };
+            if (
+              SERVER_GIT_HASH &&
+              localHash &&
+              !localHash.startsWith(SERVER_GIT_HASH) &&
+              !SERVER_GIT_HASH.startsWith(localHash)
+            ) {
+              info.needsRestart = true;
+            }
 
             // Fetch remote async to avoid blocking event loop (relay ping/pong)
             execCb("git fetch origin", { cwd: GIT_ROOT, timeout: 15000 }, (err: any) => {

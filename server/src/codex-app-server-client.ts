@@ -1,4 +1,4 @@
-import { spawn, ChildProcessWithoutNullStreams } from "child_process";
+import { spawn, spawnSync, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
 
 export type CodexAppServerSandbox =
@@ -189,6 +189,7 @@ export class CodexAppServerClient extends EventEmitter {
     this.proc = spawn(command, args, {
       cwd: this.options.cwd,
       env: this.options.env ?? process.env,
+      detached: process.platform !== "win32",
       shell: this.options.shell,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -358,14 +359,38 @@ export class CodexAppServerClient extends EventEmitter {
       return;
     }
 
+    const killProcessTree = (nextSignal: NodeJS.Signals) => {
+      if (process.platform === "win32" && nextSignal === "SIGKILL" && proc.pid) {
+        const result = spawnSync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { stdio: "ignore" });
+        if (result.status === 0) return;
+      }
+      if (process.platform !== "win32" && proc.pid) {
+        try {
+          process.kill(-proc.pid, nextSignal);
+          return;
+        } catch {
+          // Fall back to the direct child below.
+        }
+      }
+      try {
+        proc.kill(nextSignal);
+      } catch {
+        // Ignore cleanup races.
+      }
+    };
+
     await new Promise<void>((resolve) => {
       let exited = false;
       let finished = false;
+      let forceTimer: NodeJS.Timeout | null = null;
+      let abandonTimer: NodeJS.Timeout | null = null;
       const done = () => {
         if (finished) return;
         finished = true;
         this.closed = true;
         this.proc = null;
+        if (forceTimer) clearTimeout(forceTimer);
+        if (abandonTimer) clearTimeout(abandonTimer);
         try { proc.unref(); } catch {}
         try { proc.removeAllListeners(); } catch {}
         try { proc.stdin.destroy(); } catch {}
@@ -373,13 +398,12 @@ export class CodexAppServerClient extends EventEmitter {
         try { proc.stderr.destroy(); } catch {}
         resolve();
       };
-      const timer = setTimeout(() => {
-        if (!exited) proc.kill("SIGKILL");
-        done();
+      forceTimer = setTimeout(() => {
+        if (!exited) killProcessTree("SIGKILL");
       }, forceKillMs);
+      abandonTimer = setTimeout(done, forceKillMs + 2000);
       proc.once("exit", () => {
         exited = true;
-        clearTimeout(timer);
         done();
       });
       try {
@@ -387,7 +411,7 @@ export class CodexAppServerClient extends EventEmitter {
       } catch {
         // Ignore cleanup races.
       }
-      proc.kill(signal);
+      killProcessTree(signal);
     });
   }
 
@@ -439,6 +463,7 @@ export class CodexAppServerClient extends EventEmitter {
     } else {
       pending.resolve(msg.result);
     }
+    this.emit("response", pending.method, msg);
   }
 
   private handleServerRequest(msg: WireServerRequest): void {

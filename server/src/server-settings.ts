@@ -19,6 +19,10 @@ const CODEX_DRIVER_CACHE_MS = 5000;
 let cachedSettings: ServerSettings | null = null;
 let cachedDriversAvailable: { checkedAt: number; value: CodexDriver[] } | null = null;
 
+export function invalidateCodexDriverAvailabilityCache(): void {
+  cachedDriversAvailable = null;
+}
+
 function ensureStoreDir(): void {
   if (!fs.existsSync(STORE_DIR)) fs.mkdirSync(STORE_DIR, { recursive: true });
 }

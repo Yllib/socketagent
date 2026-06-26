@@ -15,6 +15,7 @@ set -euo pipefail
 # Re-running is safe — existing tokens and pairings are preserved.
 
 RELAY_URL="wss://relay.jarofdirt.info"
+CODEX_DEVICE_URL="https://chatgpt.com/codex/device"
 SERVICE_NAME="socketagent"
 NODE_MIN_VERSION=22
 PORT=8085
@@ -23,6 +24,7 @@ BACKENDS=""
 ENABLED_BACKENDS=""
 INSTALL_CLAUDE=false
 INSTALL_CODEX=false
+SERVER_BUILD_DONE=false
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -156,6 +158,28 @@ install_cli() {
   esac
 }
 
+install_server_dependencies_and_build() {
+  if [[ "$SERVER_BUILD_DONE" == "true" ]]; then
+    ok "Server dependencies already installed and built"
+    return
+  fi
+
+  echo "  Running npm install..."
+  (cd "$SERVER_DIR" && npm install)
+  ok "Dependencies installed"
+
+  echo "  Compiling TypeScript..."
+  (cd "$SERVER_DIR" && npx tsc)
+  ok "Server built successfully"
+  SERVER_BUILD_DONE=true
+}
+
+render_qr() {
+  local payload="$1"
+  (cd "$SERVER_DIR" && node -e "const q=require('qrcode-terminal');q.generate(process.argv[1],{small:true},c=>{c.split('\n').forEach(l=>console.log('  '+l))})" "$payload" 2>/dev/null) || \
+    warn "QR code rendering failed. Open this link manually: $payload"
+}
+
 echo ""
 echo -e "  ${CYAN}SocketAgent Installer${NC}"
 echo -e "  ${CYAN}======================${NC}"
@@ -278,11 +302,11 @@ else
     ok "Claude Code credentials found"
   else
     warn "Claude Code is not authenticated."
-    echo "  Running 'claude login' -- this will open your browser."
+    echo "  Running 'claude auth login' -- this will open your browser."
     echo "  Complete the login, then return to this terminal."
     echo ""
     prompt_read "  Press Enter to start login..." _
-    claude login
+    claude auth login
 
     if [[ -f "$CLAUDE_DIR/credentials.json" ]] || [[ -f "$CLAUDE_DIR/.credentials.json" ]]; then
       ok "Authentication successful"
@@ -344,11 +368,18 @@ else
     ok "OpenAI Codex credentials found"
   else
     warn "OpenAI Codex is not authenticated."
-    echo "  Running 'codex login' -- this will open your browser or show a device login."
+    echo "  Running 'codex login --device-auth'."
+    echo "  Scan this QR code with your phone, or open the link on this PC:"
+    echo "  $CODEX_DEVICE_URL"
+    echo ""
+    install_server_dependencies_and_build
+    render_qr "$CODEX_DEVICE_URL"
+    echo ""
+    echo "  The Codex CLI will print a one-time code. Enter that code on the page."
     echo "  Complete the login, then return to this terminal."
     echo ""
     prompt_read "  Press Enter to start login..." _
-    codex login || true
+    codex login --device-auth || true
 
     if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
       ok "Codex authentication successful"
@@ -364,13 +395,7 @@ fi
 
 phase "Phase 6: Install Dependencies & Build"
 
-echo "  Running npm install..."
-(cd "$SERVER_DIR" && npm install)
-ok "Dependencies installed"
-
-echo "  Compiling TypeScript..."
-(cd "$SERVER_DIR" && npx tsc)
-ok "Server built successfully"
+install_server_dependencies_and_build
 
 # ══════════════════════════════════════════════
 #  Phase 7: Generate Configuration

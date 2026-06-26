@@ -28,6 +28,7 @@ $ErrorActionPreference = "Stop"
 
 # ── Configuration ──
 $RELAY_URL = "wss://relay.jarofdirt.info"
+$CODEX_DEVICE_URL = "https://chatgpt.com/codex/device"
 $TASK_NAME = "SocketAgent"
 $NODE_MIN_VERSION = [version]"22.0.0"
 
@@ -41,6 +42,7 @@ $LOG_FILE = Join-Path $SERVER_DIR "socketagent.log"
 $SETUP_SCRIPT = Join-Path (Join-Path $SERVER_DIR "scripts") "setup.js"
 
 $currentPhase = ""
+$serverBuildDone = $false
 
 function Write-Phase($name) {
     $script:currentPhase = $name
@@ -90,12 +92,21 @@ function Add-DirectoryToPath($directory, [bool]$persistUser = $false) {
 }
 
 function Ensure-NpmGlobalBinOnPath {
+    $dirs = @()
     if (-not (Test-CommandExists "npm")) { return }
     $prefixResult = Invoke-NativeCapture { npm prefix -g }
-    if ($prefixResult.ExitCode -ne 0) { return }
-    $prefix = ($prefixResult.Output | Where-Object { $_ } | Select-Object -First 1).ToString().Trim()
-    if ($prefix) {
-        Add-DirectoryToPath $prefix $true
+    if ($prefixResult.ExitCode -eq 0) {
+        $prefix = ($prefixResult.Output | Where-Object { $_ } | Select-Object -First 1).ToString().Trim()
+        if ($prefix) { $dirs += $prefix }
+    }
+
+    # npm's Windows shims normally live here; keep these as explicit fallbacks
+    # for fresh installs where the current terminal has not picked up PATH yet.
+    if ($env:APPDATA) { $dirs += (Join-Path $env:APPDATA "npm") }
+    if ($env:LOCALAPPDATA) { $dirs += (Join-Path $env:LOCALAPPDATA "npm") }
+
+    foreach ($dir in ($dirs | Where-Object { $_ } | Select-Object -Unique)) {
+        Add-DirectoryToPath $dir $true
     }
 }
 
@@ -139,6 +150,58 @@ function Invoke-NativeCapture {
     }
 }
 
+function Install-ServerDependenciesAndBuild {
+    if ($script:serverBuildDone) {
+        Write-Ok "Server dependencies already installed and built"
+        return
+    }
+
+    Push-Location $SERVER_DIR
+    try {
+        $packageLock = Join-Path $SERVER_DIR "package-lock.json"
+        if (Test-Path $packageLock) {
+            Write-Host "  Running npm ci..."
+            $npmResult = Invoke-NativeCapture { npm ci }
+            $installLabel = "npm ci"
+        } else {
+            Write-Host "  Running npm install..."
+            $npmResult = Invoke-NativeCapture { npm install }
+            $installLabel = "npm install"
+        }
+        $npmOutput = $npmResult.Output
+        $npmExit = $npmResult.ExitCode
+        $npmOutput | ForEach-Object { Write-Host "    $_" }
+        if ($npmExit -ne 0) { throw "$installLabel failed (exit code $npmExit)" }
+        Write-Ok "Dependencies installed"
+
+        Write-Host "  Compiling TypeScript..."
+        $tscResult = Invoke-NativeCapture { npx tsc }
+        $tscOutput = $tscResult.Output
+        $tscExit = $tscResult.ExitCode
+        $tscOutput | ForEach-Object { Write-Host "    $_" }
+        if ($tscExit -ne 0) { throw "TypeScript compilation failed (exit code $tscExit)" }
+        Write-Ok "Server built successfully"
+        $script:serverBuildDone = $true
+    } finally {
+        Pop-Location
+    }
+}
+
+function Show-QrCode($payload) {
+    $qrScript = "const q=require('qrcode-terminal');q.generate(process.argv[1],{small:true},c=>{c.split('\n').forEach(l=>console.log('  '+l))})"
+    Push-Location $SERVER_DIR
+    try {
+        $qrResult = Invoke-NativeCapture { node -e $qrScript $payload }
+        if ($qrResult.ExitCode -eq 0) {
+            $qrResult.Output | ForEach-Object { Write-Host $_ }
+        } else {
+            Write-Warn "QR code rendering failed. Open this link manually: $payload"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
 function Test-CodexAuthenticated {
     $authCandidates = @()
     if ($env:CODEX_HOME) {
@@ -172,7 +235,7 @@ function Invoke-CodexLogin {
     $oldPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & codex login
+        & codex login --device-auth
         return $LASTEXITCODE
     } catch {
         Write-Warn "codex login reported: $($_.Exception.Message)"
@@ -189,7 +252,7 @@ function Invoke-ClaudeLogin {
     $oldPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & claude login
+        & claude auth login
         return $LASTEXITCODE
     } catch {
         Write-Warn "claude login reported: $($_.Exception.Message)"
@@ -463,7 +526,7 @@ if (-not $installClaude) {
         Write-Ok "Claude Code credentials found"
     } else {
         Write-Warn "Claude Code is not authenticated."
-        Write-Host "  Running 'claude login' -- this will open your browser."
+        Write-Host "  Running 'claude auth login' -- this will open your browser."
         Write-Host "  Complete the login, then return to this window."
         Write-Host ""
         Read-Host "  Press Enter to start login"
@@ -551,7 +614,14 @@ if (-not $installCodex) {
         Write-Ok "OpenAI Codex credentials found"
     } else {
         Write-Warn "OpenAI Codex is not authenticated."
-        Write-Host "  Running 'codex login' -- this will open your browser or show a device login."
+        Write-Host "  Running 'codex login --device-auth'."
+        Write-Host "  Scan this QR code with your phone, or open the link on this PC:"
+        Write-Host "  $CODEX_DEVICE_URL"
+        Write-Host ""
+        Install-ServerDependenciesAndBuild
+        Show-QrCode $CODEX_DEVICE_URL
+        Write-Host ""
+        Write-Host "  The Codex CLI will print a one-time code. Enter that code on the page."
         Write-Host "  Complete the login, then return to this window."
         Write-Host ""
         Read-Host "  Press Enter to start login"
@@ -576,34 +646,7 @@ if (-not $installCodex) {
 
 Write-Phase "Phase 6: Install Dependencies & Build"
 
-Push-Location $SERVER_DIR
-try {
-    $packageLock = Join-Path $SERVER_DIR "package-lock.json"
-    if (Test-Path $packageLock) {
-        Write-Host "  Running npm ci..."
-        $npmResult = Invoke-NativeCapture { npm ci }
-        $installLabel = "npm ci"
-    } else {
-        Write-Host "  Running npm install..."
-        $npmResult = Invoke-NativeCapture { npm install }
-        $installLabel = "npm install"
-    }
-    $npmOutput = $npmResult.Output
-    $npmExit = $npmResult.ExitCode
-    $npmOutput | ForEach-Object { Write-Host "    $_" }
-    if ($npmExit -ne 0) { throw "$installLabel failed (exit code $npmExit)" }
-    Write-Ok "Dependencies installed"
-
-    Write-Host "  Compiling TypeScript..."
-    $tscResult = Invoke-NativeCapture { npx tsc }
-    $tscOutput = $tscResult.Output
-    $tscExit = $tscResult.ExitCode
-    $tscOutput | ForEach-Object { Write-Host "    $_" }
-    if ($tscExit -ne 0) { throw "TypeScript compilation failed (exit code $tscExit)" }
-    Write-Ok "Server built successfully"
-} finally {
-    Pop-Location
-}
+Install-ServerDependenciesAndBuild
 
 # ══════════════════════════════════════════════
 #  Phase 7: Generate Configuration

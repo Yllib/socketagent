@@ -8,7 +8,7 @@ import * as path from "path";
 import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
-import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, unarchiveCodexAppServerThread } from "./codex-session";
+import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeCodex, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, renameCodexNativeThread, invalidateCodexNativeListCache } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
@@ -17,10 +17,11 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
-import { getAdvertisedServerSettings, getCodexDriversAvailable, getDefaultCwd, resolveCodexDriver, setCodexDriver, setDefaultCwd } from "./server-settings";
+import { getAdvertisedServerSettings, getCodexDriversAvailable, getDefaultCwd, invalidateCodexDriverAvailabilityCache, resolveCodexDriver, setCodexDriver, setDefaultCwd } from "./server-settings";
 import { isPushConfigured, registerPushToken, sendPushNotification } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
+import { runBackendInstall } from "./backend-installer";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -144,6 +145,8 @@ const connectedClients = new Set<WebSocket>();
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
 
+const activeBackendInstalls = new Set<Backend>();
+
 // Sessions whose context has been cleared — next query should NOT pass resume
 const clearedSessions: Set<string> = new Set();
 
@@ -247,6 +250,30 @@ function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPub
     pairingToken: PAIRING_TOKEN,
     serverPubkey: toBase64(keyPair.publicKey),
   };
+}
+
+function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknown> {
+  const settings = getAdvertisedServerSettings();
+  return {
+    type: "server_capabilities",
+    binaryEnvelope,
+    backends: detectAvailableBackends(),
+    codexDriver: settings.codexDriver,
+    codexDriversAvailable: settings.codexDriversAvailable,
+    relayPairing: relayPairingInfo(),
+    pushNotifications: {
+      directFcm: true,
+      configured: isPushConfigured(),
+    },
+  };
+}
+
+function broadcastServerCapabilities(): void {
+  const msg = JSON.stringify(serverCapabilitiesPayload(true));
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  }
+  if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
 }
 
 function shouldSendPushNotification(): boolean {
@@ -569,19 +596,9 @@ function createConnectionHandler(transport: ClientTransport) {
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
     if ((msg as any).type === "client_capabilities") {
-      const settings = getAdvertisedServerSettings();
       sendJson({
-        type: "server_capabilities",
-        binaryEnvelope: true,
-        backends: detectAvailableBackends(),
-        codexDriver: settings.codexDriver,
-        codexDriversAvailable: settings.codexDriversAvailable,
+        ...serverCapabilitiesPayload(true),
         codexCollaborationMode: pendingCodexCollaborationMode,
-        relayPairing: relayPairingInfo(),
-        pushNotifications: {
-          directFcm: true,
-          configured: isPushConfigured(),
-        },
       });
       return;
     }
@@ -607,6 +624,66 @@ function createConnectionHandler(transport: ClientTransport) {
           type: "server_settings",
           ...getAdvertisedServerSettings(),
           codexCollaborationMode: pendingCodexCollaborationMode,
+        });
+        break;
+      }
+
+      case "backend_install": {
+        const backend = msg.backend;
+        const requestId = (msg as any).requestId as string | undefined;
+        const reinstall = (msg as any).reinstall !== false;
+        const authenticate = (msg as any).authenticate !== false;
+
+        const sendProgress = (progress: Record<string, unknown>) => {
+          sendJson({
+            type: "backend_install_progress",
+            requestId,
+            backend,
+            ...progress,
+          });
+        };
+
+        if (activeBackendInstalls.has(backend)) {
+          sendProgress({
+            phase: "install",
+            status: "failed",
+            message: `${backend} backend repair is already running on this server.`,
+          });
+          break;
+        }
+
+        activeBackendInstalls.add(backend);
+        void runBackendInstall({
+          backend,
+          reinstall,
+          authenticate,
+          onProgress: sendProgress as any,
+        }).then(() => {
+          invalidateCodexAvailabilityCache();
+          invalidateCodexDriverAvailabilityCache();
+          sendProgress({
+            phase: "probe",
+            status: "completed",
+            message: `${backend === "codex" ? "Codex" : "Backend"} repair completed.`,
+          });
+          broadcastServerCapabilities();
+          sendJson({
+            type: "server_settings",
+            ...getAdvertisedServerSettings(),
+            codexCollaborationMode: pendingCodexCollaborationMode,
+          });
+          broadcastSessionList();
+        }).catch((e: any) => {
+          invalidateCodexAvailabilityCache();
+          invalidateCodexDriverAvailabilityCache();
+          sendProgress({
+            phase: "probe",
+            status: "failed",
+            message: `${backend === "codex" ? "Codex" : "Backend"} repair failed: ${e?.message || String(e)}`,
+          });
+          broadcastServerCapabilities();
+        }).finally(() => {
+          activeBackendInstalls.delete(backend);
         });
         break;
       }
@@ -1118,17 +1195,18 @@ function createConnectionHandler(transport: ClientTransport) {
           });
         };
 
-        const runOptions = activeSession instanceof CodexSession
+        const sessionForRun = activeSession;
+        const runOptions = sessionForRun instanceof CodexSession
           ? { fastMode: promptCodexFastMode ?? pendingCodexFastMode }
           : undefined;
-        const runPromise = (activeSession as any).runQueryWithOptions
-          ? (activeSession as any).runQueryWithOptions(msg.text, resumeId, runOptions)
-          : activeSession.runQuery(msg.text, resumeId);
+        const runPromise = (sessionForRun as any).runQueryWithOptions
+          ? (sessionForRun as any).runQueryWithOptions(msg.text, resumeId, runOptions)
+          : sessionForRun.runQuery(msg.text, resumeId);
         runPromise.then(() => {
-          const sid = activeSession?.getSessionId();
-          if (sid && activeSessions.get(sid) === activeSession) {
+          const sid = sessionForRun.getSessionId();
+          if (sid && activeSessions.get(sid) === sessionForRun) {
             // Keep session in pool if auth login is pending
-            if ((activeSession as any)._authCodeVerifier) {
+            if ((sessionForRun as any)._authCodeVerifier) {
               console.log(`Session ${sid} query completed but auth flow pending — keeping in active pool`);
             } else {
               activeSessions.delete(sid);
@@ -1137,17 +1215,22 @@ function createConnectionHandler(transport: ClientTransport) {
           }
           broadcastSessionList();
         }).catch((err: any) => {
+          const sid = sessionForRun.getSessionId();
+          if (sid && activeSessions.get(sid) === sessionForRun && !(sessionForRun as any)._authCodeVerifier) {
+            activeSessions.delete(sid);
+          }
           sendJson({
             type: "error",
             message: err.message || "Query failed",
           });
+          broadcastSessionList();
         });
 
         // Register the session globally once it has an ID
         const checkAndRegister = () => {
-          const sid = activeSession?.getSessionId();
+          const sid = sessionForRun.getSessionId();
           if (sid && !activeSessions.has(sid)) {
-            activeSessions.set(sid, activeSession!);
+            activeSessions.set(sid, sessionForRun);
           }
           if (sid) {
             activeSessionId = sid;

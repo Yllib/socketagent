@@ -61,6 +61,14 @@ export interface SetServerSettingsMessage {
   defaultCwd?: string;
 }
 
+export interface BackendInstallMessage {
+  type: "backend_install";
+  backend: Backend;
+  reinstall?: boolean;
+  authenticate?: boolean;
+  requestId?: string;
+}
+
 export interface DeleteSessionMessage {
   type: "delete_session";
   sessionId: string;
@@ -437,6 +445,7 @@ export type ClientMessage =
   | GetServerSettingsMessage
   | SetCodexDriverMessage
   | SetServerSettingsMessage
+  | BackendInstallMessage
   | CodexCollaborationModesMessage
   | SetCodexCollaborationModeMessage
   | DeleteSessionMessage
@@ -670,6 +679,18 @@ export interface ServerSettingsMessage {
   codexDriver: CodexDriver;
   defaultCwd: string;
   codexDriversAvailable: CodexDriver[];
+}
+
+export interface BackendInstallProgressServerMessage {
+  type: "backend_install_progress";
+  requestId?: string;
+  backend: Backend;
+  phase: "install" | "auth" | "probe";
+  status: "running" | "completed" | "failed";
+  message: string;
+  output?: string;
+  authUrl?: string;
+  authCode?: string;
 }
 
 export interface SessionCreatedServerMessage {
@@ -1089,6 +1110,7 @@ export type ServerMessage =
   | ErrorServerMessage
   | ServerCapabilitiesMessage
   | ServerSettingsMessage
+  | BackendInstallProgressServerMessage
   | SessionCreatedServerMessage
   | SessionArchiveFailedServerMessage
   | SessionHistoryServerMessage

@@ -207,6 +207,7 @@ export class CodexSession {
   private proc: ChildProcess | null = null;
   private appServer: CodexAppServerClient | null = null;
   private appServerInitialized = false;
+  private appServerIdleStopTimer: ReturnType<typeof setTimeout> | null = null;
   private appServerMcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
   private activeAppServerTurnId: string | null = null;
   private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
@@ -218,6 +219,7 @@ export class CodexSession {
   private appServerSeenUserMessageItems = new Set<string>();
   private _isCompacting = false;
   private _compactBoundaryEmitted = false;
+  private _compactBoundaryTrigger: "auto" | "manual" = "auto";
   private _isRunning = false;
   private _model: string | null = null;
   private _effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh" = "high";
@@ -450,6 +452,7 @@ export class CodexSession {
     await this.ensureAppServer();
     this._isCompacting = true;
     this._compactBoundaryEmitted = false;
+    this._compactBoundaryTrigger = "manual";
     this.send({ type: "compacting", active: true, sessionId: threadId } as any);
     await this.appServer!.compactThread(threadId);
   }
@@ -1367,6 +1370,10 @@ export class CodexSession {
   }
 
   private async ensureAppServer(): Promise<void> {
+    if (this.appServerIdleStopTimer) {
+      clearTimeout(this.appServerIdleStopTimer);
+      this.appServerIdleStopTimer = null;
+    }
     if (!this.appServer) {
       const codex = buildCodexSpawn(["app-server", "--listen", "stdio://"]);
       this.appServer = new CodexAppServerClient({
@@ -1381,6 +1388,9 @@ export class CodexSession {
       this.appServer.on("notification", (notification: CodexAppServerNotification) => {
         this.handleAppServerNotification(notification.method, notification.params);
         this.onActivity?.();
+      });
+      this.appServer.on("response", () => {
+        this.scheduleAppServerIdleStop();
       });
       this.appServer.on("stderr", (chunk: string) => {
         this._stderrBuffer.push(chunk);
@@ -1414,7 +1424,21 @@ export class CodexSession {
     }
   }
 
+  private scheduleAppServerIdleStop(delayMs = 15_000): void {
+    if (!this.appServer || this._isRunning || this._isCompacting || this.appServerTurnSettler) return;
+    if (this.appServerIdleStopTimer) clearTimeout(this.appServerIdleStopTimer);
+    this.appServerIdleStopTimer = setTimeout(() => {
+      this.appServerIdleStopTimer = null;
+      if (!this.appServer || this._isRunning || this._isCompacting || this.appServerTurnSettler) return;
+      void this.stopAppServerClient();
+    }, delayMs);
+  }
+
   private async stopAppServerClient(): Promise<void> {
+    if (this.appServerIdleStopTimer) {
+      clearTimeout(this.appServerIdleStopTimer);
+      this.appServerIdleStopTimer = null;
+    }
     const client = this.appServer;
     this.appServer = null;
     this.appServerInitialized = false;
@@ -1932,7 +1956,8 @@ export class CodexSession {
         if (!sid) return;
         this._isCompacting = false;
         this.send({ type: "compacting", active: false, sessionId: sid } as any);
-        this.emitCompactBoundary(sid, "manual");
+        this.emitCompactBoundary(sid, this._compactBoundaryTrigger);
+        this.scheduleAppServerIdleStop();
         return;
       }
 
@@ -2254,11 +2279,15 @@ export class CodexSession {
       if (method === "item/started") {
         this._isCompacting = true;
         this._compactBoundaryEmitted = false;
+        if (this._compactBoundaryTrigger !== "manual") {
+          this._compactBoundaryTrigger = "auto";
+        }
         this.send({ type: "compacting", active: true, sessionId: sid } as any);
       } else {
         this._isCompacting = false;
         this.send({ type: "compacting", active: false, sessionId: sid } as any);
-        this.emitCompactBoundary(sid, "manual");
+        this.emitCompactBoundary(sid, this._compactBoundaryTrigger);
+        this.scheduleAppServerIdleStop();
       }
       return;
     }
@@ -2754,16 +2783,18 @@ export class CodexSession {
   private emitCompactBoundary(sid: string, trigger: string): void {
     if (this._compactBoundaryEmitted) return;
     this._compactBoundaryEmitted = true;
+    const boundaryTrigger = trigger === "manual" ? "manual" : "auto";
+    this._compactBoundaryTrigger = "auto";
     const preTokens = this.currentContextTokenTotal();
     this.send({
       type: "compact_boundary",
-      trigger,
+      trigger: boundaryTrigger,
       preTokens,
       sessionId: sid,
     } as any);
     appendHistory(sid, {
       role: "assistant",
-      content: `[compact_boundary:${preTokens}:${trigger}]`,
+      content: `[compact_boundary:${preTokens}:${boundaryTrigger}]`,
       timestamp: now(),
     });
   }
@@ -3497,6 +3528,10 @@ export async function rollbackCodexAppServerThread(threadId: string, cwd: string
 
 const CODEX_AVAILABILITY_CACHE_MS = 5000;
 let _cachedCodexAvailability: { checkedAt: number; value: { available: boolean; reason?: string } } | null = null;
+
+export function invalidateCodexAvailabilityCache(): void {
+  _cachedCodexAvailability = null;
+}
 
 function getEnabledBackendSet(): Set<Backend> {
   const raw = (process.env.ENABLED_BACKENDS || "claude,codex").toLowerCase().trim();

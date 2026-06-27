@@ -1202,7 +1202,10 @@ function createConnectionHandler(transport: ClientTransport) {
 
         const sessionForRun = activeSession;
         const runOptions = sessionForRun instanceof CodexSession
-          ? { fastMode: promptCodexFastMode ?? pendingCodexFastMode }
+          ? {
+              fastMode: promptCodexFastMode ?? pendingCodexFastMode,
+              messageId: (msg as any).messageId || undefined,
+            }
           : undefined;
         const runPromise = (sessionForRun as any).runQueryWithOptions
           ? (sessionForRun as any).runQueryWithOptions(msg.text, resumeId, runOptions)
@@ -3587,6 +3590,7 @@ httpServer.on("upgrade", (req, socket, head) => {
 // Relay client (initialized after server starts if RELAY_URL is set)
 let relayClient: RelayClient | null = null;
 let relayConnectionHandler: ReturnType<typeof createConnectionHandler> | null = null;
+let relayMessageQueue = Promise.resolve();
 
 httpServer.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT} (WebSocket + HTTP)`);
@@ -3979,8 +3983,9 @@ wss.on("connection", (ws: WebSocket) => {
   sendStatusSyncTo(ws);
 
   const handler = createConnectionHandler(ws);
+  let messageQueue = Promise.resolve();
 
-  ws.on("message", async (data: Buffer, isBinary: boolean) => {
+  ws.on("message", (data: Buffer, isBinary: boolean) => {
     let msg: ClientMessage;
 
     console.log(`[WS Recv] isBinary=${isBinary} bytes=${data.length}`);
@@ -4012,16 +4017,16 @@ wss.on("connection", (ws: WebSocket) => {
       }
     }
 
-    try {
-      await handler.handleMessage(msg);
-    } catch (err: any) {
-      ws.send(
-        JSON.stringify({
-          type: "error",
-          message: err.message || "Server error",
-        })
-      );
-    }
+    messageQueue = messageQueue
+      .then(() => handler.handleMessage(msg))
+      .catch((err: any) => {
+        ws.send(
+          JSON.stringify({
+            type: "error",
+            message: err.message || "Server error",
+          })
+        );
+      });
   });
 
   ws.on("close", () => {
@@ -4079,23 +4084,28 @@ function startRelayClient(): void {
         relayConnectionHandler = createConnectionHandler(relayClient!.getVirtualSocket() as any);
         console.log(`[Relay] Created connection handler for phone`);
       }
-      relayConnectionHandler.handleMessage(msg).catch((err: any) => {
-        console.error(`[Relay] Message handler error: ${err.message}`);
-        relayConnectionHandler?.sendJson({
-          type: "error",
-          message: err.message || "Server error",
+      const handler = relayConnectionHandler;
+      relayMessageQueue = relayMessageQueue
+        .then(() => handler.handleMessage(msg))
+        .catch((err: any) => {
+          console.error(`[Relay] Message handler error: ${err.message}`);
+          handler.sendJson({
+            type: "error",
+            message: err.message || "Server error",
+          });
         });
-      });
     },
     onStatusChange: (status: RelayStatus) => {
       console.log(`[Relay] Status: ${status}`);
       if (status === "paired") {
         // Reset handler when phone reconnects so it gets a fresh state
         relayConnectionHandler = createConnectionHandler(relayClient!.getVirtualSocket() as any);
+        relayMessageQueue = Promise.resolve();
         console.log(`[Relay] Phone paired — ready for messages`);
       }
       if (status === "waiting_for_peer" || status === "disconnected") {
         relayConnectionHandler = null;
+        relayMessageQueue = Promise.resolve();
       }
     },
   });

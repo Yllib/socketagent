@@ -145,6 +145,7 @@ export type CodexSlashCommand = {
 
 type CodexRunOptions = {
   fastMode?: boolean;
+  messageId?: string;
 };
 
 export const CODEX_NATIVE_SLASH_COMMANDS: CodexSlashCommand[] = [
@@ -207,6 +208,7 @@ export class CodexSession {
   private proc: ChildProcess | null = null;
   private appServer: CodexAppServerClient | null = null;
   private appServerInitialized = false;
+  private appServerInitializePromise: Promise<void> | null = null;
   private appServerIdleStopTimer: ReturnType<typeof setTimeout> | null = null;
   private appServerMcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
   private activeAppServerTurnId: string | null = null;
@@ -239,7 +241,8 @@ export class CodexSession {
   // Persistence state — see runQuery/handleEvent for the buffer-then-flush
   // dance for the user prompt (prompt arrives before sessionId on first turn).
   private _sessionInfoSaved = false;
-  private _pendingUserPrompt: { text: string; uuid: string } | null = null;
+  private _pendingUserPrompt: { text: string; uuid: string; messageId?: string } | null = null;
+  private _currentClientMessageId: string | null = null;
   private _currentPrompt = "";   // for SessionInfo.title on first save
   private _lastAssistantText = ""; // for messagePreview on turn.completed
   private _lastUsage: {
@@ -1097,15 +1100,18 @@ export class CodexSession {
    * existing SocketAgent/Codex thread.
    */
   async runQueryWithOptions(prompt: string, resumeSessionId?: string, options: CodexRunOptions = {}): Promise<void> {
-    if (options.fastMode === undefined) {
+    if (options.fastMode === undefined && options.messageId === undefined) {
       return this.runQuery(prompt, resumeSessionId);
     }
     const previousFastMode = this._fastMode;
-    this._fastMode = options.fastMode;
+    const previousClientMessageId = this._currentClientMessageId;
+    if (options.fastMode !== undefined) this._fastMode = options.fastMode;
+    this._currentClientMessageId = options.messageId || null;
     try {
       return await this.runQuery(prompt, resumeSessionId);
     } finally {
       this._fastMode = previousFastMode;
+      this._currentClientMessageId = previousClientMessageId;
     }
   }
 
@@ -1148,9 +1154,14 @@ export class CodexSession {
         type: "user_message_uuid",
         uuid: userMsgUuid,
         sessionId: this.sessionId,
+        ...(this._currentClientMessageId ? { clientMessageId: this._currentClientMessageId } : {}),
       } as any);
     } else {
-      this._pendingUserPrompt = { text: prompt, uuid: userMsgUuid };
+      this._pendingUserPrompt = {
+        text: prompt,
+        uuid: userMsgUuid,
+        ...(this._currentClientMessageId ? { messageId: this._currentClientMessageId } : {}),
+      };
     }
 
     const mcpRegistration = registerCodexAppMcp(this.createAppToolContext());
@@ -1244,7 +1255,10 @@ export class CodexSession {
           const nextPrompt = this.dequeueNextPrompt();
           if (nextPrompt) {
             nextPrompt.resolve();
-            this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, { fastMode: nextPrompt.fastMode })
+            this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, {
+              fastMode: nextPrompt.fastMode,
+              messageId: nextPrompt.messageId,
+            })
               .then(settleResolve)
               .catch(settleReject);
             return;
@@ -1283,22 +1297,11 @@ export class CodexSession {
       this._sessionInfoSaved = true;
     }
 
-    const userMsgUuid = crypto.randomUUID();
-    if (this.sessionId) {
-      appendHistory(this.sessionId, {
-        role: "user",
-        content: prompt,
-        uuid: userMsgUuid,
-        timestamp: now(),
-      });
-      this.send({
-        type: "user_message_uuid",
-        uuid: userMsgUuid,
-        sessionId: this.sessionId,
-      } as any);
-    } else {
-      this._pendingUserPrompt = { text: prompt, uuid: userMsgUuid };
-    }
+    this._pendingUserPrompt = {
+      text: prompt,
+      uuid: crypto.randomUUID(),
+      ...(this._currentClientMessageId ? { messageId: this._currentClientMessageId } : {}),
+    };
 
     await this.ensureAppServer();
 
@@ -1341,6 +1344,7 @@ export class CodexSession {
         ...(collaborationMode ? { collaborationMode } : {}),
       });
       this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
+      this.flushPendingUserPrompt();
 
       await completion;
 
@@ -1352,6 +1356,7 @@ export class CodexSession {
         this.appServerTurnSettler = null;
         await this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, {
           fastMode: nextPrompt.fastMode,
+          messageId: nextPrompt.messageId,
         });
       }
     } catch (err: any) {
@@ -1408,8 +1413,13 @@ export class CodexSession {
       });
     }
 
-    if (!this.appServerInitialized) {
-      await this.appServer.initialize({
+    if (this.appServerInitialized) return;
+    if (this.appServerInitializePromise) {
+      await this.appServerInitializePromise;
+      return;
+    }
+    this.appServerInitializePromise = (async () => {
+      await this.appServer!.initialize({
         clientInfo: {
           name: "socketagent",
           title: "SocketAgent",
@@ -1421,6 +1431,11 @@ export class CodexSession {
         },
       });
       this.appServerInitialized = true;
+    })();
+    try {
+      await this.appServerInitializePromise;
+    } finally {
+      this.appServerInitializePromise = null;
     }
   }
 
@@ -1442,6 +1457,7 @@ export class CodexSession {
     const client = this.appServer;
     this.appServer = null;
     this.appServerInitialized = false;
+    this.appServerInitializePromise = null;
     if (this.appServerMcpRegistration) {
       this.appServerMcpRegistration.unregister();
       this.appServerMcpRegistration = null;
@@ -1610,20 +1626,23 @@ export class CodexSession {
       }
     }
 
-    if (this._pendingUserPrompt) {
-      appendHistory(this.sessionId, {
-        role: "user",
-        content: this._pendingUserPrompt.text,
-        uuid: this._pendingUserPrompt.uuid,
-        timestamp: now(),
-      });
-      this.send({
-        type: "user_message_uuid",
-        uuid: this._pendingUserPrompt.uuid,
-        sessionId: this.sessionId,
-      } as any);
-      this._pendingUserPrompt = null;
-    }
+  }
+
+  private flushPendingUserPrompt(): void {
+    if (!this.sessionId || !this._pendingUserPrompt) return;
+    appendHistory(this.sessionId, {
+      role: "user",
+      content: this._pendingUserPrompt.text,
+      uuid: this._pendingUserPrompt.uuid,
+      timestamp: now(),
+    });
+    this.send({
+      type: "user_message_uuid",
+      uuid: this._pendingUserPrompt.uuid,
+      sessionId: this.sessionId,
+      ...(this._pendingUserPrompt.messageId ? { clientMessageId: this._pendingUserPrompt.messageId } : {}),
+    } as any);
+    this._pendingUserPrompt = null;
   }
 
   private createAppToolContext(): AppToolContext {
@@ -1734,7 +1753,10 @@ export class CodexSession {
     const nextPrompt = this.dequeueNextPrompt();
     if (!nextPrompt) return;
     nextPrompt.resolve();
-    void this.runQueryWithOptions(nextPrompt.text, undefined, { fastMode: nextPrompt.fastMode })
+    void this.runQueryWithOptions(nextPrompt.text, undefined, {
+      fastMode: nextPrompt.fastMode,
+      messageId: nextPrompt.messageId,
+    })
       .catch((err) => nextPrompt.reject(err instanceof Error ? err : new Error(String(err))));
   }
 
@@ -1753,6 +1775,7 @@ export class CodexSession {
         type: "user_message_uuid",
         uuid: pending.uuid,
         sessionId: sid,
+        ...(pending.messageId ? { clientMessageId: pending.messageId } : {}),
       } as any);
     }
     pending.resolve();
@@ -2872,20 +2895,7 @@ export class CodexSession {
         }
 
         // Flush any user prompt that was buffered while sessionId was unknown.
-        if (this._pendingUserPrompt) {
-          appendHistory(this.sessionId, {
-            role: "user",
-            content: this._pendingUserPrompt.text,
-            uuid: this._pendingUserPrompt.uuid,
-            timestamp: now(),
-          });
-          this.send({
-            type: "user_message_uuid",
-            uuid: this._pendingUserPrompt.uuid,
-            sessionId: this.sessionId,
-          } as any);
-          this._pendingUserPrompt = null;
-        }
+        this.flushPendingUserPrompt();
         return;
       }
 

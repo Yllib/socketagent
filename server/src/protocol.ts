@@ -648,6 +648,8 @@ export interface SessionInfo {
   createdAt: string;
   lastActive: string;
   messagePreview: string;
+  /** Number of user turns/prompts in this session when known. */
+  turnCount?: number;
   running?: boolean;
   lastUsage?: UsageInfo & { costUsd?: number; numTurns?: number };
   scheduledTaskId?: string;

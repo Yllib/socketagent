@@ -119,6 +119,7 @@ export function updateSessionActivity(
   if (session) {
     session.lastActive = new Date().toISOString();
     session.messagePreview = cleanPreviewText(messagePreview);
+    session.turnCount = conversationTurnCountForSession(id, session.turnCount);
     if (lastUsage) {
       (session as any).lastUsage = lastUsage;
     }
@@ -193,6 +194,13 @@ function latestConversationPreviewFromEntries(entries: HistoryEntry[]): string {
   return "";
 }
 
+function conversationTurnCountFromEntries(entries: HistoryEntry[]): number {
+  return entries.reduce((count, entry) => {
+    if (entry.role !== "user") return count;
+    return cleanPreviewText(entry.content) ? count + 1 : count;
+  }, 0);
+}
+
 function latestConversationPreviewFromHistory(sessionId: string): string {
   try {
     return latestConversationPreviewFromEntries(readHistoryEntries(sessionId));
@@ -200,6 +208,16 @@ function latestConversationPreviewFromHistory(sessionId: string): string {
     /* ignore stale/corrupt history */
   }
   return "";
+}
+
+function conversationTurnCountFromHistory(sessionId: string): number | undefined {
+  try {
+    if (!fs.existsSync(historyFile(sessionId))) return undefined;
+    return conversationTurnCountFromEntries(readHistoryEntries(sessionId));
+  } catch {
+    /* ignore stale/corrupt history */
+  }
+  return undefined;
 }
 
 function latestConversationPreviewFromCodexRollout(sessionId: string): string {
@@ -211,12 +229,44 @@ function latestConversationPreviewFromCodexRollout(sessionId: string): string {
   return "";
 }
 
+function conversationTurnCountFromCodexRollout(sessionId: string): number | undefined {
+  try {
+    if (!findCodexRolloutFile(sessionId)) return undefined;
+    return conversationTurnCountFromEntries(readCodexRolloutHistory(sessionId));
+  } catch {
+    /* ignore missing/corrupt rollout */
+  }
+  return undefined;
+}
+
 function latestConversationPreviewForSession(sessionId: string): string {
   return (
     latestConversationPreviewFromHistory(sessionId) ||
     latestConversationPreviewFromSdkEvents(sessionId) ||
     latestConversationPreviewFromCodexRollout(sessionId)
   );
+}
+
+function normalizedTurnCount(value: unknown): number | undefined {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count < 0) return undefined;
+  return Math.floor(count);
+}
+
+function conversationTurnCountForSession(sessionId: string, fallback?: unknown): number {
+  return (
+    conversationTurnCountFromHistory(sessionId) ??
+    conversationTurnCountFromCodexRollout(sessionId) ??
+    normalizedTurnCount(fallback) ??
+    0
+  );
+}
+
+function withConversationTurnCount(session: SessionInfo): SessionInfo {
+  return {
+    ...session,
+    turnCount: conversationTurnCountForSession(session.id, (session as any).turnCount),
+  };
 }
 
 function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
@@ -1229,8 +1279,10 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
   const restoredAt = new Date().toISOString();
   let messagePreview = "";
   let titleFallback = "";
+  let turnCount = 0;
   try {
     const hist = JSON.parse(fs.readFileSync(liveHist, "utf-8")) as any[];
+    turnCount = Array.isArray(hist) ? conversationTurnCountFromEntries(hist as HistoryEntry[]) : 0;
     const lastUser = [...hist].reverse().find((e) => e.role === "user");
     if (lastUser) messagePreview = String(lastUser.content || "").slice(0, 200);
     const firstUser = (hist as any[]).find((e) => e.role === "user");
@@ -1249,6 +1301,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     createdAt: metaCreatedAt || restoredAt,
     lastActive: restoredAt,
     messagePreview,
+    turnCount,
     ...(metaBackend ? { backend: metaBackend } : {}),
     ...(metaCodexDriver ? { codexDriver: metaCodexDriver as any } : {}),
   };
@@ -1367,6 +1420,7 @@ function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInf
     createdAt,
     lastActive,
     messagePreview: recentPreview || stored?.messagePreview || preview || "",
+    turnCount: conversationTurnCountForSession(id, stored?.turnCount),
     backend: "codex",
     codexDriver: "app-server",
   } as SessionInfo;
@@ -1447,7 +1501,7 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
     native = await listCodexNativeSessionsFromAppServer(useCache);
   } catch (err: any) {
     console.warn(`[CodexThreads] native session list failed: ${err?.message || String(err)}`);
-    return stored;
+    return stored.map(withConversationTurnCount);
   }
 
   const nativeById = new Map(native.map((s) => [s.id, s]));
@@ -1460,6 +1514,10 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
         ...session,
         ...nativeSession,
         messagePreview: recentPreview || session.messagePreview || nativeSession.messagePreview,
+        turnCount: conversationTurnCountForSession(
+          session.id,
+          session.turnCount ?? nativeSession.turnCount,
+        ),
         lastUsage: session.lastUsage,
         scheduledTaskId: session.scheduledTaskId,
         permissionMode: session.permissionMode,
@@ -1481,10 +1539,10 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
       continue;
     }
 
-    merged.push(session);
+    merged.push(withConversationTurnCount(session));
   }
 
-  merged.push(...nativeById.values());
+  merged.push(...Array.from(nativeById.values()).map(withConversationTurnCount));
   return merged.sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
 }
 
@@ -2002,6 +2060,7 @@ export function getCodexThreadSessionInfo(sessionId: string): SessionInfo | null
       createdAt,
       lastActive,
       messagePreview: preview.slice(0, 200),
+      turnCount: conversationTurnCountForSession(String(row.id)),
       backend: "codex",
       codexDriver: "app-server",
     } as SessionInfo;

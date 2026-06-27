@@ -67,6 +67,14 @@ function readRemoteAppVersionInfo(branch: string): AppVersionInfo | null {
   }
 }
 
+function attachAppVersionInfo(info: Record<string, any>, appVersion: AppVersionInfo) {
+  info.app = appVersion;
+  // Backward compatibility for app builds that read version metadata directly
+  // from the server version payload before app checks moved to GitHub.
+  info.version = appVersion.version;
+  info.url = appVersion.url;
+}
+
 // ── .env migrations (run once on startup, before reading config) ──
 (function migrateEnv() {
   const envPath = path.join(__dirname, "..", ".env");
@@ -1560,7 +1568,7 @@ function createConnectionHandler(transport: ClientTransport) {
           },
         };
         const localAppVersion = readLocalAppVersionInfo();
-        if (localAppVersion) info.app = localAppVersion;
+        if (localAppVersion) attachAppVersionInfo(info, localAppVersion);
         if (GIT_ROOT) {
           try {
             const localHash = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
@@ -1589,7 +1597,7 @@ function createConnectionHandler(transport: ClientTransport) {
                   info.updateAvailable = localHash !== remoteHash;
                   info.commitsBehind = commitsBehind;
                   const remoteAppVersion = readRemoteAppVersionInfo(branch);
-                  if (remoteAppVersion) info.app = remoteAppVersion;
+                  if (remoteAppVersion) attachAppVersionInfo(info, remoteAppVersion);
                 } else {
                   info.fetchError = err.message;
                 }

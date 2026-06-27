@@ -3358,6 +3358,51 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
+  // GET /download-file — fast direct-LAN file download for app file cards/file manager.
+  // The WebSocket file transfer path remains the fallback for relay and old apps.
+  if (req.method === "GET" && req.url?.startsWith("/download-file")) {
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const token = url.searchParams.get("token");
+    if (token !== AUTH_TOKEN) {
+      res.writeHead(401);
+      res.end("Unauthorized");
+      return;
+    }
+
+    const filePath = url.searchParams.get("path") || "";
+    if (!filePath || !fs.existsSync(filePath)) {
+      res.writeHead(404);
+      res.end("File not found");
+      return;
+    }
+
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) {
+      res.writeHead(400);
+      res.end("Not a file");
+      return;
+    }
+
+    const fileName = path.basename(filePath).replace(/["\r\n]/g, "_");
+    console.log(`[HTTP Download] Serving ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
+    res.writeHead(200, {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": stat.size.toString(),
+      "Content-Disposition": `attachment; filename="${fileName}"`,
+    });
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+    stream.on("error", (err) => {
+      console.error(`[HTTP Download] Stream error for ${filePath}: ${err.message}`);
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    });
+    stream.on("close", () => {
+      console.log(`[HTTP Download] Complete ${fileName}`);
+    });
+    return;
+  }
+
   // GET /tts-model — serve Kokoro model components individually
   // ?model=kokoro-en-v0_19|kokoro-multi-lang-v1_0 — which model dir (default: kokoro-en-v0_19)
   // ?file=model.onnx|voices.bin|tokens.txt|espeak-ng-data — which file to serve

@@ -10,7 +10,7 @@ set -euo pipefail
 # configuration, and systemd user service.
 #
 # Usage:
-#   bash install-server.sh [--reset-pairing] [--port PORT] [--backends claude|codex|both] [--non-interactive]
+#   bash install-server.sh [--reset-pairing] [--port PORT] [--backends claude|codex|both|installed] [--non-interactive]
 #
 # Re-running is safe — existing tokens and pairings are preserved.
 
@@ -114,7 +114,7 @@ select_backends() {
 
   if [[ -z "$value" ]]; then
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
-      fail "Non-interactive mode requires --backends claude, --backends codex, or --backends both."
+      fail "Non-interactive mode requires --backends claude, --backends codex, --backends both, or --backends installed."
       exit 1
     fi
     phase "Backend Selection"
@@ -137,14 +137,33 @@ select_backends() {
     3|both|all|claude,codex|codex,claude)
       ENABLED_BACKENDS="claude,codex"
       ;;
+    auto|installed|existing)
+      ENABLED_BACKENDS="$(detect_installed_backends)"
+      ;;
     *)
-      fail "Invalid backend selection: ${1:-$value}. Use claude, codex, or both."
+      fail "Invalid backend selection: ${1:-$value}. Use claude, codex, both, or installed."
       exit 1
       ;;
   esac
 
   if [[ ",$ENABLED_BACKENDS," == *",claude,"* ]]; then INSTALL_CLAUDE=true; fi
   if [[ ",$ENABLED_BACKENDS," == *",codex,"* ]]; then INSTALL_CODEX=true; fi
+}
+
+detect_installed_backends() {
+  local installed=()
+  if command -v claude &>/dev/null; then
+    installed+=("claude")
+  fi
+  if command -v codex &>/dev/null && codex app-server --help &>/dev/null; then
+    installed+=("codex")
+  fi
+  if [[ ${#installed[@]} -eq 0 ]]; then
+    fail "No installed SocketAgent backends found on PATH. Use --backends claude, --backends codex, or --backends both to install one."
+    exit 1
+  fi
+  local IFS=,
+  echo "${installed[*]}"
 }
 
 install_cli() {

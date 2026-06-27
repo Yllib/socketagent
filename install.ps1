@@ -11,7 +11,7 @@
 .PARAMETER Port
     Server port (default: 8085).
 .PARAMETER Backends
-    Agent backend selection: claude, codex, or both. If omitted, the installer prompts.
+    Agent backend selection: claude, codex, both, or installed. If omitted, the installer prompts.
 .PARAMETER NonInteractive
     Do not prompt for input. Requires -Backends and skips interactive auth login prompts.
 .PARAMETER SkipClaudeLogin
@@ -24,6 +24,8 @@
     powershell -ExecutionPolicy Bypass -File install.ps1 -Backends codex
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1 -Backends claude -NonInteractive -SkipClaudeLogin
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File install.ps1 -Backends installed -NonInteractive -SkipClaudeLogin -SkipCodexLogin
 #>
 
 param(
@@ -283,8 +285,23 @@ function Convert-BackendSelection($value) {
         { $_ -in @("1", "codex", "openai") } { return "codex" }
         { $_ -in @("2", "claude", "anthropic") } { return "claude" }
         { $_ -in @("3", "both", "all", "claude,codex", "codex,claude") } { return "claude,codex" }
-        default { throw "Invalid backend selection '$value'. Use claude, codex, or both." }
+        { $_ -in @("auto", "installed", "existing") } { return Get-InstalledBackendSelection }
+        default { throw "Invalid backend selection '$value'. Use claude, codex, both, or installed." }
     }
+}
+
+function Get-InstalledBackendSelection {
+    $installed = @()
+    if (Test-CommandExists "claude") {
+        $installed += "claude"
+    }
+    if ((Test-CommandExists "codex") -and (Test-CodexAppServer)) {
+        $installed += "codex"
+    }
+    if ($installed.Count -eq 0) {
+        throw "No installed SocketAgent backends found on PATH. Use -Backends claude, -Backends codex, or -Backends both to install one."
+    }
+    return ($installed -join ",")
 }
 
 function Install-SocketAgentCli {
@@ -361,7 +378,7 @@ if ($portInUse) {
 Write-Phase "Backend Selection"
 if (-not $Backends) {
     if ($NonInteractive) {
-        Write-Fail "NonInteractive mode requires -Backends claude, -Backends codex, or -Backends both."
+        Write-Fail "NonInteractive mode requires -Backends claude, -Backends codex, -Backends both, or -Backends installed."
         exit 1
     }
     Write-Host "  Which agent backend(s) should this server use?"

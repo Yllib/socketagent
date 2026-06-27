@@ -211,6 +211,14 @@ function latestConversationPreviewFromCodexRollout(sessionId: string): string {
   return "";
 }
 
+function latestConversationPreviewForSession(sessionId: string): string {
+  return (
+    latestConversationPreviewFromHistory(sessionId) ||
+    latestConversationPreviewFromSdkEvents(sessionId) ||
+    latestConversationPreviewFromCodexRollout(sessionId)
+  );
+}
+
 function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
   ensureHistoryDir();
   const file = historyFile(sessionId);
@@ -734,16 +742,102 @@ export function getSdkEvents(sessionId: string, limit = 300): Record<string, any
   const file = sdkEventsFile(sessionId);
   if (!fs.existsSync(file)) return [];
   try {
-    const content = fs.readFileSync(file, "utf-8");
-    return content
-      .split("\n")
-      .filter(Boolean)
-      .slice(-Math.max(1, limit))
+    return readJsonlTailLines(file, { maxLines: Math.max(1, limit), maxBytes: 16 * 1024 * 1024 })
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .filter(Boolean) as Record<string, any>[];
   } catch {
     return [];
   }
+}
+
+function readJsonlTailLines(
+  file: string,
+  options: { maxLines?: number; maxBytes?: number } = {}
+): string[] {
+  const maxLines = Math.max(1, Math.floor(options.maxLines ?? 300));
+  const maxBytes = Math.max(1024, Math.floor(options.maxBytes ?? 4 * 1024 * 1024));
+  const stat = fs.statSync(file);
+  if (stat.size === 0) return [];
+
+  const fd = fs.openSync(file, "r");
+  try {
+    const chunks: Buffer[] = [];
+    let position = stat.size;
+    let totalBytes = 0;
+    let newlineCount = 0;
+
+    while (position > 0 && totalBytes < maxBytes && newlineCount <= maxLines) {
+      const readSize = Math.min(64 * 1024, position, maxBytes - totalBytes);
+      position -= readSize;
+      const buffer = Buffer.allocUnsafe(readSize);
+      const bytesRead = fs.readSync(fd, buffer, 0, readSize, position);
+      if (bytesRead <= 0) break;
+      const chunk = buffer.subarray(0, bytesRead);
+      chunks.unshift(chunk);
+      totalBytes += bytesRead;
+      for (const byte of chunk) {
+        if (byte === 10) newlineCount++;
+      }
+    }
+
+    const lines = Buffer.concat(chunks).toString("utf-8").split("\n");
+    if (position > 0) lines.shift();
+    if (lines[lines.length - 1] === "") lines.pop();
+    return lines.slice(-maxLines);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function appServerUserContentPreview(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      const input = part as any;
+      if (input.type === "text") return String(input.text ?? "");
+      if (input.type === "input_text") return String(input.text ?? "");
+      if (input.type === "skill") return `/${String(input.name ?? "skill")}`;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function appServerItemPreview(item: any): string {
+  if (!item || typeof item !== "object") return "";
+  if (item.type === "agentMessage") {
+    return cleanPreviewText(item.text);
+  }
+  if (item.type === "userMessage") {
+    return cleanPreviewText(appServerUserContentPreview(item.content));
+  }
+  return "";
+}
+
+function latestConversationPreviewFromSdkEvents(sessionId: string): string {
+  const file = sdkEventsFile(sessionId);
+  if (!fs.existsSync(file)) return "";
+  try {
+    const lines = readJsonlTailLines(file, { maxLines: 1200, maxBytes: 16 * 1024 * 1024 });
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let event: any;
+      try {
+        event = JSON.parse(lines[i]);
+      } catch {
+        continue;
+      }
+      const method = String(event?.method || "");
+      if (method !== "item/completed" && method !== "item/started") continue;
+      const preview = appServerItemPreview(event?.params?.item);
+      if (preview) return preview;
+    }
+  } catch {
+    /* ignore missing/corrupt sdk event history */
+  }
+  return "";
 }
 
 /** Get SDK event count for a session (for deciding whether to send) */
@@ -1264,10 +1358,7 @@ function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInf
   const createdAt = unixSecondsToIso(thread?.createdAt, stored?.createdAt || nowIso());
   const lastActive = unixSecondsToIso(thread?.updatedAt, stored?.lastActive || createdAt);
   const preview = codexThreadPreview(thread);
-  const recentPreview = stored
-    ? latestConversationPreviewFromHistory(id) ||
-      latestConversationPreviewFromCodexRollout(id)
-    : "";
+  const recentPreview = stored ? latestConversationPreviewForSession(id) : "";
   return {
     ...(stored || {}),
     id,
@@ -1364,9 +1455,7 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
   for (const session of stored) {
     const nativeSession = nativeById.get(session.id);
     if (nativeSession) {
-      const recentPreview =
-        latestConversationPreviewFromHistory(session.id) ||
-        latestConversationPreviewFromCodexRollout(session.id);
+      const recentPreview = latestConversationPreviewForSession(session.id);
       merged.push({
         ...session,
         ...nativeSession,

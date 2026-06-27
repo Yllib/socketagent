@@ -433,17 +433,31 @@ function isContextClearedSession(sessionInfo: SessionInfo | undefined, sessionId
 
 async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> {
   if (sessionInfo.backend !== "codex") return [];
-  const rolloutHistory = readCodexRolloutHistory(sessionInfo.id);
+  const rolloutAdded = syncCodexRolloutHistory(sessionInfo);
+  if (rolloutAdded.length > 0) return rolloutAdded;
+  const localHistory = getHistory(sessionInfo.id);
   let appServerHistory: any[] = [];
-  if (rolloutHistory.length === 0) {
+  if (localHistory.length === 0) {
     appServerHistory = await readCodexAppServerThreadHistory(sessionInfo.id);
   }
-  const nativeHistory = appServerHistory.length > rolloutHistory.length
-    ? appServerHistory
-    : rolloutHistory;
-  const added = appendNativeHistorySuffix(sessionInfo.id, nativeHistory);
+  const added = appendNativeHistorySuffix(sessionInfo.id, appServerHistory);
   if (added.length > 0) {
     console.log(`[CodexSync] Merged ${added.length} native suffix entries for ${sessionInfo.id}`);
+    updateSessionActivity(
+      sessionInfo.id,
+      added[added.length - 1]?.content || sessionInfo.messagePreview || "",
+    );
+  }
+  return added;
+}
+
+function syncCodexRolloutHistory(sessionInfo: SessionInfo): any[] {
+  if (sessionInfo.backend !== "codex") return [];
+  const rolloutHistory = readCodexRolloutHistory(sessionInfo.id);
+  if (rolloutHistory.length === 0) return [];
+  const added = appendNativeHistorySuffix(sessionInfo.id, rolloutHistory);
+  if (added.length > 0) {
+    console.log(`[CodexSync] Merged ${added.length} rollout entries for ${sessionInfo.id}`);
     updateSessionActivity(
       sessionInfo.id,
       added[added.length - 1]?.content || sessionInfo.messagePreview || "",
@@ -899,6 +913,21 @@ function createConnectionHandler(transport: ClientTransport) {
         // session (claude or codex). The caller passes `backend` so we tag the
         // freshly-registered SessionInfo correctly — without it, codex SDK
         // resumes would default to claude and fail on the first prompt.
+        if (!sessionInfo && (msg as any).cwd) {
+          const sdkBackend = ((msg as any).backend as "claude" | "codex" | undefined);
+          sessionInfo = {
+            id: msg.sessionId,
+            title: "Untitled",
+            cwd: resumeCwd,
+            createdAt: new Date().toISOString(),
+            lastActive: new Date().toISOString(),
+            messagePreview: "",
+            backend: sdkBackend,
+            ...(sdkBackend === "codex" ? { codexDriver: resolveCodexDriver(undefined) } : {}),
+          };
+          saveSession(sessionInfo);
+          console.log(`[Resume] Created SocketAgent entry for SDK session ${msg.sessionId} in ${resumeCwd} (backend=${sdkBackend ?? "claude"})`);
+        }
         if (!sessionInfo) {
           const nativeCodex = await getCodexNativeThreadSessionInfo(
             msg.sessionId,
@@ -916,21 +945,6 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({ type: "session_archived", sessionId: msg.sessionId });
           broadcastSessionList();
           break;
-        }
-        if (!sessionInfo && (msg as any).cwd) {
-          const sdkBackend = ((msg as any).backend as "claude" | "codex" | undefined);
-          sessionInfo = {
-            id: msg.sessionId,
-            title: "Untitled",
-            cwd: resumeCwd,
-            createdAt: new Date().toISOString(),
-            lastActive: new Date().toISOString(),
-            messagePreview: "",
-            backend: sdkBackend,
-            ...(sdkBackend === "codex" ? { codexDriver: resolveCodexDriver(undefined) } : {}),
-          };
-          saveSession(sessionInfo);
-          console.log(`[Resume] Created SocketAgent entry for SDK session ${msg.sessionId} in ${resumeCwd} (backend=${sdkBackend ?? "claude"})`);
         }
         if (!sessionInfo) {
           sendJson({
@@ -1001,7 +1015,11 @@ function createConnectionHandler(transport: ClientTransport) {
         });
 
         // Send message history — if session is running, load back to last user prompt
+        const historyStartMs = Date.now();
         const isRunning = activeSessions.has(msg.sessionId) && activeSessions.get(msg.sessionId)!.isRunning;
+        if (sessionInfo.backend === "codex" && !contextCleared && getHistory(msg.sessionId).length === 0) {
+          syncCodexRolloutHistory(sessionInfo);
+        }
         const page = isRunning
           ? getHistoryPageToLastPrompt(msg.sessionId, 50)
           : getHistoryPage(msg.sessionId, 50);
@@ -1016,6 +1034,7 @@ function createConnectionHandler(transport: ClientTransport) {
           ...(todos.length > 0 ? { todos } : {}),
           ...(lastSuggestion ? { promptSuggestion: lastSuggestion } : {}),
         });
+        console.log(`[ResumeHistory] sent initial history for ${msg.sessionId}: entries=${page.entries.length} total=${page.total} offset=${page.offset} ms=${Date.now() - historyStartMs}`);
 
         // Check for missed messages from Claude Code's session file
         const allHistory = getHistory(msg.sessionId);

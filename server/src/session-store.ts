@@ -118,7 +118,7 @@ export function updateSessionActivity(
   const session = sessions.find((s) => s.id === id);
   if (session) {
     session.lastActive = new Date().toISOString();
-    session.messagePreview = messagePreview.slice(0, 200);
+    session.messagePreview = cleanPreviewText(messagePreview);
     if (lastUsage) {
       (session as any).lastUsage = lastUsage;
     }
@@ -177,6 +177,25 @@ function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: bo
   const entries = JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[];
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
   return entries;
+}
+
+function cleanPreviewText(value: unknown): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
+function latestConversationPreviewFromHistory(sessionId: string): string {
+  try {
+    const entries = readHistoryEntries(sessionId);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry.role !== "user" && entry.role !== "assistant") continue;
+      const text = cleanPreviewText(entry.content);
+      if (text) return text;
+    }
+  } catch {
+    /* ignore stale/corrupt history */
+  }
+  return "";
 }
 
 function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
@@ -1239,7 +1258,7 @@ function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInf
     cwd,
     createdAt,
     lastActive,
-    messagePreview: preview || stored?.messagePreview || "",
+    messagePreview: stored?.messagePreview || preview || "",
     backend: "codex",
     codexDriver: "app-server",
   } as SessionInfo;
@@ -1328,9 +1347,11 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
   for (const session of stored) {
     const nativeSession = nativeById.get(session.id);
     if (nativeSession) {
+      const recentPreview = latestConversationPreviewFromHistory(session.id);
       merged.push({
         ...session,
         ...nativeSession,
+        messagePreview: recentPreview || session.messagePreview || nativeSession.messagePreview,
         lastUsage: session.lastUsage,
         scheduledTaskId: session.scheduledTaskId,
         permissionMode: session.permissionMode,

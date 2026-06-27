@@ -1340,9 +1340,13 @@ export function isCodexNativeArchiveTs(ts: string): boolean {
 const CODEX_THREAD_LIST_SOURCE_KINDS = ["cli", "vscode", "appServer", "unknown"];
 const CODEX_THREAD_LOOKUP_SOURCE_KINDS = ["cli", "exec", "vscode", "appServer", "unknown"];
 const CODEX_THREAD_LIST_LIMIT = 500;
+const CLAUDE_NATIVE_LIST_LIMIT = 500;
 const CODEX_NATIVE_LIST_CACHE_MS = 10_000;
 
 let codexNativeSessionsCache:
+  | { at: number; sessions: SessionInfo[] }
+  | null = null;
+let claudeNativeSessionsCache:
   | { at: number; sessions: SessionInfo[] }
   | null = null;
 let codexNativeArchivesCache:
@@ -1351,6 +1355,7 @@ let codexNativeArchivesCache:
 
 export function invalidateCodexNativeListCache(): void {
   codexNativeSessionsCache = null;
+  claudeNativeSessionsCache = null;
   codexNativeArchivesCache = null;
 }
 
@@ -1500,6 +1505,94 @@ async function listCodexNativeSessionsFromAppServer(useCache = true): Promise<Se
   return sessions;
 }
 
+function newestIso(values: Array<string | undefined>, fallback: string): string {
+  let best = fallback;
+  let bestMs = Date.parse(fallback);
+  if (!Number.isFinite(bestMs)) bestMs = 0;
+  for (const value of values) {
+    if (!value) continue;
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) continue;
+    if (ms > bestMs) {
+      best = value;
+      bestMs = ms;
+    }
+  }
+  return best;
+}
+
+function sdkSessionInfoToSessionInfo(info: SDKSessionInfo, tracked?: SessionInfo): SessionInfo | null {
+  if (!info.sessionId) return null;
+  const cwd = tracked?.cwd || info.cwd;
+  if (!cwd) return null;
+
+  const fallbackMs = Date.now();
+  const lastModified = typeof info.lastModified === "number" ? info.lastModified : fallbackMs;
+  const nativeLastActive = isoFromMs(lastModified, fallbackMs);
+  const recentPreview = latestConversationPreviewForSession(info.sessionId);
+  const messagePreview = cleanPreviewText(
+    recentPreview ||
+    tracked?.messagePreview ||
+    info.firstPrompt ||
+    info.summary ||
+    tracked?.title ||
+    "Claude session"
+  );
+  const trackedTitle = tracked?.title && tracked.title !== "Untitled" ? tracked.title : "";
+  const title = cleanPreviewText(
+    trackedTitle ||
+    info.customTitle ||
+    info.summary ||
+    info.firstPrompt ||
+    messagePreview ||
+    "Claude session"
+  );
+
+  return withConversationTurnCount({
+    ...tracked,
+    id: info.sessionId,
+    title: title || "Claude session",
+    cwd,
+    createdAt: tracked?.createdAt || isoFromMs(info.createdAt, lastModified),
+    lastActive: newestIso([tracked?.lastActive, nativeLastActive], nativeLastActive),
+    messagePreview,
+    backend: "claude",
+  } as SessionInfo);
+}
+
+async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<SessionInfo[]> {
+  const nowMs = Date.now();
+  if (useCache && claudeNativeSessionsCache && nowMs - claudeNativeSessionsCache.at < CODEX_NATIVE_LIST_CACHE_MS) {
+    return claudeNativeSessionsCache.sessions;
+  }
+
+  const storedById = new Map(readStore().map((s) => [s.id, s]));
+  const sdkSessions = await sdkListSessions({ limit: CLAUDE_NATIVE_LIST_LIMIT });
+  const deduped = new Map<string, SessionInfo>();
+  for (const info of sdkSessions) {
+    const session = sdkSessionInfoToSessionInfo(info, storedById.get(info.sessionId));
+    if (session) deduped.set(session.id, session);
+  }
+  const sessions = [...deduped.values()]
+    .sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
+  claudeNativeSessionsCache = { at: nowMs, sessions };
+  return sessions;
+}
+
+function mergeClaudeNativeSession(existing: SessionInfo, nativeSession: SessionInfo): SessionInfo {
+  const recentPreview = latestConversationPreviewForSession(existing.id);
+  const existingTitle = existing.title && existing.title !== "Untitled" ? existing.title : "";
+  return withConversationTurnCount({
+    ...nativeSession,
+    ...existing,
+    title: existingTitle || nativeSession.title,
+    cwd: existing.cwd || nativeSession.cwd,
+    lastActive: newestIso([existing.lastActive, nativeSession.lastActive], nativeSession.lastActive),
+    messagePreview: recentPreview || existing.messagePreview || nativeSession.messagePreview,
+    backend: "claude",
+  } as SessionInfo);
+}
+
 export async function listSessionsWithNativeCodex(useCache = true): Promise<SessionInfo[]> {
   const stored = listSessions();
   let native: SessionInfo[];
@@ -1550,6 +1643,31 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
 
   merged.push(...Array.from(nativeById.values()).map(withConversationTurnCount));
   return merged.sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
+}
+
+export async function listSessionsWithNativeBackends(useCache = true): Promise<SessionInfo[]> {
+  const merged = await listSessionsWithNativeCodex(useCache);
+  let claudeNative: SessionInfo[];
+  try {
+    claudeNative = await listClaudeNativeSessionsFromSdk(useCache);
+  } catch (err: any) {
+    console.warn(`[SdkSessions] Native Claude global listSessions failed: ${err?.message || err}`);
+    return merged;
+  }
+
+  const byId = new Map(merged.map((s) => [s.id, s]));
+  for (const nativeSession of claudeNative) {
+    const existing = byId.get(nativeSession.id);
+    if (!existing) {
+      byId.set(nativeSession.id, nativeSession);
+      continue;
+    }
+    if ((existing.backend ?? "claude") === "claude") {
+      byId.set(nativeSession.id, mergeClaudeNativeSession(existing, nativeSession));
+    }
+  }
+
+  return [...byId.values()].sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
 }
 
 export async function listArchivesWithNativeCodex(useCache = true): Promise<ArchiveEntry[]> {

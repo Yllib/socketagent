@@ -162,13 +162,13 @@ function describeActiveSessions(): string {
 }
 
 function autoUpdateBlockReason(): string | null {
-  if (activeSessions.size > 0) {
-    for (const [, session] of activeSessions) {
-      if (sessionIsBusy(session)) {
-        return `sessions are running (${describeActiveSessions()})`;
-      }
+  if (activeBackendInstalls.size > 0) {
+    return `backend repair is running (${Array.from(activeBackendInstalls).join(", ")})`;
+  }
+  for (const [, session] of activeSessions) {
+    if (sessionIsBusy(session)) {
+      return `sessions are running (${describeActiveSessions()})`;
     }
-    return `sessions are active (${describeActiveSessions()})`;
   }
   return null;
 }

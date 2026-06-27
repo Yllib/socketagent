@@ -1411,6 +1411,26 @@ export class CodexSession {
           this.appServerTurnSettler?.reject(new Error(`codex app-server exited code=${code} signal=${signal}`));
         }
       });
+      // Codex "error" notifications (e.g. usageLimitExceeded / systemError)
+      // arrive here on a non-reserved channel so they cannot crash the process.
+      // Surface the real message to the client instead of failing silently.
+      this.appServer.on("errorNotification", (params: any) => {
+        const message = params?.error?.message || params?.message || "Codex reported an error";
+        const sid = this.sessionId;
+        if (sid) {
+          this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
+          this.send({ type: "error", message: `Codex: ${message}`, sessionId: sid } as any);
+        }
+        this.appServerTurnSettler?.reject(new Error(message));
+      });
+      // Guard genuine client/proc errors (e.g. spawn failure) so an emitted
+      // "error" event never becomes an uncaught ERR_UNHANDLED_ERROR.
+      this.appServer.on("error", (err: Error) => {
+        this._stderrBuffer.push(`[codex app-server error] ${err?.message || String(err)}\n`);
+        if (this._isRunning && !this._abortRequested) {
+          this.appServerTurnSettler?.reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
     }
 
     if (this.appServerInitialized) return;

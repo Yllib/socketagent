@@ -442,7 +442,17 @@ export class CodexAppServerClient extends EventEmitter {
 
       if (this.isNotification(msg)) {
         this.emit("notification", { method: msg.method, params: msg.params });
-        this.emit(msg.method, msg.params);
+        // EventEmitter treats "error" as a reserved event that throws
+        // (ERR_UNHANDLED_ERROR) when no listener is registered. Codex sends
+        // "error" notifications (e.g. usageLimitExceeded / systemError), so
+        // re-emitting one on the reserved channel would crash the whole server.
+        // It is already delivered via the "notification" event above; expose it
+        // on a safe channel instead of the reserved one.
+        if (msg.method === "error") {
+          this.emit("errorNotification", msg.params);
+        } else {
+          this.emit(msg.method, msg.params);
+        }
         continue;
       }
 

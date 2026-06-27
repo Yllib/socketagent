@@ -5,6 +5,7 @@ import { listSessions as sdkListSessions, type SDKSessionInfo } from "@anthropic
 import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
+import { buildCodexSpawn } from "./codex-env";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
@@ -1357,9 +1358,13 @@ async function withCodexThreadListClient<T>(
   cwd: string,
   fn: (client: CodexAppServerClient) => Promise<T>,
 ): Promise<T> {
+  const codex = buildCodexSpawn(["app-server", "--listen", "stdio://"]);
   const client = new CodexAppServerClient({
     cwd,
-    env: process.env,
+    command: codex.command,
+    args: codex.args,
+    env: codex.env,
+    shell: codex.shell,
     requestTimeoutMs: 20_000,
     startupTimeoutMs: 20_000,
   });
@@ -2231,9 +2236,13 @@ export function readCodexRolloutHistory(sessionId: string): HistoryEntry[] {
 }
 
 export async function readCodexAppServerThreadHistory(sessionId: string): Promise<HistoryEntry[]> {
+  const codex = buildCodexSpawn(["app-server", "--listen", "stdio://"]);
   const client = new CodexAppServerClient({
     cwd: process.cwd(),
-    env: process.env,
+    command: codex.command,
+    args: codex.args,
+    env: codex.env,
+    shell: codex.shell,
     requestTimeoutMs: 15_000,
     startupTimeoutMs: 15_000,
   });

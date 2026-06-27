@@ -183,17 +183,30 @@ function cleanPreviewText(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
+function latestConversationPreviewFromEntries(entries: HistoryEntry[]): string {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.role !== "user" && entry.role !== "assistant") continue;
+    const text = cleanPreviewText(entry.content);
+    if (text) return text;
+  }
+  return "";
+}
+
 function latestConversationPreviewFromHistory(sessionId: string): string {
   try {
-    const entries = readHistoryEntries(sessionId);
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i];
-      if (entry.role !== "user" && entry.role !== "assistant") continue;
-      const text = cleanPreviewText(entry.content);
-      if (text) return text;
-    }
+    return latestConversationPreviewFromEntries(readHistoryEntries(sessionId));
   } catch {
     /* ignore stale/corrupt history */
+  }
+  return "";
+}
+
+function latestConversationPreviewFromCodexRollout(sessionId: string): string {
+  try {
+    return latestConversationPreviewFromEntries(readCodexRolloutHistory(sessionId));
+  } catch {
+    /* ignore missing/corrupt rollout */
   }
   return "";
 }
@@ -1251,6 +1264,10 @@ function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInf
   const createdAt = unixSecondsToIso(thread?.createdAt, stored?.createdAt || nowIso());
   const lastActive = unixSecondsToIso(thread?.updatedAt, stored?.lastActive || createdAt);
   const preview = codexThreadPreview(thread);
+  const recentPreview = stored
+    ? latestConversationPreviewFromHistory(id) ||
+      latestConversationPreviewFromCodexRollout(id)
+    : "";
   return {
     ...(stored || {}),
     id,
@@ -1258,7 +1275,7 @@ function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInf
     cwd,
     createdAt,
     lastActive,
-    messagePreview: stored?.messagePreview || preview || "",
+    messagePreview: recentPreview || stored?.messagePreview || preview || "",
     backend: "codex",
     codexDriver: "app-server",
   } as SessionInfo;
@@ -1347,7 +1364,9 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
   for (const session of stored) {
     const nativeSession = nativeById.get(session.id);
     if (nativeSession) {
-      const recentPreview = latestConversationPreviewFromHistory(session.id);
+      const recentPreview =
+        latestConversationPreviewFromHistory(session.id) ||
+        latestConversationPreviewFromCodexRollout(session.id);
       merged.push({
         ...session,
         ...nativeSession,

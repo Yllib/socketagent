@@ -10,7 +10,7 @@ set -euo pipefail
 # configuration, and systemd user service.
 #
 # Usage:
-#   bash install-server.sh [--reset-pairing] [--port PORT] [--backends claude|codex|both]
+#   bash install-server.sh [--reset-pairing] [--port PORT] [--backends claude|codex|both] [--non-interactive]
 #
 # Re-running is safe — existing tokens and pairings are preserved.
 
@@ -25,6 +25,9 @@ ENABLED_BACKENDS=""
 INSTALL_CLAUDE=false
 INSTALL_CODEX=false
 SERVER_BUILD_DONE=false
+NON_INTERACTIVE=false
+SKIP_CLAUDE_LOGIN=false
+SKIP_CODEX_LOGIN=false
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -32,6 +35,9 @@ while [[ $# -gt 0 ]]; do
     --reset-pairing) RESET_PAIRING=true; shift ;;
     --port) PORT="$2"; shift 2 ;;
     --backend|--backends) BACKENDS="$2"; shift 2 ;;
+    --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --skip-claude-login) SKIP_CLAUDE_LOGIN=true; shift ;;
+    --skip-codex-login) SKIP_CODEX_LOGIN=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -69,6 +75,10 @@ prompt_read() {
   local prompt="$1"
   local __resultvar="$2"
   local value=""
+  if [[ "$NON_INTERACTIVE" == "true" ]]; then
+    fail "Non-interactive mode cannot prompt: $prompt"
+    exit 1
+  fi
   if [[ -r /dev/tty ]]; then
     read -r -p "$prompt" value </dev/tty
   elif ! read -r -p "$prompt" value; then
@@ -103,6 +113,10 @@ select_backends() {
   value=$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
 
   if [[ -z "$value" ]]; then
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+      fail "Non-interactive mode requires --backends claude, --backends codex, or --backends both."
+      exit 1
+    fi
     phase "Backend Selection"
     echo "  Which agent backend(s) should this server use?"
     echo "    1) Codex only"
@@ -300,6 +314,9 @@ else
   CLAUDE_DIR="$HOME/.claude"
   if [[ -f "$CLAUDE_DIR/credentials.json" ]] || [[ -f "$CLAUDE_DIR/.credentials.json" ]]; then
     ok "Claude Code credentials found"
+  elif [[ "$SKIP_CLAUDE_LOGIN" == "true" || "$NON_INTERACTIVE" == "true" ]]; then
+    warn "Claude Code is not authenticated. Skipping interactive login."
+    echo "  Run 'claude auth login' later if this server should run Claude sessions."
   else
     warn "Claude Code is not authenticated."
     echo "  Running 'claude auth login' -- this will open your browser."
@@ -366,6 +383,9 @@ else
   CODEX_AUTH_FILE="$HOME/.codex/auth.json"
   if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
     ok "OpenAI Codex credentials found"
+  elif [[ "$SKIP_CODEX_LOGIN" == "true" || "$NON_INTERACTIVE" == "true" ]]; then
+    warn "OpenAI Codex is not authenticated. Skipping interactive login."
+    echo "  Run 'codex login --device-auth' later if this server should run Codex sessions."
   else
     warn "OpenAI Codex is not authenticated."
     echo "  Running 'codex login --device-auth'."

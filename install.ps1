@@ -12,16 +12,27 @@
     Server port (default: 8085).
 .PARAMETER Backends
     Agent backend selection: claude, codex, or both. If omitted, the installer prompts.
+.PARAMETER NonInteractive
+    Do not prompt for input. Requires -Backends and skips interactive auth login prompts.
+.PARAMETER SkipClaudeLogin
+    Do not run interactive Claude login if credentials are missing.
+.PARAMETER SkipCodexLogin
+    Do not run interactive Codex login if credentials are missing.
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1 -Backends codex
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File install.ps1 -Backends claude -NonInteractive -SkipClaudeLogin
 #>
 
 param(
     [switch]$ResetPairing,
     [int]$Port = 8085,
-    [string]$Backends = ""
+    [string]$Backends = "",
+    [switch]$NonInteractive,
+    [switch]$SkipClaudeLogin,
+    [switch]$SkipCodexLogin
 )
 
 $ErrorActionPreference = "Stop"
@@ -349,6 +360,10 @@ if ($portInUse) {
 
 Write-Phase "Backend Selection"
 if (-not $Backends) {
+    if ($NonInteractive) {
+        Write-Fail "NonInteractive mode requires -Backends claude, -Backends codex, or -Backends both."
+        exit 1
+    }
     Write-Host "  Which agent backend(s) should this server use?"
     Write-Host "    1) Codex only"
     Write-Host "    2) Claude only"
@@ -524,6 +539,9 @@ if (-not $installClaude) {
 
     if ($isAuthenticated) {
         Write-Ok "Claude Code credentials found"
+    } elseif ($SkipClaudeLogin -or $NonInteractive) {
+        Write-Warn "Claude Code is not authenticated. Skipping interactive login."
+        Write-Host "  Run 'claude auth login' later if this server should run Claude sessions."
     } else {
         Write-Warn "Claude Code is not authenticated."
         Write-Host "  Running 'claude auth login' -- this will open your browser."
@@ -612,6 +630,9 @@ if (-not $installCodex) {
 
     if ($codexAuthed) {
         Write-Ok "OpenAI Codex credentials found"
+    } elseif ($SkipCodexLogin -or $NonInteractive) {
+        Write-Warn "OpenAI Codex is not authenticated. Skipping interactive login."
+        Write-Host "  Run 'codex login --device-auth' later if this server should run Codex sessions."
     } else {
         Write-Warn "OpenAI Codex is not authenticated."
         Write-Host "  Running 'codex login --device-auth'."

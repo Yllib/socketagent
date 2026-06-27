@@ -4,6 +4,7 @@ import * as path from "path";
 import { spawnSync } from "child_process";
 import type { CodexDriver } from "./protocol";
 import { buildCodexSpawn } from "./codex-env";
+import { resolveClientPath } from "./path-utils";
 
 export interface ServerSettings {
   codexDriver: CodexDriver;
@@ -13,7 +14,7 @@ export interface ServerSettings {
 const STORE_DIR = path.join(process.env.HOME || os.homedir(), ".claude-assistant");
 const SETTINGS_FILE = path.join(STORE_DIR, "server-settings.json");
 const DEFAULT_CODEX_DRIVER: CodexDriver = "app-server";
-const BOOT_DEFAULT_CWD = path.resolve(process.env.DEFAULT_CWD || process.cwd());
+const BOOT_DEFAULT_CWD = resolveClientPath(process.env.DEFAULT_CWD || process.cwd()).resolvedPath || path.resolve(process.cwd());
 const CODEX_DRIVER_CACHE_MS = 5000;
 
 let cachedSettings: ServerSettings | null = null;
@@ -33,7 +34,7 @@ function normalizeDriver(value: unknown): CodexDriver {
 
 function normalizeDefaultCwd(value: unknown): string {
   if (typeof value !== "string" || value.trim() === "") return BOOT_DEFAULT_CWD;
-  return path.resolve(value.trim());
+  return resolveClientPath(value).resolvedPath || BOOT_DEFAULT_CWD;
 }
 
 export function loadServerSettings(): ServerSettings {

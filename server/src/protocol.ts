@@ -124,11 +124,13 @@ export interface LoadMoreHistoryMessage {
 export interface CheckCwdMessage {
   type: "check_cwd";
   path: string;
+  requestId?: string;
 }
 
 export interface CreateCwdMessage {
   type: "create_cwd";
   path: string;
+  requestId?: string;
 }
 
 export interface FileManagerListMessage {

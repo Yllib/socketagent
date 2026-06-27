@@ -4,6 +4,7 @@ dotenv.config({ path: require("path").join(__dirname, "..", ".env") });
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as http from "http";
+import * as os from "os";
 import * as path from "path";
 import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
@@ -22,6 +23,7 @@ import { isPushConfigured, registerPushToken, sendPushNotification } from "./pus
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 import { runBackendInstall } from "./backend-installer";
+import { getProcessHome, resolveClientPath } from "./path-utils";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -73,6 +75,62 @@ function attachAppVersionInfo(info: Record<string, any>, appVersion: AppVersionI
   // from the server version payload before app checks moved to GitHub.
   info.version = appVersion.version;
   info.url = appVersion.url;
+}
+
+function buildCwdCheck(rawPath: unknown, overrides: Record<string, any> = {}): Record<string, any> {
+  const resolved = resolveClientPath(rawPath);
+  const home = getProcessHome();
+  let user: string | undefined;
+  try {
+    user = os.userInfo().username;
+  } catch {
+    user = undefined;
+  }
+
+  const base = {
+    type: "cwd_check",
+    path: resolved.inputPath,
+    expandedPath: resolved.expandedPath,
+    resolvedPath: resolved.resolvedPath,
+    exists: false,
+    isDirectory: false,
+    platform: process.platform,
+    serverCwd: process.cwd(),
+    home,
+    user,
+  };
+
+  if (!resolved.inputPath) {
+    return { ...base, error: "No path provided", ...overrides };
+  }
+
+  try {
+    const stat = fs.statSync(resolved.resolvedPath);
+    const isDirectory = stat.isDirectory();
+    return {
+      ...base,
+      exists: true,
+      isDirectory,
+      error: isDirectory ? undefined : "Path exists but is not a directory",
+      ...overrides,
+    };
+  } catch (e: any) {
+    return {
+      ...base,
+      error: e?.message || String(e),
+      errorCode: e?.code,
+      ...overrides,
+    };
+  }
+}
+
+function sendCwdCheck(sendJson: (payload: any) => void, rawPath: unknown, overrides: Record<string, any> = {}): Record<string, any> {
+  const payload = buildCwdCheck(rawPath, overrides);
+  const ok = payload.exists === true && payload.isDirectory === true;
+  const reason = payload.errorCode || payload.error || (payload.exists ? "not_directory" : "missing");
+  console.log(`[cwd_check] ${ok ? "ok" : "fail"} path="${payload.path}" resolved="${payload.resolvedPath}" reason="${reason}" user="${payload.user || ""}" home="${payload.home || ""}"`);
+  sendJson(payload);
+  return payload;
 }
 
 // ── .env migrations (run once on startup, before reading config) ──
@@ -2838,32 +2896,29 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "check_cwd": {
         const checkPath = (msg as any).path as string;
-        const exists = checkPath ? fs.existsSync(checkPath) : false;
-        sendJson({
-          type: "cwd_check",
-          path: checkPath,
-          exists,
-        });
+        const requestId = (msg as any).requestId;
+        sendCwdCheck(sendJson, checkPath, typeof requestId === "string" ? { requestId } : {});
         break;
       }
 
       case "create_cwd": {
         const createPath = (msg as any).path as string;
-        if (!createPath) {
-          sendJson({ type: "error", message: "No path provided" });
+        const requestId = (msg as any).requestId;
+        const responseMeta = typeof requestId === "string" ? { requestId } : {};
+        const resolved = resolveClientPath(createPath);
+        if (!resolved.inputPath) {
+          sendCwdCheck(sendJson, createPath, responseMeta);
           break;
         }
         try {
-          fs.mkdirSync(createPath, { recursive: true });
-          sendJson({
-            type: "cwd_check",
-            path: createPath,
-            exists: true,
-          });
+          fs.mkdirSync(resolved.resolvedPath, { recursive: true });
+          sendCwdCheck(sendJson, createPath, { ...responseMeta, created: true });
         } catch (e: any) {
-          sendJson({
-            type: "error",
-            message: `Failed to create directory: ${e.message}`,
+          sendCwdCheck(sendJson, createPath, {
+            ...responseMeta,
+            createFailed: true,
+            error: `Failed to create directory: ${e?.message || String(e)}`,
+            errorCode: e?.code,
           });
         }
         break;

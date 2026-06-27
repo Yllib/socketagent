@@ -271,6 +271,13 @@ function withConversationTurnCount(session: SessionInfo): SessionInfo {
   };
 }
 
+function withCachedTurnCount(session: SessionInfo): SessionInfo {
+  return {
+    ...session,
+    turnCount: normalizedTurnCount((session as any).turnCount) ?? 0,
+  };
+}
+
 function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
   ensureHistoryDir();
   const file = historyFile(sessionId);
@@ -1340,8 +1347,9 @@ export function isCodexNativeArchiveTs(ts: string): boolean {
 const CODEX_THREAD_LIST_SOURCE_KINDS = ["cli", "vscode", "appServer", "unknown"];
 const CODEX_THREAD_LOOKUP_SOURCE_KINDS = ["cli", "exec", "vscode", "appServer", "unknown"];
 const CODEX_THREAD_LIST_LIMIT = 500;
-const CLAUDE_NATIVE_LIST_LIMIT = 500;
-const CODEX_NATIVE_LIST_CACHE_MS = 10_000;
+const CLAUDE_NATIVE_CWD_LIMIT = 20;
+const CLAUDE_NATIVE_SESSIONS_PER_CWD = 75;
+const CODEX_NATIVE_LIST_CACHE_MS = 300_000;
 
 let codexNativeSessionsCache:
   | { at: number; sessions: SessionInfo[] }
@@ -1486,6 +1494,7 @@ async function listCodexNativeSessionsFromAppServer(useCache = true): Promise<Se
   if (useCache && codexNativeSessionsCache && nowMs - codexNativeSessionsCache.at < CODEX_NATIVE_LIST_CACHE_MS) {
     return codexNativeSessionsCache.sessions;
   }
+  if (useCache) return [];
 
   const stored = readStore();
   const storedById = new Map(stored.map((s) => [s.id, s]));
@@ -1548,7 +1557,7 @@ function sdkSessionInfoToSessionInfo(info: SDKSessionInfo, tracked?: SessionInfo
     "Claude session"
   );
 
-  return withConversationTurnCount({
+  return withCachedTurnCount({
     ...tracked,
     id: info.sessionId,
     title: title || "Claude session",
@@ -1566,12 +1575,24 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
     return claudeNativeSessionsCache.sessions;
   }
 
-  const storedById = new Map(readStore().map((s) => [s.id, s]));
-  const sdkSessions = await sdkListSessions({ limit: CLAUDE_NATIVE_LIST_LIMIT });
+  const stored = readStore();
+  const storedById = new Map(stored.map((s) => [s.id, s]));
+  const cwdCandidates = claudeNativeCwdCandidates();
   const deduped = new Map<string, SessionInfo>();
-  for (const info of sdkSessions) {
-    const session = sdkSessionInfoToSessionInfo(info, storedById.get(info.sessionId));
-    if (session) deduped.set(session.id, session);
+  for (const cwd of cwdCandidates) {
+    try {
+      const sdkSessions = await sdkListSessions({
+        dir: cwd,
+        limit: CLAUDE_NATIVE_SESSIONS_PER_CWD,
+        includeWorktrees: true,
+      });
+      for (const info of sdkSessions) {
+        const session = sdkSessionInfoToSessionInfo(info, storedById.get(info.sessionId));
+        if (session) deduped.set(session.id, session);
+      }
+    } catch (err: any) {
+      console.warn(`[SdkSessions] Native Claude listSessions failed for ${cwd}: ${err?.message || err}`);
+    }
   }
   const sessions = [...deduped.values()]
     .sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
@@ -1579,10 +1600,21 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
   return sessions;
 }
 
+function claudeNativeCwdCandidates(): string[] {
+  const seen = new Set<string>();
+  const add = (cwd: unknown) => {
+    if (typeof cwd !== "string" || cwd.trim() === "") return;
+    seen.add(path.resolve(cwd.trim()));
+  };
+  for (const cwd of getRecentCwds()) add(cwd);
+  add(getDefaultProcessCwd());
+  return [...seen].slice(0, CLAUDE_NATIVE_CWD_LIMIT);
+}
+
 function mergeClaudeNativeSession(existing: SessionInfo, nativeSession: SessionInfo): SessionInfo {
   const recentPreview = latestConversationPreviewForSession(existing.id);
   const existingTitle = existing.title && existing.title !== "Untitled" ? existing.title : "";
-  return withConversationTurnCount({
+  return withCachedTurnCount({
     ...nativeSession,
     ...existing,
     title: existingTitle || nativeSession.title,
@@ -1600,7 +1632,7 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
     native = await listCodexNativeSessionsFromAppServer(useCache);
   } catch (err: any) {
     console.warn(`[CodexThreads] native session list failed: ${err?.message || String(err)}`);
-    return stored.map(withConversationTurnCount);
+    return stored.map(withCachedTurnCount);
   }
 
   const nativeById = new Map(native.map((s) => [s.id, s]));
@@ -1628,6 +1660,8 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
     }
 
     if (
+      native.length > 0
+      &&
       session.backend === "codex"
       && (session as any).codexDriver === "app-server"
       && !(session as any).contextClearedAt
@@ -1638,10 +1672,10 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
       continue;
     }
 
-    merged.push(withConversationTurnCount(session));
+    merged.push(withCachedTurnCount(session));
   }
 
-  merged.push(...Array.from(nativeById.values()).map(withConversationTurnCount));
+  merged.push(...Array.from(nativeById.values()).map(withCachedTurnCount));
   return merged.sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
 }
 

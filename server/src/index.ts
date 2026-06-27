@@ -433,10 +433,9 @@ function isContextClearedSession(sessionInfo: SessionInfo | undefined, sessionId
 
 async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> {
   if (sessionInfo.backend !== "codex") return [];
-  const driver = getStoredCodexDriver(sessionInfo);
   const rolloutHistory = readCodexRolloutHistory(sessionInfo.id);
   let appServerHistory: any[] = [];
-  if (driver === "app-server" || rolloutHistory.length === 0) {
+  if (rolloutHistory.length === 0) {
     appServerHistory = await readCodexAppServerThreadHistory(sessionInfo.id);
   }
   const nativeHistory = appServerHistory.length > rolloutHistory.length

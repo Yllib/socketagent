@@ -1388,7 +1388,7 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({ type: "error", message: "No cwd provided for list_sdk_sessions" });
           break;
         }
-        const claudeSessions = listSdkSessions(cwd);
+        const claudeSessions = await listSdkSessions(cwd);
         let codexSessions;
         try {
           codexSessions = await listCodexNativeSdkSessions(cwd);

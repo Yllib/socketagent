@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { execFileSync } from "child_process";
+import { listSessions as sdkListSessions, type SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
 import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
@@ -1738,13 +1739,73 @@ function loadPromptHistory(cwd: string): Map<string, string> {
   return map;
 }
 
+function isoFromMs(ms: number | undefined, fallbackMs: number): string {
+  const value = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : fallbackMs;
+  return new Date(value).toISOString();
+}
+
+function buildTrackedClaudeMap(): Map<string, SessionInfo> {
+  const store = readStore();
+  const trackedMap = new Map<string, SessionInfo>();
+  for (const s of store) {
+    if ((s.backend ?? "claude") === "claude") trackedMap.set(s.id, s);
+  }
+  return trackedMap;
+}
+
+function sdkSessionInfoToEntry(info: SDKSessionInfo, trackedMap: Map<string, SessionInfo>): SdkSessionEntry | null {
+  if (!info.sessionId) return null;
+  const tracked = trackedMap.get(info.sessionId);
+  const fallbackMs = Date.now();
+  const lastModified = typeof info.lastModified === "number" ? info.lastModified : fallbackMs;
+  const preview =
+    tracked?.messagePreview ||
+    tracked?.title ||
+    info.firstPrompt ||
+    info.summary ||
+    "Untitled";
+
+  return {
+    sessionId: info.sessionId,
+    firstMessage: preview.slice(0, 200),
+    createdAt: tracked?.createdAt || isoFromMs(info.createdAt, lastModified),
+    lastActive: tracked?.lastActive || isoFromMs(info.lastModified, fallbackMs),
+    tracked: !!tracked,
+    backend: "claude",
+  };
+}
+
 /**
- * List Claude Code SDK sessions for a given CWD.
- * Scans ~/.claude/projects/-{cwd-sanitized}/ for JSONL files.
- * Uses ~/.claude/history.jsonl for session preview text.
- * Includes both tracked (already in SocketAgent store) and untracked sessions.
+ * List Claude Code SDK sessions for a given CWD using Claude's native session
+ * index. The SDK includes git worktree paths by default, which avoids stale
+ * results from guessing Claude's on-disk project directory names ourselves.
  */
-export function listSdkSessions(cwd: string, limit = 30): SdkSessionEntry[] {
+export async function listSdkSessions(cwd: string, limit = 30): Promise<SdkSessionEntry[]> {
+  try {
+    const trackedMap = buildTrackedClaudeMap();
+    const sdkSessions = await sdkListSessions({
+      dir: cwd,
+      limit,
+      includeWorktrees: true,
+    });
+    const deduped = new Map<string, SdkSessionEntry>();
+    for (const info of sdkSessions) {
+      const entry = sdkSessionInfoToEntry(info, trackedMap);
+      if (entry) deduped.set(entry.sessionId, entry);
+    }
+    return [...deduped.values()]
+      .sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime())
+      .slice(0, limit);
+  } catch (err: any) {
+    console.warn(`[SdkSessions] Native Claude listSessions failed for ${cwd}: ${err?.message || err}`);
+    return listSdkSessionsFromFiles(cwd, limit);
+  }
+}
+
+/**
+ * Legacy fallback for older SDK failures. Scans ~/.claude/projects directly.
+ */
+function listSdkSessionsFromFiles(cwd: string, limit = 30): SdkSessionEntry[] {
   const homeDir = process.env.HOME || require("os").homedir();
   const projectDir = sanitizeCwdToProjectDir(cwd);
   const projectPath = path.join(homeDir, ".claude", "projects", projectDir);
@@ -1760,11 +1821,7 @@ export function listSdkSessions(cwd: string, limit = 30): SdkSessionEntry[] {
   }
 
   // Build lookup of tracked sessions for this CWD
-  const store = readStore();
-  const trackedMap = new Map<string, SessionInfo>();
-  for (const s of store) {
-    if (s.cwd === cwd) trackedMap.set(s.id, s);
-  }
+  const trackedMap = buildTrackedClaudeMap();
 
   // Load prompt history from ~/.claude/history.jsonl
   const promptHistory = loadPromptHistory(cwd);

@@ -700,6 +700,7 @@ function createConnectionHandler(transport: ClientTransport) {
       const fingerprint = nativeHistoryFingerprintForSession(sessionInfo);
       const fileChanged = !!fingerprint && fingerprint !== externalNativeWatchFingerprint;
       if (fingerprint) externalNativeWatchFingerprint = fingerprint;
+      if (!fileChanged) return;
 
       const added = syncExternalNativeHistory(sessionInfo);
       if (added.length > 0) {

@@ -28,6 +28,8 @@ SocketAgent command line
 
 Usage:
   socketagent pair [--raw]        Show pairing QR or raw pairing payload
+  socketagent direct [--json]     Show direct/manual IP connection settings
+  socketagent token               Show direct/manual auth token only
   socketagent install [args...]   Re-run server installer, e.g. --backends both
   socketagent status              Show server service status
   socketagent logs                Follow server logs
@@ -43,6 +45,12 @@ if [[ $# -gt 0 ]]; then shift; fi
 case "$cmd" in
   pair|qr)
     exec node "$SERVER_DIR/scripts/show-pairing.js" "$@"
+    ;;
+  direct|manual)
+    exec node "$SERVER_DIR/scripts/show-direct-auth.js" "$@"
+    ;;
+  token|auth-token|authtoken)
+    exec node "$SERVER_DIR/scripts/show-direct-auth.js" --raw
     ;;
   install|setup)
     exec "$REPO_ROOT/install-server.sh" "$@"

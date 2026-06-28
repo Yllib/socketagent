@@ -21,6 +21,8 @@ function Show-Usage {
     Write-Host ""
     Write-Host "Usage:"
     Write-Host "  socketagent pair [--raw]        Show pairing QR or raw pairing payload"
+    Write-Host "  socketagent direct [--json]     Show direct/manual IP connection settings"
+    Write-Host "  socketagent token               Show direct/manual auth token only"
     Write-Host "  socketagent install [args...]   Re-run installer, e.g. -Backends both"
     Write-Host "  socketagent status              Show scheduled task status"
     Write-Host "  socketagent logs                Follow server logs"
@@ -35,6 +37,14 @@ $rest = if ($Args.Count -gt 1) { $Args[1..($Args.Count - 1)] } else { @() }
 switch ($cmd.ToLowerInvariant()) {
     { $_ -in @("pair", "qr") } {
         & node (Join-Path $serverDir "scripts\show-pairing.js") @rest
+        exit $LASTEXITCODE
+    }
+    { $_ -in @("direct", "manual") } {
+        & node (Join-Path $serverDir "scripts\show-direct-auth.js") @rest
+        exit $LASTEXITCODE
+    }
+    { $_ -in @("token", "auth-token", "authtoken") } {
+        & node (Join-Path $serverDir "scripts\show-direct-auth.js") "--raw"
         exit $LASTEXITCODE
     }
     { $_ -in @("install", "setup") } {

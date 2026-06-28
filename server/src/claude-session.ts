@@ -26,6 +26,15 @@ import {
 } from "./app-tool-handlers";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep } from "./secure-input-store";
+import { legacyManagedNpmBinDir, managedNpmBinDir } from "./socket-agent-paths";
+
+export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
+
+export interface ClaudeExecutableInfo {
+  path?: string;
+  source: ClaudeExecutableSource;
+  reason?: string;
+}
 
 function existingFile(filePath: string | undefined): string | undefined {
   if (!filePath) return undefined;
@@ -82,14 +91,52 @@ function resolveInstalledClaudeCli(): string | undefined {
   return candidates.map(existingFile).find(Boolean);
 }
 
-const CLAUDE_BINARY_OVERRIDE: string | undefined = (() => {
+function resolveManagedClaudeCli(): { path?: string; source?: ClaudeExecutableSource } {
+  const names = process.platform === "win32"
+    ? ["claude.cmd", "claude.exe", "claude.bat", "claude"]
+    : ["claude"];
+  for (const name of names) {
+    const managed = existingFile(path.join(managedNpmBinDir(), name));
+    if (managed) return { path: managed, source: "managed" };
+  }
+  for (const name of names) {
+    const legacy = existingFile(path.join(legacyManagedNpmBinDir(), name));
+    if (legacy) return { path: legacy, source: "legacy" };
+  }
+  return {};
+}
+
+function resolveClaudeExecutable(): ClaudeExecutableInfo {
   const explicit =
     existingFile(process.env.CLAUDE_CODE_EXECUTABLE) ||
     existingFile(process.env.CLAUDE_CODE_PATH);
-  return explicit || resolveSdkClaudeBinary() || resolveInstalledClaudeCli();
-})();
+  if (explicit) return { path: explicit, source: "explicit" };
+
+  const sdk = resolveSdkClaudeBinary();
+  if (sdk) return { path: sdk, source: "sdk" };
+
+  const managed = resolveManagedClaudeCli();
+  if (managed.path) return { path: managed.path, source: managed.source || "managed" };
+
+  const installed = resolveInstalledClaudeCli();
+  if (installed) return { path: installed, source: "system" };
+
+  return {
+    source: "unresolved",
+    reason: "No Claude executable was found in the SDK, SocketAgent toolchain, or PATH",
+  };
+}
+
+const CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
+const CLAUDE_BINARY_OVERRIDE: string | undefined = CLAUDE_EXECUTABLE_INFO.path;
 if (CLAUDE_BINARY_OVERRIDE) {
-  console.log(`[SDK] Using Claude executable: ${CLAUDE_BINARY_OVERRIDE}`);
+  console.log(`[SDK] Using Claude executable (${CLAUDE_EXECUTABLE_INFO.source}): ${CLAUDE_BINARY_OVERRIDE}`);
+} else if (CLAUDE_EXECUTABLE_INFO.reason) {
+  console.warn(`[SDK] ${CLAUDE_EXECUTABLE_INFO.reason}`);
+}
+
+export function getClaudeExecutableInfo(): ClaudeExecutableInfo {
+  return { ...CLAUDE_EXECUTABLE_INFO };
 }
 
 interface PendingQuestion {

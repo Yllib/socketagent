@@ -7,11 +7,9 @@ import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./cod
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
 import { buildCodexSpawn } from "./codex-env";
 import { redactSecretsDeep } from "./secure-input-store";
+import { socketAgentDataPath } from "./socket-agent-paths";
 
-const STORE_DIR = path.join(
-  process.env.HOME || require("os").homedir(),
-  ".claude-assistant"
-);
+const STORE_DIR = socketAgentDataPath();
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
 const HISTORY_DIR = path.join(STORE_DIR, "history");
 const ARCHIVED_SESSION_IDS_FILE = path.join(STORE_DIR, "archived-session-ids.json");

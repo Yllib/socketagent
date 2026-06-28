@@ -4,6 +4,7 @@ import * as path from "path";
 import { spawn } from "child_process";
 import type { Backend } from "./protocol";
 import { buildCodexSpawn } from "./codex-env";
+import { managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 
 export type BackendInstallPhase = "install" | "auth" | "probe";
 export type BackendInstallStatus = "running" | "completed" | "failed";
@@ -30,16 +31,20 @@ function commandName(base: string): string {
   return process.platform === "win32" ? `${base}.cmd` : base;
 }
 
+function pathKey(env: NodeJS.ProcessEnv): string {
+  return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
+}
+
 function installEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  if (process.platform !== "win32") {
-    const home = env.HOME || os.homedir();
-    const prefix = env.NPM_CONFIG_PREFIX || path.join(home, ".local", "share", "socketagent", "npm-global");
-    const binDir = path.join(prefix, "bin");
-    fs.mkdirSync(binDir, { recursive: true });
-    env.NPM_CONFIG_PREFIX = prefix;
-    env.PATH = env.PATH ? `${binDir}${path.delimiter}${env.PATH}` : binDir;
-  }
+  const prefix = managedNpmPrefix(env);
+  const binDir = managedNpmBinDir(env);
+  fs.mkdirSync(binDir, { recursive: true });
+  env.NPM_CONFIG_PREFIX = prefix;
+  const key = pathKey(env);
+  const currentPath = env[key] || env.PATH || "";
+  env[key] = currentPath ? `${binDir}${path.delimiter}${currentPath}` : binDir;
+  if (key !== "PATH") env.PATH = env[key];
   return env;
 }
 
@@ -128,7 +133,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
     options.onProgress({
       phase: "install",
       status: "running",
-      message: "Installing latest OpenAI Codex CLI...",
+      message: `Installing latest OpenAI Codex CLI into ${managedNpmPrefix(env)}...`,
     });
     await runProcess({
       command: commandName("npm"),

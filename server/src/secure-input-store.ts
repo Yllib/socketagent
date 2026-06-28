@@ -2,6 +2,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { socketAgentDataPath } from "./socket-agent-paths";
 import type { ServerMessage } from "./protocol";
 
 export type SecureInputScope = "session" | "project" | "global";
@@ -43,7 +44,7 @@ interface PendingSecureInput {
   timer: NodeJS.Timeout;
 }
 
-const STORE_DIR = path.join(os.homedir(), ".claude-assistant", "secrets");
+const STORE_DIR = socketAgentDataPath("secrets");
 const pendingRequests = new Map<string, PendingSecureInput>();
 const secretValues = new Set<string>();
 let loadedExistingSecrets = false;

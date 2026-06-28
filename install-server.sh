@@ -46,18 +46,21 @@ done
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$REPO_ROOT/server"
 ENV_FILE="$SERVER_DIR/.env"
-DATA_DIR="$HOME/.claude-assistant"
+SOCKET_AGENT_HOME="${SOCKET_AGENT_HOME:-$HOME/.socket-agent}"
+DATA_DIR="${SOCKETAGENT_DATA_DIR:-$SOCKET_AGENT_HOME}"
+LEGACY_DATA_DIR="$HOME/.claude-assistant"
 KEYS_FILE="$DATA_DIR/relay-keys.json"
 SETUP_SCRIPT="$SERVER_DIR/scripts/setup.js"
 USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
-NPM_GLOBAL_DIR="${SOCKETAGENT_NPM_GLOBAL_DIR:-$HOME/.local/share/socketagent/npm-global}"
+NPM_GLOBAL_DIR="${SOCKETAGENT_NPM_GLOBAL_DIR:-$SOCKET_AGENT_HOME/toolchains/npm-global}"
+NPM_BIN_DIR="$NPM_GLOBAL_DIR/bin"
 
 if [[ -x "$USER_NODE_DIR/bin/node" ]]; then
   export PATH="$USER_NODE_DIR/bin:$PATH"
 fi
-mkdir -p "$NPM_GLOBAL_DIR/bin"
-export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$NPM_GLOBAL_DIR}"
-export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+mkdir -p "$NPM_BIN_DIR"
+export NPM_CONFIG_PREFIX="$NPM_GLOBAL_DIR"
+export PATH="$NPM_BIN_DIR:$PATH"
 
 # Colors
 RED='\033[0;31m'
@@ -307,17 +310,19 @@ phase "Phase 2: Claude Code CLI"
 if [[ "$INSTALL_CLAUDE" != "true" ]]; then
   ok "Skipped (Claude not selected)"
 else
-  if command -v claude &>/dev/null; then
-    CLAUDE_VER=$(claude --version 2>/dev/null || echo "unknown")
-    ok "Claude Code CLI already installed ($CLAUDE_VER)"
+  CLAUDE_BIN="$NPM_BIN_DIR/claude"
+  if [[ -x "$CLAUDE_BIN" || -f "$CLAUDE_BIN" ]]; then
+    CLAUDE_VER=$("$CLAUDE_BIN" --version 2>/dev/null || echo "unknown")
+    ok "Managed Claude Code CLI already installed ($CLAUDE_VER)"
   else
-    echo "  Installing Claude Code CLI..."
-    npm install -g @anthropic-ai/claude-code
-    if ! command -v claude &>/dev/null; then
-      fail "Claude Code CLI installation failed. Try: npm install -g @anthropic-ai/claude-code"
+    echo "  Installing managed Claude Code CLI..."
+    npm install -g --include=optional @anthropic-ai/claude-code@latest
+    hash -r 2>/dev/null
+    if [[ ! -x "$CLAUDE_BIN" && ! -f "$CLAUDE_BIN" ]]; then
+      fail "Claude Code CLI installation failed in $NPM_GLOBAL_DIR"
       exit 1
     fi
-    ok "Claude Code CLI installed ($(claude --version 2>/dev/null))"
+    ok "Managed Claude Code CLI installed ($("$CLAUDE_BIN" --version 2>/dev/null))"
   fi
 fi
 
@@ -362,31 +367,32 @@ if [[ "$INSTALL_CODEX" != "true" ]]; then
   ok "Skipped (Codex not selected)"
 else
   NEED_CODEX_INSTALL=false
-  if command -v codex &>/dev/null; then
-    CODEX_VER=$(codex --version 2>/dev/null || echo "unknown")
-    if codex app-server --help &>/dev/null; then
-      ok "OpenAI Codex CLI already installed ($CODEX_VER)"
+  CODEX_BIN="$NPM_BIN_DIR/codex"
+  if [[ -x "$CODEX_BIN" || -f "$CODEX_BIN" ]]; then
+    CODEX_VER=$("$CODEX_BIN" --version 2>/dev/null || echo "unknown")
+    if "$CODEX_BIN" app-server --help &>/dev/null; then
+      ok "Managed OpenAI Codex CLI already installed ($CODEX_VER)"
     else
-      warn "OpenAI Codex CLI found ($CODEX_VER) but app-server is unavailable. Updating..."
+      warn "Managed OpenAI Codex CLI found ($CODEX_VER) but app-server is unavailable. Updating..."
       NEED_CODEX_INSTALL=true
     fi
   else
-    echo "  Installing OpenAI Codex CLI..."
+    echo "  Installing managed OpenAI Codex CLI..."
     NEED_CODEX_INSTALL=true
   fi
 
   if [[ "$NEED_CODEX_INSTALL" == "true" ]]; then
-    npm install -g @openai/codex
+    npm install -g --include=optional @openai/codex@latest
     hash -r 2>/dev/null
-    if ! command -v codex &>/dev/null; then
-      fail "OpenAI Codex CLI installation failed. Try: npm install -g @openai/codex"
+    if [[ ! -x "$CODEX_BIN" && ! -f "$CODEX_BIN" ]]; then
+      fail "OpenAI Codex CLI installation failed in $NPM_GLOBAL_DIR"
       exit 1
     fi
-    if ! codex app-server --help &>/dev/null; then
-      fail "OpenAI Codex CLI installed, but 'codex app-server' is unavailable. Try: npm install -g @openai/codex@latest"
+    if ! "$CODEX_BIN" app-server --help &>/dev/null; then
+      fail "OpenAI Codex CLI installed, but 'codex app-server' is unavailable."
       exit 1
     fi
-    ok "OpenAI Codex CLI installed ($(codex --version 2>/dev/null))"
+    ok "Managed OpenAI Codex CLI installed ($("$CODEX_BIN" --version 2>/dev/null))"
   fi
 fi
 
@@ -454,6 +460,18 @@ IS_UPGRADE=false
 [[ -f "$ENV_FILE" ]] && IS_UPGRADE=true
 
 # Ensure data directory exists for keys file
+if [[ -d "$LEGACY_DATA_DIR" && "$DATA_DIR" != "$LEGACY_DATA_DIR" ]]; then
+  if [[ -e "$DATA_DIR" && "$(realpath "$DATA_DIR" 2>/dev/null)" == "$(realpath "$LEGACY_DATA_DIR" 2>/dev/null)" ]]; then
+    :
+  elif [[ ! -e "$DATA_DIR" ]]; then
+    mv "$LEGACY_DATA_DIR" "$DATA_DIR"
+    ln -s "$DATA_DIR" "$LEGACY_DATA_DIR" 2>/dev/null || true
+    ok "Migrated SocketAgent data to $DATA_DIR"
+  else
+    cp -an "$LEGACY_DATA_DIR"/. "$DATA_DIR"/ 2>/dev/null || true
+    ok "Merged legacy SocketAgent data into $DATA_DIR"
+  fi
+fi
 mkdir -p "$DATA_DIR"
 
 # Run from server dir so require('tweetnacl') resolves
@@ -491,12 +509,7 @@ mkdir -p "$SERVICE_DIR"
 
 NODE_DIR=$(dirname "$NODE_PATH")
 SERVICE_PATH="$NODE_DIR"
-if command -v claude &>/dev/null; then
-  SERVICE_PATH="$SERVICE_PATH:$(dirname "$(command -v claude)")"
-fi
-if command -v codex &>/dev/null; then
-  SERVICE_PATH="$SERVICE_PATH:$(dirname "$(command -v codex)")"
-fi
+SERVICE_PATH="$SERVICE_PATH:$NPM_BIN_DIR"
 SERVICE_PATH="$SERVICE_PATH:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 cat > "$SERVICE_FILE" << EOF
 [Unit]

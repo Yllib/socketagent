@@ -45,7 +45,10 @@ if [[ -z "${_RESTART_DETACHED:-}" ]]; then
   exit 0
 fi
 
-STORE_DIR="$HOME/.claude-assistant"
+STORE_DIR="${SOCKETAGENT_DATA_DIR:-$HOME/.socket-agent}"
+if [[ ! -d "$STORE_DIR" && -d "$HOME/.claude-assistant" ]]; then
+  STORE_DIR="$HOME/.claude-assistant"
+fi
 SESSIONS_FILE="$STORE_DIR/sessions.json"
 HISTORY_DIR="$STORE_DIR/history"
 SERVER_DIR="$(cd "$(dirname "$0")/.." && pwd)"

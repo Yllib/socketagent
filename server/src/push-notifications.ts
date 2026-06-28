@@ -1,8 +1,8 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
+import { socketAgentDataPath } from "./socket-agent-paths";
 
 interface StoredPushToken {
   token: string;
@@ -19,7 +19,7 @@ export interface PushNotificationPayload {
 }
 
 const STORE_PATH = process.env.PUSH_TOKEN_STORE
-  || path.join(os.homedir(), ".claude-assistant", "push-tokens.json");
+  || socketAgentDataPath("push-tokens.json");
 
 let firebaseReady: boolean | null = null;
 

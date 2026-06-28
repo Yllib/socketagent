@@ -93,10 +93,7 @@ assert.strictEqual(appServer[1].toolName, "Bash");
 assert.strictEqual(appServer[2].content, "(no output)");
 
 withTempHome((home) => {
-  const sessionStorePath = require.resolve("../dist/session-store");
-  delete require.cache[sessionStorePath];
-  const { appendNativeHistorySuffix } = require("../dist/session-store");
-  const historyDir = path.join(home, ".claude-assistant", "history");
+  const historyDir = path.join(home, ".socket-agent", "history");
   fs.mkdirSync(historyDir, { recursive: true });
   const sid = "suffix-test";
   const historyFile = path.join(historyDir, `${sid}.json`);
@@ -104,6 +101,9 @@ withTempHome((home) => {
     { role: "user", content: "hello", timestamp: "2026-01-01T00:00:00.000Z" },
     { role: "assistant", content: "hi", timestamp: "2026-01-01T00:00:01.000Z" },
   ]));
+  const sessionStorePath = require.resolve("../dist/session-store");
+  delete require.cache[sessionStorePath];
+  const { appendNativeHistorySuffix } = require("../dist/session-store");
 
   const toolOnly = appendNativeHistorySuffix(sid, [
     { role: "user", content: "hello", timestamp: "2026-01-01T00:00:00.000Z" },

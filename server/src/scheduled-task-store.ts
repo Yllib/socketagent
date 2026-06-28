@@ -1,11 +1,9 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { Backend, CodexDriver } from "./protocol";
+import { socketAgentDataPath } from "./socket-agent-paths";
 
-const STORE_DIR = path.join(
-  process.env.HOME || require("os").homedir(),
-  ".claude-assistant"
-);
+const STORE_DIR = socketAgentDataPath();
 const TASKS_FILE = path.join(STORE_DIR, "scheduled-tasks.json");
 
 export interface RecurrenceConfig {

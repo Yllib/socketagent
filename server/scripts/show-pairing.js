@@ -8,8 +8,14 @@ const qrcode = require("qrcode-terminal");
 const serverDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(serverDir, "..");
 const envFile = process.env.SOCKETAGENT_ENV || path.join(serverDir, ".env");
+const dataDir = process.env.SOCKETAGENT_DATA_DIR
+  || process.env.SOCKET_AGENT_DATA_DIR
+  || path.join(os.homedir(), ".socket-agent");
 const legacyDataDir = path.join(os.homedir(), ".claude-assistant");
-const keysFile = process.env.SOCKETAGENT_KEYS_FILE || path.join(legacyDataDir, "relay-keys.json");
+const defaultKeysFile = fs.existsSync(path.join(dataDir, "relay-keys.json"))
+  ? path.join(dataDir, "relay-keys.json")
+  : path.join(legacyDataDir, "relay-keys.json");
+const keysFile = process.env.SOCKETAGENT_KEYS_FILE || defaultKeysFile;
 
 function readEnv(file) {
   const result = {};

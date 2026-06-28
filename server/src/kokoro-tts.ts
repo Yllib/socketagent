@@ -1,11 +1,9 @@
 import * as path from "path";
 import * as fs from "fs";
-import * as os from "os";
+import { socketAgentDataPath } from "./socket-agent-paths";
 
 const MODEL_DIR = path.join(
-  os.homedir(),
-  ".claude-assistant",
-  "tts-models",
+  socketAgentDataPath("tts-models"),
   "kokoro-en-v0_19"
 );
 

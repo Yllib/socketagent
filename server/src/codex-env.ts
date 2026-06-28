@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { legacyManagedNpmBinDir, managedNpmBinDir } from "./socket-agent-paths";
 
 function pathKey(env: NodeJS.ProcessEnv): string {
   return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
@@ -17,7 +18,10 @@ function includesPathDir(pathValue: string | undefined, dir: string): boolean {
 
 function codexCandidateDirs(env: NodeJS.ProcessEnv): string[] {
   const home = env.HOME || os.homedir();
-  const dirs: string[] = [];
+  const dirs: string[] = [
+    managedNpmBinDir(env),
+    legacyManagedNpmBinDir(env),
+  ];
 
   if (process.platform === "win32") {
     const appData = env.APPDATA || (home ? path.join(home, "AppData", "Roaming") : "");
@@ -34,7 +38,6 @@ function codexCandidateDirs(env: NodeJS.ProcessEnv): string[] {
     if (programFilesX86) dirs.push(path.join(programFilesX86, "nodejs"));
   } else if (home) {
     dirs.push(
-      path.join(home, ".local", "share", "socketagent", "npm-global", "bin"),
       path.join(home, ".local", "bin"),
     );
   }

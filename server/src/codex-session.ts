@@ -2949,6 +2949,24 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
       });
     }
 
+    const appServerHelp = buildCodexSpawn(["app-server", "--help"]);
+    const appServerResult = spawnSync(appServerHelp.command, appServerHelp.args, {
+      timeout: 3000,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: appServerHelp.env,
+      shell: appServerHelp.shell,
+    });
+    if (appServerResult.error || appServerResult.status !== 0) {
+      const detail = appServerResult.error?.message || (appServerResult.stderr || appServerResult.stdout || "").trim();
+      return cache({
+        available: false,
+        reason: detail
+          ? `Codex app-server probe failed: ${detail.slice(0, 300)}`
+          : "Codex app-server probe failed",
+      });
+    }
+
     return cache({ available: true });
   } catch (e: any) {
     return cache({

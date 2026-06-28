@@ -2,7 +2,10 @@
 # Downloads the Kokoro English TTS model for sherpa-onnx
 # Model: kokoro-en-v0_19 (~330MB download)
 
-MODEL_DIR="$HOME/.claude-assistant/tts-models"
+MODEL_DIR="${SOCKETAGENT_DATA_DIR:-$HOME/.socket-agent}/tts-models"
+if [[ ! -d "$(dirname "$MODEL_DIR")" && -d "$HOME/.claude-assistant" ]]; then
+  MODEL_DIR="$HOME/.claude-assistant/tts-models"
+fi
 MODEL_NAME="kokoro-en-v0_19"
 DOWNLOAD_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/${MODEL_NAME}.tar.bz2"
 

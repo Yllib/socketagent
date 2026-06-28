@@ -49,10 +49,28 @@ $NODE_MIN_VERSION = [version]"22.0.0"
 $REPO_ROOT = $PSScriptRoot
 $SERVER_DIR = Join-Path $REPO_ROOT "server"
 $ENV_FILE = Join-Path $SERVER_DIR ".env"
-$DATA_DIR = Join-Path $env:USERPROFILE ".claude-assistant"
+$SOCKET_AGENT_HOME = if ($env:SOCKET_AGENT_HOME) { $env:SOCKET_AGENT_HOME } else { Join-Path $env:USERPROFILE ".socket-agent" }
+$DATA_DIR = if ($env:SOCKETAGENT_DATA_DIR) {
+    $env:SOCKETAGENT_DATA_DIR
+} elseif ($env:SOCKET_AGENT_DATA_DIR) {
+    $env:SOCKET_AGENT_DATA_DIR
+} else {
+    $SOCKET_AGENT_HOME
+}
+$LEGACY_DATA_DIR = Join-Path $env:USERPROFILE ".claude-assistant"
 $KEYS_FILE = Join-Path $DATA_DIR "relay-keys.json"
 $LOG_FILE = Join-Path $SERVER_DIR "socketagent.log"
 $SETUP_SCRIPT = Join-Path (Join-Path $SERVER_DIR "scripts") "setup.js"
+$NPM_GLOBAL_DIR = if ($env:SOCKETAGENT_NPM_GLOBAL_DIR) {
+    $env:SOCKETAGENT_NPM_GLOBAL_DIR
+} elseif ($env:SOCKET_AGENT_NPM_PREFIX) {
+    $env:SOCKET_AGENT_NPM_PREFIX
+} else {
+    Join-Path (Join-Path $SOCKET_AGENT_HOME "toolchains") "npm-global"
+}
+$NPM_BIN_DIR = $NPM_GLOBAL_DIR
+New-Item -ItemType Directory -Path $NPM_BIN_DIR -Force | Out-Null
+$env:NPM_CONFIG_PREFIX = $NPM_GLOBAL_DIR
 
 $currentPhase = ""
 $serverBuildDone = $false
@@ -105,7 +123,7 @@ function Add-DirectoryToPath($directory, [bool]$persistUser = $false) {
 }
 
 function Ensure-NpmGlobalBinOnPath {
-    $dirs = @()
+    $dirs = @($NPM_BIN_DIR)
     if (-not (Test-CommandExists "npm")) { return }
     $prefixResult = Invoke-NativeCapture { npm prefix -g }
     if ($prefixResult.ExitCode -eq 0) {
@@ -130,12 +148,21 @@ function Add-CommandDirectoryToPath($commandName) {
     }
 }
 
+function Get-ManagedCommandPath($commandName) {
+    $extensions = @(".cmd", ".exe", ".bat", "")
+    foreach ($ext in $extensions) {
+        $candidate = Join-Path $NPM_BIN_DIR "$commandName$ext"
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
 function Test-CommandExists($cmd) {
     $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue)
 }
 
-function Test-CodexAppServer {
-    $result = Invoke-NativeCapture { codex app-server --help }
+function Test-CodexAppServer($codexPath = "codex") {
+    $result = Invoke-NativeCapture { & $codexPath app-server --help }
     return $result.ExitCode -eq 0
 }
 
@@ -506,29 +533,31 @@ Write-Phase "Phase 2: Claude Code CLI"
 if (-not $installClaude) {
     Write-Ok "Skipped (Claude not selected)"
 } else {
-    $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
-    if ($claudeCmd) {
-        $claudeVer = & claude --version 2>$null
-        Write-Ok "Claude Code CLI already installed ($claudeVer)"
+    $claudePath = Get-ManagedCommandPath "claude"
+    if ($claudePath) {
+        $claudeVer = & $claudePath --version 2>$null
+        Write-Ok "Managed Claude Code CLI already installed ($claudeVer)"
     } else {
-        Write-Host "  Installing Claude Code CLI..."
-        $cliResult = Invoke-NativeCapture { npm install -g @anthropic-ai/claude-code }
+        Write-Host "  Installing managed Claude Code CLI..."
+        $cliResult = Invoke-NativeCapture { npm install -g --include=optional @anthropic-ai/claude-code@latest }
         $cliOutput = $cliResult.Output
         $cliExit = $cliResult.ExitCode
         $cliOutput | ForEach-Object { Write-Host "    $_" }
         if ($cliExit -ne 0) {
-            throw "npm install -g @anthropic-ai/claude-code failed (exit code $cliExit)"
+            throw "managed npm install @anthropic-ai/claude-code failed (exit code $cliExit)"
         }
 
         Refresh-Path
+        Add-DirectoryToPath $NPM_BIN_DIR $true
 
-        $claudeVer = & claude --version 2>$null
+        $claudePath = Get-ManagedCommandPath "claude"
+        $claudeVer = if ($claudePath) { & $claudePath --version 2>$null } else { $null }
         if (-not $claudeVer) {
-            throw "Claude Code CLI installation failed. Try running: npm install -g @anthropic-ai/claude-code"
+            throw "Claude Code CLI installation failed in $NPM_GLOBAL_DIR"
         }
-        Write-Ok "Claude Code CLI installed ($claudeVer)"
+        Write-Ok "Managed Claude Code CLI installed ($claudeVer)"
     }
-    Add-CommandDirectoryToPath "claude"
+    Add-DirectoryToPath $NPM_BIN_DIR $true
 }
 
 # ══════════════════════════════════════════════
@@ -597,41 +626,41 @@ if (-not $installCodex) {
     Write-Ok "Skipped (Codex not selected)"
 } else {
     $codexInstalled = $false
-    $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
-    if ($codexCmd) {
-        $codexVer = & codex --version 2>$null
-        if (Test-CodexAppServer) {
-            Write-Ok "OpenAI Codex CLI already installed ($codexVer)"
+    $codexPath = Get-ManagedCommandPath "codex"
+    if ($codexPath) {
+        $codexVer = & $codexPath --version 2>$null
+        if (Test-CodexAppServer $codexPath) {
+            Write-Ok "Managed OpenAI Codex CLI already installed ($codexVer)"
             $codexInstalled = $true
         } else {
-            Write-Warn "OpenAI Codex CLI found ($codexVer) but app-server is unavailable. Updating..."
+            Write-Warn "Managed OpenAI Codex CLI found ($codexVer) but app-server is unavailable. Updating..."
         }
     }
 
     if (-not $codexInstalled) {
-        Write-Host "  Installing OpenAI Codex CLI..."
-        $codexResult = Invoke-NativeCapture { npm install -g @openai/codex }
+        Write-Host "  Installing managed OpenAI Codex CLI..."
+        $codexResult = Invoke-NativeCapture { npm install -g --include=optional @openai/codex@latest }
         $codexOutput = $codexResult.Output
         $codexExit = $codexResult.ExitCode
         $codexOutput | ForEach-Object { Write-Host "    $_" }
         if ($codexExit -ne 0) {
-            throw "npm install -g @openai/codex failed (exit code $codexExit)"
+            throw "managed npm install @openai/codex failed (exit code $codexExit)"
         }
 
         Refresh-Path
-        Ensure-NpmGlobalBinOnPath
+        Add-DirectoryToPath $NPM_BIN_DIR $true
 
-        $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
-        if (-not $codexCmd) {
-            throw "OpenAI Codex CLI installation failed. Try running: npm install -g @openai/codex"
+        $codexPath = Get-ManagedCommandPath "codex"
+        if (-not $codexPath) {
+            throw "OpenAI Codex CLI installation failed in $NPM_GLOBAL_DIR"
         }
-        $codexVer = & codex --version 2>$null
-        if (-not (Test-CodexAppServer)) {
-            throw "OpenAI Codex CLI installed, but 'codex app-server' is unavailable. Try running: npm install -g @openai/codex@latest"
+        $codexVer = & $codexPath --version 2>$null
+        if (-not (Test-CodexAppServer $codexPath)) {
+            throw "OpenAI Codex CLI installed, but 'codex app-server' is unavailable."
         }
-        Write-Ok "OpenAI Codex CLI installed ($codexVer)"
+        Write-Ok "Managed OpenAI Codex CLI installed ($codexVer)"
     }
-    Add-CommandDirectoryToPath "codex"
+    Add-DirectoryToPath $NPM_BIN_DIR $true
 }
 
 # ══════════════════════════════════════════════
@@ -705,6 +734,26 @@ if ($ResetPairing) {
 
 $isUpgrade = Test-Path $ENV_FILE
 
+if ((Test-Path $LEGACY_DATA_DIR) -and ($DATA_DIR -ine $LEGACY_DATA_DIR)) {
+    $legacyItem = Get-Item $LEGACY_DATA_DIR -Force
+    $legacyIsLink = ($legacyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    if (-not (Test-Path $DATA_DIR)) {
+        Move-Item -Path $LEGACY_DATA_DIR -Destination $DATA_DIR
+        try {
+            New-Item -ItemType Junction -Path $LEGACY_DATA_DIR -Target $DATA_DIR -Force | Out-Null
+        } catch {
+            Write-Warn "Could not create legacy data directory junction: $($_.Exception.Message)"
+        }
+        Write-Ok "Migrated SocketAgent data to $DATA_DIR"
+    } elseif ($legacyIsLink) {
+        Write-Ok "Legacy SocketAgent data link already points to migrated data"
+    } else {
+        Copy-Item -Path (Join-Path $LEGACY_DATA_DIR "*") -Destination $DATA_DIR -Recurse -ErrorAction SilentlyContinue
+        Write-Ok "Merged legacy SocketAgent data into $DATA_DIR"
+    }
+}
+New-Item -ItemType Directory -Path $DATA_DIR -Force | Out-Null
+
 $setupResult = Invoke-NativeCapture {
     node $SETUP_SCRIPT `
         --envfile $ENV_FILE `
@@ -754,6 +803,9 @@ if ($existing) {
 # This ensures the server auto-restarts after updates (process.exit(1))
 $batFile = Join-Path $SERVER_DIR "run-service.bat"
 $servicePath = $env:PATH -replace '"', ''
+if (-not (Test-PathListContains $servicePath $NPM_BIN_DIR)) {
+    $servicePath = "$NPM_BIN_DIR;$servicePath"
+}
 foreach ($commandName in @("claude", "codex")) {
     $cmd = Get-Command $commandName -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source) {
@@ -952,11 +1004,11 @@ Write-Host ""
         }
         "*Claude Code CLI*" {
             Write-Host "    - Check your internet connection"
-            Write-Host "    - Try: npm install -g @anthropic-ai/claude-code"
+            Write-Host "    - Try: npm install -g --prefix `"$NPM_GLOBAL_DIR`" --include=optional @anthropic-ai/claude-code@latest"
         }
         "*OpenAI Codex CLI*" {
             Write-Host "    - Check your internet connection"
-            Write-Host "    - Try: npm install -g @openai/codex"
+            Write-Host "    - Try: npm install -g --prefix `"$NPM_GLOBAL_DIR`" --include=optional @openai/codex@latest"
         }
         "*Authentication*" {
             Write-Host "    - Run 'claude login' or 'codex login' manually"

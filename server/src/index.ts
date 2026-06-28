@@ -18,7 +18,7 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
-import { getAdvertisedServerSettings, getDefaultCwd, invalidateCodexDriverAvailabilityCache, setDefaultCwd } from "./server-settings";
+import { getAdvertisedServerSettings, getDefaultCwd, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, setDefaultCwd } from "./server-settings";
 import { isPushConfigured, registerPushToken, sendPushNotification } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
@@ -26,6 +26,7 @@ import { runBackendInstall } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
 import { terminalSessionManager } from "./terminal-session";
 import { cancelSecureInputRequest, completeSecureInputRequest, redactSecretsDeep, saveSecureInput } from "./secure-input-store";
+import { socketAgentDataPath } from "./socket-agent-paths";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -307,11 +308,7 @@ function broadcastScheduledTaskList(): void {
 
 function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPubkey: string } | undefined {
   if (!RELAY_URL || !PAIRING_TOKEN) return undefined;
-  const keysPath = path.join(
-    process.env.HOME || require("os").homedir(),
-    ".claude-assistant",
-    "relay-keys.json"
-  );
+  const keysPath = socketAgentDataPath("relay-keys.json");
   const keyPair = loadOrCreateKeyPair(keysPath);
   return {
     relayUrl: RELAY_URL,
@@ -329,6 +326,7 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
     codexDriversAvailable: settings.codexDriversAvailable,
+    backendHealth: settings.backendHealth,
     relayPairing: relayPairingInfo(),
     pushNotifications: {
       directFcm: true,
@@ -928,6 +926,7 @@ function createConnectionHandler(transport: ClientTransport) {
         }).then(() => {
           invalidateCodexAvailabilityCache();
           invalidateCodexDriverAvailabilityCache();
+          invalidateBackendHealthCache();
           sendProgress({
             phase: "probe",
             status: "completed",
@@ -943,6 +942,7 @@ function createConnectionHandler(transport: ClientTransport) {
         }).catch((e: any) => {
           invalidateCodexAvailabilityCache();
           invalidateCodexDriverAvailabilityCache();
+          invalidateBackendHealthCache();
           sendProgress({
             phase: "probe",
             status: "failed",
@@ -3764,7 +3764,7 @@ const httpServer = http.createServer((req, res) => {
       res.end(`Invalid model: ${modelName}. Allowed: ${allowedModels.join(", ")}`);
       return;
     }
-    const modelDir = path.join(require("os").homedir(), ".claude-assistant", "tts-models", modelName);
+    const modelDir = socketAgentDataPath("tts-models", modelName);
 
     const fileName = url.searchParams.get("file") || "";
     if (!fileName) {
@@ -4438,11 +4438,7 @@ wss.on("connection", (ws: WebSocket) => {
 
 // ── Relay client setup ──
 function startRelayClient(): void {
-  const keysPath = path.join(
-    process.env.HOME || require("os").homedir(),
-    ".claude-assistant",
-    "relay-keys.json"
-  );
+  const keysPath = socketAgentDataPath("relay-keys.json");
   const keyPair = loadOrCreateKeyPair(keysPath);
   const pubkeyBase64 = toBase64(keyPair.publicKey);
 

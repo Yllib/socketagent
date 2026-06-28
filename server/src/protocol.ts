@@ -762,6 +762,20 @@ export interface ServerCapabilitiesMessage {
   backends: Backend[];
   codexDriver?: CodexDriver;
   codexDriversAvailable?: CodexDriver[];
+  backendHealth?: BackendHealthInfo[];
+}
+
+export interface BackendHealthInfo {
+  backend: Backend;
+  enabled: boolean;
+  available: boolean;
+  severity: "ok" | "warning" | "error" | "disabled";
+  source?: "explicit" | "sdk" | "managed" | "legacy" | "system" | "path" | "unresolved";
+  command?: string;
+  version?: string;
+  reason?: string;
+  detail?: string;
+  installRoot?: string;
 }
 
 export interface ServerSettingsMessage {
@@ -769,6 +783,7 @@ export interface ServerSettingsMessage {
   codexDriver: CodexDriver;
   defaultCwd: string;
   codexDriversAvailable: CodexDriver[];
+  backendHealth?: BackendHealthInfo[];
 }
 
 export interface BackendInstallProgressServerMessage {

@@ -14,6 +14,7 @@ const STORE_DIR = path.join(
 );
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
 const HISTORY_DIR = path.join(STORE_DIR, "history");
+const ARCHIVED_SESSION_IDS_FILE = path.join(STORE_DIR, "archived-session-ids.json");
 
 function ensureStoreDir(): void {
   if (!fs.existsSync(STORE_DIR)) {
@@ -59,6 +60,43 @@ export function getSession(id: string): SessionInfo | undefined {
 export function deleteSession(id: string): void {
   const sessions = readStore().filter((s) => s.id !== id);
   writeStore(sessions);
+}
+
+function readArchivedSessionIds(): Set<string> {
+  ensureStoreDir();
+  if (!fs.existsSync(ARCHIVED_SESSION_IDS_FILE)) return new Set();
+  try {
+    const raw = JSON.parse(fs.readFileSync(ARCHIVED_SESSION_IDS_FILE, "utf-8"));
+    if (!Array.isArray(raw)) return new Set();
+    return new Set(raw.filter((id) => typeof id === "string" && id.length > 0));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeArchivedSessionIds(ids: Set<string>): void {
+  ensureStoreDir();
+  fs.writeFileSync(
+    ARCHIVED_SESSION_IDS_FILE,
+    JSON.stringify([...ids].sort(), null, 2),
+    "utf-8",
+  );
+}
+
+export function markSessionArchived(sessionId: string): void {
+  if (!sessionId) return;
+  const ids = readArchivedSessionIds();
+  ids.add(sessionId);
+  writeArchivedSessionIds(ids);
+  invalidateCodexNativeListCache();
+}
+
+export function unmarkSessionArchived(sessionId: string): void {
+  if (!sessionId) return;
+  const ids = readArchivedSessionIds();
+  if (!ids.delete(sessionId)) return;
+  writeArchivedSessionIds(ids);
+  invalidateCodexNativeListCache();
 }
 
 export interface DeleteSessionArtifactsResult {
@@ -1254,6 +1292,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
       sessions.push(restored);
     }
     writeStore(sessions);
+    unmarkSessionArchived(sid);
     return { ok: true, session: restored };
   }
 
@@ -1385,6 +1424,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     sessions.push(restored);
   }
   writeStore(sessions);
+  unmarkSessionArchived(sid);
   if (restored.backend === "codex" && restoredCodexRolloutPath) {
     updateCodexThreadRolloutState(sid, restoredCodexRolloutPath, false);
   }
@@ -1640,6 +1680,7 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
     return claudeNativeSessionsCache.sessions;
   }
 
+  const archivedIds = readArchivedSessionIds();
   const stored = readStore();
   const storedById = new Map(stored.map((s) => [s.id, s]));
   const cwdCandidates = claudeNativeCwdCandidates();
@@ -1652,6 +1693,7 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
         includeWorktrees: true,
       });
       for (const info of sdkSessions) {
+        if (archivedIds.has(info.sessionId)) continue;
         const session = sdkSessionInfoToSessionInfo(info, storedById.get(info.sessionId));
         if (session) deduped.set(session.id, session);
       }
@@ -1663,6 +1705,12 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
     .sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
   claudeNativeSessionsCache = { at: nowMs, sessions };
   return sessions;
+}
+
+export async function getClaudeNativeSessionInfo(sessionId: string): Promise<SessionInfo | undefined> {
+  if (!sessionId) return undefined;
+  const sessions = await listClaudeNativeSessionsFromSdk(false);
+  return sessions.find((session) => session.id === sessionId);
 }
 
 function claudeNativeCwdCandidates(): string[] {

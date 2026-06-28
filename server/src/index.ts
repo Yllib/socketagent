@@ -10,7 +10,7 @@ import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
+import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -2045,6 +2045,7 @@ function createConnectionHandler(transport: ClientTransport) {
       case "archive_session": {
         const sid = (msg as any).sessionId as string;
         let sessionInfo = getSession(sid);
+        let foundNativeOnly = false;
         if (!sessionInfo) {
           if (isCodexThreadArchived(sid)) {
             deleteSession(sid);
@@ -2054,12 +2055,16 @@ function createConnectionHandler(transport: ClientTransport) {
             broadcastSessionList();
             break;
           }
-          sessionInfo = await getCodexNativeThreadSessionInfo(sid, getDefaultCwd()) || undefined;
+          sessionInfo =
+            await getCodexNativeThreadSessionInfo(sid, getDefaultCwd()) ||
+            await getClaudeNativeSessionInfo(sid) ||
+            undefined;
           if (!sessionInfo) {
-            console.warn(`[Archive] Session ${sid} not found in SocketAgent store or native Codex threads`);
+            console.warn(`[Archive] Session ${sid} not found in SocketAgent store or native backends`);
             sendJson({ type: "session_archive_failed", sessionId: sid, error: "Session not found" });
             break;
           }
+          foundNativeOnly = true;
         }
         if (sessionInfo) {
           const running = activeSessions.get(sid);
@@ -2091,7 +2096,11 @@ function createConnectionHandler(transport: ClientTransport) {
             broadcastSessionList();
             break;
           }
+          if (foundNativeOnly) {
+            saveSession(sessionInfo);
+          }
           clearSessionContext(sid, sessionInfo.cwd);
+          markSessionArchived(sid);
           deleteSession(sid);
           console.log(`Archived session ${sid}`);
           sendJson({ type: "session_archived", sessionId: sid });

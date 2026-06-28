@@ -1316,7 +1316,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
       if (typeof meta.createdAt === "string") metaCreatedAt = meta.createdAt;
       if (typeof meta.cwd === "string") cwd = meta.cwd;
       if (meta.backend === "claude" || meta.backend === "codex") metaBackend = meta.backend;
-      if (meta.codexDriver === "exec" || meta.codexDriver === "app-server") metaCodexDriver = meta.codexDriver;
+      if (meta.codexDriver === "exec" || meta.codexDriver === "app-server") metaCodexDriver = "app-server";
       if (typeof meta.codexRolloutPath === "string") codexRolloutPath = meta.codexRolloutPath;
     } catch {}
   }

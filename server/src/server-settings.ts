@@ -28,8 +28,8 @@ function ensureStoreDir(): void {
   if (!fs.existsSync(STORE_DIR)) fs.mkdirSync(STORE_DIR, { recursive: true });
 }
 
-function normalizeDriver(value: unknown): CodexDriver {
-  return value === "app-server" ? "app-server" : "exec";
+function normalizeDriver(_value: unknown): CodexDriver {
+  return "app-server";
 }
 
 function normalizeDefaultCwd(value: unknown): string {
@@ -69,10 +69,6 @@ export function saveServerSettings(settings: ServerSettings): ServerSettings {
   return cachedSettings;
 }
 
-export function setCodexDriver(driver: CodexDriver): ServerSettings {
-  return saveServerSettings({ ...loadServerSettings(), codexDriver: normalizeDriver(driver) });
-}
-
 export function setDefaultCwd(defaultCwd: string): ServerSettings {
   return saveServerSettings({ ...loadServerSettings(), defaultCwd: normalizeDefaultCwd(defaultCwd) });
 }
@@ -108,7 +104,6 @@ export function getCodexDriversAvailable(): CodexDriver[] {
     return cache([]);
   }
 
-  const drivers: CodexDriver[] = ["exec"];
   try {
     const appServerHelp = buildCodexSpawn(["app-server", "--help"]);
     const result = spawnSync(appServerHelp.command, appServerHelp.args, {
@@ -117,25 +112,18 @@ export function getCodexDriversAvailable(): CodexDriver[] {
       env: appServerHelp.env,
       shell: appServerHelp.shell,
     });
-    if (result.status === 0) drivers.push("app-server");
+    return cache(result.status === 0 ? ["app-server"] : []);
   } catch {
-    // Leave app-server absent; exec remains the stable fallback.
+    return cache([]);
   }
-  return cache(drivers);
 }
 
 export function getAdvertisedServerSettings(): ServerSettings & { codexDriversAvailable: CodexDriver[] } {
   const settings = loadServerSettings();
   const codexDriversAvailable = getCodexDriversAvailable();
-  const fallback = codexDriversAvailable.includes(DEFAULT_CODEX_DRIVER) ? DEFAULT_CODEX_DRIVER : "exec";
   return {
-    codexDriver: codexDriversAvailable.includes(settings.codexDriver) ? settings.codexDriver : fallback,
+    codexDriver: DEFAULT_CODEX_DRIVER,
     defaultCwd: settings.defaultCwd,
     codexDriversAvailable,
   };
-}
-
-export function resolveCodexDriver(driver?: CodexDriver): CodexDriver {
-  const requested = driver ? normalizeDriver(driver) : getAdvertisedServerSettings().codexDriver;
-  return getCodexDriversAvailable().includes(requested) ? requested : "exec";
 }

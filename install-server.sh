@@ -197,8 +197,8 @@ install_server_dependencies_and_build() {
     return
   fi
 
-  echo "  Running npm install..."
-  (cd "$SERVER_DIR" && npm install)
+  echo "  Running npm install --include=optional..."
+  (cd "$SERVER_DIR" && npm install --include=optional)
   ok "Dependencies installed"
 
   echo "  Compiling TypeScript..."

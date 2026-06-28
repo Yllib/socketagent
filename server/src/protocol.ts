@@ -8,7 +8,7 @@
  */
 export type Backend = "claude" | "codex";
 
-export type CodexDriver = "exec" | "app-server";
+export type CodexDriver = "app-server";
 
 // ── Client → Server messages ──
 
@@ -751,6 +751,11 @@ export interface ErrorServerMessage {
   message: string;
 }
 
+export interface PushTokenRegisteredServerMessage {
+  type: "push_token_registered";
+  appServerId?: string;
+}
+
 export interface ServerCapabilitiesMessage {
   type: "server_capabilities";
   binaryEnvelope?: boolean;
@@ -1223,6 +1228,7 @@ export type ServerMessage =
   | ResultServerMessage
   | SessionListServerMessage
   | ErrorServerMessage
+  | PushTokenRegisteredServerMessage
   | ServerCapabilitiesMessage
   | ServerSettingsMessage
   | BackendInstallProgressServerMessage

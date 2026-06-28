@@ -111,40 +111,51 @@ export async function sendPushNotification(
   if (tokens.length === 0) return { sent: 0, attempted: 0 };
   if (!ensureFirebase()) return { sent: 0, attempted: tokens.length };
 
-  const response = await getMessaging().sendEachForMulticast({
-    tokens,
-    notification: {
-      title: payload.title,
-      body: payload.body || "",
-    },
-    data: {
-      title: payload.title,
-      body: payload.body || "",
-      sessionId: payload.sessionId || "",
-      serverId: entries.find((entry) => entry.appServerId)?.appServerId || "",
-      status: payload.status || "manual",
-    },
-    android: {
-      priority: "high",
-      notification: {
-        channelId: "session_alerts",
-        priority: "high",
-        defaultSound: true,
-        defaultVibrateTimings: true,
-      },
-    },
-  });
+  const groups = new Map<string, StoredPushToken[]>();
+  for (const entry of entries) {
+    const key = entry.appServerId || "";
+    groups.set(key, [...(groups.get(key) || []), entry]);
+  }
 
+  let sent = 0;
   const invalid = new Set<string>();
-  response.responses.forEach((item, index) => {
-    if (!item.success) {
-      const code = item.error?.code || "";
-      if (code === "messaging/registration-token-not-registered" || code === "messaging/invalid-registration-token") {
-        invalid.add(tokens[index]);
+  for (const [appServerId, group] of groups) {
+    const groupTokens = group.map((entry) => entry.token).filter(Boolean);
+    if (groupTokens.length === 0) continue;
+    const response = await getMessaging().sendEachForMulticast({
+      tokens: groupTokens,
+      notification: {
+        title: payload.title,
+        body: payload.body || "",
+      },
+      data: {
+        title: payload.title,
+        body: payload.body || "",
+        sessionId: payload.sessionId || "",
+        serverId: appServerId,
+        status: payload.status || "manual",
+      },
+      android: {
+        priority: "high",
+        notification: {
+          channelId: "session_alerts",
+          priority: "high",
+          defaultSound: true,
+          defaultVibrateTimings: true,
+        },
+      },
+    });
+    sent += response.successCount;
+    response.responses.forEach((item, index) => {
+      if (!item.success) {
+        const code = item.error?.code || "";
+        if (code === "messaging/registration-token-not-registered" || code === "messaging/invalid-registration-token") {
+          invalid.add(groupTokens[index]);
+        }
+        console.warn(`[Push] FCM send failed: ${code || item.error?.message || "unknown error"}`);
       }
-      console.warn(`[Push] FCM send failed: ${code || item.error?.message || "unknown error"}`);
-    }
-  });
+    });
+  }
   removeTokens(invalid);
-  return { sent: response.successCount, attempted: tokens.length };
+  return { sent, attempted: tokens.length };
 }

@@ -1,40 +1,10 @@
 /**
- * Codex backend mirroring claude-session.ts. Drives the OpenAI Codex CLI
- * (`codex exec --json`) as a subprocess under the user's ChatGPT subscription
- * (auth_mode: "chatgpt" in ~/.codex/auth.json — no API key required).
- *
- * What this implementation covers:
- *   - Subprocess lifecycle (spawn, JSONL parse, stderr capture, exit handling)
- *   - thread_id capture + resume across turns
- *   - Sandbox mode (read-only / workspace-write / bypass) controllable per turn
- *   - Translation of codex JSONL events → existing SocketAgent ServerMessage
- *
- * Intentionally not supported:
- *   - Questions / answers (no codex equivalent in --json mode)
- *   - Mid-turn message injection (codex runs prompt → completion atomically;
- *     to interrupt, kill the subprocess and start a new turn)
- *   - Plugin-provided MCP servers (Codex gets the SocketAgent app MCP bridge,
- *     but arbitrary plugin MCP injection is not wired here yet)
- *   - Fork / branch / rewind
- *   - Claude-style system prompt mutation; SocketAgent extra instructions are
- *     passed as native Codex developer instructions where supported.
- *   - Compaction / context-window tracking (no JSONL surface)
- *   - Thinking budget config (Codex exposes reasoning effort, wired below)
- *
- * Empirical schema notes (from probes — see chat history):
- *   - resume does NOT accept -s or -C; only -c overrides + a few flags
- *   - resume does NOT inherit cwd from the original session — pass it via
- *     spawn options so codex picks it up from the parent process
- *   - file_change emits item.started + item.completed (not completed-only)
- *   - todo_list / apply_patch are NOT separate item types in --json mode
- *   - Sandbox denials don't fire structured events — model narrates them in
- *     an agent_message; cannot be detected programmatically
- *   - apply_patch verification retries leak only to stderr, not JSONL
- *   - Schema has had silent breaking renames historically
- *     (issue: openai/codex#4776) — keep the dispatcher tolerant of unknowns
+ * Codex backend mirroring claude-session.ts. Drives the OpenAI Codex app-server
+ * protocol under the user's ChatGPT subscription (auth_mode: "chatgpt" in
+ * ~/.codex/auth.json — no API key required).
  */
 
-import { spawn, spawnSync, execFileSync, ChildProcess } from "child_process";
+import { spawnSync } from "child_process";
 import { WebSocket } from "ws";
 import * as crypto from "crypto";
 import * as fs from "fs";
@@ -50,7 +20,6 @@ import {
   updateSessionActivity,
   updateSessionContextUsage,
   remapSession,
-  readCodexRolloutContextUsage,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
@@ -66,63 +35,11 @@ import {
   CodexAppServerUserInput,
 } from "./codex-app-server-client";
 import { buildCodexSpawn } from "./codex-env";
-import { resolveCodexDriver } from "./server-settings";
 import { listSkills, SkillEntry } from "./skills-manager";
 
 const now = (): string => new Date().toISOString();
 
-// ─── Codex JSONL event types (from empirical probe) ───────────────────────
-
 type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
-
-interface CodexUsage {
-  input_tokens: number;
-  cached_input_tokens?: number;
-  output_tokens: number;
-  reasoning_output_tokens?: number;
-}
-
-type CodexItem =
-  | { id: string; type: "agent_message"; text: string }
-  | { id: string; type: "reasoning"; text: string }
-  | {
-      id: string;
-      type: "command_execution";
-      command: string;
-      aggregated_output: string;
-      exit_code: number | null;
-      status: "in_progress" | "completed" | "failed";
-    }
-  | {
-      id: string;
-      type: "file_change";
-      changes: Array<{ path: string; kind: "add" | "delete" | "update" }>;
-      status: "in_progress" | "completed" | "failed";
-    }
-  | {
-      id: string;
-      type: "mcp_tool_call";
-      server: string;
-      tool: string;
-      arguments: unknown;
-      result?: unknown;
-      error?: string;
-      status: "in_progress" | "completed" | "failed";
-    }
-  | { id: string; type: "web_search"; query: string }
-  | { id: string; type: "error"; message: string }
-  // Forward-compat catch-all so unknown future item types don't crash us.
-  | { id: string; type: string;[k: string]: unknown };
-
-type CodexEvent =
-  | { type: "thread.started"; thread_id: string }
-  | { type: "turn.started" }
-  | { type: "turn.completed"; usage: CodexUsage }
-  | { type: "turn.failed"; error: { message: string } }
-  | { type: "error"; message: string }
-  | { type: "item.started"; item: CodexItem }
-  | { type: "item.updated"; item: CodexItem }
-  | { type: "item.completed"; item: CodexItem };
 
 type QueuedPrompt = {
   text: string;
@@ -206,7 +123,6 @@ export const CODEX_NATIVE_SLASH_COMMANDS: CodexSlashCommand[] = [
 export class CodexSession {
   private sessionId: string | null = null; // SocketAgent session id (= codex thread_id)
   private threadId: string | null = null;  // codex thread_id (for resume)
-  private proc: ChildProcess | null = null;
   private appServer: CodexAppServerClient | null = null;
   private appServerInitialized = false;
   private appServerInitializePromise: Promise<void> | null = null;
@@ -254,7 +170,6 @@ export class CodexSession {
     contextWindow: number;
   } | null = null;
   private _lastSupportedModels: ServerMessage | null = null;
-  private _fileChangeSnapshots = new Map<string, Map<string, string | null>>();
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
   private clientSockets = new Set<WebSocket>();
@@ -270,7 +185,6 @@ export class CodexSession {
     private ws: WebSocket,
     private cwd: string,
     private _plugins: SocketAgentPlugin[] = [],
-    private readonly codexDriver: CodexDriver = "exec",
   ) {
     this.attachWebSocket(ws);
   }
@@ -287,7 +201,7 @@ export class CodexSession {
       || this._queuedPrompts.length > 0
       || this._pendingAppServerSteers.length > 0;
   }
-  get driver(): CodexDriver { return this.codexDriver; }
+  get driver(): CodexDriver { return "app-server"; }
   get permissionMode(): string | null {
     return this._permissionMode;
   }
@@ -441,9 +355,6 @@ export class CodexSession {
   }
 
   async forkAppServerThread(sourceThreadId: string): Promise<{ threadId: string }> {
-    if (this.codexDriver !== "app-server") {
-      throw new Error("Codex thread fork requires App Server mode");
-    }
     await this.ensureAppServer();
     const forked = await this.appServer!.forkThread({
       ...this.buildAppServerThreadParams(),
@@ -458,9 +369,6 @@ export class CodexSession {
   }
 
   async compactAppServerThread(threadId = this.threadId || this.sessionId || this._resumeSessionId): Promise<void> {
-    if (this.codexDriver !== "app-server") {
-      throw new Error("Codex compaction requires App Server mode");
-    }
     if (!threadId) throw new Error("No Codex thread id to compact");
     await this.ensureAppServer();
     this._isCompacting = true;
@@ -471,9 +379,6 @@ export class CodexSession {
   }
 
   async rollbackAppServerThread(numTurns: number, threadId = this.threadId || this.sessionId || this._resumeSessionId): Promise<void> {
-    if (this.codexDriver !== "app-server") {
-      throw new Error("Codex rollback requires App Server mode");
-    }
     if (!threadId) throw new Error("No Codex thread id to roll back");
     if (!Number.isFinite(numTurns) || numTurns < 1) throw new Error("Rollback must drop at least one turn");
     await this.ensureAppServer();
@@ -488,10 +393,6 @@ export class CodexSession {
     if (!commandDef) {
       throw new Error(`Unsupported Codex slash command: /${command}`);
     }
-    if (commandDef.availability === "app-server" && this.codexDriver !== "app-server") {
-      throw new Error(`/${command} requires Codex App Server mode`);
-    }
-
     switch (command) {
       case "status": {
         const result = await this.buildStatusResult(threadId);
@@ -679,19 +580,17 @@ export class CodexSession {
     let rateLimits: any = null;
     let usage: any = null;
 
-    if (this.codexDriver === "app-server") {
-      await this.ensureAppServer();
-      const [configResult, threadResult, limitsResult, usageResult] = await Promise.allSettled([
-        this.appServer!.readConfig(this.cwd),
-        threadId ? this.appServer!.readThread({ threadId, includeTurns: false }) : Promise.resolve(null),
-        this.appServer!.readAccountRateLimits(),
-        this.appServer!.readAccountUsage(),
-      ]);
-      if (configResult.status === "fulfilled") config = (configResult.value as any)?.config || null;
-      if (threadResult.status === "fulfilled") thread = (threadResult.value as any)?.thread || null;
-      if (limitsResult.status === "fulfilled") rateLimits = limitsResult.value;
-      if (usageResult.status === "fulfilled") usage = usageResult.value;
-    }
+    await this.ensureAppServer();
+    const [configResult, threadResult, limitsResult, usageResult] = await Promise.allSettled([
+      this.appServer!.readConfig(this.cwd),
+      threadId ? this.appServer!.readThread({ threadId, includeTurns: false }) : Promise.resolve(null),
+      this.appServer!.readAccountRateLimits(),
+      this.appServer!.readAccountUsage(),
+    ]);
+    if (configResult.status === "fulfilled") config = (configResult.value as any)?.config || null;
+    if (threadResult.status === "fulfilled") thread = (threadResult.value as any)?.thread || null;
+    if (limitsResult.status === "fulfilled") rateLimits = limitsResult.value;
+    if (usageResult.status === "fulfilled") usage = usageResult.value;
 
     const threadStatus = thread?.status?.type
       || (this._isCompacting ? "compacting" : this._isRunning ? "running" : "idle");
@@ -702,7 +601,7 @@ export class CodexSession {
     if (thread?.name) lines.push(`Title: ${thread.name}`);
     lines.push(`State: ${threadStatus}`);
     lines.push(`CWD: ${thread?.cwd || this.cwd}`);
-    lines.push(`Driver: ${this.codexDriver}`);
+    lines.push("Driver: app-server");
     lines.push(`Model: ${model}`);
     lines.push(`Effort: ${effort || "default"}`);
     lines.push(`Fast mode: ${this._fastMode ? "on" : "off"}`);
@@ -738,7 +637,7 @@ export class CodexSession {
           cwd: thread?.cwd || this.cwd,
         },
         config: {
-          driver: this.codexDriver,
+          driver: "app-server",
           model,
           effort: effort || "default",
           serviceTier: this._fastMode ? "fast" : config?.service_tier || "",
@@ -940,9 +839,6 @@ export class CodexSession {
   }
 
   async listCodexCollaborationModes(): Promise<Array<Record<string, unknown>>> {
-    if (this.codexDriver !== "app-server") {
-      return [{ id: "default", name: "Default" }];
-    }
     await this.ensureAppServer();
     const result = await this.appServer!.listCollaborationModes();
     void this.refreshSupportedModels();
@@ -968,7 +864,6 @@ export class CodexSession {
   }
 
   async refreshSupportedModels(): Promise<void> {
-    if (this.codexDriver !== "app-server") return;
     try {
       await this.ensureAppServer();
       const result = await this.appServer!.listModels();
@@ -1037,9 +932,8 @@ export class CodexSession {
   }
 
   /**
-   * Codex exec runs each turn atomically, so mid-turn messages are queued for a
-   * follow-up turn. Codex app-server supports mid-turn `turn/steer`; those
-   * messages resolve only once Codex echoes the steered userMessage item.
+   * Mid-turn messages use app-server `turn/steer` when a turn is active.
+   * Otherwise they queue as follow-up turns and resolve when run.
    */
   async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'now', messageId?: string, options: CodexRunOptions = {}): Promise<void> {
     if (!this._isRunning) {
@@ -1051,7 +945,7 @@ export class CodexSession {
       return;
     }
 
-    if (this.codexDriver === "app-server" && this.threadId && this.activeAppServerTurnId) {
+    if (this.threadId && this.activeAppServerTurnId) {
       try {
         await this.ensureAppServer();
         return new Promise<void>((resolve, reject) => {
@@ -1088,9 +982,7 @@ export class CodexSession {
       }
     }
 
-    if (this.codexDriver === "app-server") {
-      console.warn(`[codex app-server] no active turn for injection; queueing follow-up (thread=${this.threadId || ""}, turn=${this.activeAppServerTurnId || ""}, priority=${priority}, messageId=${messageId || ""})`);
-    }
+    console.warn(`[codex app-server] no active turn for injection; queueing follow-up (thread=${this.threadId || ""}, turn=${this.activeAppServerTurnId || ""}, priority=${priority}, messageId=${messageId || ""})`);
     return new Promise<void>((resolve, reject) => {
       this._queuedPrompts.push({ text, priority, messageId, fastMode: options.fastMode, resolve, reject });
     });
@@ -1196,167 +1088,7 @@ export class CodexSession {
   }
 
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
-    if (this.codexDriver === "app-server") {
-      return this.runAppServerQuery(prompt, resumeSessionId);
-    }
-
-    if (this._isRunning) throw new Error("CodexSession already running a turn");
-    this._isRunning = true;
-    this.onActivity?.();
-    this._abortRequested = false;
-    this._stderrBuffer = [];
-    this._fileChangeSnapshots.clear();
-    this._currentPrompt = prompt;
-    this._lastAssistantText = "";
-
-    // Resume case: index.ts set _resumeSessionId before calling runQuery.
-    // Adopt it as our SocketAgent sessionId so history writes target the
-    // right file. (We confirm/replace it when thread.started fires.)
-    const resumeTarget = resumeSessionId || this._resumeSessionId;
-    if (!this.sessionId && resumeTarget) {
-      this.sessionId = resumeTarget;
-      this.threadId = resumeTarget;
-      this._sessionInfoSaved = true;
-    }
-
-    // Log the user prompt now if we already know the sessionId; otherwise
-    // buffer until thread.started arrives. Either way the app sees it via
-    // the user_message_uuid below, which mirrors the Claude flow.
-    const userMsgUuid = crypto.randomUUID();
-    if (this.sessionId) {
-      appendHistory(this.sessionId, {
-        role: "user",
-        content: prompt,
-        uuid: userMsgUuid,
-        timestamp: now(),
-      });
-      this.send({
-        type: "user_message_uuid",
-        uuid: userMsgUuid,
-        sessionId: this.sessionId,
-        ...(this._currentClientMessageId ? { clientMessageId: this._currentClientMessageId } : {}),
-      } as any);
-    } else {
-      this._pendingUserPrompt = {
-        text: prompt,
-        uuid: userMsgUuid,
-        ...(this._currentClientMessageId ? { messageId: this._currentClientMessageId } : {}),
-      };
-    }
-
-    const mcpRegistration = registerCodexAppMcp(this.createAppToolContext());
-    const mcpUrl = this.buildCodexMcpUrl(mcpRegistration.token);
-    const args = this.threadId
-      ? this.buildResumeArgs(this.threadId, mcpUrl)
-      : this.buildExecArgs(mcpUrl);
-
-    const codex = buildCodexSpawn(args);
-    this.proc = spawn(codex.command, codex.args, {
-      cwd: this.cwd, // resume relies on this — it does NOT inherit cwd from the original session
-      env: codex.env,
-      shell: codex.shell,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    this.proc.stdin?.on("error", (err) => {
-      console.warn(`[codex] stdin error: ${err.message}`);
-    });
-    this.proc.stdin?.end(prompt);
-
-    let stdoutTail = "";
-    this.proc.stdout!.setEncoding("utf8");
-    this.proc.stdout!.on("data", (chunk: string) => {
-      stdoutTail += chunk;
-      const lines = stdoutTail.split("\n");
-      stdoutTail = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const evt = JSON.parse(line) as CodexEvent;
-          this.handleEvent(evt);
-          this.onActivity?.();
-        } catch (err) {
-          console.warn(`[codex] failed to parse JSONL line: ${line.slice(0, 200)}`);
-        }
-      }
-    });
-
-    this.proc.stderr!.setEncoding("utf8");
-    this.proc.stderr!.on("data", (chunk: string) => {
-      this._stderrBuffer.push(chunk);
-    });
-
-    return new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const settleResolve = () => {
-        if (settled) return;
-        settled = true;
-        mcpRegistration.unregister();
-        resolve();
-      };
-      const settleReject = (err: Error) => {
-        if (settled) return;
-        settled = true;
-        mcpRegistration.unregister();
-        reject(err);
-      };
-
-      this.proc!.on("error", (err) => {
-        // Spawn-level failure (e.g., codex binary missing). exit never fires
-        // for this case, so surface it and settle the turn explicitly.
-        console.error(`[codex] spawn error: ${err.message}`);
-        this._isRunning = false;
-        this.onActivity?.();
-        this.send({
-          type: "error",
-          message: `codex failed to launch: ${err.message}`,
-        } as ServerMessage);
-        settleReject(err);
-      });
-
-      this.proc!.on("exit", (code, signal) => {
-        this._isRunning = false;
-        this.onActivity?.();
-        const stderr = this._stderrBuffer.join("");
-
-        if (this._abortRequested || signal === "SIGTERM" || signal === "SIGINT") {
-          this.clearQueuedPrompts("Codex turn interrupted");
-          this.send({
-            type: "result",
-            content: "(interrupted)",
-            sessionId: this.sessionId!,
-          } as ServerMessage);
-          // Don't drain queued prompts after a user-initiated abort.
-          settleResolve();
-          return;
-        }
-
-        if (code === 0) {
-          this.refreshRolloutContextUsage();
-          const nextPrompt = this.dequeueNextPrompt();
-          if (nextPrompt) {
-            nextPrompt.resolve();
-            this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, {
-              fastMode: nextPrompt.fastMode,
-              messageId: nextPrompt.messageId,
-            })
-              .then(settleResolve)
-              .catch(settleReject);
-            return;
-          }
-          settleResolve();
-          return;
-        }
-
-        // Non-zero exit. Stderr likely contains the cause (auth failure,
-        // network, codex crash). Tail to keep payload small.
-        console.error(`[codex] exit ${code}: ${stderr.slice(-1500)}`);
-        this.send({
-          type: "error",
-          message: `codex exec exit ${code}: ${stderr.slice(-1500)}`,
-        } as ServerMessage);
-        settleReject(new Error(`codex exec exit ${code}`));
-      });
-    });
+    return this.runAppServerQuery(prompt, resumeSessionId);
   }
 
   private async runAppServerQuery(prompt: string, resumeSessionId?: string): Promise<void> {
@@ -1504,7 +1236,7 @@ export class CodexSession {
         }
         this.appServerTurnSettler?.reject(new Error(message));
       });
-      // Guard genuine client/proc errors (e.g. spawn failure) so an emitted
+      // Guard genuine client errors (e.g. spawn failure) so an emitted
       // "error" event never becomes an uncaught ERR_UNHANDLED_ERROR.
       this.appServer.on("error", (err: Error) => {
         this._stderrBuffer.push(`[codex app-server error] ${err?.message || String(err)}\n`);
@@ -1698,7 +1430,7 @@ export class CodexSession {
         lastActive: now(),
         messagePreview: "",
         backend: "codex",
-        codexDriver: this.codexDriver,
+        codexDriver: "app-server",
         permissionMode: this.permissionMode || undefined,
       };
       if (this.replacesSessionId) {
@@ -1751,7 +1483,7 @@ export class CodexSession {
       getSessionId: () => this.sessionId || "",
       getCwd: () => this.cwd,
       getBackend: () => "codex",
-      getCodexDriver: () => this.codexDriver,
+      getCodexDriver: () => "app-server",
       send: (msg) => this.send(msg as ServerMessage),
       appendHistory: (entry) => {
         if (this.sessionId) appendHistory(this.sessionId, entry as HistoryEntry);
@@ -1765,41 +1497,31 @@ export class CodexSession {
     };
   }
 
-  /** Mirrors the abort path. SIGTERM the subprocess; codex flushes pending events. */
+  /** Mirrors the abort path. Interrupt the active app-server turn if possible. */
   abort(): void {
     this._abortRequested = true;
     this.clearQueuedPrompts("Codex turn interrupted");
     this.clearPendingAppServerSteers("Codex turn interrupted");
-    if (this.codexDriver === "app-server") {
-      if (this.appServer && this.threadId && this.activeAppServerTurnId) {
-        this.appServer.interruptTurn({
-          threadId: this.threadId,
-          turnId: this.activeAppServerTurnId,
-        }).catch((err) => {
-          console.warn(`[codex app-server] turn interrupt failed: ${err.message}`);
-        });
-      }
-      this.appServerTurnSettler?.resolve();
-      this.appServerTurnSettler = null;
-      this._isRunning = false;
-      this.onActivity?.();
-      if (this.sessionId) {
-        this.send({
-          type: "result",
-          content: "(interrupted)",
-          sessionId: this.sessionId,
-        } as ServerMessage);
-      }
-      void this.stopAppServerClient();
-      return;
+    if (this.appServer && this.threadId && this.activeAppServerTurnId) {
+      this.appServer.interruptTurn({
+        threadId: this.threadId,
+        turnId: this.activeAppServerTurnId,
+      }).catch((err) => {
+        console.warn(`[codex app-server] turn interrupt failed: ${err.message}`);
+      });
     }
-    if (this.proc && !this.proc.killed) {
-      this.proc.kill("SIGTERM");
-      // Hard kill if it doesn't exit promptly.
-      setTimeout(() => {
-        if (this.proc && !this.proc.killed) this.proc.kill("SIGKILL");
-      }, 2000);
+    this.appServerTurnSettler?.resolve();
+    this.appServerTurnSettler = null;
+    this._isRunning = false;
+    this.onActivity?.();
+    if (this.sessionId) {
+      this.send({
+        type: "result",
+        content: "(interrupted)",
+        sessionId: this.sessionId,
+      } as ServerMessage);
     }
+    void this.stopAppServerClient();
   }
 
   private dequeueNextPrompt(): QueuedPrompt | null {
@@ -2939,444 +2661,9 @@ export class CodexSession {
     this.send(event as any);
   }
 
-  // ─── Event translation: codex JSONL → SocketAgent ServerMessage ─────
-
-  private handleEvent(evt: CodexEvent): void {
-    switch (evt.type) {
-      case "thread.started": {
-        // Adopt thread_id as our SocketAgent sessionId. On resume, this
-        // should equal the value we already had; on a fresh session, it's
-        // the first time we learn the id.
-        this.threadId = evt.thread_id;
-        const isFirstTime = !this.sessionId;
-        this.sessionId = evt.thread_id;
-
-        if (!this._sessionInfoSaved) {
-          const title =
-            this._currentPrompt.slice(0, 50) +
-            (this._currentPrompt.length > 50 ? "..." : "");
-          const info: SessionInfo = {
-            id: this.sessionId,
-            title,
-            cwd: this.cwd,
-            createdAt: now(),
-            lastActive: now(),
-            messagePreview: "",
-            backend: "codex",
-            codexDriver: this.codexDriver,
-            permissionMode: this.permissionMode || undefined,
-          };
-          if (this.replacesSessionId) {
-            remapSession(this.replacesSessionId, this.sessionId);
-            saveSession(info);
-            this.replacesSessionId = undefined;
-          } else {
-            saveSession(info);
-          }
-          this._sessionInfoSaved = true;
-
-          // Tell the client the real sessionId now that we have it.
-          // Mirrors the Claude flow where the SDK's init message produces
-          // a follow-up session_created with the real id.
-          if (isFirstTime) {
-            this.appendPermissionModeHistory();
-            this.send({
-              type: "session_created",
-              sessionId: this.sessionId,
-              cwd: this.cwd,
-              title,
-              backend: "codex",
-              permissionMode: this.permissionMode,
-            } as ServerMessage);
-            this.send({
-              type: "permission_mode_changed",
-              permissionMode: this.permissionMode,
-            } as any);
-          }
-        }
-
-        // Flush any user prompt that was buffered while sessionId was unknown.
-        this.flushPendingUserPrompt();
-        return;
-      }
-
-      case "turn.started":
-        return;
-
-      case "turn.completed": {
-        const sid = this.sessionId!;
-        const contextUsage = readCodexRolloutContextUsage(sid);
-        const usage = this.usageFromCodexEvent(evt.usage, contextUsage);
-        this._lastUsage = usage;
-        this.send({
-          type: "result",
-          content: "",
-          sessionId: sid,
-          usage,
-        } as ServerMessage);
-        if (contextUsage) {
-          this.sendRolloutContextUsage(sid, contextUsage, usage);
-        }
-        // Update lastActive + messagePreview so the session list reflects
-        // recent activity. Codex doesn't give us a cost number under
-        // ChatGPT-sub billing, so leave costUsd undefined.
-        updateSessionActivity(sid, this._lastAssistantText, usage);
-        return;
-      }
-
-      case "turn.failed":
-        this.send({
-          type: "error",
-          message: `Turn failed: ${evt.error.message}`,
-        } as ServerMessage);
-        return;
-
-      case "error":
-        this.send({ type: "error", message: evt.message } as ServerMessage);
-        return;
-
-      case "item.started":
-      case "item.updated":
-      case "item.completed":
-        this.handleItem(evt.type, evt.item);
-        return;
-    }
-  }
-
-  private usageFromCodexEvent(
-    eventUsage: CodexUsage,
-    contextUsage: ReturnType<typeof readCodexRolloutContextUsage>,
-  ): NonNullable<CodexSession["_lastUsage"]> {
-    const lastTokenUsage = contextUsage?.lastTokenUsage;
-    const cachedInputTokens = lastTokenUsage?.cached_input_tokens ?? eventUsage.cached_input_tokens ?? 0;
-    return {
-      inputTokens: lastTokenUsage
-        ? Math.max(0, lastTokenUsage.input_tokens - cachedInputTokens)
-        : eventUsage.input_tokens,
-      outputTokens: lastTokenUsage?.output_tokens ?? eventUsage.output_tokens,
-      cacheReadTokens: cachedInputTokens,
-      cacheCreateTokens: 0,
-      contextWindow: contextUsage?.maxTokens ?? 0,
-    };
-  }
-
-  private sendRolloutContextUsage(
-    sid: string,
-    contextUsage: NonNullable<ReturnType<typeof readCodexRolloutContextUsage>>,
-    usage: NonNullable<CodexSession["_lastUsage"]>,
-  ): void {
-    this.send({
-      type: "context_usage",
-      sessionId: sid,
-      ...contextUsage,
-    } as any);
-    this.send({
-      type: "usage_update",
-      sessionId: sid,
-      ...usage,
-    } as any);
-    updateSessionContextUsage(sid, contextUsage);
-  }
-
-  private refreshRolloutContextUsage(): void {
-    const sid = this.sessionId;
-    if (!sid) return;
-    const contextUsage = readCodexRolloutContextUsage(sid);
-    if (!contextUsage) return;
-    const cachedInputTokens = contextUsage.lastTokenUsage.cached_input_tokens;
-    const usage = {
-      inputTokens: Math.max(0, contextUsage.lastTokenUsage.input_tokens - cachedInputTokens),
-      outputTokens: contextUsage.lastTokenUsage.output_tokens,
-      cacheReadTokens: cachedInputTokens,
-      cacheCreateTokens: 0,
-      contextWindow: contextUsage.maxTokens,
-    };
-    this._lastUsage = usage;
-    this.sendRolloutContextUsage(sid, contextUsage, usage);
-    updateSessionActivity(sid, this._lastAssistantText, usage);
-  }
-
-  private snapshotFileChanges(item: Extract<CodexItem, { type: "file_change" }>): void {
-    const snapshots = new Map<string, string | null>();
-    for (const change of item.changes) {
-      if (snapshots.has(change.path)) continue;
-      snapshots.set(change.path, this.readTextSnapshot(change.path));
-    }
-    this._fileChangeSnapshots.set(item.id, snapshots);
-  }
-
-  private buildFileChangeDiff(item: Extract<CodexItem, { type: "file_change" }>): string {
-    const snapshots = this._fileChangeSnapshots.get(item.id);
-    this._fileChangeSnapshots.delete(item.id);
-
-    const parts: string[] = [];
-    for (const change of item.changes) {
-      const before = snapshots?.has(change.path)
-        ? snapshots.get(change.path)!
-        : this.readTextSnapshot(change.path);
-      const after = this.readTextSnapshot(change.path);
-      const diff = this.unifiedDiff(change.path, before, after);
-      parts.push(diff || `${change.kind}: ${change.path}`);
-    }
-    return this.truncateToolOutput(parts.join("\n\n"));
-  }
-
-  private resolveChangePath(filePath: string): string {
-    return path.isAbsolute(filePath) ? filePath : path.join(this.cwd, filePath);
-  }
-
-  private readTextSnapshot(filePath: string): string | null {
-    const resolved = this.resolveChangePath(filePath);
-    try {
-      const stat = fs.statSync(resolved);
-      if (!stat.isFile()) return null;
-      if (stat.size > 512 * 1024) return `[diff skipped: file larger than 512 KiB]`;
-      const buf = fs.readFileSync(resolved);
-      if (buf.includes(0)) return "[diff skipped: binary file]";
-      return buf.toString("utf8");
-    } catch {
-      return null;
-    }
-  }
-
-  private unifiedDiff(filePath: string, before: string | null, after: string | null): string {
-    if (before === after) return "";
-    if (before?.startsWith("[diff skipped:") || after?.startsWith("[diff skipped:")) {
-      return `${filePath}\n${before ?? after}`;
-    }
-
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-codex-diff-"));
-    const beforePath = path.join(tmpDir, "before");
-    const afterPath = path.join(tmpDir, "after");
-    try {
-      fs.writeFileSync(beforePath, before ?? "", "utf8");
-      fs.writeFileSync(afterPath, after ?? "", "utf8");
-      try {
-        return execFileSync(
-          "diff",
-          ["-u", "--label", `a/${filePath}`, "--label", `b/${filePath}`, beforePath, afterPath],
-          { encoding: "utf8", maxBuffer: 1024 * 1024 },
-        ).toString().trimEnd();
-      } catch (err: any) {
-        const stdout = err?.stdout ? String(err.stdout) : "";
-        if (stdout) return stdout.trimEnd();
-        return `${filePath}\n[diff unavailable]`;
-      }
-    } finally {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    }
-  }
-
-  private truncateToolOutput(output: string): string {
-    const max = 120 * 1024;
-    if (output.length <= max) return output;
-    return `${output.slice(0, max)}\n\n[diff truncated: ${output.length - max} additional chars]`;
-  }
-
-  private handleItem(
-    lifecycle: "item.started" | "item.updated" | "item.completed",
-    item: CodexItem,
-  ): void {
-    const sid = this.sessionId!;
-
-    switch (item.type) {
-      case "agent_message":
-        if (lifecycle === "item.completed") {
-          const text = (item as { text: string }).text;
-          this._lastAssistantText = text;
-          this.send({
-            type: "text",
-            content: text,
-            sessionId: sid,
-          } as ServerMessage);
-          appendHistory(sid, {
-            role: "assistant",
-            content: text,
-            timestamp: now(),
-          });
-        }
-        return;
-
-      case "reasoning":
-        if (lifecycle === "item.completed") {
-          this.send({
-            type: "thinking",
-            content: (item as { text: string }).text,
-            sessionId: sid,
-          } as ServerMessage);
-        }
-        return;
-
-      case "command_execution": {
-        const it = item as Extract<CodexItem, { type: "command_execution" }>;
-        if (lifecycle === "item.started") {
-          this.send({
-            type: "tool_call",
-            tool: "Bash",
-            input: { command: it.command },
-            toolUseId: it.id,
-            sessionId: sid,
-          } as ServerMessage);
-          appendHistory(sid, {
-            role: "tool_call",
-            content: it.command,
-            toolName: "Bash",
-            toolInput: { command: it.command },
-            toolUseId: it.id,
-            timestamp: now(),
-          });
-        } else if (lifecycle === "item.completed") {
-          const suffix = it.exit_code !== 0 ? `\n[exit ${it.exit_code}]` : "";
-          const output = it.aggregated_output + suffix;
-          this.send({
-            type: "tool_result",
-            toolUseId: it.id,
-            output,
-            sessionId: sid,
-          } as ServerMessage);
-          appendHistory(sid, {
-            role: "tool_result",
-            content: output,
-            toolUseId: it.id,
-            toolOutput: output,
-            timestamp: now(),
-          });
-        }
-        return;
-      }
-
-      case "file_change": {
-        const it = item as Extract<CodexItem, { type: "file_change" }>;
-        if (lifecycle === "item.started") {
-          this.snapshotFileChanges(it);
-          this.send({
-            type: "tool_call",
-            tool: "ApplyPatch",
-            input: { changes: it.changes },
-            toolUseId: it.id,
-            sessionId: sid,
-          } as ServerMessage);
-          appendHistory(sid, {
-            role: "tool_call",
-            content: it.changes.map((c) => `${c.kind}: ${c.path}`).join("\n"),
-            toolName: "ApplyPatch",
-            toolInput: { changes: it.changes },
-            toolUseId: it.id,
-            timestamp: now(),
-          });
-        } else if (lifecycle === "item.completed") {
-          const summary = this.buildFileChangeDiff(it);
-          this.send({
-            type: "tool_result",
-            toolUseId: it.id,
-            output: summary,
-            sessionId: sid,
-          } as ServerMessage);
-          appendHistory(sid, {
-            role: "tool_result",
-            content: summary,
-            toolUseId: it.id,
-            toolOutput: summary,
-            timestamp: now(),
-          });
-        }
-        return;
-      }
-
-      case "mcp_tool_call": {
-        const it = item as Extract<CodexItem, { type: "mcp_tool_call" }>;
-        const isSocketAgentApp =
-          it.server === "socketagent_app" ||
-          it.server === "socketagent-app" ||
-          it.server === "\"socketagent-app\"";
-        const toolName = isSocketAgentApp ? it.tool : `mcp:${it.server}/${it.tool}`;
-        if (lifecycle === "item.started") {
-          const input = (it.arguments as Record<string, unknown>) ?? {};
-          this.send({
-            type: "tool_call",
-            tool: toolName,
-            input,
-            toolUseId: it.id,
-            sessionId: sid,
-          } as ServerMessage);
-          if (!isSocketAgentApp) appendHistory(sid, {
-            role: "tool_call",
-            content: JSON.stringify(input),
-            toolName,
-            toolInput: input,
-            toolUseId: it.id,
-            timestamp: now(),
-          });
-        } else if (lifecycle === "item.completed") {
-          const output = it.error
-            ? `Error: ${it.error}`
-            : JSON.stringify(it.result ?? null, null, 2);
-          this.send({
-            type: "tool_result",
-            toolUseId: it.id,
-            output,
-            sessionId: sid,
-          } as ServerMessage);
-          if (!isSocketAgentApp) appendHistory(sid, {
-            role: "tool_result",
-            content: output,
-            toolUseId: it.id,
-            toolOutput: output,
-            timestamp: now(),
-          });
-        }
-        return;
-      }
-
-      case "web_search": {
-        const it = item as Extract<CodexItem, { type: "web_search" }>;
-        if (lifecycle === "item.completed") {
-          this.send({
-            type: "tool_call",
-            tool: "WebSearch",
-            input: { query: it.query },
-            toolUseId: it.id,
-            sessionId: sid,
-          } as ServerMessage);
-          appendHistory(sid, {
-            role: "tool_call",
-            content: it.query,
-            toolName: "WebSearch",
-            toolInput: { query: it.query },
-            toolUseId: it.id,
-            timestamp: now(),
-          });
-        }
-        return;
-      }
-
-      case "error": {
-        const it = item as Extract<CodexItem, { type: "error" }>;
-        if (lifecycle === "item.completed") {
-          this.send({ type: "error", message: it.message } as ServerMessage);
-        }
-        return;
-      }
-
-      default:
-        // Forward-compat: log unknown item types instead of crashing.
-        // Schema has had silent renames historically.
-        if (lifecycle === "item.completed") {
-          console.log(`[codex] unknown item type: ${item.type}`, item);
-        }
-        return;
-    }
-  }
-
-  // ─── codex CLI argument builders ─────────────────────────────────────
-
   private buildCodexMcpUrl(token: string): string {
     const port = process.env.PORT || "8085";
     return `http://127.0.0.1:${port}/codex-mcp/${encodeURIComponent(token)}`;
-  }
-
-  private codexMcpConfigArg(mcpUrl: string): string {
-    return `mcp_servers.socketagent_app.url="${mcpUrl}"`;
   }
 
   private codexReasoningEffort(): string {
@@ -3467,56 +2754,6 @@ export class CodexSession {
     };
   }
 
-  private codexDeveloperInstructionsConfigArg(): string | null {
-    const developerInstructions = this.codexDeveloperInstructions();
-    if (!developerInstructions) return null;
-    return `developer_instructions=${JSON.stringify(developerInstructions)}`;
-  }
-
-  private codexFastModeConfigArgs(): string[] {
-    return this._fastMode
-      ? ["-c", `service_tier="fast"`, "-c", "features.fast_mode=true"]
-      : [];
-  }
-
-  private buildExecArgs(mcpUrl: string): string[] {
-    const args = [
-      "exec",
-      "--json",
-      "-s", this._sandbox,
-      "-C", this.cwd,
-      "--skip-git-repo-check",
-      "-c", this.codexMcpConfigArg(mcpUrl),
-      "-c", `model_reasoning_effort="${this.codexReasoningEffort()}"`,
-    ];
-    args.push(...this.codexFastModeConfigArgs());
-    const developerInstructionsArg = this.codexDeveloperInstructionsConfigArg();
-    if (developerInstructionsArg) args.push("-c", developerInstructionsArg);
-    if (this._model) args.push("-m", this._model);
-    args.push("-");
-    return args;
-  }
-
-  private buildResumeArgs(threadId: string, mcpUrl: string): string[] {
-    // resume rejects -s and -C as flags. Sandbox is set via -c override.
-    // cwd is picked up from the spawn cwd option, NOT inherited from session.
-    // Verified: `-c sandbox_mode="<mode>"` overrides the default read-only on
-    // resume (TOML quoting required — the inner quotes go in the argv literal).
-    const args = [
-      "exec", "resume", threadId,
-      "--json",
-      "--skip-git-repo-check",
-      "-c", `sandbox_mode="${this._sandbox}"`,
-      "-c", this.codexMcpConfigArg(mcpUrl),
-      "-c", `model_reasoning_effort="${this.codexReasoningEffort()}"`,
-    ];
-    args.push(...this.codexFastModeConfigArgs());
-    const developerInstructionsArg = this.codexDeveloperInstructionsConfigArg();
-    if (developerInstructionsArg) args.push("-c", developerInstructionsArg);
-    if (this._model) args.push("-m", this._model);
-    args.push("-");
-    return args;
-  }
 }
 
 // ─── Backend factory ────────────────────────────────────────────────────────
@@ -3538,7 +2775,7 @@ export function createSession(
   ws: WebSocket,
   cwd: string,
   plugins: SocketAgentPlugin[],
-  codexDriver?: CodexDriver,
+  _codexDriver?: CodexDriver,
 ): Session {
   const enabled = getEnabledBackendSet();
   const requestedBackend = backend || (enabled.has("claude") ? "claude" : "codex");
@@ -3550,7 +2787,7 @@ export function createSession(
     if (!availability.available) {
       throw new Error(`Codex backend is not available on this server: ${availability.reason || "unknown reason"}`);
     }
-    return new CodexSession(ws, cwd, plugins, resolveCodexDriver(codexDriver));
+    return new CodexSession(ws, cwd, plugins);
   }
   if (!enabled.has("claude")) {
     throw new Error("Claude backend is disabled on this server");

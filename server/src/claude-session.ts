@@ -1,9 +1,10 @@
 import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type Settings } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import * as crypto from "crypto";
-import { execFile, spawn } from "child_process";
+import { execFile, execFileSync, spawn } from "child_process";
 import * as pty from "node-pty";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { WebSocket } from "ws";
 import {
@@ -26,10 +27,19 @@ import {
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep } from "./secure-input-store";
 
-// Some SDK installs include both linux-*-musl and glibc optional-dep packages.
-// On glibc hosts, make the binary choice explicit so the SDK cannot pick a musl
-// binary and fail with ENOENT for /lib/ld-musl-*.so.1.
-const CLAUDE_BINARY_OVERRIDE: string | undefined = (() => {
+function existingFile(filePath: string | undefined): string | undefined {
+  if (!filePath) return undefined;
+  try {
+    return fs.existsSync(filePath) ? filePath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveSdkClaudeBinary(): string | undefined {
+  // Some SDK installs include both linux-*-musl and glibc optional-dep packages.
+  // On glibc hosts, make the binary choice explicit so the SDK cannot pick a musl
+  // binary and fail with ENOENT for /lib/ld-musl-*.so.1.
   if (process.platform !== "linux") return undefined;
   const arch = process.arch;
   const glibcRuntime = (process.report?.getReport() as any)?.header?.glibcVersionRuntime;
@@ -41,9 +51,45 @@ const CLAUDE_BINARY_OVERRIDE: string | undefined = (() => {
     try { return require.resolve(pkg); } catch {}
   }
   return undefined;
+}
+
+function resolveInstalledClaudeCli(): string | undefined {
+  const isWindows = process.platform === "win32";
+  try {
+    const command = isWindows ? "where.exe" : "which";
+    const output = execFileSync(command, ["claude"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+    });
+    const first = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    if (first) return first;
+  } catch {}
+
+  const home = os.homedir();
+  const candidates = isWindows
+    ? [
+        process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "claude.cmd") : undefined,
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "npm", "claude.cmd") : undefined,
+        path.join(home, "AppData", "Roaming", "npm", "claude.cmd"),
+        path.join(home, "AppData", "Local", "Programs", "claude", "claude.exe"),
+      ]
+    : [
+        path.join(home, ".local", "bin", "claude"),
+        path.join(home, ".claude", "local", "claude"),
+        "/usr/local/bin/claude",
+      ];
+  return candidates.map(existingFile).find(Boolean);
+}
+
+const CLAUDE_BINARY_OVERRIDE: string | undefined = (() => {
+  const explicit =
+    existingFile(process.env.CLAUDE_CODE_EXECUTABLE) ||
+    existingFile(process.env.CLAUDE_CODE_PATH);
+  return explicit || resolveSdkClaudeBinary() || resolveInstalledClaudeCli();
 })();
 if (CLAUDE_BINARY_OVERRIDE) {
-  console.log(`[SDK] Using Claude binary: ${CLAUDE_BINARY_OVERRIDE}`);
+  console.log(`[SDK] Using Claude executable: ${CLAUDE_BINARY_OVERRIDE}`);
 }
 
 interface PendingQuestion {

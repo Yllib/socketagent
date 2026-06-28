@@ -173,13 +173,13 @@ function Install-ServerDependenciesAndBuild {
     try {
         $packageLock = Join-Path $SERVER_DIR "package-lock.json"
         if (Test-Path $packageLock) {
-            Write-Host "  Running npm ci..."
-            $npmResult = Invoke-NativeCapture { npm ci }
-            $installLabel = "npm ci"
+            Write-Host "  Running npm ci --include=optional..."
+            $npmResult = Invoke-NativeCapture { npm ci --include=optional }
+            $installLabel = "npm ci --include=optional"
         } else {
-            Write-Host "  Running npm install..."
-            $npmResult = Invoke-NativeCapture { npm install }
-            $installLabel = "npm install"
+            Write-Host "  Running npm install --include=optional..."
+            $npmResult = Invoke-NativeCapture { npm install --include=optional }
+            $installLabel = "npm install --include=optional"
         }
         $npmOutput = $npmResult.Output
         $npmExit = $npmResult.ExitCode
@@ -964,7 +964,7 @@ Write-Host ""
         }
         "*Dependencies*" {
             Write-Host "    - Check your internet connection"
-            Write-Host "    - Try: cd server && npm install"
+            Write-Host "    - Try: cd server && npm install --include=optional"
         }
         "*Configuration*" {
             Write-Host "    - Check that server/scripts/setup.js exists"

@@ -18,7 +18,7 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
-import { getAdvertisedServerSettings, getCodexDriversAvailable, getDefaultCwd, invalidateCodexDriverAvailabilityCache, resolveCodexDriver, setCodexDriver, setDefaultCwd } from "./server-settings";
+import { getAdvertisedServerSettings, getDefaultCwd, invalidateCodexDriverAvailabilityCache, setDefaultCwd } from "./server-settings";
 import { isPushConfigured, registerPushToken, sendPushNotification } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
@@ -427,7 +427,7 @@ function notifySessionActivity(): void {
 
 function getStoredCodexDriver(sessionInfo: SessionInfo | undefined): CodexDriver | undefined {
   if (sessionInfo?.backend !== "codex") return undefined;
-  return resolveCodexDriver((sessionInfo as any).codexDriver);
+  return "app-server";
 }
 
 function isContextClearedSession(sessionInfo: SessionInfo | undefined, sessionId: string): boolean {
@@ -866,13 +866,14 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "register_push_token": {
         const token = typeof msg.fcmToken === "string" ? msg.fcmToken : "";
+        const appServerId = typeof msg.appServerId === "string" ? msg.appServerId : undefined;
         if (token.trim()) {
           registerPushToken(
             token,
             typeof msg.platform === "string" ? msg.platform : "android",
-            typeof msg.appServerId === "string" ? msg.appServerId : undefined,
+            appServerId,
           );
-          sendJson({ type: "push_token_registered" });
+          sendJson({ type: "push_token_registered", appServerId });
         } else {
           sendJson({ type: "error", message: "Missing FCM token" });
         }
@@ -959,20 +960,9 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "set_codex_driver": {
-        const available = getCodexDriversAvailable();
-        if (!available.includes(msg.driver)) {
-          sendJson({
-            type: "error",
-            message: `Codex driver '${msg.driver}' is not available on this server`,
-          });
-          break;
-        }
-        const settings = setCodexDriver(msg.driver);
         sendJson({
           type: "server_settings",
-          codexDriver: settings.codexDriver,
-          defaultCwd: settings.defaultCwd,
-          codexDriversAvailable: available,
+          ...getAdvertisedServerSettings(),
           codexCollaborationMode: pendingCodexCollaborationMode,
         });
         break;
@@ -1106,7 +1096,7 @@ function createConnectionHandler(transport: ClientTransport) {
             lastActive: new Date().toISOString(),
             messagePreview: "",
             backend: sdkBackend,
-            ...(sdkBackend === "codex" ? { codexDriver: resolveCodexDriver(undefined) } : {}),
+            ...(sdkBackend === "codex" ? { codexDriver: "app-server" as CodexDriver } : {}),
           };
           saveSession(sessionInfo);
           console.log(`[Resume] Created SocketAgent entry for SDK session ${msg.sessionId} in ${resumeCwd} (backend=${sdkBackend ?? "claude"})`);
@@ -1726,9 +1716,7 @@ function createConnectionHandler(transport: ClientTransport) {
       case "schedule_task": {
         const recurrence = (msg as any).recurrence;
         const backend = ((msg as any).backend === "codex" ? "codex" : "claude") as Backend;
-        const codexDriver = backend === "codex"
-          ? resolveCodexDriver((msg as any).codexDriver)
-          : undefined;
+        const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
         const task: ScheduledTask = {
           id: crypto.randomUUID(),
           prompt: (msg as any).prompt,
@@ -1794,20 +1782,10 @@ function createConnectionHandler(transport: ClientTransport) {
               task.sessionId = undefined;
             }
             task.backend = nextBackend;
-            if (nextBackend === "codex") {
-              task.codexDriver = resolveCodexDriver((msg as any).codexDriver || task.codexDriver);
-            } else {
-              task.codexDriver = undefined;
-            }
+            task.codexDriver = nextBackend === "codex" ? "app-server" : undefined;
           }
           if ((msg as any).codexDriver !== undefined) {
-            const nextDriver = (msg as any).codexDriver === null
-              ? undefined
-              : resolveCodexDriver((msg as any).codexDriver);
-            if (task.backend === "codex" && task.codexDriver && nextDriver && task.codexDriver !== nextDriver) {
-              task.sessionId = undefined;
-            }
-            task.codexDriver = task.backend === "codex" ? nextDriver : undefined;
+            task.codexDriver = task.backend === "codex" ? "app-server" : undefined;
           }
           if ((msg as any).scheduledTime !== undefined) task.scheduledTime = (msg as any).scheduledTime;
           if ((msg as any).recurrence !== undefined) {
@@ -1914,7 +1892,7 @@ function createConnectionHandler(transport: ClientTransport) {
           const tscDir = fs.existsSync(path.join(GIT_ROOT, "server", "tsconfig.json"))
             ? path.join(GIT_ROOT, "server")
             : GIT_ROOT;
-          execSync("npm ci", { cwd: tscDir, stdio: "pipe", timeout: 120000 });
+          execSync("npm ci --include=optional", { cwd: tscDir, stdio: "pipe", timeout: 120000 });
           execSync("npx tsc", { cwd: tscDir, stdio: "pipe", timeout: 120000 });
           installSocketAgentCliFromRepo(GIT_ROOT);
 
@@ -1954,7 +1932,7 @@ function createConnectionHandler(transport: ClientTransport) {
             running.abort();
             activeSessions.delete(sid);
           }
-          if (sessionInfo.backend === "codex" && (sessionInfo as any).codexDriver !== "exec") {
+          if (sessionInfo.backend === "codex") {
             let archivedByAppServer = false;
             await archiveCodexAppServerThread(sid, sessionInfo.cwd)
               .then(() => { archivedByAppServer = true; })
@@ -1985,7 +1963,7 @@ function createConnectionHandler(transport: ClientTransport) {
           : activeSession;
         if (!targetSession) {
           const sessionInfo = targetSid ? getSession(targetSid) : undefined;
-          if (sessionInfo?.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server") {
+          if (sessionInfo?.backend === "codex") {
             compactCodexAppServerThread(targetSid, sessionInfo.cwd).then(() => {
               sendJson({ type: "codex_compact_result", sessionId: targetSid, success: true });
             }).catch((e: any) => {
@@ -1998,10 +1976,6 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
         if (targetSession instanceof CodexSession) {
-          if (targetSession.driver !== "app-server") {
-            sendJson({ type: "error", message: "Codex compaction is only supported in App Server mode" });
-            break;
-          }
           targetSession.compactAppServerThread(targetSid || undefined).then(() => {
             sendJson({ type: "codex_compact_result", sessionId: targetSid || "", success: true });
           }).catch((e: any) => {
@@ -2025,9 +1999,9 @@ function createConnectionHandler(transport: ClientTransport) {
         const sessionInfo = getSession(targetSid);
         const runRollback = targetSession instanceof CodexSession
           ? targetSession.rollbackAppServerThread(numTurns, targetSid)
-          : sessionInfo?.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server"
+          : sessionInfo?.backend === "codex"
             ? rollbackCodexAppServerThread(targetSid, sessionInfo.cwd, numTurns)
-            : Promise.reject(new Error("Codex rollback is only supported for App Server threads"));
+            : Promise.reject(new Error("Codex rollback is only supported for Codex threads"));
         runRollback.then(() => {
           appendHistory(targetSid, {
             role: "system",
@@ -2844,9 +2818,7 @@ function createConnectionHandler(transport: ClientTransport) {
         if (!activeSession) {
           sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "No active session" });
         } else if (activeSession instanceof CodexSession) {
-          const detail = activeSession.driver === "app-server"
-            ? "Codex App Server rollback is turn-level and does not restore workspace files for a message UUID."
-            : "Rewind is not supported for Codex exec sessions.";
+          const detail = "Codex App Server rollback is turn-level and does not restore workspace files for a message UUID.";
           sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: detail });
         } else if (!uuid) {
           sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "No message UUID" });
@@ -2882,10 +2854,7 @@ function createConnectionHandler(transport: ClientTransport) {
         }
         const rewindSessionInfo = getSession(sessionId);
         if (rewindSessionInfo?.backend === "codex" || activeSession instanceof CodexSession) {
-          const codexDriver = (rewindSessionInfo as any)?.codexDriver || (activeSession instanceof CodexSession ? activeSession.driver : resolveCodexDriver(undefined));
-          const detail = codexDriver === "app-server"
-            ? "Codex App Server currently exposes turn-count rollback, but not a safe message-level conversation rewind."
-            : "Conversation rewind is not supported for Codex exec sessions.";
+          const detail = "Codex App Server currently exposes turn-count rollback, but not a safe message-level conversation rewind.";
           sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: detail });
           break;
         }
@@ -2995,10 +2964,7 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
         if (sessionInfo.backend === "codex") {
-          const codexDriver = (sessionInfo as any).codexDriver || resolveCodexDriver(undefined);
-          const detail = codexDriver === "app-server"
-            ? "Codex App Server currently exposes full thread fork and turn-count rollback, but not a safe branch-at-message operation."
-            : "Branching from a message is not supported for Codex exec sessions.";
+          const detail = "Codex App Server currently exposes full thread fork and turn-count rollback, but not a safe branch-at-message operation.";
           sendJson({ type: "branch_result", success: false, originalSessionId: sourceId, branchPointUuid: branchUuid, error: detail });
           break;
         }
@@ -3097,15 +3063,11 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
         if (sessionInfo.backend === "codex") {
-          if ((sessionInfo as any).codexDriver === "exec") {
-            sendJson({ type: "error", message: "Forking is only supported for Codex App Server sessions." });
-            break;
-          }
           try {
             if (activeSession && activeSession.isRunning) {
               activeSession.detachWebSocket();
             }
-            const forked = new CodexSession(transport as any, sessionInfo.cwd, plugins, "app-server");
+            const forked = new CodexSession(transport as any, sessionInfo.cwd, plugins);
             forked.setTtsEnabled(pendingTtsEnabled);
             forked.setTtsEngine(pendingTtsEngine);
             forked.setKokoroVoice(pendingKokoroVoice);
@@ -4230,13 +4192,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       || reusableSessionInfo?.backend
       || "claude";
     task.backend = backend;
-    const codexDriver = backend === "codex"
-      ? resolveCodexDriver(
-        task.codexDriver
-          || (reusableSessionInfo as any)?.codexDriver
-          || undefined
-      )
-      : undefined;
+    const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
     if (codexDriver) task.codexDriver = codexDriver;
     else task.codexDriver = undefined;
     saveScheduledTask(task);
@@ -4710,7 +4666,7 @@ async function checkForUpdates(): Promise<void> {
       ? path.join(GIT_ROOT, "server")
       : GIT_ROOT;
     // Install/update deps so SDK and other package changes are picked up
-    await execAsync("npm ci", { cwd: tscDir, timeout: 120000 });
+    await execAsync("npm ci --include=optional", { cwd: tscDir, timeout: 120000 });
     await execAsync("npx tsc", { cwd: tscDir, timeout: 120000 });
     installSocketAgentCliFromRepo(GIT_ROOT);
 

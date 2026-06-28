@@ -5,7 +5,6 @@ import { spawn, ChildProcess } from "child_process";
 import type { Backend, CodexDriver, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
-import { resolveCodexDriver } from "./server-settings";
 import { listSkills, SkillEntry } from "./skills-manager";
 import { requestSecureInput, SecureInputRequestArgs } from "./secure-input-store";
 
@@ -320,7 +319,7 @@ export async function handleScheduleTaskTool(
     cwd: args.cwd,
     backend,
     ...(backend === "codex"
-      ? { codexDriver: resolveCodexDriver(args.codexDriver || ctx.getCodexDriver?.()) }
+      ? { codexDriver: "app-server" as CodexDriver }
       : {}),
     scheduledTime: args.scheduledTime,
     createdAt: new Date().toISOString(),

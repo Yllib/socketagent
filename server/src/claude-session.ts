@@ -18,11 +18,13 @@ import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
   AppToolContext,
   handleNotifyUserTool,
+  handleRequestSecureInputTool,
   handleScheduleReminderTool,
   handleSendFileTool,
   handleSpeakTool,
 } from "./app-tool-handlers";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
+import { pendingSecureInputMessagesForSession, redactSecretsDeep } from "./secure-input-store";
 
 // Some SDK installs include both linux-*-musl and glibc optional-dep packages.
 // On glibc hosts, make the binary choice explicit so the SDK cannot pick a musl
@@ -520,6 +522,7 @@ export class ClaudeSession {
         type: "thinking",
         content: this._streamingThinking,
         sessionId: this.sessionId || "",
+        replay: true,
       });
     }
     // Send any text accumulated during the current streaming response
@@ -528,6 +531,7 @@ export class ClaudeSession {
         type: "text",
         content: this._streamingText,
         sessionId: this.sessionId || "",
+        replay: true,
       });
     }
   }
@@ -538,6 +542,9 @@ export class ClaudeSession {
       if (pending.questionData) {
         this.sendTo(ws, pending.questionData);
       }
+    }
+    for (const pendingSecureInput of pendingSecureInputMessagesForSession(this.sessionId || "")) {
+      this.sendTo(ws, pendingSecureInput as ServerMessage);
     }
     // Send active subagent tasks so the app can render SubAgentCards
     const activeSubagents = this.getActiveSubagents();
@@ -566,12 +573,12 @@ export class ClaudeSession {
 
   private sendTo(ws: WebSocket, msg: ServerMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
+      ws.send(JSON.stringify(redactSecretsDeep(msg)));
     }
   }
 
   public send(msg: ServerMessage): void {
-    const payload = JSON.stringify(msg);
+    const payload = JSON.stringify(redactSecretsDeep(msg));
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(payload);
@@ -785,6 +792,7 @@ export class ClaudeSession {
 
       const appToolContext: AppToolContext = {
         getSessionId: () => this.sessionId || "",
+        getCwd: () => this.cwd,
         getBackend: () => "claude",
         send: (msg) => this.send(msg as ServerMessage),
         getTtsEngine: () => this._ttsEngine,
@@ -792,7 +800,7 @@ export class ClaudeSession {
         getKokoroSpeed: () => this._kokoroSpeed,
       };
 
-      // Build the MCP server with app-facing tools (Speak, SendFile, ScheduleReminder)
+      // Build the MCP server with app-facing tools.
       const appTools = createSdkMcpServer({
         name: "app",
         tools: [
@@ -809,6 +817,18 @@ export class ClaudeSession {
               file_path: z.string().describe("Absolute path to the file to send"),
             },
             async (args) => handleSendFileTool(appToolContext, args)
+          ),
+          tool(
+            "RequestSecureInput",
+            "Ask the user to enter a credential, API key, token, or other secret through a secure app card. The secret is saved to a local 0600 file on the server, and this tool returns only the file path and metadata. Use this instead of asking the user to paste secrets into chat.",
+            {
+              label: z.string().describe("Short label for the secret, e.g. OPENAI_API_KEY or GitHub token"),
+              reason: z.string().optional().describe("Why you need this secret, shown to the user"),
+              envHint: z.string().optional().describe("Suggested environment variable name"),
+              scope: z.enum(["session", "project", "global"]).optional().describe("Where to store it. Default: session"),
+              timeoutSeconds: z.number().optional().describe("How long to wait for the user, 30-3600 seconds. Default: 600"),
+            },
+            async (args) => handleRequestSecureInputTool(appToolContext, args as any)
           ),
           tool(
             "ScheduleReminder",
@@ -1110,7 +1130,7 @@ export class ClaudeSession {
         }
       }
 
-      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude session that runs automatically at the specified time. Supports recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
+      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude session that runs automatically at the specified time. Supports recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nUse RequestSecureInput when you need an API key, password, auth token, cookie, or other secret. Do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata.\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
 
       // Handle fork: use fork source as resume target + set forkSession flag
       const shouldFork = !!this._forkFromSessionId;

@@ -56,6 +56,7 @@ import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
+import { pendingSecureInputMessagesForSession, redactSecretsDeep } from "./secure-input-store";
 import {
   CodexAppServerApprovalPolicy,
   CodexAppServerApprovalsReviewer,
@@ -252,6 +253,7 @@ export class CodexSession {
     cacheCreateTokens: number;
     contextWindow: number;
   } | null = null;
+  private _lastSupportedModels: ServerMessage | null = null;
   private _fileChangeSnapshots = new Map<string, Map<string, string | null>>();
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
@@ -309,6 +311,8 @@ export class CodexSession {
   /** Mirrors ClaudeSession.setModel — async to match signature. */
   async setModel(model?: string): Promise<void> {
     this._model = model ?? null;
+    this.updateCachedSupportedModelSelection();
+    if (this._lastSupportedModels) this.send(this._lastSupportedModels);
   }
 
   /**
@@ -362,21 +366,27 @@ export class CodexSession {
     });
   }
 
-  setWebSocket(ws: WebSocket): void { this.attachWebSocket(ws); }
+  setWebSocket(ws: WebSocket): void {
+    this.attachWebSocket(ws);
+    if (this._lastSupportedModels) this.sendTo(ws, this._lastSupportedModels);
+  }
   replayLiveState(ws: WebSocket = this.ws): void {
     const sid = this.sessionId || "";
     if (!sid) return;
 
     for (const content of this.appServerReasoningText.values()) {
       if (content) {
-        this.sendTo(ws, { type: "thinking", content, sessionId: sid } as ServerMessage);
+        this.sendTo(ws, { type: "thinking", content, sessionId: sid, replay: true } as any);
       }
     }
 
     for (const [streamId, content] of this.appServerAgentText.entries()) {
       if (content) {
-        this.sendTo(ws, { type: "text", content, sessionId: sid, streamId } as ServerMessage);
+        this.sendTo(ws, { type: "text", content, sessionId: sid, streamId, replay: true } as any);
       }
+    }
+    for (const pendingSecureInput of pendingSecureInputMessagesForSession(sid)) {
+      this.sendTo(ws, pendingSecureInput as ServerMessage);
     }
   }
   detachWebSocket(): void {
@@ -935,6 +945,7 @@ export class CodexSession {
     }
     await this.ensureAppServer();
     const result = await this.appServer!.listCollaborationModes();
+    void this.refreshSupportedModels();
     const rawModes = Array.isArray((result as any)?.modes)
       ? (result as any).modes
       : Array.isArray((result as any)?.data)
@@ -954,6 +965,75 @@ export class CodexSession {
       modes.unshift({ id: "default", name: "Default" });
     }
     return modes;
+  }
+
+  async refreshSupportedModels(): Promise<void> {
+    if (this.codexDriver !== "app-server") return;
+    try {
+      await this.ensureAppServer();
+      const result = await this.appServer!.listModels();
+      const rawModels = Array.isArray((result as any)?.data)
+        ? (result as any).data
+        : Array.isArray((result as any)?.models)
+          ? (result as any).models
+          : Array.isArray(result)
+            ? result
+            : [];
+      const visible = rawModels
+        .filter((model: any) => model && model.hidden !== true)
+        .slice(0, 50);
+      const configuredModel = this.configuredCodexModel();
+      const defaultModel = visible
+        .map((model: any) => ({ model, id: this.codexModelId(model) }))
+        .find((entry: { model: any; id: string }) => entry.id && entry.model.isDefault === true)?.id;
+      const currentModel = this._model || configuredModel || defaultModel || this.codexModel();
+      const models = visible
+        .map((model: any) => {
+          const id = this.codexModelId(model);
+          if (!id) return null;
+          const tiers = Array.isArray(model.serviceTiers)
+            ? model.serviceTiers.map((tier: any) => tier?.name || tier?.id).filter(Boolean)
+            : [];
+          const descriptionParts = [
+            model.description ? String(model.description) : "",
+            tiers.length > 0 ? `Tiers: ${tiers.join(", ")}` : "",
+          ].filter(Boolean);
+          return {
+            id,
+            value: id,
+            displayName: String(model.displayName || model.name || model.title || id),
+            description: descriptionParts.join(" · "),
+            current: id === currentModel,
+            ...(tiers.length > 0 ? { tiers } : {}),
+          };
+        })
+        .filter(Boolean) as Array<Record<string, unknown>>;
+      const message = {
+        type: "supported_models",
+        models,
+        currentModel,
+        sessionId: this.sessionId || this._resumeSessionId || "",
+      } as any as ServerMessage;
+      this._lastSupportedModels = message;
+      this.send(message);
+    } catch (e: any) {
+      console.warn(`[CodexModels] Failed to list models: ${e?.message || e}`);
+    }
+  }
+
+  private codexModelId(model: any): string {
+    return String(model?.id || model?.model || model?.value || "").trim();
+  }
+
+  private updateCachedSupportedModelSelection(): void {
+    const cached = this._lastSupportedModels as any;
+    if (!cached || !Array.isArray(cached.models)) return;
+    const currentModel = this._model || this.configuredCodexModel() || cached.currentModel || this.codexModel();
+    cached.currentModel = currentModel;
+    cached.models = cached.models.map((model: any) => {
+      const id = String(model?.value || model?.id || "");
+      return { ...model, current: id === currentModel };
+    });
   }
 
   /**
@@ -1079,12 +1159,12 @@ export class CodexSession {
 
   private sendTo(ws: WebSocket, msg: ServerMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
+      ws.send(JSON.stringify(redactSecretsDeep(msg)));
     }
   }
 
   public send(msg: ServerMessage): void {
-    const payload = JSON.stringify(msg);
+    const payload = JSON.stringify(redactSecretsDeep(msg));
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(payload);
@@ -1333,6 +1413,7 @@ export class CodexSession {
       }
 
       if (!this.threadId) throw new Error("codex app-server did not return a thread id");
+      void this.refreshSupportedModels();
 
       const collaborationMode = this.codexCollaborationMode();
       const turnModel = collaborationMode ? this.codexModel() : undefined;
@@ -3302,8 +3383,7 @@ export class CodexSession {
     return this._effort === "max" ? "high" : this._effort;
   }
 
-  private codexModel(): string | undefined {
-    if (this._model) return this._model;
+  private configuredCodexModel(): string | undefined {
     const envModel = process.env.CODEX_MODEL?.trim();
     if (envModel) return envModel;
 
@@ -3316,6 +3396,13 @@ export class CodexSession {
       // Fall through to Codex's current default when config is absent/unreadable.
     }
 
+    return undefined;
+  }
+
+  private codexModel(): string {
+    if (this._model) return this._model;
+    const configuredModel = this.configuredCodexModel();
+    if (configuredModel) return configuredModel;
     return "gpt-5.5";
   }
 
@@ -3323,7 +3410,7 @@ export class CodexSession {
     const parts: string[] = [];
 
     parts.push(
-      `SocketAgent app tools are available through the MCP server named socketagent_app: ${SOCKETAGENT_APP_TOOLS.map((tool) => tool.name).join(", ")}. Use SendFile with an absolute file_path when the user asks you to send, share, or transfer a file to their phone. Use NotifyUser for important phone push notifications, ScheduleReminder for device reminders, ScheduleTask for scheduled agent work, Monitor for background command monitoring, and Speak only when text-to-speech is enabled or requested. If a SocketAgent app tool is not immediately visible, use tool discovery for socketagent_app instead of telling the user it must be loaded.`,
+      `SocketAgent app tools are available through the MCP server named socketagent_app: ${SOCKETAGENT_APP_TOOLS.map((tool) => tool.name).join(", ")}. Use SendFile with an absolute file_path when the user asks you to send, share, or transfer a file to their phone. Use RequestSecureInput when you need an API key, password, auth token, cookie, or other secret; do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata. Use NotifyUser for important phone push notifications, ScheduleReminder for device reminders, ScheduleTask for scheduled agent work, Monitor for background command monitoring, and Speak only when text-to-speech is enabled or requested. If a SocketAgent app tool is not immediately visible, use tool discovery for socketagent_app instead of telling the user it must be loaded.`,
     );
 
     parts.push(SOCKETAGENT_FILE_LINK_INSTRUCTIONS);

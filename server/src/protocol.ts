@@ -31,6 +31,24 @@ export interface AnswerMessage {
   answers: Record<string, string>;
 }
 
+export interface SecureInputResponseMessage {
+  type: "secure_input_response";
+  requestId: string;
+  value?: string;
+  cancelled?: boolean;
+}
+
+export interface SecureInputStoreMessage {
+  type: "secure_input_store";
+  label: string;
+  value: string;
+  reason?: string;
+  envHint?: string;
+  scope?: "session" | "project" | "global";
+  sessionId?: string;
+  cwd?: string;
+}
+
 export interface NewSessionMessage {
   type: "new_session";
   cwd?: string;
@@ -472,6 +490,8 @@ export type ClientMessage =
   | PromptMessage
   | RetractQueuedPromptMessage
   | AnswerMessage
+  | SecureInputResponseMessage
+  | SecureInputStoreMessage
   | NewSessionMessage
   | ResumeSessionMessage
   | ListSessionsMessage
@@ -579,6 +599,7 @@ export interface TextServerMessage {
   streamId?: string;
   parentToolUseId?: string | null;
   uuid?: string;
+  replay?: boolean;
 }
 
 export interface ToolCallServerMessage {
@@ -626,6 +647,28 @@ export interface QuestionServerMessage {
   emailPreview?: EmailPreview;
 }
 
+export interface SecureInputRequestServerMessage {
+  type: "secure_input_request";
+  requestId: string;
+  sessionId: string;
+  label: string;
+  reason?: string;
+  envHint?: string;
+  scope?: "session" | "project" | "global";
+  multiline?: boolean;
+}
+
+export interface SecureInputSavedServerMessage {
+  type: "secure_input_saved";
+  requestId?: string;
+  sessionId?: string;
+  secretId: string;
+  label: string;
+  scope: "session" | "project" | "global";
+  filePath: string;
+  envHint: string;
+}
+
 export interface QuestionItem {
   question: string;
   header?: string;
@@ -639,6 +682,7 @@ export interface ThinkingServerMessage {
   sessionId: string;
   parentToolUseId?: string | null;
   uuid?: string;
+  replay?: boolean;
 }
 
 export interface UsageInfo {
@@ -1174,6 +1218,8 @@ export type ServerMessage =
   | ToolCallServerMessage
   | ToolResultServerMessage
   | QuestionServerMessage
+  | SecureInputRequestServerMessage
+  | SecureInputSavedServerMessage
   | ResultServerMessage
   | SessionListServerMessage
   | ErrorServerMessage

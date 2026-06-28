@@ -6,6 +6,7 @@ import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
 import { buildCodexSpawn } from "./codex-env";
+import { redactSecretsDeep } from "./secure-input-store";
 
 const STORE_DIR = path.join(
   process.env.HOME || require("os").homedir(),
@@ -344,9 +345,10 @@ function withCachedTurnCount(session: SessionInfo): SessionInfo {
 function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
   ensureHistoryDir();
   const file = historyFile(sessionId);
-  fs.writeFileSync(file, JSON.stringify(entries, null, 2), "utf-8");
+  const safeEntries = redactSecretsDeep(entries);
+  fs.writeFileSync(file, JSON.stringify(safeEntries, null, 2), "utf-8");
   const stat = fs.statSync(file);
-  historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
+  historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries: safeEntries });
 }
 
 export function appendHistory(sessionId: string, entry: HistoryEntry): void {

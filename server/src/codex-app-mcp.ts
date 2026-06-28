@@ -8,6 +8,7 @@ import {
   AppToolContext,
   handleMonitorTool,
   handleNotifyUserTool,
+  handleRequestSecureInputTool,
   handleReadSkillTool,
   handleScheduleReminderTool,
   handleScheduleTaskTool,
@@ -25,6 +26,10 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "SendFile",
     description: "Send a file to the user's mobile device for download.",
+  },
+  {
+    name: "RequestSecureInput",
+    description: "Ask the user for a credential/API key/token through a secure app card and receive only a local secret file path.",
   },
   {
     name: "Speak",
@@ -144,6 +149,22 @@ function createServer(context: AppToolContext): McpServer {
       },
     },
     async (args) => handleSendFileTool(context, args as { file_path: string }),
+  );
+
+  server.registerTool(
+    "RequestSecureInput",
+    {
+      title: "Request Secure Input",
+      description: "Ask the user to enter a credential, API key, token, or other secret through a secure app card. The secret is saved to a local 0600 file on the server, and this tool returns only the file path and metadata. Use this instead of asking the user to paste secrets into chat.",
+      inputSchema: {
+        label: z.string().describe("Short label for the secret, e.g. OPENAI_API_KEY or GitHub token"),
+        reason: z.string().optional().describe("Why you need this secret, shown to the user"),
+        envHint: z.string().optional().describe("Suggested environment variable name"),
+        scope: z.enum(["session", "project", "global"]).optional().describe("Where to store it. Default: session"),
+        timeoutSeconds: z.number().optional().describe("How long to wait for the user, 30-3600 seconds. Default: 600"),
+      },
+    },
+    async (args) => handleRequestSecureInputTool(context, args as any),
   );
 
   server.registerTool(

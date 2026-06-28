@@ -7,6 +7,7 @@ import { generateKokoroAudio } from "./kokoro-tts";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { resolveCodexDriver } from "./server-settings";
 import { listSkills, SkillEntry } from "./skills-manager";
+import { requestSecureInput, SecureInputRequestArgs } from "./secure-input-store";
 
 export interface AppToolContext {
   getSessionId(): string;
@@ -69,6 +70,8 @@ export interface ReadSkillArgs {
   name?: string;
   filePath?: string;
 }
+
+export type RequestSecureInputArgs = SecureInputRequestArgs;
 
 interface AppMonitorState {
   ctx: AppToolContext;
@@ -194,6 +197,46 @@ export async function handleSendFileTool(
   } catch (e: any) {
     console.error(`[MCP:SendFile] Error: ${e.message}`, e.stack);
     return { content: [{ type: "text", text: `SendFile error: ${e.message}` }], isError: true };
+  }
+}
+
+export async function handleRequestSecureInputTool(
+  ctx: AppToolContext,
+  args: RequestSecureInputArgs,
+): Promise<McpTextResult> {
+  const label = (args.label || "").trim() || "Secret";
+  try {
+    const saved = await requestSecureInput(
+      (msg) => ctx.send(msg),
+      {
+        label,
+        reason: args.reason,
+        envHint: args.envHint,
+        scope: args.scope,
+        timeoutSeconds: args.timeoutSeconds,
+      },
+      ctx.getSessionId(),
+      ctx.getCwd?.(),
+    );
+    const resultText = [
+      "Secure input saved.",
+      `Label: ${saved.label}`,
+      `Secret ID: ${saved.secretId}`,
+      `Scope: ${saved.scope}`,
+      `File path: ${saved.filePath}`,
+      `Suggested env var: ${saved.envHint}`,
+      "",
+      "Use the file path or suggested env var name in commands. Do not print the secret value.",
+    ].join("\n");
+    appendVisibleToolHistory(
+      ctx,
+      "RequestSecureInput",
+      { label, reason: args.reason || "", scope: saved.scope, envHint: saved.envHint },
+      resultText,
+    );
+    return { content: [{ type: "text", text: resultText }] };
+  } catch (e: any) {
+    return { content: [{ type: "text", text: `Secure input request failed: ${e.message || e}` }], isError: true };
   }
 }
 

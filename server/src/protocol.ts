@@ -276,6 +276,32 @@ export interface ClientCapabilitiesMessage {
   binaryEnvelope?: boolean;
 }
 
+export interface TerminalAttachMessage {
+  type: "terminal_attach";
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+}
+
+export interface TerminalInputMessage {
+  type: "terminal_input";
+  data: string;
+}
+
+export interface TerminalResizeMessage {
+  type: "terminal_resize";
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalDetachMessage {
+  type: "terminal_detach";
+}
+
+export interface TerminalKillMessage {
+  type: "terminal_kill";
+}
+
 export interface RegisterPushTokenMessage {
   type: "register_push_token";
   fcmToken: string;
@@ -497,6 +523,11 @@ export type ClientMessage =
   | UploadChunkMessage
   | UploadChunkBinMessage
   | ClientCapabilitiesMessage
+  | TerminalAttachMessage
+  | TerminalInputMessage
+  | TerminalResizeMessage
+  | TerminalDetachMessage
+  | TerminalKillMessage
   | RegisterPushTokenMessage
   | ScheduleTaskMessage
   | ListScheduledTasksMessage
@@ -1104,6 +1135,34 @@ export interface UsageUpdateServerMessage {
   sessionId: string;
 }
 
+export interface TerminalStatusServerMessage {
+  type: "terminal_status";
+  running: boolean;
+  pid?: number;
+  cwd: string;
+  shell: string;
+  cols: number;
+  rows: number;
+  exitCode?: number;
+}
+
+export interface TerminalOutputServerMessage {
+  type: "terminal_output";
+  data: string;
+  replay?: boolean;
+}
+
+export interface TerminalExitedServerMessage {
+  type: "terminal_exited";
+  exitCode: number;
+  signal?: number;
+}
+
+export interface TerminalErrorServerMessage {
+  type: "terminal_error";
+  message: string;
+}
+
 export type ServerMessage =
   | TextServerMessage
   | ToolCallServerMessage
@@ -1156,4 +1215,8 @@ export type ServerMessage =
   | HookProgressServerMessage
   | HookResponseServerMessage
   | MonitorStartedServerMessage
-  | MonitorOutputServerMessage;
+  | MonitorOutputServerMessage
+  | TerminalStatusServerMessage
+  | TerminalOutputServerMessage
+  | TerminalExitedServerMessage
+  | TerminalErrorServerMessage;

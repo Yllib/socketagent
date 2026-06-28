@@ -24,6 +24,7 @@ import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirec
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 import { runBackendInstall } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
+import { terminalSessionManager } from "./terminal-session";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -323,6 +324,7 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
   return {
     type: "server_capabilities",
     binaryEnvelope,
+    terminal: true,
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
     codexDriversAvailable: settings.codexDriversAvailable,
@@ -642,6 +644,32 @@ function createConnectionHandler(transport: ClientTransport) {
     externalNativeWatchFingerprint = null;
   }
 
+  function closeConnection(): void {
+    stopExternalNativeWatcher();
+    terminalSessionManager.detach(transport);
+  }
+
+  function resolveTerminalCwd(rawCwd: unknown): string {
+    const candidates = [
+      typeof rawCwd === "string" && rawCwd.trim() ? rawCwd.trim() : undefined,
+      activeSession?.getCwd?.(),
+      activeSessionId ? getSession(activeSessionId)?.cwd : undefined,
+      getDefaultCwd(),
+      os.homedir(),
+      process.cwd(),
+    ];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const resolved = path.resolve(candidate);
+      try {
+        if (fs.statSync(resolved).isDirectory()) return resolved;
+      } catch {
+        // Try the next candidate.
+      }
+    }
+    return process.cwd();
+  }
+
   function emitExternalNativeHistory(sessionInfo: SessionInfo, added: any[]): void {
     if (added.length === 0) return;
     const total = getHistory(sessionInfo.id).length;
@@ -805,6 +833,35 @@ function createConnectionHandler(transport: ClientTransport) {
     }
 
     switch (msg.type) {
+      case "terminal_attach": {
+        terminalSessionManager.attach(transport, {
+          cwd: resolveTerminalCwd((msg as any).cwd),
+          cols: (msg as any).cols,
+          rows: (msg as any).rows,
+        });
+        break;
+      }
+
+      case "terminal_input": {
+        terminalSessionManager.input((msg as any).data);
+        break;
+      }
+
+      case "terminal_resize": {
+        terminalSessionManager.resize((msg as any).cols, (msg as any).rows);
+        break;
+      }
+
+      case "terminal_detach": {
+        terminalSessionManager.detach(transport);
+        break;
+      }
+
+      case "terminal_kill": {
+        terminalSessionManager.kill();
+        break;
+      }
+
       case "register_push_token": {
         const token = typeof msg.fcmToken === "string" ? msg.fcmToken : "";
         if (token.trim()) {
@@ -3472,7 +3529,7 @@ function createConnectionHandler(transport: ClientTransport) {
     handleMessage,
     sendJson,
     sendRaw,
-    close: stopExternalNativeWatcher,
+    close: closeConnection,
     get activeSessionId() { return activeSessionId; },
   };
 }

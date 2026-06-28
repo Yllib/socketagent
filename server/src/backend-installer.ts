@@ -3,7 +3,6 @@ import * as os from "os";
 import * as path from "path";
 import { spawn } from "child_process";
 import type { Backend } from "./protocol";
-import { buildCodexSpawn } from "./codex-env";
 import { managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 
 export type BackendInstallPhase = "install" | "auth" | "probe";
@@ -42,6 +41,26 @@ function commandName(base: string): string {
 
 function pathKey(env: NodeJS.ProcessEnv): string {
   return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
+}
+
+function existingFile(filePath: string): string | undefined {
+  try {
+    return fs.existsSync(filePath) ? filePath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveManagedCodexCommand(env: NodeJS.ProcessEnv): string | undefined {
+  const binDir = managedNpmBinDir(env);
+  const names = process.platform === "win32"
+    ? ["codex.cmd", "codex.exe", "codex.bat", "codex"]
+    : ["codex"];
+  for (const name of names) {
+    const found = existingFile(path.join(binDir, name));
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function installEnv(): NodeJS.ProcessEnv {
@@ -146,20 +165,35 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
     });
     await runProcess({
       command: commandName("npm"),
-      args: ["install", "-g", "@openai/codex@latest"],
+      args: [
+        "install",
+        "-g",
+        "--prefix",
+        managedNpmPrefix(env),
+        "--include=optional",
+        "@openai/codex@latest",
+      ],
       env,
       phase: "install",
       shell: process.platform === "win32",
       onProgress: options.onProgress,
     });
+    const managedCodex = resolveManagedCodexCommand(env);
+    if (!managedCodex) {
+      throw new Error(`Managed Codex install finished, but no codex executable was created in ${managedNpmBinDir(env)}`);
+    }
     options.onProgress({
       phase: "install",
       status: "completed",
-      message: "OpenAI Codex CLI install finished.",
+      message: `Managed OpenAI Codex CLI install finished: ${managedCodex}`,
     });
   }
 
   if (options.authenticate) {
+    const managedCodex = resolveManagedCodexCommand(env);
+    if (!managedCodex) {
+      throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}. Run Install / Repair Codex again.`);
+    }
     options.onProgress({
       phase: "auth",
       status: "running",
@@ -167,7 +201,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
       authUrl: CODEX_DEVICE_URL,
     });
 
-    const codex = buildCodexSpawn(["login", "--device-auth"], env);
+    const codex = { command: managedCodex, args: ["login", "--device-auth"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex) };
     let authDetected = false;
     const authPoll = setInterval(() => {
       if (authDetected || !codexAuthFileExists()) return;
@@ -215,7 +249,11 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
     status: "running",
     message: "Checking Codex CLI...",
   });
-  const codexVersion = buildCodexSpawn(["--version"], env);
+  const managedCodex = resolveManagedCodexCommand(env);
+  if (!managedCodex) {
+    throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}`);
+  }
+  const codexVersion = { command: managedCodex, args: ["--version"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex) };
   await runProcess({
     command: codexVersion.command,
     args: codexVersion.args,

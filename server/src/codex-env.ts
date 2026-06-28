@@ -7,13 +7,14 @@ function pathKey(env: NodeJS.ProcessEnv): string {
   return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
 }
 
-function includesPathDir(pathValue: string | undefined, dir: string): boolean {
-  if (!pathValue) return false;
+function movePathDirToFront(pathValue: string, dir: string): string {
   const normalized = path.resolve(dir).toLowerCase();
-  return pathValue
+  const entries = pathValue
     .split(path.delimiter)
     .filter(Boolean)
-    .some((entry) => path.resolve(entry).toLowerCase() === normalized);
+    .filter((entry) => path.resolve(entry).toLowerCase() !== normalized);
+  entries.unshift(dir);
+  return entries.join(path.delimiter);
 }
 
 function codexCandidateDirs(env: NodeJS.ProcessEnv): string[] {
@@ -52,10 +53,8 @@ export function buildCodexProcessEnv(base: NodeJS.ProcessEnv = process.env): Nod
   const key = pathKey(env);
   let value = env[key] || "";
 
-  for (const dir of codexCandidateDirs(env)) {
-    if (!includesPathDir(value, dir)) {
-      value = value ? `${value}${path.delimiter}${dir}` : dir;
-    }
+  for (const dir of codexCandidateDirs(env).reverse()) {
+    value = movePathDirToFront(value, dir);
   }
 
   env[key] = value;

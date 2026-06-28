@@ -10,7 +10,7 @@ import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, renameCodexNativeThread, invalidateCodexNativeListCache } from "./session-store";
+import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -466,6 +466,74 @@ function syncCodexRolloutHistory(sessionInfo: SessionInfo): any[] {
   return added;
 }
 
+const EXTERNAL_NATIVE_ACTIVE_TTL_MS = 15_000;
+const externalNativeSessionActivity = new Map<string, number>();
+
+function nativeHistoryPathForSession(sessionInfo: SessionInfo): string | null {
+  if (sessionInfo.backend === "codex") {
+    return findCodexRolloutFile(sessionInfo.id);
+  }
+  if (sessionInfo.backend === "claude" || !sessionInfo.backend) {
+    const cwd = sessionInfo.cwd || getDefaultCwd();
+    return cwd ? getJsonlPath(sessionInfo.id, cwd) : null;
+  }
+  return null;
+}
+
+function nativeHistoryFingerprintForSession(sessionInfo: SessionInfo): string | null {
+  const file = nativeHistoryPathForSession(sessionInfo);
+  if (!file) return null;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return null;
+    return `${file}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
+function markExternalNativeSessionActive(sessionId: string): void {
+  externalNativeSessionActivity.set(sessionId, Date.now() + EXTERNAL_NATIVE_ACTIVE_TTL_MS);
+  broadcastStatusSync();
+}
+
+function getExternalNativeRunningSessions(now = Date.now()): string[] {
+  const running: string[] = [];
+  for (const [sessionId, activeUntil] of externalNativeSessionActivity) {
+    if (activeUntil <= now) {
+      externalNativeSessionActivity.delete(sessionId);
+      continue;
+    }
+    running.push(sessionId);
+  }
+  return running;
+}
+
+function hasExternalNativeActivity(now = Date.now()): boolean {
+  return getExternalNativeRunningSessions(now).length > 0;
+}
+
+function syncClaudeNativeHistory(sessionInfo: SessionInfo): any[] {
+  const cwd = sessionInfo.cwd || getDefaultCwd();
+  if (!cwd) return [];
+  const lastTimestamp = getLastHistoryTimestamp(sessionInfo.id) || "1970-01-01T00:00:00Z";
+  const added = getMissedMessages(sessionInfo.id, cwd, lastTimestamp);
+  if (added.length > 0) {
+    appendHistoryBulk(sessionInfo.id, added);
+    updateSessionActivity(
+      sessionInfo.id,
+      added[added.length - 1]?.content || sessionInfo.messagePreview || "",
+    );
+  }
+  return added;
+}
+
+function syncExternalNativeHistory(sessionInfo: SessionInfo): any[] {
+  if (sessionInfo.backend === "codex") return syncCodexRolloutHistory(sessionInfo);
+  if (sessionInfo.backend === "claude" || !sessionInfo.backend) return syncClaudeNativeHistory(sessionInfo);
+  return [];
+}
+
 /**
  * Transport interface — abstracts over real WebSocket and relay virtual socket.
  * ClaudeSession needs readyState + send(). Connection handler needs send().
@@ -529,6 +597,9 @@ function createConnectionHandler(transport: ClientTransport) {
     bytesReceived: number;
     lastProgressEmit: number;
   }>();
+  let externalNativeWatchTimer: ReturnType<typeof setInterval> | null = null;
+  let externalNativeWatchSessionId: string | null = null;
+  let externalNativeWatchFingerprint: string | null = null;
 
   // Throttle interval for upload_progress emissions.
   const UPLOAD_PROGRESS_INTERVAL_MS = 250;
@@ -560,6 +631,57 @@ function createConnectionHandler(transport: ClientTransport) {
     if (transport.readyState === WebSocket.OPEN) {
       transport.send(data);
     }
+  }
+
+  function stopExternalNativeWatcher(): void {
+    if (externalNativeWatchTimer) {
+      clearInterval(externalNativeWatchTimer);
+      externalNativeWatchTimer = null;
+    }
+    externalNativeWatchSessionId = null;
+    externalNativeWatchFingerprint = null;
+  }
+
+  function emitExternalNativeHistory(sessionInfo: SessionInfo, added: any[]): void {
+    if (added.length === 0) return;
+    const total = getHistory(sessionInfo.id).length;
+    sendJson({
+      type: "session_history",
+      sessionId: sessionInfo.id,
+      messages: added,
+      total,
+      offset: Math.max(0, total - added.length),
+      append: true,
+    });
+    broadcastSessionList();
+  }
+
+  function startExternalNativeWatcher(sessionInfo: SessionInfo): void {
+    if (externalNativeWatchSessionId === sessionInfo.id && externalNativeWatchTimer) return;
+    stopExternalNativeWatcher();
+    externalNativeWatchSessionId = sessionInfo.id;
+    externalNativeWatchFingerprint = nativeHistoryFingerprintForSession(sessionInfo);
+
+    const tick = () => {
+      if (transport.readyState !== WebSocket.OPEN) {
+        stopExternalNativeWatcher();
+        return;
+      }
+      const fingerprint = nativeHistoryFingerprintForSession(sessionInfo);
+      const fileChanged = !!fingerprint && fingerprint !== externalNativeWatchFingerprint;
+      if (fingerprint) externalNativeWatchFingerprint = fingerprint;
+
+      const added = syncExternalNativeHistory(sessionInfo);
+      if (added.length > 0) {
+        emitExternalNativeHistory(sessionInfo, added);
+      }
+      if (fileChanged || added.length > 0) {
+        markExternalNativeSessionActive(sessionInfo.id);
+      }
+    };
+
+    externalNativeWatchTimer = setInterval(tick, 2000);
+    tick();
   }
 
   function codexUnavailable(): boolean {
@@ -867,6 +989,7 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "new_session": {
+        stopExternalNativeWatcher();
         const cwd = msg.cwd || getDefaultCwd();
         if (msg.backend === "codex" && codexUnavailable()) {
           sendJson({
@@ -1074,6 +1197,12 @@ function createConnectionHandler(transport: ClientTransport) {
               append: true,
             });
           }
+        }
+
+        if (!contextCleared && !activeSessions.has(msg.sessionId)) {
+          startExternalNativeWatcher(sessionInfo);
+        } else {
+          stopExternalNativeWatcher();
         }
 
         // Restore last usage data if available
@@ -3331,6 +3460,7 @@ function createConnectionHandler(transport: ClientTransport) {
     handleMessage,
     sendJson,
     sendRaw,
+    close: stopExternalNativeWatcher,
     get activeSessionId() { return activeSessionId; },
   };
 }
@@ -3824,6 +3954,12 @@ function buildStatusSyncMessage(): string {
       sessionModels[sid] = session.sessionModel;
     }
   }
+  for (const sid of getExternalNativeRunningSessions()) {
+    if (!runningSessions.includes(sid)) {
+      runningSessions.push(sid);
+    }
+    anyRunning = true;
+  }
   return JSON.stringify({
     type: "status_sync",
     running: anyRunning || compactingSessions.length > 0,
@@ -3847,6 +3983,7 @@ function scheduleStatusSync(): void {
   for (const [, session] of activeSessions) {
     if (sessionIsBusy(session)) { anyRunning = true; break; }
   }
+  anyRunning = anyRunning || hasExternalNativeActivity();
 
   const interval = anyRunning ? STATUS_SYNC_RUNNING_INTERVAL : STATUS_SYNC_IDLE_INTERVAL;
   statusSyncTimer = setTimeout(() => {
@@ -4157,6 +4294,7 @@ wss.on("connection", (ws: WebSocket) => {
 
   ws.on("close", () => {
     console.log("Client disconnected");
+    handler.close();
     connectedClients.delete(ws);
     // Clean up session client mapping for this connection
     if (handler.activeSessionId) {
@@ -4225,11 +4363,13 @@ function startRelayClient(): void {
       console.log(`[Relay] Status: ${status}`);
       if (status === "paired") {
         // Reset handler when phone reconnects so it gets a fresh state
+        relayConnectionHandler?.close();
         relayConnectionHandler = createConnectionHandler(relayClient!.getVirtualSocket() as any);
         relayMessageQueue = Promise.resolve();
         console.log(`[Relay] Phone paired — ready for messages`);
       }
       if (status === "waiting_for_peer" || status === "disconnected") {
+        relayConnectionHandler?.close();
         relayConnectionHandler = null;
         relayMessageQueue = Promise.resolve();
       }

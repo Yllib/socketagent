@@ -168,7 +168,9 @@ export class RelayClient {
     // Relay control messages (unencrypted)
     if (parsed.type === "peer_connected") {
       console.log(`[Relay] Phone connected to relay`);
-      this.setStatus("waiting_for_peer"); // Will become "paired" after key exchange
+      if (!this.phonePublicKey) {
+        this.setStatus("waiting_for_peer"); // Will become "paired" after key exchange
+      }
       return;
     }
 
@@ -184,9 +186,13 @@ export class RelayClient {
     // Key exchange (plaintext from phone)
     if (parsed.type === "key_exchange") {
       console.log(`[Relay] Received phone public key`);
-      this.phonePublicKey = fromBase64(parsed.pubkey);
-      this.setStatus("paired");
+      const nextPhonePublicKey = fromBase64(parsed.pubkey);
+      if (this.phonePublicKey && toBase64(this.phonePublicKey) !== toBase64(nextPhonePublicKey)) {
+        console.warn(`[Relay] Mirrored phone connected with a different public key; existing phones may not decrypt future relay messages`);
+      }
+      this.phonePublicKey = nextPhonePublicKey;
       this.virtualWs._setOpen(true);
+      this.setStatus("paired");
 
       // Send ack PLAINTEXT — phone needs this to confirm handshake before
       // encrypted mode begins. Contains no sensitive data.
@@ -306,6 +312,7 @@ export class RelayClient {
   }
 
   private setStatus(status: RelayStatus): void {
+    if (this.status === status) return;
     this.status = status;
     this.opts.onStatusChange(status);
   }

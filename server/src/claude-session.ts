@@ -1,4 +1,4 @@
-import { query, createSdkMcpServer, tool, forkSession as sdkForkSession } from "@anthropic-ai/claude-agent-sdk";
+import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type Settings } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import * as crypto from "crypto";
 import { execFile, spawn } from "child_process";
@@ -24,11 +24,9 @@ import {
 } from "./app-tool-handlers";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 
-// SDK 0.2.116 tries the linux-*-musl optional-dep package before the glibc one.
-// Both get installed as peer optional deps, so on a glibc host the SDK picks the
-// musl binary and the exec fails with ENOENT (no /lib/ld-musl-*.so.1), which the
-// SDK then reports as "native binary not found". Resolve the right variant here
-// and pass it as pathToClaudeCodeExecutable.
+// Some SDK installs include both linux-*-musl and glibc optional-dep packages.
+// On glibc hosts, make the binary choice explicit so the SDK cannot pick a musl
+// binary and fail with ENOENT for /lib/ld-musl-*.so.1.
 const CLAUDE_BINARY_OVERRIDE: string | undefined = (() => {
   if (process.platform !== "linux") return undefined;
   const arch = process.arch;
@@ -183,12 +181,9 @@ export class ClaudeSession {
     console.log(`Claude auto-compact ${enabled ? 'enabled' : 'disabled'} for session ${this.sessionId || '(pending)'}`);
   }
 
-  private claudeFlagSettings(): Record<string, unknown> | undefined {
-    if (this._autoCompactEnabled) return undefined;
+  private claudeFlagSettings(): Settings {
     return {
-      env: {
-        DISABLE_AUTO_COMPACT: "1",
-      },
+      autoCompactEnabled: this._autoCompactEnabled,
     };
   }
 
@@ -1131,7 +1126,7 @@ export class ClaudeSession {
       this._resumeSessionAt = undefined;
 
       // Pre-assign a UUID for this user message so we can wire up rewind support
-      // immediately, without waiting for the SDK to echo it back. (SDK 0.2.116 stopped
+      // immediately, without waiting for the SDK to echo it back. (Recent SDK versions stopped
       // emitting a `user` message echo for string prompts; we control the UUID here
       // and pass it via streaming-input mode so it lands in the SDK transcript with
       // the same ID we hand to the app.)
@@ -1149,7 +1144,6 @@ export class ClaudeSession {
 
       console.log(`Starting query: resume=${resumeTarget || 'none'}${shouldFork ? ' (FORK)' : ''}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt=${prompt.slice(0, 80)}..., uuid=${userMsgUuid}, cwd=${this.cwd}`);
 
-      const flagSettings = this.claudeFlagSettings();
       const q = this.activeQuery = query({
         prompt: promptStream as any,
         options: {
@@ -1167,7 +1161,7 @@ export class ClaudeSession {
           systemPrompt: { type: "preset", preset: "claude_code", append: this._appendSystemPrompt ? toolContext + '\n\n' + this._appendSystemPrompt : toolContext } as any,
           tools: { type: "preset", preset: "claude_code" },
           ...(this._disallowedTools.length ? { disallowedTools: this._disallowedTools } : {}),
-          ...(flagSettings ? { settings: flagSettings as any } : {}),
+          settings: this.claudeFlagSettings(),
           enableFileCheckpointing: true,
           promptSuggestions: true,
           agentProgressSummaries: true,

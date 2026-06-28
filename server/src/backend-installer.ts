@@ -27,6 +27,15 @@ export interface BackendInstallOptions {
 
 const CODEX_DEVICE_URL = "https://chatgpt.com/codex/device";
 
+function stripTerminalControl(text: string): string {
+  return text
+    .replace(
+      /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g,
+      ""
+    )
+    .replace(/\[(?:\d{1,3}(?:;\d{1,3})*)m/g, "");
+}
+
 function commandName(base: string): string {
   return process.platform === "win32" ? `${base}.cmd` : base;
 }
@@ -87,7 +96,7 @@ async function runProcess(options: {
       : null;
 
     const handleChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
-      const text = chunk.toString("utf8");
+      const text = stripTerminalControl(chunk.toString("utf8"));
       tail = (tail + text).slice(-12000);
       const auth = options.phase === "auth" ? parseDeviceAuth(text) : {};
       options.onProgress({

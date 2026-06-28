@@ -7,6 +7,12 @@ import { getAdvertisedServerSettings } from "./server-settings";
 // Binary envelope plaintext markers — first byte of the decrypted payload.
 const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
 const BIN_MARKER_UPLOAD_CHUNK = 0x42;  // 'B' — upload chunk: [1 idLen][idBytes][4 chunkIdx BE][bytes]
+const LEGACY_PEER_ID = "legacy";
+
+interface RelayPeer {
+  publicKey: Uint8Array | null;
+  binaryEnabled: boolean;
+}
 
 export type RelayStatus = "disconnected" | "connecting" | "waiting_for_peer" | "paired" | "error";
 
@@ -25,7 +31,8 @@ export interface RelayClientOptions {
  */
 export class RelayClient {
   private ws: WebSocket | null = null;
-  private phonePublicKey: Uint8Array | null = null;
+  private peers = new Map<string, RelayPeer>();
+  private relaySupportsMultiDevice = false;
   private status: RelayStatus = "disconnected";
   private reconnectDelay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -34,11 +41,6 @@ export class RelayClient {
   private pongReceived = true;
   private static PING_INTERVAL = 30_000;  // send ping every 30s
   private static PING_TIMEOUT = 10_000;   // if no pong within 10s, connection is dead
-
-  // Wire-format flag — flipped to true after the phone announces
-  // {type: "client_capabilities", binaryEnvelope: true}. While false we keep
-  // sending the legacy JSON `{n, c}` envelope so older app builds keep working.
-  private binaryEnabled = false;
 
   // Virtual WebSocket interface for ClaudeSession compatibility
   private virtualWs: VirtualRelaySocket;
@@ -57,7 +59,7 @@ export class RelayClient {
     if (this.closed) return;
     this.setStatus("connecting");
 
-    const url = `${this.opts.relayUrl}?token=${encodeURIComponent(this.opts.pairingToken)}&role=server`;
+    const url = `${this.opts.relayUrl}?token=${encodeURIComponent(this.opts.pairingToken)}&role=server&multi_device=1`;
     console.log(`[Relay] Connecting to ${this.opts.relayUrl}...`);
 
     try {
@@ -105,8 +107,8 @@ export class RelayClient {
       console.log(`[Relay] Disconnected`);
       this.stopPingPong();
       this.ws = null;
-      this.phonePublicKey = null;
-      this.binaryEnabled = false;
+      this.peers.clear();
+      this.relaySupportsMultiDevice = false;
       this.virtualWs._setOpen(false);
       this.setStatus("disconnected");
       if (!this.closed) this.scheduleReconnect();
@@ -122,32 +124,24 @@ export class RelayClient {
   send(msg: Record<string, unknown>): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-    const json = JSON.stringify(msg);
+    const pairedPeers = Array.from(this.peers.entries())
+      .filter(([, peer]) => peer.publicKey !== null);
 
-    if (!this.phonePublicKey) {
-      // Pre-key-exchange: send plaintext (only used for key_exchange_ack)
-      this.ws.send(json);
+    if (pairedPeers.length === 0) {
+      // Pre-key-exchange legacy fallback. The multi-device path uses
+      // sendPlainToPeer for targeted handshake messages.
+      this.ws.send(JSON.stringify(msg));
       return;
     }
 
-    if (this.binaryEnabled) {
-      // Binary envelope: 1-byte JSON marker + UTF-8 JSON, encrypted as raw bytes.
-      const jsonBytes = new TextEncoder().encode(json);
-      const plaintext = new Uint8Array(jsonBytes.length + 1);
-      plaintext[0] = BIN_MARKER_JSON;
-      plaintext.set(jsonBytes, 1);
-      const envelope = encryptBinary(plaintext, this.phonePublicKey, this.opts.keyPair.secretKey);
-      this.ws.send(envelope, { binary: true });
-    } else {
-      // Legacy text JSON envelope `{n, c}`.
-      const envelope = encrypt(json, this.phonePublicKey, this.opts.keyPair.secretKey);
-      this.ws.send(JSON.stringify(envelope));
+    for (const [peerId, peer] of pairedPeers) {
+      this.sendToPeer(peerId, msg, peer);
     }
   }
 
   /** Whether the relay is connected and paired with a phone */
   get isPaired(): boolean {
-    return this.status === "paired" && this.phonePublicKey !== null;
+    return this.status === "paired" && this.hasPairedPeer();
   }
 
   get currentStatus(): RelayStatus {
@@ -161,64 +155,150 @@ export class RelayClient {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.ws) this.ws.close();
     this.ws = null;
+    this.peers.clear();
+    this.relaySupportsMultiDevice = false;
     this.setStatus("disconnected");
   }
 
+  private getPeer(peerId = LEGACY_PEER_ID): RelayPeer {
+    let peer = this.peers.get(peerId);
+    if (!peer) {
+      peer = { publicKey: null, binaryEnabled: false };
+      this.peers.set(peerId, peer);
+    }
+    return peer;
+  }
+
+  private hasPairedPeer(): boolean {
+    return Array.from(this.peers.values()).some((peer) => peer.publicKey !== null);
+  }
+
+  private sendRawFrameToPeer(peerId: string, data: string | Buffer, binary: boolean): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    if (this.relaySupportsMultiDevice) {
+      this.ws.send(JSON.stringify({
+        type: "relay_to_peer",
+        peerId,
+        binary,
+        data: binary ? Buffer.from(data as Buffer).toString("base64") : data.toString(),
+      }));
+      return;
+    }
+
+    this.ws.send(data, { binary });
+  }
+
+  private sendPlainToPeer(peerId: string, msg: Record<string, unknown>): void {
+    this.sendRawFrameToPeer(peerId, JSON.stringify(msg), false);
+  }
+
+  private sendToPeer(peerId: string, msg: Record<string, unknown>, peer = this.getPeer(peerId)): void {
+    if (!peer.publicKey) return;
+
+    const json = JSON.stringify(msg);
+    if (peer.binaryEnabled) {
+      const jsonBytes = new TextEncoder().encode(json);
+      const plaintext = new Uint8Array(jsonBytes.length + 1);
+      plaintext[0] = BIN_MARKER_JSON;
+      plaintext.set(jsonBytes, 1);
+      const envelope = encryptBinary(plaintext, peer.publicKey, this.opts.keyPair.secretKey);
+      this.sendRawFrameToPeer(peerId, envelope, true);
+    } else {
+      const envelope = encrypt(json, peer.publicKey, this.opts.keyPair.secretKey);
+      this.sendRawFrameToPeer(peerId, JSON.stringify(envelope), false);
+    }
+  }
+
   private handleRelayMessage(parsed: any): void {
+    if (parsed.type === "relay_capabilities") {
+      this.relaySupportsMultiDevice = !!parsed.multiDevice;
+      if (this.relaySupportsMultiDevice) {
+        console.log(`[Relay] Relay supports multi-device routing`);
+      }
+      return;
+    }
+
     // Relay control messages (unencrypted)
     if (parsed.type === "peer_connected") {
-      console.log(`[Relay] Phone connected to relay`);
-      if (!this.phonePublicKey) {
-        this.setStatus("waiting_for_peer"); // Will become "paired" after key exchange
+      const peerId = typeof parsed.peerId === "string" ? parsed.peerId : LEGACY_PEER_ID;
+      this.getPeer(peerId);
+      console.log(`[Relay] Phone connected to relay${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
+      if (!this.hasPairedPeer()) {
+        this.setStatus("waiting_for_peer");
       }
       return;
     }
 
     if (parsed.type === "peer_disconnected") {
-      console.log(`[Relay] Phone disconnected from relay`);
-      this.phonePublicKey = null;
-      this.binaryEnabled = false;  // next phone may be old-format
-      this.virtualWs._setOpen(false);
-      this.setStatus("waiting_for_peer");
+      const peerId = typeof parsed.peerId === "string" ? parsed.peerId : undefined;
+      if (peerId) {
+        this.peers.delete(peerId);
+        console.log(`[Relay] Phone disconnected from relay (${peerId})`);
+      } else {
+        this.peers.clear();
+        console.log(`[Relay] Phone disconnected from relay`);
+      }
+      const stillPaired = this.hasPairedPeer();
+      this.virtualWs._setOpen(stillPaired);
+      if (!stillPaired) this.setStatus("waiting_for_peer");
       return;
     }
 
+    if (parsed.type === "relay_peer_message") {
+      const peerId = typeof parsed.peerId === "string" ? parsed.peerId : LEGACY_PEER_ID;
+      if (parsed.binary) {
+        this.handleBinaryFrame(Buffer.from(String(parsed.data || ""), "base64"), peerId);
+        return;
+      }
+      try {
+        this.handlePeerMessage(JSON.parse(String(parsed.data || "")), peerId);
+      } catch (err: any) {
+        console.error(`[Relay] Failed to parse peer message: ${err.message}`);
+      }
+      return;
+    }
+
+    this.handlePeerMessage(parsed, LEGACY_PEER_ID);
+  }
+
+  private handlePeerMessage(parsed: any, peerId: string): void {
+    const peer = this.getPeer(peerId);
+
     // Key exchange (plaintext from phone)
     if (parsed.type === "key_exchange") {
-      console.log(`[Relay] Received phone public key`);
+      console.log(`[Relay] Received phone public key${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
       const nextPhonePublicKey = fromBase64(parsed.pubkey);
-      if (this.phonePublicKey && toBase64(this.phonePublicKey) !== toBase64(nextPhonePublicKey)) {
-        console.warn(`[Relay] Mirrored phone connected with a different public key; existing phones may not decrypt future relay messages`);
+      if (peer.publicKey && toBase64(peer.publicKey) !== toBase64(nextPhonePublicKey)) {
+        console.warn(`[Relay] Phone ${peerId} changed public key; replacing peer crypto state`);
       }
-      this.phonePublicKey = nextPhonePublicKey;
+      peer.publicKey = nextPhonePublicKey;
       this.virtualWs._setOpen(true);
       this.setStatus("paired");
 
       // Send ack PLAINTEXT — phone needs this to confirm handshake before
       // encrypted mode begins. Contains no sensitive data.
-      if (this.ws) {
-        this.ws.send(JSON.stringify({ type: "key_exchange_ack" }));
-      }
+      this.sendPlainToPeer(peerId, { type: "key_exchange_ack" });
       console.log(`[Relay] Key exchange complete — encrypted channel established`);
       return;
     }
 
     // Encrypted message from phone
     if (parsed.n && parsed.c) {
-      if (!this.phonePublicKey) {
-        console.error(`[Relay] Received encrypted message before key exchange`);
+      if (!peer.publicKey) {
+        console.error(`[Relay] Received encrypted message before key exchange${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
         return;
       }
       try {
         const plaintext = decrypt(
           parsed as EncryptedEnvelope,
-          this.phonePublicKey,
+          peer.publicKey,
           this.opts.keyPair.secretKey
         );
         const msg = JSON.parse(plaintext) as ClientMessage;
-        this.dispatchClientMessage(msg);
+        this.dispatchClientMessage(msg, peerId);
       } catch (err: any) {
-        console.error(`[Relay] Decryption failed: ${err.message}`);
+        console.error(`[Relay] Decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${err.message}`);
       }
       return;
     }
@@ -231,16 +311,17 @@ export class RelayClient {
    * `[1-byte marker][rest]`; the marker tells us whether `rest` is UTF-8 JSON
    * or a packed upload-chunk record.
    */
-  private handleBinaryFrame(buf: Buffer): void {
-    if (!this.phonePublicKey) {
-      console.error(`[Relay] Binary frame received before key exchange — dropping`);
+  private handleBinaryFrame(buf: Buffer, peerId = LEGACY_PEER_ID): void {
+    const peer = this.getPeer(peerId);
+    if (!peer.publicKey) {
+      console.error(`[Relay] Binary frame received before key exchange — dropping${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
       return;
     }
     let plaintext: Uint8Array;
     try {
-      plaintext = decryptBinary(buf, this.phonePublicKey, this.opts.keyPair.secretKey);
+      plaintext = decryptBinary(buf, peer.publicKey, this.opts.keyPair.secretKey);
     } catch (err: any) {
-      console.error(`[Relay] Binary decryption failed: ${err.message}`);
+      console.error(`[Relay] Binary decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${err.message}`);
       return;
     }
     if (plaintext.length === 0) return;
@@ -250,7 +331,7 @@ export class RelayClient {
       try {
         const json = new TextDecoder().decode(plaintext.subarray(1));
         const msg = JSON.parse(json) as ClientMessage;
-        this.dispatchClientMessage(msg);
+        this.dispatchClientMessage(msg, peerId);
       } catch (err: any) {
         console.error(`[Relay] Binary JSON parse failed: ${err.message}`);
       }
@@ -276,7 +357,7 @@ export class RelayClient {
         uploadId,
         chunkIndex,
         data,
-      } as any);
+      } as any, peerId);
       return;
     }
 
@@ -288,24 +369,25 @@ export class RelayClient {
    * handshake so the rest of the server never sees it; everything else goes
    * through to the handler.
    */
-  private dispatchClientMessage(msg: ClientMessage): void {
+  private dispatchClientMessage(msg: ClientMessage, peerId = LEGACY_PEER_ID): void {
     if ((msg as any).type === "client_capabilities") {
       const wantsBinary = !!(msg as any).binaryEnvelope;
-      if (wantsBinary && !this.binaryEnabled) {
-        this.binaryEnabled = true;
-        console.log(`[Relay] Phone announced binary envelope support — flipping outbound to binary`);
+      const peer = this.getPeer(peerId);
+      if (wantsBinary && !peer.binaryEnabled) {
+        peer.binaryEnabled = true;
+        console.log(`[Relay] Phone announced binary envelope support — flipping outbound to binary${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
       }
       // Ack so the phone knows the server is now sending binary, and tell
       // it which agent backends this server can drive (claude is always
       // present; codex iff installed + authed).
       const settings = getAdvertisedServerSettings();
-      this.send({
+      this.sendToPeer(peerId, {
         type: "server_capabilities",
-        binaryEnvelope: this.binaryEnabled,
+        binaryEnvelope: peer.binaryEnabled,
         backends: detectAvailableBackends(),
         codexDriver: settings.codexDriver,
         codexDriversAvailable: settings.codexDriversAvailable,
-      });
+      }, peer);
       return;
     }
     this.opts.onMessage(msg);

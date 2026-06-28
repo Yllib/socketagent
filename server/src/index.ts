@@ -586,6 +586,7 @@ function createConnectionHandler(transport: ClientTransport) {
   let pendingSystemPrompt: string = '';
   let pendingCodexCollaborationMode = 'default';
   let pendingCodexFastMode = false;
+  let pendingClaudeAutoCompact = true;
 
   // Track active file uploads from the app
   const activeUploads = new Map<string, {
@@ -1071,6 +1072,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
         (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
         (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
+        (activeSession as any).setClaudeAutoCompact?.(pendingClaudeAutoCompact);
 
         addRecentCwd(cwd);
         sendJson({
@@ -1178,6 +1180,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
         (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
         (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
+        (activeSession as any).setClaudeAutoCompact?.(pendingClaudeAutoCompact);
 
 
         // Register this client so /continue can find the real WebSocket
@@ -1379,6 +1382,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
           (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
           (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
+          (activeSession as any).setClaudeAutoCompact?.(pendingClaudeAutoCompact);
         }
 
         // If session is already running, inject the message inline between turns
@@ -2274,6 +2278,15 @@ function createConnectionHandler(transport: ClientTransport) {
         break;
       }
 
+      case "set_claude_auto_compact": {
+        pendingClaudeAutoCompact = Boolean((msg as any).enabled);
+        if (activeSession && !(activeSession instanceof CodexSession)) {
+          (activeSession as any).setClaudeAutoCompact?.(pendingClaudeAutoCompact);
+        }
+        console.log(`Claude auto-compact ${pendingClaudeAutoCompact ? "enabled" : "disabled"} (session ${activeSession ? 'active' : 'pending'})`);
+        break;
+      }
+
       case "set_thinking": {
         const thinking = (msg as any).thinking;
         if (thinking && ['adaptive', 'enabled', 'disabled'].includes(thinking.type)) {
@@ -2850,6 +2863,7 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setAppendSystemPrompt(pendingSystemPrompt);
           (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
           (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
+          (activeSession as any).setClaudeAutoCompact?.(pendingClaudeAutoCompact);
   
           activeSession.setResumeSessionAt(uuid);
           // Store the session ID so the next prompt resumes this session at the rewind point
@@ -3074,6 +3088,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setAppendSystemPrompt(pendingSystemPrompt);
         (activeSession as any).setCodexCollaborationMode?.(pendingCodexCollaborationMode);
         (activeSession as any).setCodexFastMode?.(pendingCodexFastMode);
+        (activeSession as any).setClaudeAutoCompact?.(pendingClaudeAutoCompact);
 
         activeSession.setForkSource(sourceId);
         sendJson({

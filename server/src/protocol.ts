@@ -319,6 +319,11 @@ export interface SetCodexFastModeMessage {
   enabled: boolean;
 }
 
+export interface SetClaudeAutoCompactMessage {
+  type: "set_claude_auto_compact";
+  enabled: boolean;
+}
+
 export interface SetThinkingMessage {
   type: "set_thinking";
   thinking:
@@ -489,6 +494,7 @@ export type ClientMessage =
   | RequestTtsAudioMessage
   | SetEffortMessage
   | SetCodexFastModeMessage
+  | SetClaudeAutoCompactMessage
   | SetThinkingMessage
   | SetDisallowedToolsMessage
   | SetSystemPromptMessage

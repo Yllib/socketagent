@@ -80,6 +80,7 @@ export class ClaudeSession {
   private _thinking: { type: 'adaptive' } | { type: 'enabled'; budgetTokens: number } | { type: 'disabled' } = { type: 'adaptive' };
   private _disallowedTools: string[] = [];
   private _appendSystemPrompt: string = '';
+  private _autoCompactEnabled = true;
   private _forkFromSessionId?: string;
   private _suppressedToolResultIds: Set<string> = new Set();  // toolUseIds whose results should be hidden from client
   private _taskIdToToolUseId: Map<string, string> = new Map();  // agentId → toolUseId mapping
@@ -175,6 +176,20 @@ export class ClaudeSession {
   setAppendSystemPrompt(text: string): void {
     this._appendSystemPrompt = text;
     console.log(`Append system prompt set (${text.length} chars) for session ${this.sessionId || '(pending)'}`);
+  }
+
+  setClaudeAutoCompact(enabled: boolean): void {
+    this._autoCompactEnabled = enabled;
+    console.log(`Claude auto-compact ${enabled ? 'enabled' : 'disabled'} for session ${this.sessionId || '(pending)'}`);
+  }
+
+  private claudeFlagSettings(): Record<string, unknown> | undefined {
+    if (this._autoCompactEnabled) return undefined;
+    return {
+      env: {
+        DISABLE_AUTO_COMPACT: "1",
+      },
+    };
   }
 
   setForkSource(sessionId: string): void {
@@ -1134,6 +1149,7 @@ export class ClaudeSession {
 
       console.log(`Starting query: resume=${resumeTarget || 'none'}${shouldFork ? ' (FORK)' : ''}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt=${prompt.slice(0, 80)}..., uuid=${userMsgUuid}, cwd=${this.cwd}`);
 
+      const flagSettings = this.claudeFlagSettings();
       const q = this.activeQuery = query({
         prompt: promptStream as any,
         options: {
@@ -1151,6 +1167,7 @@ export class ClaudeSession {
           systemPrompt: { type: "preset", preset: "claude_code", append: this._appendSystemPrompt ? toolContext + '\n\n' + this._appendSystemPrompt : toolContext } as any,
           tools: { type: "preset", preset: "claude_code" },
           ...(this._disallowedTools.length ? { disallowedTools: this._disallowedTools } : {}),
+          ...(flagSettings ? { settings: flagSettings as any } : {}),
           enableFileCheckpointing: true,
           promptSuggestions: true,
           agentProgressSummaries: true,

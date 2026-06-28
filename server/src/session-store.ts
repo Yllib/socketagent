@@ -60,6 +60,69 @@ export function deleteSession(id: string): void {
   writeStore(sessions);
 }
 
+export interface DeleteSessionArtifactsResult {
+  removed: string[];
+  warnings: string[];
+}
+
+function unlinkIfExists(filePath: string | undefined, removed: string[], label = "file"): void {
+  if (!filePath) return;
+  try {
+    if (!fs.existsSync(filePath)) return;
+    fs.unlinkSync(filePath);
+    removed.push(`${label}:${filePath}`);
+  } catch (err: any) {
+    throw new Error(`Failed to delete ${label} ${filePath}: ${err?.message || String(err)}`);
+  }
+}
+
+function deleteCodexThreadState(sessionId: string, removed: string[], warnings: string[]): void {
+  const homeDir = process.env.HOME || require("os").homedir();
+  const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
+  if (!fs.existsSync(dbPath)) return;
+  const sql = `DELETE FROM threads WHERE id = ${sqlStringLiteral(sessionId)};`;
+  try {
+    execFileSync("sqlite3", [dbPath, sql], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    });
+    removed.push(`codex-thread:${sessionId}`);
+  } catch (err: any) {
+    warnings.push(`Failed to delete Codex thread state for ${sessionId}: ${err?.message || String(err)}`);
+  }
+}
+
+export function deleteSessionArtifacts(sessionId: string, sessionInfo?: SessionInfo): DeleteSessionArtifactsResult {
+  const removed: string[] = [];
+  const warnings: string[] = [];
+  const info = sessionInfo || getSession(sessionId) || getCodexThreadSessionInfo(sessionId) || undefined;
+  const backend = info?.backend;
+
+  unlinkIfExists(historyFile(sessionId), removed, "history");
+  historyCache.delete(sessionId);
+  unlinkIfExists(todosFile(sessionId), removed, "todos");
+  unlinkIfExists(sdkEventsFile(sessionId), removed, "sdk-events");
+
+  if (backend === "codex" || (!backend && !!getCodexThreadSessionInfo(sessionId))) {
+    const rolloutPath = findCodexRolloutFile(sessionId);
+    unlinkIfExists(rolloutPath || undefined, removed, "codex-rollout");
+    deleteCodexThreadState(sessionId, removed, warnings);
+  }
+
+  if (backend === "claude" || !backend) {
+    const cwdPath = info?.cwd ? getJsonlPath(sessionId, info.cwd) : undefined;
+    unlinkIfExists(cwdPath, removed, "claude-jsonl");
+    const discoveredPath = findJsonlForSession(sessionId);
+    if (discoveredPath && discoveredPath !== cwdPath) {
+      unlinkIfExists(discoveredPath, removed, "claude-jsonl");
+    }
+  }
+
+  deleteSession(sessionId);
+  return { removed, warnings };
+}
+
 /** Remap a session entry from oldId to newId (after context clear creates a fresh SDK session) */
 export function remapSession(oldId: string, newId: string): void {
   const sessions = readStore();

@@ -25,7 +25,7 @@ export interface BackendInstallOptions {
   onProgress: (progress: BackendInstallProgress) => void;
 }
 
-const CODEX_DEVICE_URL = "https://chatgpt.com/codex/device";
+const CODEX_DEVICE_URL = "https://auth.openai.com/codex/device";
 
 function stripTerminalControl(text: string): string {
   return text
@@ -163,11 +163,22 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
     options.onProgress({
       phase: "auth",
       status: "running",
-      message: "Open the Codex device page and enter the one-time code from the login output.",
+      message: "Open the OpenAI Codex device page and enter the one-time code.",
       authUrl: CODEX_DEVICE_URL,
     });
 
     const codex = buildCodexSpawn(["login", "--device-auth"], env);
+    let authDetected = false;
+    const authPoll = setInterval(() => {
+      if (authDetected || !codexAuthFileExists()) return;
+      authDetected = true;
+      options.onProgress({
+        phase: "auth",
+        status: "running",
+        message: "Codex authorization detected. Waiting for the login command to finish...",
+        authUrl: CODEX_DEVICE_URL,
+      });
+    }, 2000);
     try {
       await runProcess({
         command: codex.command,
@@ -185,6 +196,8 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
         status: "completed",
         message: `Codex login exited with a warning, but auth.json exists: ${err?.message || String(err)}`,
       });
+    } finally {
+      clearInterval(authPoll);
     }
 
     if (!codexAuthFileExists()) {

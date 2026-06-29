@@ -9,7 +9,7 @@ import * as path from "path";
 import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
-import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, unarchiveCodexAppServerThread } from "./codex-session";
+import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
@@ -18,7 +18,7 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
-import { getAdvertisedServerSettings, getDefaultCwd, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, setDefaultCwd } from "./server-settings";
+import { clearBackendHealthOverride, getAdvertisedServerSettings, getDefaultCwd, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, markBackendAuthRequired, setDefaultCwd } from "./server-settings";
 import { isPushConfigured, registerPushToken, sendPushNotification } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
@@ -936,6 +936,7 @@ function createConnectionHandler(transport: ClientTransport) {
           onProgress: sendProgress as any,
         }).then(() => {
           if (backend === "claude") refreshClaudeExecutableInfo();
+          clearBackendHealthOverride(backend);
           invalidateCodexAvailabilityCache();
           invalidateCodexDriverAvailabilityCache();
           invalidateBackendHealthCache();
@@ -1505,10 +1506,30 @@ function createConnectionHandler(transport: ClientTransport) {
           if (sid && activeSessions.get(sid) === sessionForRun && !(sessionForRun as any)._authCodeVerifier) {
             activeSessions.delete(sid);
           }
-          sendJson({
-            type: "error",
-            message: err.message || "Query failed",
-          });
+          if (sessionForRun instanceof CodexSession && isCodexAuthError(err)) {
+            const detail = err?.message || String(err);
+            markBackendAuthRequired("codex", detail);
+            invalidateCodexAvailabilityCache();
+            invalidateCodexDriverAvailabilityCache();
+            sendJson({
+              type: "backend_auth_required",
+              backend: "codex",
+              sessionId: sid,
+              message: "Codex authentication is invalid or expired. Sign in to Codex again to continue.",
+              detail,
+            });
+            sendJson({
+              type: "server_settings",
+              ...getAdvertisedServerSettings(),
+              codexCollaborationMode: pendingCodexCollaborationMode,
+            });
+            broadcastServerCapabilities();
+          } else {
+            sendJson({
+              type: "error",
+              message: err.message || "Query failed",
+            });
+          }
           broadcastSessionList();
         });
 

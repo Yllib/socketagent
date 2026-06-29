@@ -118,6 +118,26 @@ export const CODEX_NATIVE_SLASH_COMMANDS: CodexSlashCommand[] = [
   },
 ];
 
+export function isCodexAuthError(error: unknown): boolean {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : (() => {
+          try {
+            return JSON.stringify(error);
+          } catch {
+            return String(error);
+          }
+        })();
+
+  return /\b(auth|authentication|authorize|authorization|login|sign[- ]?in|credential|token)\b.*\b(invalid|expired|required|missing|failed|denied|unauthorized)\b/i.test(message)
+    || /\b(invalid|expired|required|missing|failed|denied|unauthorized)\b.*\b(auth|authentication|authorization|login|sign[- ]?in|credential|token)\b/i.test(message)
+    || /\bnot authenticated\b/i.test(message)
+    || /\bunauthorized\b/i.test(message)
+    || /\b401\b/.test(message);
+}
+
 // ─── CodexSession ─────────────────────────────────────────────────────────
 
 export class CodexSession {
@@ -1173,10 +1193,12 @@ export class CodexSession {
         });
       }
     } catch (err: any) {
-      this.send({
-        type: "error",
-        message: `codex app-server error: ${err?.message || String(err)}`,
-      } as ServerMessage);
+      if (!isCodexAuthError(err)) {
+        this.send({
+          type: "error",
+          message: `codex app-server error: ${err?.message || String(err)}`,
+        } as ServerMessage);
+      }
       throw err;
     } finally {
       this._isRunning = false;
@@ -1232,7 +1254,9 @@ export class CodexSession {
         const sid = this.sessionId;
         if (sid) {
           this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
-          this.send({ type: "error", message: `Codex: ${message}`, sessionId: sid } as any);
+          if (!isCodexAuthError(message)) {
+            this.send({ type: "error", message: `Codex: ${message}`, sessionId: sid } as any);
+          }
         }
         this.appServerTurnSettler?.reject(new Error(message));
       });

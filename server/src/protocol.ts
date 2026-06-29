@@ -751,6 +751,14 @@ export interface ErrorServerMessage {
   message: string;
 }
 
+export interface BackendAuthRequiredServerMessage {
+  type: "backend_auth_required";
+  backend: Backend;
+  message: string;
+  detail?: string;
+  sessionId?: string;
+}
+
 export interface PushTokenRegisteredServerMessage {
   type: "push_token_registered";
   appServerId?: string;
@@ -1243,6 +1251,7 @@ export type ServerMessage =
   | ResultServerMessage
   | SessionListServerMessage
   | ErrorServerMessage
+  | BackendAuthRequiredServerMessage
   | PushTokenRegisteredServerMessage
   | ServerCapabilitiesMessage
   | ServerSettingsMessage

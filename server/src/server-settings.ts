@@ -28,6 +28,7 @@ const BACKEND_HEALTH_CACHE_MS = 10000;
 let cachedSettings: ServerSettings | null = null;
 let cachedDriversAvailable: { checkedAt: number; value: CodexDriver[] } | null = null;
 let cachedBackendHealth: { checkedAt: number; value: BackendHealthInfo[] } | null = null;
+const backendHealthOverrides = new Map<Backend, BackendHealthInfo>();
 
 export function invalidateCodexDriverAvailabilityCache(): void {
   cachedDriversAvailable = null;
@@ -35,6 +36,25 @@ export function invalidateCodexDriverAvailabilityCache(): void {
 
 export function invalidateBackendHealthCache(): void {
   cachedBackendHealth = null;
+}
+
+export function markBackendAuthRequired(backend: Backend, detail?: string): void {
+  const label = backend === "codex" ? "Codex" : "Claude";
+  backendHealthOverrides.set(backend, {
+    backend,
+    enabled: true,
+    available: false,
+    severity: "error",
+    reason: `${label} authentication is invalid or expired. Repair the backend to sign in again.`,
+    detail,
+  });
+  invalidateBackendHealthCache();
+}
+
+export function clearBackendHealthOverride(backend: Backend): void {
+  if (backendHealthOverrides.delete(backend)) {
+    invalidateBackendHealthCache();
+  }
 }
 
 function ensureStoreDir(): void {
@@ -316,7 +336,7 @@ export function getBackendHealth(): BackendHealthInfo[] {
   const value = [
     claudeHealth(enabled.has("claude")),
     codexHealth(enabled.has("codex")),
-  ];
+  ].map((entry) => backendHealthOverrides.get(entry.backend) ?? entry);
   cachedBackendHealth = { checkedAt: Date.now(), value };
   return value;
 }

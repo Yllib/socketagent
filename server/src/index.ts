@@ -8,7 +8,7 @@ import * as os from "os";
 import * as path from "path";
 import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
-import { ClaudeSession } from "./claude-session";
+import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
@@ -893,6 +893,7 @@ function createConnectionHandler(transport: ClientTransport) {
         const requestId = (msg as any).requestId as string | undefined;
         const reinstall = (msg as any).reinstall !== false;
         const authenticate = (msg as any).authenticate !== false;
+        const backendName = backend === "codex" ? "Codex" : "Claude";
 
         const sendProgress = (progress: Record<string, unknown>) => {
           sendJson({
@@ -916,7 +917,7 @@ function createConnectionHandler(transport: ClientTransport) {
         sendProgress({
           phase: "install",
           status: "running",
-          message: `Starting ${backend === "codex" ? "Codex" : backend} backend repair...`,
+          message: `Starting ${backendName} backend repair...`,
         });
         void runBackendInstall({
           backend,
@@ -924,13 +925,14 @@ function createConnectionHandler(transport: ClientTransport) {
           authenticate,
           onProgress: sendProgress as any,
         }).then(() => {
+          if (backend === "claude") refreshClaudeExecutableInfo();
           invalidateCodexAvailabilityCache();
           invalidateCodexDriverAvailabilityCache();
           invalidateBackendHealthCache();
           sendProgress({
             phase: "probe",
             status: "completed",
-            message: `${backend === "codex" ? "Codex" : "Backend"} repair completed.`,
+            message: `${backendName} repair completed.`,
           });
           broadcastServerCapabilities();
           sendJson({
@@ -946,7 +948,7 @@ function createConnectionHandler(transport: ClientTransport) {
           sendProgress({
             phase: "probe",
             status: "failed",
-            message: `${backend === "codex" ? "Codex" : "Backend"} repair failed: ${e?.message || String(e)}`,
+            message: `${backendName} repair failed: ${e?.message || String(e)}`,
           });
           broadcastServerCapabilities();
         }).finally(() => {

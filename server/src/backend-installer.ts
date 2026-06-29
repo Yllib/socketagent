@@ -63,6 +63,32 @@ function resolveManagedCodexCommand(env: NodeJS.ProcessEnv): string | undefined 
   return undefined;
 }
 
+function resolveManagedClaudeCommand(env: NodeJS.ProcessEnv): string | undefined {
+  const binDir = managedNpmBinDir(env);
+  const names = process.platform === "win32"
+    ? ["claude.cmd", "claude.exe", "claude.bat", "claude"]
+    : ["claude"];
+  for (const name of names) {
+    const found = existingFile(path.join(binDir, name));
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function resolveManagedBackendCommand(env: NodeJS.ProcessEnv, backend: Backend): string | undefined {
+  return backend === "codex"
+    ? resolveManagedCodexCommand(env)
+    : resolveManagedClaudeCommand(env);
+}
+
+function backendDisplayName(backend: Backend): string {
+  return backend === "codex" ? "OpenAI Codex CLI" : "Claude Code CLI";
+}
+
+function backendPackageName(backend: Backend): string {
+  return backend === "codex" ? "@openai/codex@latest" : "@anthropic-ai/claude-code@latest";
+}
+
 function installEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   const prefix = managedNpmPrefix(env);
@@ -76,9 +102,22 @@ function installEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+function codexAuthFilePath(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+  return path.join(home, ".codex", "auth.json");
+}
+
 function codexAuthFileExists(): boolean {
-  const home = process.env.HOME || os.homedir();
-  return fs.existsSync(path.join(home, ".codex", "auth.json"));
+  return fs.existsSync(codexAuthFilePath());
+}
+
+function codexAuthFileSignature(): string | undefined {
+  try {
+    const stat = fs.statSync(codexAuthFilePath());
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return undefined;
+  }
 }
 
 function parseDeviceAuth(text: string): { authUrl?: string; authCode?: string } {
@@ -150,18 +189,101 @@ async function runProcess(options: {
   });
 }
 
-export async function runBackendInstall(options: BackendInstallOptions): Promise<void> {
-  if (options.backend !== "codex") {
-    throw new Error("In-app backend repair currently supports Codex only");
-  }
+async function runCodexDeviceAuth(options: {
+  command: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  shell?: boolean;
+  onProgress: (progress: BackendInstallProgress) => void;
+}): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const initialAuthSignature = codexAuthFileSignature();
+    const child = spawn(options.command, options.args, {
+      env: options.env,
+      shell: options.shell,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
+    let tail = "";
+    let settled = false;
+    let timedOut = false;
+    let timeout: NodeJS.Timeout;
+    let authPoll: NodeJS.Timeout;
+
+    const finish = (err?: Error, killChild = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearInterval(authPoll);
+      if (killChild && child.exitCode == null && !child.killed) {
+        child.kill("SIGTERM");
+      }
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    };
+
+    timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, options.timeoutMs);
+
+    authPoll = setInterval(() => {
+      const currentSignature = codexAuthFileSignature();
+      if (!currentSignature || currentSignature === initialAuthSignature) return;
+
+      options.onProgress({
+        phase: "auth",
+        status: "completed",
+        message: "Codex authorization detected. Finishing repair...",
+        authUrl: CODEX_DEVICE_URL,
+      });
+      finish(undefined, true);
+    }, 1000);
+
+    const handleChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      const text = stripTerminalControl(chunk.toString("utf8"));
+      tail = (tail + text).slice(-12000);
+      options.onProgress({
+        phase: "auth",
+        status: "running",
+        message: text.trim() || `${stream} output`,
+        output: text,
+        ...parseDeviceAuth(text),
+      });
+    };
+
+    child.stdout.on("data", (chunk) => handleChunk("stdout", chunk));
+    child.stderr.on("data", (chunk) => handleChunk("stderr", chunk));
+
+    child.on("error", (err) => finish(err));
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      if (timedOut) {
+        finish(new Error(`${options.command} timed out`));
+        return;
+      }
+      if (code === 0 && codexAuthFileExists()) {
+        finish();
+        return;
+      }
+      finish(new Error(`${options.command} exited ${code ?? signal ?? "unknown"}${tail.trim() ? `: ${tail.trim()}` : ""}`));
+    });
+  });
+}
+
+export async function runBackendInstall(options: BackendInstallOptions): Promise<void> {
   const env = installEnv();
+  const label = backendDisplayName(options.backend);
 
   if (options.reinstall) {
     options.onProgress({
       phase: "install",
       status: "running",
-      message: `Installing latest OpenAI Codex CLI into ${managedNpmPrefix(env)}...`,
+      message: `Installing latest ${label} into ${managedNpmPrefix(env)}...`,
     });
     await runProcess({
       command: commandName("npm"),
@@ -171,25 +293,32 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
         "--prefix",
         managedNpmPrefix(env),
         "--include=optional",
-        "@openai/codex@latest",
+        backendPackageName(options.backend),
       ],
       env,
       phase: "install",
       shell: process.platform === "win32",
       onProgress: options.onProgress,
     });
-    const managedCodex = resolveManagedCodexCommand(env);
-    if (!managedCodex) {
-      throw new Error(`Managed Codex install finished, but no codex executable was created in ${managedNpmBinDir(env)}`);
+    const managedCommand = resolveManagedBackendCommand(env, options.backend);
+    if (!managedCommand) {
+      throw new Error(`Managed ${label} install finished, but no executable was created in ${managedNpmBinDir(env)}`);
     }
     options.onProgress({
       phase: "install",
       status: "completed",
-      message: `Managed OpenAI Codex CLI install finished: ${managedCodex}`,
+      message: `Managed ${label} install finished: ${managedCommand}`,
     });
   }
 
   if (options.authenticate) {
+    if (options.backend !== "codex") {
+      options.onProgress({
+        phase: "auth",
+        status: "completed",
+        message: "Claude repair does not run interactive browser login. If Claude needs sign-in, start a Claude session and use the Claude Login card.",
+      });
+    } else {
     const managedCodex = resolveManagedCodexCommand(env);
     if (!managedCodex) {
       throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}. Run Install / Repair Codex again.`);
@@ -202,37 +331,14 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
     });
 
     const codex = { command: managedCodex, args: ["login", "--device-auth"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex) };
-    let authDetected = false;
-    const authPoll = setInterval(() => {
-      if (authDetected || !codexAuthFileExists()) return;
-      authDetected = true;
-      options.onProgress({
-        phase: "auth",
-        status: "running",
-        message: "Codex authorization detected. Waiting for the login command to finish...",
-        authUrl: CODEX_DEVICE_URL,
-      });
-    }, 2000);
-    try {
-      await runProcess({
-        command: codex.command,
-        args: codex.args,
-        env: codex.env,
-        shell: codex.shell,
-        phase: "auth",
-        timeoutMs: 15 * 60 * 1000,
-        onProgress: options.onProgress,
-      });
-    } catch (err: any) {
-      if (!codexAuthFileExists()) throw err;
-      options.onProgress({
-        phase: "auth",
-        status: "completed",
-        message: `Codex login exited with a warning, but auth.json exists: ${err?.message || String(err)}`,
-      });
-    } finally {
-      clearInterval(authPoll);
-    }
+    await runCodexDeviceAuth({
+      command: codex.command,
+      args: codex.args,
+      env: codex.env,
+      shell: codex.shell,
+      timeoutMs: 15 * 60 * 1000,
+      onProgress: options.onProgress,
+    });
 
     if (!codexAuthFileExists()) {
       throw new Error("Codex login finished, but ~/.codex/auth.json was not created");
@@ -242,23 +348,24 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
       status: "completed",
       message: "Codex authentication is available on this server.",
     });
+    }
   }
 
   options.onProgress({
     phase: "probe",
     status: "running",
-    message: "Checking Codex CLI...",
+    message: `Checking ${label}...`,
   });
-  const managedCodex = resolveManagedCodexCommand(env);
-  if (!managedCodex) {
-    throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}`);
+  const managedCommand = resolveManagedBackendCommand(env, options.backend);
+  if (!managedCommand) {
+    throw new Error(`Managed ${label} executable is missing in ${managedNpmBinDir(env)}`);
   }
-  const codexVersion = { command: managedCodex, args: ["--version"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex) };
+  const versionProbe = { command: managedCommand, args: ["--version"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCommand) };
   await runProcess({
-    command: codexVersion.command,
-    args: codexVersion.args,
-    env: codexVersion.env,
-    shell: codexVersion.shell,
+    command: versionProbe.command,
+    args: versionProbe.args,
+    env: versionProbe.env,
+    shell: versionProbe.shell,
     phase: "probe",
     timeoutMs: 10 * 1000,
     onProgress: options.onProgress,
@@ -266,6 +373,6 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
   options.onProgress({
     phase: "probe",
     status: "completed",
-    message: "Codex CLI probe completed.",
+    message: `${label} probe completed.`,
   });
 }

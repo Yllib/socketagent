@@ -127,16 +127,28 @@ function resolveClaudeExecutable(): ClaudeExecutableInfo {
   };
 }
 
-const CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
-const CLAUDE_BINARY_OVERRIDE: string | undefined = CLAUDE_EXECUTABLE_INFO.path;
-if (CLAUDE_BINARY_OVERRIDE) {
-  console.log(`[SDK] Using Claude executable (${CLAUDE_EXECUTABLE_INFO.source}): ${CLAUDE_BINARY_OVERRIDE}`);
-} else if (CLAUDE_EXECUTABLE_INFO.reason) {
-  console.warn(`[SDK] ${CLAUDE_EXECUTABLE_INFO.reason}`);
+let CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
+let CLAUDE_BINARY_OVERRIDE: string | undefined = CLAUDE_EXECUTABLE_INFO.path;
+
+function logClaudeExecutableInfo(): void {
+  if (CLAUDE_BINARY_OVERRIDE) {
+    console.log(`[SDK] Using Claude executable (${CLAUDE_EXECUTABLE_INFO.source}): ${CLAUDE_BINARY_OVERRIDE}`);
+  } else if (CLAUDE_EXECUTABLE_INFO.reason) {
+    console.warn(`[SDK] ${CLAUDE_EXECUTABLE_INFO.reason}`);
+  }
 }
+
+logClaudeExecutableInfo();
 
 export function getClaudeExecutableInfo(): ClaudeExecutableInfo {
   return { ...CLAUDE_EXECUTABLE_INFO };
+}
+
+export function refreshClaudeExecutableInfo(): ClaudeExecutableInfo {
+  CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
+  CLAUDE_BINARY_OVERRIDE = CLAUDE_EXECUTABLE_INFO.path;
+  logClaudeExecutableInfo();
+  return getClaudeExecutableInfo();
 }
 
 interface PendingQuestion {

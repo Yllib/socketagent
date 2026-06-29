@@ -40,6 +40,15 @@ import { getClaudeAvailability } from "./claude-session";
 
 const now = (): string => new Date().toISOString();
 
+const DEFAULT_CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS = (() => {
+  const raw = process.env.CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS;
+  if (!raw) return DEFAULT_CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS;
+  return Math.floor(parsed);
+})();
+
 type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
 type QueuedPrompt = {
@@ -205,6 +214,7 @@ export class CodexSession {
   private clientSockets = new Set<WebSocket>();
 
   public onActivity?: () => void;
+  public onClose?: () => void;
   public onMonitorOutput?: (text: string) => void;
   public replacesSessionId?: string;
   // Mirrors the cast-accessed private on ClaudeSession; used by index.ts to
@@ -223,6 +233,9 @@ export class CodexSession {
 
   get isRunning(): boolean { return this._isRunning; }
   get isCompacting(): boolean { return this._isCompacting; }
+  get isWarmIdle(): boolean {
+    return !!this.appServer && !this.isBusy;
+  }
   get isBusy(): boolean {
     return this._isRunning
       || this._isCompacting
@@ -1215,7 +1228,11 @@ export class CodexSession {
       this.activeAppServerTurnId = null;
       this.appServerTurnSettler = null;
       this.onActivity?.();
-      await this.stopAppServerClient();
+      if (CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS <= 0) {
+        await this.stopAppServerClient();
+      } else {
+        this.scheduleAppServerIdleStop(CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS);
+      }
     }
   }
 
@@ -1306,8 +1323,12 @@ export class CodexSession {
     }
   }
 
-  private scheduleAppServerIdleStop(delayMs = 15_000): void {
+  private scheduleAppServerIdleStop(delayMs = CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS): void {
     if (!this.appServer || this._isRunning || this._isCompacting || this.appServerTurnSettler) return;
+    if (delayMs <= 0) {
+      void this.stopAppServerClient();
+      return;
+    }
     if (this.appServerIdleStopTimer) clearTimeout(this.appServerIdleStopTimer);
     this.appServerIdleStopTimer = setTimeout(() => {
       this.appServerIdleStopTimer = null;
@@ -1336,10 +1357,16 @@ export class CodexSession {
       console.warn(`[codex app-server] cleanup failed: ${err?.message || err}`);
     } finally {
       client.removeAllListeners();
+      this.onClose?.();
     }
   }
 
   async dispose(): Promise<void> {
+    await this.stopAppServerClient();
+  }
+
+  async closeWarmIdle(): Promise<void> {
+    if (!this.isWarmIdle) return;
     await this.stopAppServerClient();
   }
 

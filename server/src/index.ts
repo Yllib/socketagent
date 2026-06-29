@@ -4400,7 +4400,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       applyLatestScheduledTaskEditableFields(task);
 
       if ((session as any).isWarmIdle) {
-        session.abort();
+        void (session as any).closeWarmIdle?.();
       }
       if (activeSessions.get(sid) === session) activeSessions.delete(sid);
       if (activeSessions.get(tempId) === session) activeSessions.delete(tempId);
@@ -4453,7 +4453,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       applyLatestScheduledTaskEditableFields(task);
 
       if ((session as any).isWarmIdle) {
-        session.abort();
+        void (session as any).closeWarmIdle?.();
       }
       activeSessions.delete(tempId);
       if (sid !== tempId) activeSessions.delete(sid);

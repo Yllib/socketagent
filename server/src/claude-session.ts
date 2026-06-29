@@ -1028,6 +1028,13 @@ export class ClaudeSession {
     }
   }
 
+  closeWarmIdle(): void {
+    if (!this._isWarmIdle) return;
+    this._leaveWarmIdle();
+    this.activeInputQueue?.close();
+    try { this.activeQuery?.close(); } catch {}
+  }
+
   /** Gracefully stop the current query between turns — session stays alive and can continue */
   interrupt(): void {
     if (this.activeQuery) {

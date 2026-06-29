@@ -5,7 +5,7 @@ import { spawnSync } from "child_process";
 import type { Backend, BackendHealthInfo, CodexDriver } from "./protocol";
 import { buildCodexSpawn } from "./codex-env";
 import { resolveClientPath } from "./path-utils";
-import { getClaudeExecutableInfo } from "./claude-session";
+import { getClaudeAvailability, getClaudeExecutableInfo } from "./claude-session";
 import {
   legacyManagedNpmBinDir,
   managedNpmBinDir,
@@ -102,7 +102,10 @@ function codexCommandSource(command: string): BackendHealthInfo["source"] {
 }
 
 function managedSourceWarning(backend: Backend, source: BackendHealthInfo["source"]): string | undefined {
-  if (source === "managed" || source === "sdk" || source === "explicit") return undefined;
+  if (source === "managed" || source === "explicit") return undefined;
+  if (source === "sdk") {
+    return `${backend === "codex" ? "Codex" : "Claude"} is using the SDK-bundled executable instead of the SocketAgent-managed toolchain. Repair the backend to install and use the managed copy.`;
+  }
   if (source === "legacy") {
     return `${backend === "codex" ? "Codex" : "Claude"} is using the old SocketAgent toolchain location. Repair the backend to move it under .socket-agent.`;
   }
@@ -220,6 +223,7 @@ function claudeHealth(enabled: boolean): BackendHealthInfo {
   }
 
   const info = getClaudeExecutableInfo();
+  const availability = getClaudeAvailability();
   if (!info.path) {
     return {
       backend: "claude",
@@ -232,6 +236,20 @@ function claudeHealth(enabled: boolean): BackendHealthInfo {
     };
   }
 
+  if (!availability.available) {
+    return {
+      backend: "claude",
+      enabled: true,
+      available: false,
+      severity: "error",
+      source: info.source,
+      command: info.path,
+      reason: availability.reason || "Claude executable is not launchable.",
+      detail: availability.detail,
+      installRoot: managedNpmPrefix(),
+    };
+  }
+
   const warning = managedSourceWarning("claude", info.source);
   return {
     backend: "claude",
@@ -240,6 +258,7 @@ function claudeHealth(enabled: boolean): BackendHealthInfo {
     severity: warning ? "warning" : "ok",
     source: info.source,
     command: info.path,
+    version: availability.version,
     reason: warning,
     installRoot: managedNpmPrefix(),
   };

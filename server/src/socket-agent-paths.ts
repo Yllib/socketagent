@@ -41,9 +41,13 @@ export function managedNpmBinDir(env: NodeJS.ProcessEnv = process.env): string {
   return process.platform === "win32" ? prefix : path.join(prefix, "bin");
 }
 
-export function legacyManagedNpmBinDir(env: NodeJS.ProcessEnv = process.env): string {
+export function legacyManagedNpmPrefix(env: NodeJS.ProcessEnv = process.env): string {
   const home = env.HOME || os.homedir();
-  const prefix = path.join(home, ".local", "share", "socketagent", "npm-global");
+  return path.join(home, ".local", "share", "socketagent", "npm-global");
+}
+
+export function legacyManagedNpmBinDir(env: NodeJS.ProcessEnv = process.env): string {
+  const prefix = legacyManagedNpmPrefix(env);
   return process.platform === "win32" ? prefix : path.join(prefix, "bin");
 }
 

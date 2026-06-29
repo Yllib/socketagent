@@ -1,7 +1,7 @@
 import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type Settings } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import * as crypto from "crypto";
-import { execFile, execFileSync, spawn } from "child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "child_process";
 import * as pty from "node-pty";
 import * as fs from "fs";
 import * as os from "os";
@@ -26,7 +26,7 @@ import {
 } from "./app-tool-handlers";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep } from "./secure-input-store";
-import { legacyManagedNpmBinDir, managedNpmBinDir } from "./socket-agent-paths";
+import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
@@ -36,6 +36,21 @@ export interface ClaudeExecutableInfo {
   reason?: string;
 }
 
+export interface ClaudeExecutableSpawn {
+  command: string;
+  args: string[];
+  shell: boolean;
+}
+
+export interface ClaudeAvailability {
+  available: boolean;
+  reason?: string;
+  detail?: string;
+  version?: string;
+}
+
+const CLAUDE_AVAILABILITY_CACHE_MS = 5000;
+
 function existingFile(filePath: string | undefined): string | undefined {
   if (!filePath) return undefined;
   try {
@@ -43,6 +58,33 @@ function existingFile(filePath: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function npmGlobalPackageDir(prefix: string, packageName: string): string {
+  const parts = packageName.split("/");
+  const nodeModules = process.platform === "win32"
+    ? path.join(prefix, "node_modules")
+    : path.join(prefix, "lib", "node_modules");
+  return path.join(nodeModules, ...parts);
+}
+
+function resolveClaudePackageBin(prefix: string): string | undefined {
+  const packageDir = npmGlobalPackageDir(prefix, "@anthropic-ai/claude-code");
+  const packageJsonPath = path.join(packageDir, "package.json");
+  try {
+    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { bin?: string | Record<string, string> };
+    const binValue = typeof pkg.bin === "string"
+      ? pkg.bin
+      : pkg.bin?.claude || Object.values(pkg.bin || {})[0];
+    if (!binValue) return undefined;
+    return existingFile(path.resolve(packageDir, binValue));
+  } catch {
+    return undefined;
+  }
+}
+
+function isJavaScriptRuntimeFile(filePath: string): boolean {
+  return /\.(?:js|mjs|tsx?|jsx)$/i.test(filePath);
 }
 
 function resolveSdkClaudeBinary(): string | undefined {
@@ -92,13 +134,20 @@ function resolveInstalledClaudeCli(): string | undefined {
 }
 
 function resolveManagedClaudeCli(): { path?: string; source?: ClaudeExecutableSource } {
+  const managedPackageBin = resolveClaudePackageBin(managedNpmPrefix());
+  if (managedPackageBin) return { path: managedPackageBin, source: "managed" };
+
   const names = process.platform === "win32"
-    ? ["claude.cmd", "claude.exe", "claude.bat", "claude"]
+    ? ["claude.exe", "claude.cmd", "claude.bat", "claude"]
     : ["claude"];
   for (const name of names) {
     const managed = existingFile(path.join(managedNpmBinDir(), name));
     if (managed) return { path: managed, source: "managed" };
   }
+
+  const legacyPackageBin = resolveClaudePackageBin(legacyManagedNpmPrefix());
+  if (legacyPackageBin) return { path: legacyPackageBin, source: "legacy" };
+
   for (const name of names) {
     const legacy = existingFile(path.join(legacyManagedNpmBinDir(), name));
     if (legacy) return { path: legacy, source: "legacy" };
@@ -112,11 +161,11 @@ function resolveClaudeExecutable(): ClaudeExecutableInfo {
     existingFile(process.env.CLAUDE_CODE_PATH);
   if (explicit) return { path: explicit, source: "explicit" };
 
-  const sdk = resolveSdkClaudeBinary();
-  if (sdk) return { path: sdk, source: "sdk" };
-
   const managed = resolveManagedClaudeCli();
   if (managed.path) return { path: managed.path, source: managed.source || "managed" };
+
+  const sdk = resolveSdkClaudeBinary();
+  if (sdk) return { path: sdk, source: "sdk" };
 
   const installed = resolveInstalledClaudeCli();
   if (installed) return { path: installed, source: "system" };
@@ -129,6 +178,7 @@ function resolveClaudeExecutable(): ClaudeExecutableInfo {
 
 let CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
 let CLAUDE_BINARY_OVERRIDE: string | undefined = CLAUDE_EXECUTABLE_INFO.path;
+let cachedClaudeAvailability: { checkedAt: number; value: ClaudeAvailability } | null = null;
 
 function logClaudeExecutableInfo(): void {
   if (CLAUDE_BINARY_OVERRIDE) {
@@ -144,9 +194,108 @@ export function getClaudeExecutableInfo(): ClaudeExecutableInfo {
   return { ...CLAUDE_EXECUTABLE_INFO };
 }
 
+export function buildClaudeExecutableSpawn(
+  args: string[],
+  info: ClaudeExecutableInfo = CLAUDE_EXECUTABLE_INFO
+): ClaudeExecutableSpawn | undefined {
+  if (!info.path) return undefined;
+  if (isJavaScriptRuntimeFile(info.path)) {
+    return {
+      command: process.execPath,
+      args: [info.path, ...args],
+      shell: false,
+    };
+  }
+  return {
+    command: info.path,
+    args,
+    shell: false,
+  };
+}
+
+function firstClaudeOutputLine(stdout?: string | Buffer, stderr?: string | Buffer): string | undefined {
+  const text = `${stdout || ""}\n${stderr || ""}`.trim();
+  return text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+}
+
+export function invalidateClaudeAvailabilityCache(): void {
+  cachedClaudeAvailability = null;
+}
+
+export function getClaudeAvailability(): ClaudeAvailability {
+  const now = Date.now();
+  if (cachedClaudeAvailability && now - cachedClaudeAvailability.checkedAt < CLAUDE_AVAILABILITY_CACHE_MS) {
+    return cachedClaudeAvailability.value;
+  }
+
+  const cache = (value: ClaudeAvailability): ClaudeAvailability => {
+    cachedClaudeAvailability = { checkedAt: Date.now(), value };
+    return value;
+  };
+
+  const info = getClaudeExecutableInfo();
+  if (!info.path) {
+    return cache({
+      available: false,
+      reason: info.reason || "No Claude executable is available.",
+    });
+  }
+
+  const probe = buildClaudeExecutableSpawn(["--version"], info);
+  if (!probe) {
+    return cache({
+      available: false,
+      reason: "No Claude executable is available.",
+    });
+  }
+
+  const result = spawnSync(probe.command, probe.args, {
+    encoding: "utf8",
+    timeout: 3000,
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: probe.shell,
+  });
+
+  if (result.error) {
+    const code = (result.error as NodeJS.ErrnoException).code;
+    return cache({
+      available: false,
+      reason: code === "ENOENT"
+        ? "Claude executable was not found."
+        : `Claude executable probe failed: ${result.error.message}`,
+      detail: firstClaudeOutputLine(result.stdout, result.stderr),
+    });
+  }
+
+  if (result.status !== 0) {
+    const detail = firstClaudeOutputLine(result.stdout, result.stderr);
+    return cache({
+      available: false,
+      reason: detail
+        ? `Claude executable probe exited ${result.status}: ${detail}`
+        : `Claude executable probe exited ${result.status}`,
+      detail,
+    });
+  }
+
+  return cache({
+    available: true,
+    version: firstClaudeOutputLine(result.stdout, result.stderr),
+  });
+}
+
+function claudeExecutableQueryOptions(): Record<string, unknown> {
+  if (!CLAUDE_BINARY_OVERRIDE) return {};
+  return {
+    pathToClaudeCodeExecutable: CLAUDE_BINARY_OVERRIDE,
+    ...(isJavaScriptRuntimeFile(CLAUDE_BINARY_OVERRIDE) ? { executable: process.execPath } : {}),
+  };
+}
+
 export function refreshClaudeExecutableInfo(): ClaudeExecutableInfo {
   CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
   CLAUDE_BINARY_OVERRIDE = CLAUDE_EXECUTABLE_INFO.path;
+  invalidateClaudeAvailabilityCache();
   logClaudeExecutableInfo();
   return getClaudeExecutableInfo();
 }
@@ -1273,7 +1422,7 @@ export class ClaudeSession {
         prompt: promptStream as any,
         options: {
           cwd: this.cwd,
-          ...(CLAUDE_BINARY_OVERRIDE ? { pathToClaudeCodeExecutable: CLAUDE_BINARY_OVERRIDE } : {}),
+          ...claudeExecutableQueryOptions(),
           permissionMode: "bypassPermissions",
           allowDangerouslySkipPermissions: true,
           includePartialMessages: true,

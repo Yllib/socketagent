@@ -36,6 +36,7 @@ import {
 } from "./codex-app-server-client";
 import { buildCodexSpawn } from "./codex-env";
 import { listSkills, SkillEntry } from "./skills-manager";
+import { getClaudeAvailability } from "./claude-session";
 
 const now = (): string => new Date().toISOString();
 
@@ -3018,14 +3019,17 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
  * is rechecked on a short cache window so install/auth fixes can be picked up
  * without a SocketAgent restart.
  *
- * Claude is present when enabled (the Agent SDK ships with the server). Codex
- * is present iff enabled, the `codex` CLI is on PATH, and `~/.codex/auth.json`
- * exists.
+ * Both backends are rechecked on short cache windows so install/auth fixes can
+ * be picked up without a SocketAgent restart.
  */
 export function detectAvailableBackends(): Backend[] {
   const enabled = getEnabledBackendSet();
   const list: Backend[] = [];
-  if (enabled.has("claude")) list.push("claude");
+  try {
+    if (enabled.has("claude") && getClaudeAvailability().available) list.push("claude");
+  } catch (e: any) {
+    console.error(`[claude] backend detection failed: ${e?.message || String(e)}`);
+  }
   try {
     if (enabled.has("codex") && getCodexAvailability().available) list.push("codex");
   } catch (e: any) {

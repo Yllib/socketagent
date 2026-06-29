@@ -51,6 +51,33 @@ function existingFile(filePath: string): string | undefined {
   }
 }
 
+function npmGlobalPackageDir(prefix: string, packageName: string): string {
+  const parts = packageName.split("/");
+  const nodeModules = process.platform === "win32"
+    ? path.join(prefix, "node_modules")
+    : path.join(prefix, "lib", "node_modules");
+  return path.join(nodeModules, ...parts);
+}
+
+function resolvePackageBin(prefix: string, packageName: string, binName: string): string | undefined {
+  const packageDir = npmGlobalPackageDir(prefix, packageName);
+  const packageJsonPath = path.join(packageDir, "package.json");
+  try {
+    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { bin?: string | Record<string, string> };
+    const binValue = typeof pkg.bin === "string"
+      ? pkg.bin
+      : pkg.bin?.[binName] || Object.values(pkg.bin || {})[0];
+    if (!binValue) return undefined;
+    return existingFile(path.resolve(packageDir, binValue));
+  } catch {
+    return undefined;
+  }
+}
+
+function isJavaScriptRuntimeFile(filePath: string): boolean {
+  return /\.(?:js|mjs|tsx?|jsx)$/i.test(filePath);
+}
+
 function resolveManagedCodexCommand(env: NodeJS.ProcessEnv): string | undefined {
   const binDir = managedNpmBinDir(env);
   const names = process.platform === "win32"
@@ -64,9 +91,12 @@ function resolveManagedCodexCommand(env: NodeJS.ProcessEnv): string | undefined 
 }
 
 function resolveManagedClaudeCommand(env: NodeJS.ProcessEnv): string | undefined {
+  const packageBin = resolvePackageBin(managedNpmPrefix(env), "@anthropic-ai/claude-code", "claude");
+  if (packageBin) return packageBin;
+
   const binDir = managedNpmBinDir(env);
   const names = process.platform === "win32"
-    ? ["claude.cmd", "claude.exe", "claude.bat", "claude"]
+    ? ["claude.exe", "claude.cmd", "claude.bat", "claude"]
     : ["claude"];
   for (const name of names) {
     const found = existingFile(path.join(binDir, name));
@@ -87,6 +117,23 @@ function backendDisplayName(backend: Backend): string {
 
 function backendPackageName(backend: Backend): string {
   return backend === "codex" ? "@openai/codex@latest" : "@anthropic-ai/claude-code@latest";
+}
+
+function buildBackendVersionProbe(backend: Backend, command: string, env: NodeJS.ProcessEnv): {
+  command: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  shell?: boolean;
+} {
+  if (backend === "claude" && isJavaScriptRuntimeFile(command)) {
+    return { command: process.execPath, args: [command, "--version"], env };
+  }
+  return {
+    command,
+    args: ["--version"],
+    env,
+    shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(command),
+  };
 }
 
 function installEnv(): NodeJS.ProcessEnv {
@@ -360,7 +407,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
   if (!managedCommand) {
     throw new Error(`Managed ${label} executable is missing in ${managedNpmBinDir(env)}`);
   }
-  const versionProbe = { command: managedCommand, args: ["--version"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCommand) };
+  const versionProbe = buildBackendVersionProbe(options.backend, managedCommand, env);
   await runProcess({
     command: versionProbe.command,
     args: versionProbe.args,

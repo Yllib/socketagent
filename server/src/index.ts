@@ -241,6 +241,10 @@ function sessionIsBusy(session: Session): boolean {
   return session.isRunning || (session as any).isCompacting === true;
 }
 
+function sessionShouldRemainPooled(session: Session): boolean {
+  return Boolean((session as any)._authRequest || (session as any).isWarmIdle === true);
+}
+
 function describeActiveSessions(): string {
   return Array.from(activeSessions.entries())
     .map(([sid, session]) => `${sid}:${sessionIsBusy(session) ? "busy" : "idle"}`)
@@ -448,6 +452,26 @@ function scheduleBroadcast(): void {
 function notifySessionActivity(): void {
   scheduleBroadcast();
   broadcastStatusSync();
+}
+
+function attachSessionLifecycleCallbacks(session: Session): void {
+  session.onActivity = () => notifySessionActivity();
+  (session as any).onClose = () => {
+    let removed = false;
+    if (!sessionShouldRemainPooled(session) && !sessionIsBusy(session)) {
+      for (const [sid, active] of activeSessions.entries()) {
+        if (active === session) {
+          activeSessions.delete(sid);
+          removed = true;
+        }
+      }
+    }
+    if (removed) {
+      console.log(`[SessionPool] Removed closed idle session ${session.getSessionId?.() || "(unknown)"}`);
+    }
+    broadcastSessionList();
+    broadcastStatusSync();
+  };
 }
 
 function getStoredCodexDriver(sessionInfo: SessionInfo | undefined): CodexDriver | undefined {
@@ -1504,7 +1528,7 @@ function createConnectionHandler(transport: ClientTransport) {
 
         (activeSession as any)._resumeSessionId = undefined;
 
-        activeSession.onActivity = () => notifySessionActivity();
+        attachSessionLifecycleCallbacks(activeSession);
         if (resumeId) {
           activeSessions.set(resumeId, activeSession);
           activeSessionId = resumeId;
@@ -1524,10 +1548,10 @@ function createConnectionHandler(transport: ClientTransport) {
           }
           const monitorSid = activeSession.getSessionId() || undefined;
           console.log(`[Monitor] Starting query for idle session ${monitorSid}`);
-          activeSession.onActivity = () => notifySessionActivity();
+          attachSessionLifecycleCallbacks(activeSession);
           activeSession.runQuery(text, monitorSid).then(() => {
             const s = activeSession?.getSessionId();
-            if (s && activeSessions.get(s) === activeSession) {
+            if (s && activeSessions.get(s) === activeSession && !sessionShouldRemainPooled(activeSession)) {
               activeSessions.delete(s);
             }
             broadcastSessionList();
@@ -1550,8 +1574,8 @@ function createConnectionHandler(transport: ClientTransport) {
           const sid = sessionForRun.getSessionId();
           if (sid && activeSessions.get(sid) === sessionForRun) {
             // Keep session in pool if auth login is pending
-            if ((sessionForRun as any)._authRequest) {
-              console.log(`Session ${sid} query completed but auth flow pending — keeping in active pool`);
+            if (sessionShouldRemainPooled(sessionForRun)) {
+              console.log(`Session ${sid} query completed but remains pooled`);
             } else {
               activeSessions.delete(sid);
               console.log(`Session ${sid} completed, removed from active pool`);
@@ -1560,7 +1584,7 @@ function createConnectionHandler(transport: ClientTransport) {
           broadcastSessionList();
         }).catch((err: any) => {
           const sid = sessionForRun.getSessionId();
-          if (sid && activeSessions.get(sid) === sessionForRun && !(sessionForRun as any)._authRequest) {
+          if (sid && activeSessions.get(sid) === sessionForRun && !sessionShouldRemainPooled(sessionForRun)) {
             activeSessions.delete(sid);
           }
           if (sessionForRun instanceof CodexSession && isCodexAuthError(err)) {
@@ -1682,12 +1706,12 @@ function createConnectionHandler(transport: ClientTransport) {
               answerSession.injectMessage(injectedText);
             } else {
               // Resume the existing session with the answer context
-              answerSession.onActivity = () => notifySessionActivity();
+              attachSessionLifecycleCallbacks(answerSession);
               answerSession.runQuery(injectedText, sid).then(() => {
                 const s = answerSession?.getSessionId();
-                if (s && activeSessions.get(s) === answerSession) {
+                if (s && activeSessions.get(s) === answerSession && !sessionShouldRemainPooled(answerSession)) {
                   activeSessions.delete(s);
-                    }
+                }
                 broadcastSessionList();
               }).catch((err) => {
                 sendJson({ type: "error", message: err.message || "Query failed" });
@@ -3769,7 +3793,7 @@ const httpServer = http.createServer((req, res) => {
         await restorePersistedPermissionMode(session, sessionInfo);
 
         (session as any)._resumeSessionId = sessionId;
-        session.onActivity = () => notifySessionActivity();
+        attachSessionLifecycleCallbacks(session);
 
         // Register immediately so the app can find it when it reconnects
         activeSessions.set(sessionId, session);
@@ -3784,13 +3808,13 @@ const httpServer = http.createServer((req, res) => {
 
         session.runQuery(prompt, sessionId).then(() => {
           const sid = session.getSessionId() || sessionId;
-          if (activeSessions.get(sid) === session) {
+          if (activeSessions.get(sid) === session && !sessionShouldRemainPooled(session)) {
             activeSessions.delete(sid);
           }
           broadcastSessionList();
         }).catch((err) => {
           console.error(`[Continue] Query error: ${err.message}`);
-          activeSessions.delete(sessionId);
+          if (!sessionShouldRemainPooled(session)) activeSessions.delete(sessionId);
         });
 
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -4326,7 +4350,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     } as any;
     session = createSession(backend, ws, task.cwd, plugins, codexDriver);
     await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
-    session.onActivity = () => notifySessionActivity();
+    attachSessionLifecycleCallbacks(session);
 
     if (shouldResume) {
       (session as any)._resumeSessionId = task.sessionId;
@@ -4375,6 +4399,9 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.runs.push(currentRun);
       applyLatestScheduledTaskEditableFields(task);
 
+      if ((session as any).isWarmIdle) {
+        session.abort();
+      }
       if (activeSessions.get(sid) === session) activeSessions.delete(sid);
       if (activeSessions.get(tempId) === session) activeSessions.delete(tempId);
 
@@ -4425,6 +4452,9 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.runs.push(currentRun);
       applyLatestScheduledTaskEditableFields(task);
 
+      if ((session as any).isWarmIdle) {
+        session.abort();
+      }
       activeSessions.delete(tempId);
       if (sid !== tempId) activeSessions.delete(sid);
 

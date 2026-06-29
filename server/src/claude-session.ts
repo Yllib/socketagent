@@ -320,13 +320,81 @@ interface MonitorState {
   process?: import("child_process").ChildProcess;
 }
 
+const DEFAULT_CLAUDE_WARM_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const CLAUDE_WARM_IDLE_TIMEOUT_MS = (() => {
+  const raw = process.env.CLAUDE_WARM_IDLE_TIMEOUT_MS;
+  if (!raw) return DEFAULT_CLAUDE_WARM_IDLE_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_CLAUDE_WARM_IDLE_TIMEOUT_MS;
+  return Math.floor(parsed);
+})();
+
+type ClaudeQueuedUserMessage = {
+  type: "user";
+  uuid: string;
+  session_id: string;
+  message: {
+    role: "user";
+    content: string;
+  };
+  parent_tool_use_id: null;
+  priority?: "now" | "next" | "later";
+};
+
+class ClaudeInputQueue implements AsyncIterable<ClaudeQueuedUserMessage> {
+  private messages: ClaudeQueuedUserMessage[] = [];
+  private waiters: Array<(result: IteratorResult<ClaudeQueuedUserMessage>) => void> = [];
+  private closed = false;
+
+  push(message: ClaudeQueuedUserMessage): void {
+    if (this.closed) throw new Error("Claude input queue is closed");
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter({ value: message, done: false });
+      return;
+    }
+    this.messages.push(message);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    while (this.waiters.length > 0) {
+      const waiter = this.waiters.shift();
+      waiter?.({ value: undefined as any, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<ClaudeQueuedUserMessage> {
+    return {
+      next: () => {
+        const message = this.messages.shift();
+        if (message) return Promise.resolve({ value: message, done: false });
+        if (this.closed) return Promise.resolve({ value: undefined as any, done: true });
+        return new Promise<IteratorResult<ClaudeQueuedUserMessage>>((resolve) => {
+          this.waiters.push(resolve);
+        });
+      },
+    };
+  }
+}
+
+interface PendingTurn {
+  resolve: () => void;
+  reject: (err: Error) => void;
+}
+
 export class ClaudeSession {
   private sessionId: string | null = null;
   private pendingQuestions: Map<string, PendingQuestion> = new Map();
   private abortController: AbortController | null = null;
   private activeQuery: ReturnType<typeof query> | null = null;
+  private activeInputQueue: ClaudeInputQueue | null = null;
+  private warmIdleTimer: NodeJS.Timeout | null = null;
+  private pendingTurns: PendingTurn[] = [];
   private questionCounter = 0;
   private _isRunning = false;
+  private _isWarmIdle = false;
   private _ttsEnabled = false;
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   private _kokoroVoice: string = "af_heart";
@@ -362,6 +430,7 @@ export class ClaudeSession {
   private _lastSupportedAgents: ServerMessage | null = null;
   private clientSockets = new Set<WebSocket>();
   public onActivity?: () => void;
+  public onClose?: () => void;
   public onMonitorOutput?: (text: string) => void;
   // When set, this fresh session replaces an old cleared session — remap the ID in the store
   public replacesSessionId?: string;
@@ -703,12 +772,83 @@ export class ClaudeSession {
     return this._isRunning;
   }
 
+  get isWarmIdle(): boolean {
+    return this._isWarmIdle;
+  }
+
+  get isBusy(): boolean {
+    return this._isRunning || this._isCompacting;
+  }
+
   get isCompacting(): boolean {
     return this._isCompacting;
   }
 
   get permissionMode(): string | null {
     return this._permissionMode;
+  }
+
+  private _clearWarmIdleTimer(): void {
+    if (this.warmIdleTimer) {
+      clearTimeout(this.warmIdleTimer);
+      this.warmIdleTimer = null;
+    }
+  }
+
+  private _resolvePendingTurn(): void {
+    const pending = this.pendingTurns.shift();
+    pending?.resolve();
+  }
+
+  private _rejectPendingTurns(err: Error): void {
+    while (this.pendingTurns.length > 0) {
+      const pending = this.pendingTurns.shift();
+      pending?.reject(err);
+    }
+  }
+
+  private _trackPendingTurn(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.pendingTurns.push({ resolve, reject });
+    });
+  }
+
+  private _createUserMessage(
+    text: string,
+    sessionId: string,
+    uuid: string,
+    priority?: "now" | "next" | "later",
+  ): ClaudeQueuedUserMessage {
+    return {
+      type: "user",
+      uuid,
+      session_id: sessionId,
+      message: { role: "user", content: text },
+      parent_tool_use_id: null,
+      ...(priority ? { priority } : {}),
+    };
+  }
+
+  private _enterWarmIdle(): void {
+    if (!this.activeQuery || !this.activeInputQueue || CLAUDE_WARM_IDLE_TIMEOUT_MS <= 0) return;
+    this._isRunning = false;
+    this._isWarmIdle = true;
+    this._clearWarmIdleTimer();
+    const sid = this.sessionId || "";
+    this.warmIdleTimer = setTimeout(() => {
+      if (!this._isWarmIdle) return;
+      console.log(`[WarmIdle] Closing Claude SDK stream for ${sid || "(unknown)"} after ${CLAUDE_WARM_IDLE_TIMEOUT_MS}ms idle`);
+      this._isWarmIdle = false;
+      this.activeInputQueue?.close();
+      try { this.activeQuery?.close(); } catch {}
+    }, CLAUDE_WARM_IDLE_TIMEOUT_MS);
+    this.warmIdleTimer.unref?.();
+    console.log(`[WarmIdle] Keeping Claude SDK stream open for ${sid || "(pending)"} (${CLAUDE_WARM_IDLE_TIMEOUT_MS}ms timeout)`);
+  }
+
+  private _leaveWarmIdle(): void {
+    this._clearWarmIdleTimer();
+    this._isWarmIdle = false;
   }
 
   get sessionModel(): string | null {
@@ -870,12 +1010,16 @@ export class ClaudeSession {
   }
 
   abort(): void {
+    this._leaveWarmIdle();
     this.abortController?.abort();
+    this.activeInputQueue?.close();
+    this.activeInputQueue = null;
     // close() forcefully terminates the CLI subprocess and all its children
     if (this.activeQuery) {
       try { this.activeQuery.close(); } catch {}
       this.activeQuery = null;
     }
+    this._rejectPendingTurns(new Error("Claude session aborted"));
     // Kill all monitored processes and clean up readers
     this._cleanupAllMonitors();
     // Stop all background bash watchers
@@ -1005,9 +1149,50 @@ export class ClaudeSession {
     }
   }
 
+  private async _runWarmPrompt(prompt: string, resumeSessionId?: string): Promise<void> {
+    if (!this.activeQuery || !this.activeInputQueue) {
+      throw new Error("Claude warm session is not available");
+    }
+    this._leaveWarmIdle();
+    this._isRunning = true;
+    this._authErrorSent = false;
+    this._streamingText = "";
+    this._streamingThinking = "";
+    this._lastPreview = "";
+    this.onActivity?.();
+
+    const sid = resumeSessionId || this.sessionId || "";
+    const userMsgUuid = crypto.randomUUID();
+    const turnPromise = this._trackPendingTurn();
+
+    if (sid) {
+      appendHistory(sid, {
+        role: "user",
+        content: prompt,
+        uuid: userMsgUuid,
+        timestamp: new Date().toISOString(),
+      });
+      this.send({
+        type: "user_message_uuid",
+        uuid: userMsgUuid,
+        sessionId: sid,
+      } as any);
+    }
+
+    this.activeInputQueue.push(this._createUserMessage(prompt, sid, userMsgUuid));
+    console.log(`[WarmIdle] Reusing Claude SDK stream for ${sid || "(pending)"}, prompt=${prompt.slice(0, 80)}...`);
+    return turnPromise;
+  }
+
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
+    if (this.activeQuery && this.activeInputQueue && this._isWarmIdle) {
+      return this._runWarmPrompt(prompt, resumeSessionId);
+    }
+
     this.abortController = new AbortController();
     this._isRunning = true;
+    this._isWarmIdle = false;
+    this._clearWarmIdleTimer();
     this._authErrorSent = false;
     this._streamingText = "";
     this._streamingThinking = "";
@@ -1407,15 +1592,9 @@ export class ClaudeSession {
       // the same ID we hand to the app.)
       const userMsgUuid = crypto.randomUUID();
       const promptSessionId = resumeTarget || this.sessionId || "";
-      const promptStream = (async function* () {
-        yield {
-          type: "user" as const,
-          uuid: userMsgUuid,
-          session_id: promptSessionId,
-          message: { role: "user" as const, content: prompt },
-          parent_tool_use_id: null,
-        };
-      })();
+      const promptStream = new ClaudeInputQueue();
+      this.activeInputQueue = promptStream;
+      promptStream.push(this._createUserMessage(prompt, promptSessionId, userMsgUuid));
 
       console.log(`Starting query: resume=${resumeTarget || 'none'}${shouldFork ? ' (FORK)' : ''}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt=${prompt.slice(0, 80)}..., uuid=${userMsgUuid}, cwd=${this.cwd}`);
 
@@ -1950,6 +2129,8 @@ export class ClaudeSession {
       let lastTurnCacheReadTokens = 0;
       let lastTurnCacheCreateTokens = 0;
 
+      const initialTurnPromise = this._trackPendingTurn();
+
       // Log the user prompt to history (for resumed sessions we already have the ID)
       let promptLogged = false;
       if (this.sessionId || resumeSessionId) {
@@ -1970,7 +2151,9 @@ export class ClaudeSession {
         promptLogged = true;
       }
 
-      for await (const message of q) {
+      const consumeQuery = async () => {
+        try {
+          for await (const message of q) {
         // Debug: log all message types to understand SDK event flow
         const msgType = message.type;
         const subtype = (message as any).subtype || (message as any).event?.type || '';
@@ -3161,6 +3344,14 @@ export class ClaudeSession {
             }).catch(() => {});
           }
 
+          this._isRunning = false;
+          if (CLAUDE_WARM_IDLE_TIMEOUT_MS > 0) {
+            this._enterWarmIdle();
+          } else {
+            this.activeInputQueue?.close();
+            try { this.activeQuery?.close(); } catch {}
+          }
+          this._resolvePendingTurn();
           this.onActivity?.();
           currentText = "";
         }
@@ -3169,6 +3360,7 @@ export class ClaudeSession {
       const errMsg = err.message || "Unknown error during query";
       console.error("Query error:", errMsg);
       if (err.stack) console.error(err.stack);
+      this._rejectPendingTurns(new Error(errMsg));
 
       // Skip if we already sent a login URL for this auth failure
       if (!this._authErrorSent) {
@@ -3178,9 +3370,38 @@ export class ClaudeSession {
         });
       }
     } finally {
+      this._leaveWarmIdle();
       this._isRunning = false;
+      this._isWarmIdle = false;
+      this.activeInputQueue?.close();
+      this.activeInputQueue = null;
       this.activeQuery = null;
+      this._rejectPendingTurns(new Error("Claude SDK stream closed"));
       this.onActivity?.();
+      this.onClose?.();
+    }
+      };
+      void consumeQuery();
+      return initialTurnPromise;
+    } catch (err: any) {
+      const errMsg = err.message || "Unknown error starting query";
+      console.error("Query setup error:", errMsg);
+      if (err.stack) console.error(err.stack);
+      this._leaveWarmIdle();
+      this._isRunning = false;
+      this._isWarmIdle = false;
+      this.activeInputQueue?.close();
+      this.activeInputQueue = null;
+      this.activeQuery = null;
+      this._rejectPendingTurns(new Error(errMsg));
+      if (!this._authErrorSent) {
+        this.send({
+          type: "error",
+          message: errMsg,
+        });
+      }
+      this.onActivity?.();
+      this.onClose?.();
     }
   }
 

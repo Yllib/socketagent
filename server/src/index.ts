@@ -311,10 +311,20 @@ function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPub
   const keysPath = socketAgentDataPath("relay-keys.json");
   const keyPair = loadOrCreateKeyPair(keysPath);
   return {
-    relayUrl: RELAY_URL,
+    relayUrl: publicRelayUrl(RELAY_URL),
     pairingToken: PAIRING_TOKEN,
     serverPubkey: toBase64(keyPair.publicKey),
   };
+}
+
+function publicRelayUrl(relayUrl: string): string {
+  try {
+    const url = new URL(relayUrl);
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1") {
+      return process.env.PUBLIC_RELAY_URL || "wss://relay.jarofdirt.info";
+    }
+  } catch {}
+  return relayUrl;
 }
 
 function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknown> {

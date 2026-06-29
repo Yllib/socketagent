@@ -27,6 +27,7 @@ import { getProcessHome, resolveClientPath } from "./path-utils";
 import { terminalSessionManager } from "./terminal-session";
 import { cancelSecureInputRequest, completeSecureInputRequest, redactSecretsDeep, saveSecureInput } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
+import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -215,6 +216,22 @@ const connectedClients = new Set<WebSocket>();
 const activeSessions: Map<string, Session> = new Map();
 
 const activeBackendInstalls = new Set<Backend>();
+const pendingClaudeBackendAuth = new Map<string, {
+  request: ClaudeAuthRequest;
+  sendProgress: (progress: Record<string, unknown>) => void;
+  timeout: NodeJS.Timeout;
+}>();
+
+function finishClaudeBackendAuth(requestId: string, progress: Record<string, unknown>): void {
+  const pending = pendingClaudeBackendAuth.get(requestId);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  pendingClaudeBackendAuth.delete(requestId);
+  activeBackendInstalls.delete("claude");
+  invalidateBackendHealthCache();
+  pending.sendProgress(progress);
+  broadcastServerCapabilities();
+}
 
 // Sessions whose context has been cleared — next query should NOT pass resume
 const clearedSessions: Set<string> = new Set();
@@ -900,16 +917,21 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "backend_install": {
         const backend = msg.backend;
-        const requestId = (msg as any).requestId as string | undefined;
-        const reinstall = (msg as any).reinstall !== false;
-        const authenticate = (msg as any).authenticate !== false;
+        const requestId = ((msg as any).requestId as string | undefined) || `backend_${backend}_${Date.now()}`;
+        const reinstall = (msg as any).reinstall === true;
+        const authenticate = (msg as any).authenticate === true;
+        const operation = ((msg as any).operation === "auth" || (authenticate && !reinstall))
+          ? "auth"
+          : "repair";
         const backendName = backend === "codex" ? "Codex" : "Claude";
+        const operationName = operation === "auth" ? "sign-in" : "repair";
 
         const sendProgress = (progress: Record<string, unknown>) => {
           sendJson({
             type: "backend_install_progress",
             requestId,
             backend,
+            operation,
             ...progress,
           });
         };
@@ -918,16 +940,51 @@ function createConnectionHandler(transport: ClientTransport) {
           sendProgress({
             phase: "install",
             status: "failed",
-            message: `${backend} backend repair is already running on this server.`,
+            message: `${backendName} backend ${operationName} is already running on this server.`,
           });
           break;
         }
 
         activeBackendInstalls.add(backend);
+
+        if (backend === "claude" && authenticate) {
+          try {
+            const authRequest = createClaudeAuthRequest();
+            const timeout = setTimeout(() => {
+              finishClaudeBackendAuth(requestId, {
+                phase: "auth",
+                status: "failed",
+                message: "Claude sign-in timed out. Start Claude sign-in again if you still need it.",
+              });
+            }, 15 * 60 * 1000);
+
+            pendingClaudeBackendAuth.set(requestId, {
+              request: authRequest,
+              sendProgress,
+              timeout,
+            });
+
+            sendProgress({
+              phase: "auth",
+              status: "running",
+              message: "Open the Claude login page, finish sign-in, then paste the copied auth code here.",
+              authUrl: authRequest.authUrl,
+            });
+          } catch (e: any) {
+            activeBackendInstalls.delete(backend);
+            sendProgress({
+              phase: "auth",
+              status: "failed",
+              message: `Claude sign-in failed to start: ${e?.message || String(e)}`,
+            });
+          }
+          break;
+        }
+
         sendProgress({
           phase: "install",
           status: "running",
-          message: `Starting ${backendName} backend repair...`,
+          message: `Starting ${backendName} backend ${operationName}...`,
         });
         void runBackendInstall({
           backend,
@@ -943,7 +1000,7 @@ function createConnectionHandler(transport: ClientTransport) {
           sendProgress({
             phase: "probe",
             status: "completed",
-            message: `${backendName} repair completed.`,
+            message: `${backendName} backend ${operationName} completed.`,
           });
           broadcastServerCapabilities();
           sendJson({
@@ -1493,7 +1550,7 @@ function createConnectionHandler(transport: ClientTransport) {
           const sid = sessionForRun.getSessionId();
           if (sid && activeSessions.get(sid) === sessionForRun) {
             // Keep session in pool if auth login is pending
-            if ((sessionForRun as any)._authCodeVerifier) {
+            if ((sessionForRun as any)._authRequest) {
               console.log(`Session ${sid} query completed but auth flow pending — keeping in active pool`);
             } else {
               activeSessions.delete(sid);
@@ -1503,7 +1560,7 @@ function createConnectionHandler(transport: ClientTransport) {
           broadcastSessionList();
         }).catch((err: any) => {
           const sid = sessionForRun.getSessionId();
-          if (sid && activeSessions.get(sid) === sessionForRun && !(sessionForRun as any)._authCodeVerifier) {
+          if (sid && activeSessions.get(sid) === sessionForRun && !(sessionForRun as any)._authRequest) {
             activeSessions.delete(sid);
           }
           if (sessionForRun instanceof CodexSession && isCodexAuthError(err)) {
@@ -2176,6 +2233,41 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "auth_code": {
         const code = (msg as any).code as string;
+        const authRequestId = (msg as any).authRequestId as string | undefined;
+        if (authRequestId && pendingClaudeBackendAuth.has(authRequestId)) {
+          const pending = pendingClaudeBackendAuth.get(authRequestId)!;
+          pending.sendProgress({
+            phase: "auth",
+            status: "running",
+            message: "Finishing Claude sign-in...",
+          });
+          exchangeClaudeAuthCode(pending.request, code)
+            .then(() => {
+              clearBackendHealthOverride("claude");
+              refreshClaudeExecutableInfo();
+              invalidateBackendHealthCache();
+              finishClaudeBackendAuth(authRequestId, {
+                phase: "probe",
+                status: "completed",
+                message: "Claude sign-in completed.",
+              });
+              sendJson({
+                type: "server_settings",
+                ...getAdvertisedServerSettings(),
+                codexCollaborationMode: pendingCodexCollaborationMode,
+              });
+              broadcastSessionList();
+            })
+            .catch((e: any) => {
+              finishClaudeBackendAuth(authRequestId, {
+                phase: "auth",
+                status: "failed",
+                message: `Claude sign-in failed: ${e?.message || String(e)}`,
+              });
+            });
+          break;
+        }
+
         const targetSid = (msg as any).sessionId || activeSessionId;
         const session = targetSid ? activeSessions.get(targetSid) : null;
         if (session) {

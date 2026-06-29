@@ -84,6 +84,7 @@ export interface BackendInstallMessage {
   backend: Backend;
   reinstall?: boolean;
   authenticate?: boolean;
+  operation?: "repair" | "auth";
   requestId?: string;
 }
 
@@ -565,7 +566,7 @@ export type ClientMessage =
   | GetArchiveHistoryMessage
   | RestoreArchiveMessage
   | DeleteArchiveMessage
-  | { type: "auth_code"; code: string; sessionId?: string }
+  | { type: "auth_code"; code: string; sessionId?: string; authRequestId?: string }
   | { type: "version_check" }
   | { type: "force_update" }
   | { type: "get_status_sync" }
@@ -798,6 +799,7 @@ export interface BackendInstallProgressServerMessage {
   type: "backend_install_progress";
   requestId?: string;
   backend: Backend;
+  operation?: "repair" | "auth";
   phase: "install" | "auth" | "probe";
   status: "running" | "completed" | "failed";
   message: string;

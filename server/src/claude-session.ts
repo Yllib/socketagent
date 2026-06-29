@@ -27,6 +27,7 @@ import {
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep } from "./secure-input-store";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
+import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
@@ -349,7 +350,7 @@ export class ClaudeSession {
   private _isCompacting = false;  // whether context compaction is in progress
   private _permissionMode: string | null = null;  // current permission mode (e.g., "plan")
   private _authErrorSent = false;  // suppress duplicate exit-code error after auth failure
-  private _authState: string | null = null;  // OAuth state param from the auth URL
+  private _authRequest: ClaudeAuthRequest | null = null;
   private _lastContextWindow = 0;  // last known context window size from modelUsage
   private _sessionModel: string | null = null;  // model reported by SessionStart hook
   private _streamingText = "";  // accumulated text for the current streaming response
@@ -3183,55 +3184,18 @@ export class ClaudeSession {
     }
   }
 
-  // OAuth PKCE config (extracted from Claude CLI binary)
-  private static readonly OAUTH_CONFIG = {
-    CLIENT_ID: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-    AUTH_URL: "https://claude.ai/oauth/authorize",
-    TOKEN_URL: "https://platform.claude.com/v1/oauth/token",
-    REDIRECT_URI: "https://platform.claude.com/oauth/code/callback",
-    SCOPES: ["org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"],
-  };
-
-  private _authCodeVerifier: string | null = null;  // PKCE code_verifier for pending auth
-
   /** Generate our own OAuth PKCE auth URL (no CLI subprocess needed). */
   private _startAuthLogin(): Promise<string | null> {
-    // Cancel any previous auth flow
-    this._authCodeVerifier = null;
-    this._authState = null;
-
-    // Generate PKCE code_verifier and code_challenge (32 bytes each, matching CLI)
-    const codeVerifier = crypto.randomBytes(32).toString("base64url");
-    const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
-    this._authCodeVerifier = codeVerifier;
-
-    // Generate state (32 bytes to match CLI's state length)
-    const state = crypto.randomBytes(32).toString("base64url");
-    this._authState = state;
-
-    // Build params in exact same order as CLI binary:
-    // code, client_id, response_type, redirect_uri, scope, code_challenge, code_challenge_method, state
-    const params = new URLSearchParams();
-    params.append("code", "true");
-    params.append("client_id", ClaudeSession.OAUTH_CONFIG.CLIENT_ID);
-    params.append("response_type", "code");
-    params.append("redirect_uri", ClaudeSession.OAUTH_CONFIG.REDIRECT_URI);
-    params.append("scope", ClaudeSession.OAUTH_CONFIG.SCOPES.join(" "));
-    params.append("code_challenge", codeChallenge);
-    params.append("code_challenge_method", "S256");
-    params.append("state", state);
-
-    const authUrl = `${ClaudeSession.OAUTH_CONFIG.AUTH_URL}?${params.toString()}`;
-    console.log(`[Auth] Generated OAuth URL: ${authUrl}`);
-    console.log(`[Auth] code_verifier: ${codeVerifier.substring(0, 10)}...`);
-
-    return Promise.resolve(authUrl);
+    this._authRequest = createClaudeAuthRequest();
+    console.log(`[Auth] Generated OAuth URL: ${this._authRequest.authUrl}`);
+    console.log(`[Auth] code_verifier: ${this._authRequest.codeVerifier.substring(0, 10)}...`);
+    return Promise.resolve(this._authRequest.authUrl);
   }
 
   /** Exchange the OAuth code for tokens and save to ~/.claude/.credentials.json */
   submitAuthCode(code: string): void {
-    console.log(`[Auth] submitAuthCode called — codeVerifier=${!!this._authCodeVerifier}, state=${!!this._authState}`);
-    if (!this._authCodeVerifier || !this._authState) {
+    console.log(`[Auth] submitAuthCode called — pending=${!!this._authRequest}`);
+    if (!this._authRequest) {
       console.error("[Auth] No pending auth flow (missing code_verifier or state)");
       this.send({
         type: "error",
@@ -3240,99 +3204,21 @@ export class ClaudeSession {
       return;
     }
 
-    // The callback page shows code#state — user copies that.
-    const raw = code.trim();
-    let authCode: string;
-    if (raw.includes("#")) {
-      [authCode] = raw.split("#", 2);
-    } else {
-      authCode = raw;
-    }
-
-    console.log(`[Auth] Exchanging code for token: code=${authCode.substring(0, 20)}...`);
-
-    // POST to token endpoint — CLI sends JSON, not form-urlencoded
-    const postData = JSON.stringify({
-      grant_type: "authorization_code",
-      code: authCode,
-      redirect_uri: ClaudeSession.OAUTH_CONFIG.REDIRECT_URI,
-      client_id: ClaudeSession.OAUTH_CONFIG.CLIENT_ID,
-      code_verifier: this._authCodeVerifier,
-      state: this._authState,
-    });
-
-    const https = require("https");
-    const url = new URL(ClaudeSession.OAUTH_CONFIG.TOKEN_URL);
-    const req = https.request({
-      hostname: url.hostname,
-      path: url.pathname,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(postData),
-      },
-    }, (res: any) => {
-      let body = "";
-      res.on("data", (d: string) => { body += d; });
-      res.on("end", () => {
-        console.log(`[Auth] Token response (${res.statusCode}): ${body.substring(0, 300)}`);
-        if (res.statusCode === 200) {
-          try {
-            const tokens = JSON.parse(body);
-            this._saveOAuthTokens(tokens);
-          } catch (e: any) {
-            console.error(`[Auth] Failed to parse token response: ${e.message}`);
-            this._sendAuthResult(false);
-          }
-        } else {
-          console.error(`[Auth] Token exchange failed: ${res.statusCode} ${body}`);
-          this.send({ type: "error", message: `Authentication failed (${res.statusCode}). Try again.` });
-          this._sendAuthResult(false);
-        }
-      });
-    });
-    req.on("error", (e: any) => {
-      console.error(`[Auth] Token request error: ${e.message}`);
-      this.send({ type: "error", message: `Auth token request failed: ${e.message}` });
-      this._sendAuthResult(false);
-    });
-    req.write(postData);
-    req.end();
-  }
-
-  /** Save OAuth tokens to ~/.claude/.credentials.json (same format the CLI uses). */
-  private _saveOAuthTokens(tokens: any): void {
-    const credPath = path.join(process.env.HOME || "", ".claude", ".credentials.json");
-    const expiresAt = tokens.expires_in
-      ? Date.now() + tokens.expires_in * 1000
-      : Date.now() + 3600 * 1000;
-
-    const credData = {
-      claudeAiOauth: {
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token || null,
-        expiresAt,
-        scopes: tokens.scope ? tokens.scope.split(" ") : ClaudeSession.OAUTH_CONFIG.SCOPES,
-        subscriptionType: null,
-        rateLimitTier: null,
-      },
-    };
-
-    try {
-      fs.mkdirSync(path.dirname(credPath), { recursive: true });
-      fs.writeFileSync(credPath, JSON.stringify(credData), { mode: 0o600 });
-      console.log(`[Auth] Saved OAuth tokens to ${credPath}`);
+    const request = this._authRequest;
+    exchangeClaudeAuthCode(request, code)
+      .then(() => {
+      console.log("[Auth] Saved Claude OAuth tokens");
       this._sendAuthResult(true);
-    } catch (e: any) {
-      console.error(`[Auth] Failed to save credentials: ${e.message}`);
-      this.send({ type: "error", message: `Failed to save credentials: ${e.message}` });
+    })
+      .catch((e: any) => {
+      console.error(`[Auth] Claude auth failed: ${e.message}`);
+      this.send({ type: "error", message: `Authentication failed: ${e.message}` });
       this._sendAuthResult(false);
-    }
+    });
   }
 
   private _sendAuthResult(success: boolean): void {
-    this._authCodeVerifier = null;
-    this._authState = null;
+    this._authRequest = null;
     this.send({
       type: "claude_auth_result",
       success,

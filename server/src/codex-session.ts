@@ -131,11 +131,20 @@ export function isCodexAuthError(error: unknown): boolean {
           }
         })();
 
-  return /\b(auth|authentication|authorize|authorization|login|sign[- ]?in|credential|token)\b.*\b(invalid|expired|required|missing|failed|denied|unauthorized)\b/i.test(message)
-    || /\b(invalid|expired|required|missing|failed|denied|unauthorized)\b.*\b(auth|authentication|authorization|login|sign[- ]?in|credential|token)\b/i.test(message)
+  return /\b(token_invalidated|invalidated|signing in again|sign in again|signed out)\b/i.test(message)
+    || /\b(auth|authentication|authorize|authorization|login|sign[- ]?in|credential|token)\b.*\b(invalid|invalidated|expired|required|missing|failed|denied|unauthorized)\b/i.test(message)
+    || /\b(invalid|invalidated|expired|required|missing|failed|denied|unauthorized)\b.*\b(auth|authentication|authorization|login|sign[- ]?in|credential|token)\b/i.test(message)
     || /\bnot authenticated\b/i.test(message)
     || /\bunauthorized\b/i.test(message)
     || /\b401\b/.test(message);
+}
+
+function codexAppServerErrorMessage(params: any, fallback: string): string {
+  return params?.error?.message
+    || params?.status?.error?.message
+    || params?.status?.message
+    || params?.message
+    || fallback;
 }
 
 // ─── CodexSession ─────────────────────────────────────────────────────────
@@ -1250,11 +1259,11 @@ export class CodexSession {
       // arrive here on a non-reserved channel so they cannot crash the process.
       // Surface the real message to the client instead of failing silently.
       this.appServer.on("errorNotification", (params: any) => {
-        const message = params?.error?.message || params?.message || "Codex reported an error";
+        const message = codexAppServerErrorMessage(params, "Codex reported an error");
         const sid = this.sessionId;
         if (sid) {
           this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
-          if (!isCodexAuthError(message)) {
+          if (!isCodexAuthError(params) && !isCodexAuthError(message)) {
             this.send({ type: "error", message: `Codex: ${message}`, sessionId: sid } as any);
           }
         }
@@ -1815,8 +1824,12 @@ export class CodexSession {
         } else if (statusType === "idle") {
           this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
         } else if (statusType === "systemError") {
+          const message = codexAppServerErrorMessage(p, "Codex app-server entered systemError state");
           this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
-          this.send({ type: "error", message: "Codex app-server entered systemError state", sessionId: sid } as any);
+          if (!isCodexAuthError(p) && !isCodexAuthError(message)) {
+            this.send({ type: "error", message, sessionId: sid } as any);
+          }
+          this.appServerTurnSettler?.reject(new Error(message));
         }
         return;
       }

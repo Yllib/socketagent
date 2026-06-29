@@ -22,6 +22,20 @@ if [[ -n "$SCRIPT_PATH" && -f "$SCRIPT_PATH" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 fi
 
+require_git_checkout() {
+  local dir="$1"
+  if ! command -v git >/dev/null 2>&1; then
+    echo "SocketAgent requires git and must be installed from a git checkout." >&2
+    echo "Install git, then run: git clone $REPO_URL" >&2
+    exit 1
+  fi
+  if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "SocketAgent must be installed from a git checkout; zip/archive installs are not supported." >&2
+    echo "Run: git clone $REPO_URL" >&2
+    exit 1
+  fi
+}
+
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<EOF
 SocketAgent installer
@@ -40,6 +54,7 @@ EOF
 fi
 
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install-server.sh" && -d "$SCRIPT_DIR/server" ]]; then
+  require_git_checkout "$SCRIPT_DIR"
   if [[ -r /dev/tty ]]; then
     exec bash "$SCRIPT_DIR/install-server.sh" "$@" </dev/tty
   fi

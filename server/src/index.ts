@@ -1908,10 +1908,6 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "force_update": {
-        if (!GIT_ROOT) {
-          sendJson({ type: "update_result", success: false, error: "No git repo found" });
-          break;
-        }
         const { execSync } = require("child_process");
         try {
           const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
@@ -4546,7 +4542,15 @@ function findGitRoot(startDir: string): string | null {
   return null;
 }
 
-const GIT_ROOT = findGitRoot(SERVER_DIR);
+const GIT_ROOT: string = (() => {
+  const root = findGitRoot(SERVER_DIR);
+  if (!root) {
+    console.error("[Startup] SocketAgent server must run from a git checkout. Zip/archive or copied installs are not supported.");
+    console.error("[Startup] Install with: git clone https://github.com/Yllib/socketagent.git");
+    process.exit(1);
+  }
+  return root;
+})();
 let lastAutoUpdateError: string | null = null;
 
 function pathIncludesDir(pathValue: string | undefined, dir: string): boolean {
@@ -4652,7 +4656,6 @@ function installSocketAgentCliFromRepo(gitRoot: string): void {
 }
 
 async function checkForUpdates(): Promise<void> {
-  if (!GIT_ROOT) return;
   try {
     const { execSync, exec } = require("child_process");
     const execAsync = (cmd: string, opts: any): Promise<string> =>
@@ -4716,13 +4719,9 @@ async function checkForUpdates(): Promise<void> {
   }
 }
 
-if (GIT_ROOT) {
-  installSocketAgentCliFromRepo(GIT_ROOT);
-  console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s)`);
-  setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
-} else {
-  console.log(`[Auto-update] No git repo found, auto-update disabled`);
-}
+installSocketAgentCliFromRepo(GIT_ROOT);
+console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s)`);
+setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
 
 // Graceful shutdown — clean up plugins, relay, and watchers
 for (const sig of ["SIGTERM", "SIGINT"] as const) {

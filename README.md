@@ -54,7 +54,7 @@ https://github.com/Yllib/socketagent/releases/latest/download/app-release.apk
 Quick start:
 
 1. Install the APK on your Android phone.
-2. Clone or download this repo on the computer you want to control.
+2. Clone this repo on the computer you want to control.
 3. Run the installer for your OS.
 4. Choose Claude, Codex, or both when prompted.
 5. Sign in to the selected agent CLI when prompted.
@@ -70,6 +70,7 @@ Requirements:
 
 - Android phone for the app.
 - Linux, WSL, or Windows machine for the server.
+- Git on the server machine. SocketAgent servers must run from a git checkout; zip/archive installs are rejected.
 - A Claude Code account if using Claude.
 - A ChatGPT/Codex account if using Codex.
 
@@ -105,18 +106,19 @@ curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh
 
 ### Windows
 
+Install Git first if `git` is not already available in PowerShell.
+
 One-line install:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://github.com/Yllib/socketagent/archive/master.zip -OutFile socketagent.zip; Expand-Archive socketagent.zip . -Force; cd socketagent-master; .\install.ps1"
+powershell -ExecutionPolicy Bypass -Command "git clone https://github.com/Yllib/socketagent.git; cd socketagent; .\install.ps1"
 ```
 
 Interactive install:
 
 ```powershell
-irm https://github.com/Yllib/socketagent/archive/master.zip -OutFile sc.zip
-Expand-Archive sc.zip . -Force
-cd socketagent-master
+git clone https://github.com/Yllib/socketagent.git
+cd socketagent
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 

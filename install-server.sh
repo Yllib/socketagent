@@ -91,6 +91,25 @@ prompt_read() {
   printf -v "$__resultvar" '%s' "$value"
 }
 
+require_git_checkout() {
+  if ! command -v git >/dev/null 2>&1; then
+    fail "Git is required. SocketAgent must be installed from a git checkout."
+    echo "  Install git, then run:"
+    echo "    git clone https://github.com/Yllib/socketagent.git"
+    echo "    cd socketagent"
+    echo "    bash install.sh"
+    exit 1
+  fi
+  if ! git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    fail "SocketAgent must be installed from a git checkout; zip/archive installs are not supported."
+    echo "  Run:"
+    echo "    git clone https://github.com/Yllib/socketagent.git"
+    echo "    cd socketagent"
+    echo "    bash install.sh"
+    exit 1
+  fi
+}
+
 ensure_shell_path() {
   local path_entry="$1"
   local label="$2"
@@ -110,6 +129,10 @@ ensure_shell_path() {
     warn "Add this to your shell profile if needed: export PATH=\"$path_entry:\$PATH\""
   fi
 }
+
+phase "Repository Check"
+require_git_checkout
+ok "Repository checkout verified"
 
 select_backends() {
   local value

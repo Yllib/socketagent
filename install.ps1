@@ -93,6 +93,29 @@ function Write-Fail($msg) {
     Write-Host "  [X] $msg" -ForegroundColor Red
 }
 
+function Assert-GitCheckout {
+    $gitMarker = Join-Path $REPO_ROOT ".git"
+    if (-not (Test-Path $gitMarker)) {
+        Write-Fail "SocketAgent must be installed from a git checkout; zip/archive installs are not supported."
+        Write-Host "  Install Git, then run:"
+        Write-Host "    git clone https://github.com/Yllib/socketagent.git"
+        Write-Host "    cd socketagent"
+        Write-Host "    powershell -ExecutionPolicy Bypass -File install.ps1"
+        exit 1
+    }
+
+    $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $gitCmd) { return }
+
+    $inside = (& git -C $REPO_ROOT rev-parse --is-inside-work-tree 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $inside -ne "true") {
+        Write-Fail "SocketAgent repository check failed. This server must run from a valid git checkout."
+        exit 1
+    }
+}
+
+Assert-GitCheckout
+
 function Refresh-Path {
     $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
                 [System.Environment]::GetEnvironmentVariable("PATH", "User")
@@ -469,6 +492,8 @@ if ($gitCmd) {
         Write-Ok "Git installed ($gitVer)"
     }
 }
+Refresh-Path
+Assert-GitCheckout
 
 # ── Node.js ──
 $nodeInstalled = $false

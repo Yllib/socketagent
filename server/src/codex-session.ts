@@ -176,9 +176,11 @@ export class CodexSession {
   private appServerFileChangePaths = new Map<string, string[]>();
   private appServerSeenUserMessageItems = new Set<string>();
   private _isCompacting = false;
+  private _compactStartedAt: string | null = null;
   private _compactBoundaryEmitted = false;
   private _compactBoundaryTrigger: "auto" | "manual" = "auto";
   private _isRunning = false;
+  private _runStartedAt: string | null = null;
   private _model: string | null = null;
   private _effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh" = "high";
   private _fastMode = false;
@@ -243,6 +245,11 @@ export class CodexSession {
       || this._pendingUserPrompt !== null
       || this._queuedPrompts.length > 0
       || this._pendingAppServerSteers.length > 0;
+  }
+  get activeStartedAt(): string | null {
+    if (this._isCompacting) return this._compactStartedAt || this._runStartedAt;
+    if (this.isBusy) return this._runStartedAt;
+    return null;
   }
   get driver(): CodexDriver { return "app-server"; }
   get permissionMode(): string | null {
@@ -415,6 +422,7 @@ export class CodexSession {
     if (!threadId) throw new Error("No Codex thread id to compact");
     await this.ensureAppServer();
     this._isCompacting = true;
+    this._compactStartedAt = new Date().toISOString();
     this._compactBoundaryEmitted = false;
     this._compactBoundaryTrigger = "manual";
     this.send({ type: "compacting", active: true, sessionId: threadId } as any);
@@ -1137,6 +1145,7 @@ export class CodexSession {
   private async runAppServerQuery(prompt: string, resumeSessionId?: string): Promise<void> {
     if (this._isRunning) throw new Error("CodexSession already running a turn");
     this._isRunning = true;
+    this._runStartedAt = new Date().toISOString();
     this.onActivity?.();
     this._abortRequested = false;
     this._currentPrompt = prompt;
@@ -1208,6 +1217,7 @@ export class CodexSession {
       if (nextPrompt) {
         nextPrompt.resolve();
         this._isRunning = false;
+        this._runStartedAt = null;
         this.activeAppServerTurnId = null;
         this.appServerTurnSettler = null;
         await this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, {
@@ -1225,6 +1235,7 @@ export class CodexSession {
       throw err;
     } finally {
       this._isRunning = false;
+      this._runStartedAt = null;
       this.activeAppServerTurnId = null;
       this.appServerTurnSettler = null;
       this.onActivity?.();
@@ -1574,6 +1585,9 @@ export class CodexSession {
     this.appServerTurnSettler?.resolve();
     this.appServerTurnSettler = null;
     this._isRunning = false;
+    this._isCompacting = false;
+    this._runStartedAt = null;
+    this._compactStartedAt = null;
     this.onActivity?.();
     if (this.sessionId) {
       this.send({
@@ -1848,7 +1862,12 @@ export class CodexSession {
         if (!sid) return;
         const statusType = p?.status?.type;
         if (statusType === "active") {
-          this.send({ type: "session_state_changed", state: "running", sessionId: sid } as any);
+          this.send({
+            type: "session_state_changed",
+            state: "running",
+            sessionId: sid,
+            ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
+          } as any);
         } else if (statusType === "idle") {
           this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
         } else if (statusType === "systemError") {
@@ -1866,6 +1885,7 @@ export class CodexSession {
         const sid = this.sessionId || p?.threadId;
         if (!sid) return;
         this._isCompacting = false;
+        this._compactStartedAt = null;
         this.send({ type: "compacting", active: false, sessionId: sid } as any);
         this.emitCompactBoundary(sid, this._compactBoundaryTrigger);
         this.scheduleAppServerIdleStop();
@@ -2189,6 +2209,7 @@ export class CodexSession {
     if (item.type === "contextCompaction") {
       if (method === "item/started") {
         this._isCompacting = true;
+        this._compactStartedAt ||= new Date().toISOString();
         this._compactBoundaryEmitted = false;
         if (this._compactBoundaryTrigger !== "manual") {
           this._compactBoundaryTrigger = "auto";
@@ -2196,6 +2217,7 @@ export class CodexSession {
         this.send({ type: "compacting", active: true, sessionId: sid } as any);
       } else {
         this._isCompacting = false;
+        this._compactStartedAt = null;
         this.send({ type: "compacting", active: false, sessionId: sid } as any);
         this.emitCompactBoundary(sid, this._compactBoundaryTrigger);
         this.scheduleAppServerIdleStop();

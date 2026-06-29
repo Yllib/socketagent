@@ -735,6 +735,8 @@ export interface SessionInfo {
   /** Number of user turns/prompts in this session when known. */
   turnCount?: number;
   running?: boolean;
+  /** Server-owned ISO timestamp for the current active turn/compaction. */
+  activeStartedAt?: string;
   lastUsage?: UsageInfo & { costUsd?: number; numTurns?: number };
   scheduledTaskId?: string;
   /** Backend that drives this session. Absent on legacy sessions = "claude". */
@@ -873,6 +875,9 @@ export interface StatusServerMessage {
   type: "status";
   sessionId: string;
   running: boolean;
+  compacting?: boolean;
+  activeStartedAt?: string;
+  activeToolUseId?: string;
   permissionMode?: string;
 }
 

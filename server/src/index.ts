@@ -241,6 +241,11 @@ function sessionIsBusy(session: Session): boolean {
   return session.isRunning || (session as any).isCompacting === true;
 }
 
+function getSessionActiveStartedAt(session: Session): string | undefined {
+  const value = (session as any).activeStartedAt;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 function sessionShouldRemainPooled(session: Session): boolean {
   return Boolean((session as any)._authRequest || (session as any).isWarmIdle === true);
 }
@@ -288,9 +293,11 @@ async function getEnrichedSessions(): Promise<SessionInfo[]> {
     .map(s => {
       const active = activeSessions.get(s.id);
       if (active && sessionIsBusy(active)) {
+        const activeStartedAt = getSessionActiveStartedAt(active);
         return {
           ...s,
           running: true,
+          ...(activeStartedAt ? { activeStartedAt } : {}),
           messagePreview: active.lastPreview || s.messagePreview,
           lastActive: new Date().toISOString(),
         };
@@ -1374,12 +1381,14 @@ function createConnectionHandler(transport: ClientTransport) {
         const resumeCompacting = !!(existing && existing.isCompacting);
         const resumePermMode = activeSession.permissionMode || null;
         const activeToolInfo = existing?.getActiveToolCall?.() || null;
-        console.log(`[Resume] sessionId=${msg.sessionId} existing=${!!existing} isRunning=${existing?.isRunning} compacting=${resumeCompacting} permMode=${resumePermMode} → sending running=${resumeRunning} activeToolUseId=${activeToolInfo?.toolUseId || 'none'}`);
+        const resumeActiveStartedAt = existing ? getSessionActiveStartedAt(existing) : undefined;
+        console.log(`[Resume] sessionId=${msg.sessionId} existing=${!!existing} isRunning=${existing?.isRunning} compacting=${resumeCompacting} permMode=${resumePermMode} → sending running=${resumeRunning} activeToolUseId=${activeToolInfo?.toolUseId || 'none'} activeStartedAt=${resumeActiveStartedAt || 'none'}`);
         sendJson({
           type: "status",
           sessionId: msg.sessionId,
           running: resumeRunning || resumeCompacting,
           compacting: resumeCompacting,
+          ...(resumeActiveStartedAt ? { activeStartedAt: resumeActiveStartedAt } : {}),
           ...(activeToolInfo ? { activeToolUseId: activeToolInfo.toolUseId } : {}),
           ...(resumePermMode ? { permissionMode: resumePermMode } : {}),
         });
@@ -4210,6 +4219,7 @@ function buildStatusSyncMessage(): string {
   let anyRunning = false;
   const runningSessions: string[] = [];
   const compactingSessions: string[] = [];
+  const sessionActiveStartedAt: Record<string, string> = {};
   const backgroundTaskIds: string[] = [];
   const sessionModels: Record<string, string> = {};
   for (const [sid, session] of activeSessions) {
@@ -4219,6 +4229,10 @@ function buildStatusSyncMessage(): string {
     }
     if (busy) {
       runningSessions.push(sid);
+      const activeStartedAt = getSessionActiveStartedAt(session);
+      if (activeStartedAt) {
+        sessionActiveStartedAt[sid] = activeStartedAt;
+      }
     }
     if (session.isCompacting) {
       compactingSessions.push(sid);
@@ -4245,6 +4259,7 @@ function buildStatusSyncMessage(): string {
     serverPid: process.pid,
     serverVersion: SERVER_GIT_HASH || undefined,
     backgroundTaskIds,
+    ...(Object.keys(sessionActiveStartedAt).length > 0 ? { sessionActiveStartedAt } : {}),
     ...(Object.keys(sessionModels).length > 0 ? { sessionModels } : {}),
     plugins: plugins.map(p => p.name),
   });

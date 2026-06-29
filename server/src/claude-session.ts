@@ -395,6 +395,7 @@ export class ClaudeSession {
   private questionCounter = 0;
   private _isRunning = false;
   private _isWarmIdle = false;
+  private _runStartedAt: string | null = null;
   private _ttsEnabled = false;
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   private _kokoroVoice: string = "af_heart";
@@ -416,6 +417,7 @@ export class ClaudeSession {
   private _activeToolName: string | null = null;
   private _readToolPaths: Map<string, string> = new Map();  // toolUseId → file_path for Read tool calls
   private _isCompacting = false;  // whether context compaction is in progress
+  private _compactStartedAt: string | null = null;
   private _permissionMode: string | null = null;  // current permission mode (e.g., "plan")
   private _authErrorSent = false;  // suppress duplicate exit-code error after auth failure
   private _authRequest: ClaudeAuthRequest | null = null;
@@ -784,6 +786,12 @@ export class ClaudeSession {
     return this._isCompacting;
   }
 
+  get activeStartedAt(): string | null {
+    if (this._isCompacting) return this._compactStartedAt || this._runStartedAt;
+    if (this._isRunning) return this._runStartedAt;
+    return null;
+  }
+
   get permissionMode(): string | null {
     return this._permissionMode;
   }
@@ -1020,6 +1028,10 @@ export class ClaudeSession {
       this.activeQuery = null;
     }
     this._rejectPendingTurns(new Error("Claude session aborted"));
+    this._isRunning = false;
+    this._isCompacting = false;
+    this._runStartedAt = null;
+    this._compactStartedAt = null;
     // Kill all monitored processes and clean up readers
     this._cleanupAllMonitors();
     // Stop all background bash watchers
@@ -1162,6 +1174,7 @@ export class ClaudeSession {
     }
     this._leaveWarmIdle();
     this._isRunning = true;
+    this._runStartedAt = new Date().toISOString();
     this._authErrorSent = false;
     this._streamingText = "";
     this._streamingThinking = "";
@@ -1198,6 +1211,7 @@ export class ClaudeSession {
 
     this.abortController = new AbortController();
     this._isRunning = true;
+    this._runStartedAt = new Date().toISOString();
     this._isWarmIdle = false;
     this._clearWarmIdleTimer();
     this._authErrorSent = false;
@@ -2472,6 +2486,11 @@ export class ClaudeSession {
           const permMode = (message as any).permissionMode as string | undefined;
           console.log(`[SDK] Status change: ${status}${permMode ? ` permissionMode=${permMode}` : ''}`);
           this._isCompacting = status === "compacting";
+          if (this._isCompacting) {
+            this._compactStartedAt ||= new Date().toISOString();
+          } else {
+            this._compactStartedAt = null;
+          }
           this.send({
             type: "compacting",
             active: this._isCompacting,
@@ -2730,6 +2749,7 @@ export class ClaudeSession {
             type: "session_state_changed",
             state,
             sessionId: this.sessionId || "",
+            ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
           } as any);
         }
 
@@ -3352,6 +3372,7 @@ export class ClaudeSession {
           }
 
           this._isRunning = false;
+          this._runStartedAt = null;
           if (CLAUDE_WARM_IDLE_TIMEOUT_MS > 0) {
             this._enterWarmIdle();
           } else {
@@ -3380,6 +3401,9 @@ export class ClaudeSession {
       this._leaveWarmIdle();
       this._isRunning = false;
       this._isWarmIdle = false;
+      this._isCompacting = false;
+      this._runStartedAt = null;
+      this._compactStartedAt = null;
       this.activeInputQueue?.close();
       this.activeInputQueue = null;
       this.activeQuery = null;
@@ -3397,6 +3421,9 @@ export class ClaudeSession {
       this._leaveWarmIdle();
       this._isRunning = false;
       this._isWarmIdle = false;
+      this._isCompacting = false;
+      this._runStartedAt = null;
+      this._compactStartedAt = null;
       this.activeInputQueue?.close();
       this.activeInputQueue = null;
       this.activeQuery = null;

@@ -58,6 +58,31 @@ export function registerPushToken(
   ].slice(-20));
 }
 
+export function unregisterPushToken(
+  fcmToken: string,
+  appServerId?: string,
+): void {
+  const token = fcmToken.trim();
+  if (!token) return;
+
+  writeStore(readStore().filter((entry) => {
+    if (entry.token !== token) return true;
+    if (!appServerId) return false;
+    return entry.appServerId !== appServerId;
+  }));
+}
+
+export function isPushTokenRegistered(
+  fcmToken: string,
+  appServerId?: string,
+): boolean {
+  const token = fcmToken.trim();
+  if (!token) return false;
+  return readStore().some((entry) => (
+    entry.token === token && (!appServerId || entry.appServerId === appServerId)
+  ));
+}
+
 export function isPushConfigured(): boolean {
   return Boolean(
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON

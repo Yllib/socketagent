@@ -328,6 +328,18 @@ export interface RegisterPushTokenMessage {
   appServerId?: string;
 }
 
+export interface UnregisterPushTokenMessage {
+  type: "unregister_push_token";
+  fcmToken: string;
+  appServerId?: string;
+}
+
+export interface GetPushRegistrationMessage {
+  type: "get_push_registration";
+  fcmToken: string;
+  appServerId?: string;
+}
+
 export interface SetEffortMessage {
   type: "set_effort";
   effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh";
@@ -556,6 +568,8 @@ export type ClientMessage =
   | TerminalDetachMessage
   | TerminalKillMessage
   | RegisterPushTokenMessage
+  | UnregisterPushTokenMessage
+  | GetPushRegistrationMessage
   | ScheduleTaskMessage
   | ListScheduledTasksMessage
   | CancelScheduledTaskMessage

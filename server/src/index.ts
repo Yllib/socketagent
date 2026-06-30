@@ -19,7 +19,7 @@ import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getDefaultCwd, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, markBackendAuthRequired, setDefaultCwd } from "./server-settings";
-import { isPushConfigured, registerPushToken, sendPushNotification } from "./push-notifications";
+import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, unregisterPushToken } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 import { runBackendInstall } from "./backend-installer";
@@ -934,6 +934,29 @@ function createConnectionHandler(transport: ClientTransport) {
         } else {
           sendJson({ type: "error", message: "Missing FCM token" });
         }
+        break;
+      }
+
+      case "unregister_push_token": {
+        const token = typeof (msg as any).fcmToken === "string" ? (msg as any).fcmToken : "";
+        const appServerId = typeof (msg as any).appServerId === "string" ? (msg as any).appServerId : undefined;
+        if (token.trim()) {
+          unregisterPushToken(token, appServerId);
+          sendJson({ type: "push_token_unregistered", appServerId });
+        } else {
+          sendJson({ type: "error", message: "Missing FCM token" });
+        }
+        break;
+      }
+
+      case "get_push_registration": {
+        const token = typeof (msg as any).fcmToken === "string" ? (msg as any).fcmToken : "";
+        const appServerId = typeof (msg as any).appServerId === "string" ? (msg as any).appServerId : undefined;
+        sendJson({
+          type: "push_registration_status",
+          appServerId,
+          registered: isPushTokenRegistered(token, appServerId),
+        });
         break;
       }
 

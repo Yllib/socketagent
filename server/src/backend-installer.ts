@@ -6,7 +6,7 @@ import type { Backend } from "./protocol";
 import { managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 
 export type BackendInstallPhase = "install" | "auth" | "probe";
-export type BackendInstallStatus = "running" | "completed" | "failed";
+export type BackendInstallStatus = "running" | "completed" | "failed" | "cancelled";
 
 export interface BackendInstallProgress {
   phase: BackendInstallPhase;
@@ -21,6 +21,7 @@ export interface BackendInstallOptions {
   backend: Backend;
   reinstall: boolean;
   authenticate: boolean;
+  signal?: AbortSignal;
   onProgress: (progress: BackendInstallProgress) => void;
 }
 
@@ -182,9 +183,15 @@ async function runProcess(options: {
   phase: BackendInstallPhase;
   timeoutMs?: number;
   shell?: boolean;
+  signal?: AbortSignal;
   onProgress: (progress: BackendInstallProgress) => void;
 }): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error("Operation cancelled"));
+      return;
+    }
+
     const child = spawn(options.command, options.args, {
       env: options.env,
       shell: options.shell,
@@ -193,12 +200,35 @@ async function runProcess(options: {
 
     let tail = "";
     let timedOut = false;
+    let cancelled = false;
     const timeout = options.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
           child.kill("SIGTERM");
         }, options.timeoutMs)
       : null;
+    let forceKill: NodeJS.Timeout | undefined;
+
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      if (forceKill) clearTimeout(forceKill);
+      options.signal?.removeEventListener("abort", handleAbort);
+    };
+
+    const handleAbort = () => {
+      cancelled = true;
+      if (child.exitCode == null && !child.killed) {
+        child.kill("SIGTERM");
+        forceKill = setTimeout(() => {
+          if (child.exitCode == null && !child.killed) {
+            child.kill("SIGKILL");
+          }
+        }, 3000);
+        forceKill.unref?.();
+      }
+    };
+    options.signal?.addEventListener("abort", handleAbort, { once: true });
+    if (options.signal?.aborted) handleAbort();
 
     const handleChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const text = stripTerminalControl(chunk.toString("utf8"));
@@ -217,12 +247,16 @@ async function runProcess(options: {
     child.stderr.on("data", (chunk) => handleChunk("stderr", chunk));
 
     child.on("error", (err) => {
-      if (timeout) clearTimeout(timeout);
-      reject(err);
+      cleanup();
+      reject(cancelled ? new Error("Operation cancelled") : err);
     });
 
     child.on("close", (code, signal) => {
-      if (timeout) clearTimeout(timeout);
+      cleanup();
+      if (cancelled) {
+        reject(new Error("Operation cancelled"));
+        return;
+      }
       if (timedOut) {
         reject(new Error(`${options.command} timed out`));
         return;
@@ -242,9 +276,15 @@ async function runCodexDeviceAuth(options: {
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
   shell?: boolean;
+  signal?: AbortSignal;
   onProgress: (progress: BackendInstallProgress) => void;
 }): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error("Operation cancelled"));
+      return;
+    }
+
     const initialAuthSignature = codexAuthFileSignature();
     const child = spawn(options.command, options.args, {
       env: options.env,
@@ -255,14 +295,18 @@ async function runCodexDeviceAuth(options: {
     let tail = "";
     let settled = false;
     let timedOut = false;
+    let cancelled = false;
     let timeout: NodeJS.Timeout;
     let authPoll: NodeJS.Timeout;
+    let forceKill: NodeJS.Timeout | undefined;
 
     const finish = (err?: Error, killChild = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       clearInterval(authPoll);
+      if (forceKill) clearTimeout(forceKill);
+      options.signal?.removeEventListener("abort", handleAbort);
       if (killChild && child.exitCode == null && !child.killed) {
         child.kill("SIGTERM");
       }
@@ -270,6 +314,19 @@ async function runCodexDeviceAuth(options: {
         reject(err);
       } else {
         resolve();
+      }
+    };
+
+    const handleAbort = () => {
+      cancelled = true;
+      if (child.exitCode == null && !child.killed) {
+        child.kill("SIGTERM");
+        forceKill = setTimeout(() => {
+          if (child.exitCode == null && !child.killed) {
+            child.kill("SIGKILL");
+          }
+        }, 3000);
+        forceKill.unref?.();
       }
     };
 
@@ -290,6 +347,8 @@ async function runCodexDeviceAuth(options: {
       });
       finish(undefined, true);
     }, 1000);
+    options.signal?.addEventListener("abort", handleAbort, { once: true });
+    if (options.signal?.aborted) handleAbort();
 
     const handleChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const text = stripTerminalControl(chunk.toString("utf8"));
@@ -306,9 +365,13 @@ async function runCodexDeviceAuth(options: {
     child.stdout.on("data", (chunk) => handleChunk("stdout", chunk));
     child.stderr.on("data", (chunk) => handleChunk("stderr", chunk));
 
-    child.on("error", (err) => finish(err));
+    child.on("error", (err) => finish(cancelled ? new Error("Operation cancelled") : err));
     child.on("close", (code, signal) => {
       if (settled) return;
+      if (cancelled) {
+        finish(new Error("Operation cancelled"));
+        return;
+      }
       if (timedOut) {
         finish(new Error(`${options.command} timed out`));
         return;
@@ -345,6 +408,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
       env,
       phase: "install",
       shell: process.platform === "win32",
+      signal: options.signal,
       onProgress: options.onProgress,
     });
     const managedCommand = resolveManagedBackendCommand(env, options.backend);
@@ -366,35 +430,36 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
         message: "Claude repair does not run interactive browser login. If Claude needs sign-in, start a Claude session and use the Claude Login card.",
       });
     } else {
-    const managedCodex = resolveManagedCodexCommand(env);
-    if (!managedCodex) {
-      throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}. Run Install / Repair Codex again.`);
-    }
-    options.onProgress({
-      phase: "auth",
-      status: "running",
-      message: "Open the OpenAI Codex device page and enter the one-time code.",
-      authUrl: CODEX_DEVICE_URL,
-    });
+      const managedCodex = resolveManagedCodexCommand(env);
+      if (!managedCodex) {
+        throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}. Run Install / Repair Codex again.`);
+      }
+      options.onProgress({
+        phase: "auth",
+        status: "running",
+        message: "Open the OpenAI Codex device page and enter the one-time code.",
+        authUrl: CODEX_DEVICE_URL,
+      });
 
-    const codex = { command: managedCodex, args: ["login", "--device-auth"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex) };
-    await runCodexDeviceAuth({
-      command: codex.command,
-      args: codex.args,
-      env: codex.env,
-      shell: codex.shell,
-      timeoutMs: 15 * 60 * 1000,
-      onProgress: options.onProgress,
-    });
+      const codex = { command: managedCodex, args: ["login", "--device-auth"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex) };
+      await runCodexDeviceAuth({
+        command: codex.command,
+        args: codex.args,
+        env: codex.env,
+        shell: codex.shell,
+        timeoutMs: 15 * 60 * 1000,
+        signal: options.signal,
+        onProgress: options.onProgress,
+      });
 
-    if (!codexAuthFileExists()) {
-      throw new Error("Codex login finished, but ~/.codex/auth.json was not created");
-    }
-    options.onProgress({
-      phase: "auth",
-      status: "completed",
-      message: "Codex authentication is available on this server.",
-    });
+      if (!codexAuthFileExists()) {
+        throw new Error("Codex login finished, but ~/.codex/auth.json was not created");
+      }
+      options.onProgress({
+        phase: "auth",
+        status: "completed",
+        message: "Codex authentication is available on this server.",
+      });
     }
   }
 
@@ -415,6 +480,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
     shell: versionProbe.shell,
     phase: "probe",
     timeoutMs: 10 * 1000,
+    signal: options.signal,
     onProgress: options.onProgress,
   });
   options.onProgress({

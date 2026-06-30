@@ -215,7 +215,15 @@ const connectedClients = new Set<WebSocket>();
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
 
-const activeBackendInstalls = new Set<Backend>();
+type BackendOperationKind = "repair" | "auth";
+type ActiveBackendInstall = {
+  requestId: string;
+  operation: BackendOperationKind;
+  abortController?: AbortController;
+  sendProgress?: (progress: Record<string, unknown>) => void;
+};
+
+const activeBackendInstalls = new Map<Backend, ActiveBackendInstall>();
 const pendingClaudeBackendAuth = new Map<string, {
   request: ClaudeAuthRequest;
   sendProgress: (progress: Record<string, unknown>) => void;
@@ -227,7 +235,10 @@ function finishClaudeBackendAuth(requestId: string, progress: Record<string, unk
   if (!pending) return;
   clearTimeout(pending.timeout);
   pendingClaudeBackendAuth.delete(requestId);
-  activeBackendInstalls.delete("claude");
+  const active = activeBackendInstalls.get("claude");
+  if (!active || active.requestId === requestId) {
+    activeBackendInstalls.delete("claude");
+  }
   invalidateBackendHealthCache();
   pending.sendProgress(progress);
   broadcastServerCapabilities();
@@ -258,7 +269,7 @@ function describeActiveSessions(): string {
 
 function autoUpdateBlockReason(): string | null {
   if (activeBackendInstalls.size > 0) {
-    return `backend repair is running (${Array.from(activeBackendInstalls).join(", ")})`;
+    return `backend repair is running (${Array.from(activeBackendInstalls.keys()).join(", ")})`;
   }
   for (const [, session] of activeSessions) {
     if (sessionIsBusy(session)) {
@@ -404,6 +415,48 @@ function maybeSendPushNotification(msg: {
     }
   }).catch((err) => {
     console.warn(`[Push] FCM push error: ${err?.message || err}`);
+  });
+}
+
+function notificationText(value: unknown, fallback: string): string {
+  const text = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+  if (!text) return fallback;
+  return text.length > 220 ? `${text.slice(0, 217)}...` : text;
+}
+
+function sessionNotificationTitle(sessionId: string, session: Session): string {
+  const info = getSession(sessionId);
+  const title = info?.title?.trim();
+  if (title && title !== "Untitled") return notificationText(title, "SocketAgent");
+  const cwd = info?.cwd || session.getCwd?.() || "";
+  return notificationText(cwd ? path.basename(cwd) || cwd : "", "SocketAgent");
+}
+
+function sessionNotificationBody(sessionId: string, session: Session, fallback: string): string {
+  const preview = (session as any).lastPreview || getSession(sessionId)?.messagePreview || "";
+  return notificationText(preview, fallback);
+}
+
+function sendSessionCompletionPush(session: Session, status: "completed" | "failed", fallbackBody?: string): void {
+  const sessionId = session.getSessionId?.();
+  if (!sessionId) return;
+  const title = sessionNotificationTitle(sessionId, session);
+  const body = sessionNotificationBody(
+    sessionId,
+    session,
+    fallbackBody || (status === "failed" ? "Prompt failed" : "Prompt complete")
+  );
+  sendPushNotification({
+    title,
+    body,
+    sessionId,
+    status,
+  }).then((result) => {
+    if (result.attempted > 0) {
+      console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for prompt ${status} session=${sessionId}`);
+    }
+  }).catch((err) => {
+    console.warn(`[Push] Prompt completion push error: ${err?.message || err}`);
   });
 }
 
@@ -991,15 +1044,14 @@ function createConnectionHandler(transport: ClientTransport) {
         };
 
         if (activeBackendInstalls.has(backend)) {
+          const active = activeBackendInstalls.get(backend);
           sendProgress({
             phase: "install",
             status: "failed",
-            message: `${backendName} backend ${operationName} is already running on this server.`,
+            message: `${backendName} backend ${active?.operation === "auth" ? "sign-in" : "repair"} is already running on this server.`,
           });
           break;
         }
-
-        activeBackendInstalls.add(backend);
 
         if (backend === "claude" && authenticate) {
           try {
@@ -1012,6 +1064,11 @@ function createConnectionHandler(transport: ClientTransport) {
               });
             }, 15 * 60 * 1000);
 
+            activeBackendInstalls.set(backend, {
+              requestId,
+              operation,
+              sendProgress,
+            });
             pendingClaudeBackendAuth.set(requestId, {
               request: authRequest,
               sendProgress,
@@ -1035,6 +1092,14 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
 
+        const abortController = new AbortController();
+        activeBackendInstalls.set(backend, {
+          requestId,
+          operation,
+          abortController,
+          sendProgress,
+        });
+
         sendProgress({
           phase: "install",
           status: "running",
@@ -1044,6 +1109,7 @@ function createConnectionHandler(transport: ClientTransport) {
           backend,
           reinstall,
           authenticate,
+          signal: abortController.signal,
           onProgress: sendProgress as any,
         }).then(() => {
           if (backend === "claude") refreshClaudeExecutableInfo();
@@ -1064,18 +1130,69 @@ function createConnectionHandler(transport: ClientTransport) {
           });
           broadcastSessionList();
         }).catch((e: any) => {
+          const cancelled = abortController.signal.aborted;
           invalidateCodexAvailabilityCache();
           invalidateCodexDriverAvailabilityCache();
           invalidateBackendHealthCache();
           sendProgress({
             phase: "probe",
-            status: "failed",
-            message: `${backendName} repair failed: ${e?.message || String(e)}`,
+            status: cancelled ? "cancelled" : "failed",
+            message: cancelled
+              ? `${backendName} backend ${operationName} stopped.`
+              : `${backendName} repair failed: ${e?.message || String(e)}`,
           });
           broadcastServerCapabilities();
         }).finally(() => {
-          activeBackendInstalls.delete(backend);
+          const active = activeBackendInstalls.get(backend);
+          if (!active || active.requestId === requestId) {
+            activeBackendInstalls.delete(backend);
+          }
         });
+        break;
+      }
+
+      case "backend_install_cancel": {
+        const backend = msg.backend;
+        const requestId = (msg as any).requestId as string | undefined;
+        const backendName = backend === "codex" ? "Codex" : "Claude";
+        const active = activeBackendInstalls.get(backend);
+        const operation = active?.operation || "repair";
+        const operationName = operation === "auth" ? "sign-in" : "repair";
+
+        const sendProgress = (progress: Record<string, unknown>) => {
+          sendJson({
+            type: "backend_install_progress",
+            requestId: active?.requestId || requestId,
+            backend,
+            operation,
+            ...progress,
+          });
+        };
+
+        if (!active || (requestId && active.requestId !== requestId)) {
+          sendProgress({
+            phase: operation === "auth" ? "auth" : "probe",
+            status: "cancelled",
+            message: `No ${backendName} backend operation is running.`,
+          });
+          break;
+        }
+
+        if (backend === "claude" && pendingClaudeBackendAuth.has(active.requestId)) {
+          finishClaudeBackendAuth(active.requestId, {
+            phase: "auth",
+            status: "cancelled",
+            message: "Claude sign-in stopped.",
+          });
+          break;
+        }
+
+        active.sendProgress?.({
+          phase: operation === "auth" ? "auth" : "install",
+          status: "running",
+          message: `Stopping ${backendName} backend ${operationName}...`,
+        });
+        active.abortController?.abort();
         break;
       }
 
@@ -1613,6 +1730,7 @@ function createConnectionHandler(transport: ClientTransport) {
               console.log(`Session ${sid} completed, removed from active pool`);
             }
           }
+          sendSessionCompletionPush(sessionForRun, "completed");
           broadcastSessionList();
         }).catch((err: any) => {
           const sid = sessionForRun.getSessionId();
@@ -1637,11 +1755,13 @@ function createConnectionHandler(transport: ClientTransport) {
               codexCollaborationMode: pendingCodexCollaborationMode,
             });
             broadcastServerCapabilities();
+            sendSessionCompletionPush(sessionForRun, "failed", "Codex sign-in required");
           } else {
             sendJson({
               type: "error",
               message: err.message || "Query failed",
             });
+            sendSessionCompletionPush(sessionForRun, "failed", err.message || "Query failed");
           }
           broadcastSessionList();
         });
@@ -3843,10 +3963,12 @@ const httpServer = http.createServer((req, res) => {
           if (activeSessions.get(sid) === session && !sessionShouldRemainPooled(session)) {
             activeSessions.delete(sid);
           }
+          sendSessionCompletionPush(session, "completed");
           broadcastSessionList();
         }).catch((err) => {
           console.error(`[Continue] Query error: ${err.message}`);
           if (!sessionShouldRemainPooled(session)) activeSessions.delete(sessionId);
+          sendSessionCompletionPush(session, "failed", err.message || "Query failed");
         });
 
         res.writeHead(200, { "Content-Type": "application/json" });

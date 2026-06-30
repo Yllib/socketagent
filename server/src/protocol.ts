@@ -88,6 +88,12 @@ export interface BackendInstallMessage {
   requestId?: string;
 }
 
+export interface BackendInstallCancelMessage {
+  type: "backend_install_cancel";
+  backend: Backend;
+  requestId?: string;
+}
+
 export interface DeleteSessionMessage {
   type: "delete_session";
   sessionId: string;
@@ -512,6 +518,7 @@ export type ClientMessage =
   | SetCodexDriverMessage
   | SetServerSettingsMessage
   | BackendInstallMessage
+  | BackendInstallCancelMessage
   | CodexCollaborationModesMessage
   | SetCodexCollaborationModeMessage
   | DeleteSessionMessage
@@ -781,6 +788,17 @@ export interface PushTokenRegisteredServerMessage {
   appServerId?: string;
 }
 
+export interface PushTokenUnregisteredServerMessage {
+  type: "push_token_unregistered";
+  appServerId?: string;
+}
+
+export interface PushRegistrationStatusServerMessage {
+  type: "push_registration_status";
+  appServerId?: string;
+  registered: boolean;
+}
+
 export interface ServerCapabilitiesMessage {
   type: "server_capabilities";
   binaryEnvelope?: boolean;
@@ -817,7 +835,7 @@ export interface BackendInstallProgressServerMessage {
   backend: Backend;
   operation?: "repair" | "auth";
   phase: "install" | "auth" | "probe";
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   message: string;
   output?: string;
   authUrl?: string;
@@ -1274,6 +1292,8 @@ export type ServerMessage =
   | ErrorServerMessage
   | BackendAuthRequiredServerMessage
   | PushTokenRegisteredServerMessage
+  | PushTokenUnregisteredServerMessage
+  | PushRegistrationStatusServerMessage
   | ServerCapabilitiesMessage
   | ServerSettingsMessage
   | BackendInstallProgressServerMessage

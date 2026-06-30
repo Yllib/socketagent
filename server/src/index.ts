@@ -4792,6 +4792,64 @@ function installSocketAgentCliFromRepo(gitRoot: string): void {
   }
 }
 
+function unquoteSystemdValue(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith("\"") && trimmed.endsWith("\"")) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function ensureStartupPreflightService(): void {
+  if (process.platform === "win32") return;
+
+  try {
+    const home = process.env.HOME || os.homedir();
+    if (!home) return;
+
+    const wrapperPath = path.join(SERVER_DIR, "scripts", "start-server.sh");
+    if (!fs.existsSync(wrapperPath)) return;
+    fs.chmodSync(wrapperPath, 0o755);
+
+    const serviceDir = path.join(home, ".config", "systemd", "user");
+    const serviceFiles = ["socketagent.service", "socketclaude.service"]
+      .map((name) => path.join(serviceDir, name))
+      .filter((file) => fs.existsSync(file));
+
+    let changed = false;
+    const expectedDist = path.join(SERVER_DIR, "dist", "index.js");
+
+    for (const serviceFile of serviceFiles) {
+      const body = fs.readFileSync(serviceFile, "utf-8");
+      const execMatch = body.match(/^ExecStart=(.*)$/m);
+      if (!execMatch) continue;
+
+      const execStart = unquoteSystemdValue(execMatch[1]);
+      if (execStart === wrapperPath) continue;
+      if (!execStart.includes("dist/index.js") && !execStart.includes(expectedDist)) continue;
+
+      const workingDirMatch = body.match(/^WorkingDirectory=(.*)$/m);
+      const workingDir = workingDirMatch ? unquoteSystemdValue(workingDirMatch[1]) : "";
+      const ownsUnit = workingDir ? path.resolve(workingDir) === SERVER_DIR : execStart.includes(expectedDist);
+      if (!ownsUnit) continue;
+
+      const updated = body.replace(/^ExecStart=.*$/m, `ExecStart=${wrapperPath}`);
+      fs.writeFileSync(serviceFile, updated);
+      changed = true;
+      console.log(`[Startup] Updated ${path.basename(serviceFile)} to use startup self-repair wrapper`);
+    }
+
+    if (changed) {
+      execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe" });
+    }
+  } catch (e: any) {
+    console.warn(`[Startup] Could not update systemd service wrapper: ${e?.message || String(e)}`);
+  }
+}
+
 async function checkForUpdates(): Promise<void> {
   try {
     const { execSync, exec } = require("child_process");
@@ -4857,6 +4915,7 @@ async function checkForUpdates(): Promise<void> {
 }
 
 installSocketAgentCliFromRepo(GIT_ROOT);
+ensureStartupPreflightService();
 console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s)`);
 setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
 

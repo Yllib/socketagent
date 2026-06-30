@@ -527,8 +527,11 @@ phase "Phase 8: Register systemd Service"
 SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
 NODE_PATH=$(command -v node)
+NPM_PATH=$(command -v npm)
+NPX_PATH=$(command -v npx)
 
 mkdir -p "$SERVICE_DIR"
+chmod +x "$SERVER_DIR/scripts/start-server.sh"
 
 NODE_DIR=$(dirname "$NODE_PATH")
 SERVICE_PATH="$NODE_DIR"
@@ -543,11 +546,14 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$SERVER_DIR
-ExecStart=$NODE_PATH $SERVER_DIR/dist/index.js
+ExecStart=$SERVER_DIR/scripts/start-server.sh
 Restart=on-failure
 RestartSec=5
 Environment=HOME=$HOME
 Environment=PATH=$SERVICE_PATH
+Environment=SOCKETAGENT_NODE=$NODE_PATH
+Environment=SOCKETAGENT_NPM=$NPM_PATH
+Environment=SOCKETAGENT_NPX=$NPX_PATH
 UnsetEnvironment=CLAUDECODE
 
 [Install]

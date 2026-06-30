@@ -437,6 +437,33 @@ function sessionNotificationBody(sessionId: string, session: Session, fallback: 
   return notificationText(preview, fallback);
 }
 
+const lastSessionStartedPush = new Map<string, string>();
+
+function sendSessionStartedPush(session: Session): boolean {
+  const sessionId = session.getSessionId?.();
+  if (!sessionId) return false;
+  const startedAt = getSessionActiveStartedAt(session) || new Date().toISOString();
+  if (lastSessionStartedPush.get(sessionId) === startedAt) return true;
+  lastSessionStartedPush.set(sessionId, startedAt);
+
+  sendPushNotification({
+    title: sessionNotificationTitle(sessionId, session),
+    body: "Agent is working",
+    sessionId,
+    status: "running",
+    kind: "session_started",
+    data: { startedAt },
+    showNotification: false,
+  }).then((result) => {
+    if (result.attempted > 0) {
+      console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for prompt started session=${sessionId}`);
+    }
+  }).catch((err) => {
+    console.warn(`[Push] Prompt started push error: ${err?.message || err}`);
+  });
+  return true;
+}
+
 function sendSessionCompletionPush(session: Session, status: "completed" | "failed", fallbackBody?: string): void {
   const sessionId = session.getSessionId?.();
   if (!sessionId) return;
@@ -451,6 +478,9 @@ function sendSessionCompletionPush(session: Session, status: "completed" | "fail
     body,
     sessionId,
     status,
+    kind: "session_finished",
+    data: { finishedAt: new Date().toISOString() },
+    showNotification: false,
   }).then((result) => {
     if (result.attempted > 0) {
       console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for prompt ${status} session=${sessionId}`);
@@ -1719,6 +1749,12 @@ function createConnectionHandler(transport: ClientTransport) {
         const runPromise = (sessionForRun as any).runQueryWithOptions
           ? (sessionForRun as any).runQueryWithOptions(msg.text, resumeId, runOptions)
           : sessionForRun.runQuery(msg.text, resumeId);
+        let sessionStartedPushSent = false;
+        const maybeSendSessionStartedPush = () => {
+          if (sessionStartedPushSent) return;
+          sessionStartedPushSent = sendSessionStartedPush(sessionForRun);
+        };
+        maybeSendSessionStartedPush();
         runPromise.then(() => {
           const sid = sessionForRun.getSessionId();
           if (sid && activeSessions.get(sid) === sessionForRun) {
@@ -1773,6 +1809,7 @@ function createConnectionHandler(transport: ClientTransport) {
             activeSessions.set(sid, sessionForRun);
           }
           if (sid) {
+            maybeSendSessionStartedPush();
             activeSessionId = sid;
             sessionClients.set(sid, {
               ws: transport as WebSocket,
@@ -3958,7 +3995,9 @@ const httpServer = http.createServer((req, res) => {
         }
         console.log(`[Continue] Starting query for session ${sessionId}`);
 
-        session.runQuery(prompt, sessionId).then(() => {
+        const continueRunPromise = session.runQuery(prompt, sessionId);
+        sendSessionStartedPush(session);
+        continueRunPromise.then(() => {
           const sid = session.getSessionId() || sessionId;
           if (activeSessions.get(sid) === session && !sessionShouldRemainPooled(session)) {
             activeSessions.delete(sid);

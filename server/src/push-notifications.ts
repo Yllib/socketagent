@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
-import { getMessaging } from "firebase-admin/messaging";
+import { getMessaging, MulticastMessage } from "firebase-admin/messaging";
 import { socketAgentDataPath } from "./socket-agent-paths";
 
 interface StoredPushToken {
@@ -16,6 +16,9 @@ export interface PushNotificationPayload {
   body?: string;
   sessionId?: string;
   status?: string;
+  kind?: string;
+  data?: Record<string, string | number | boolean | null | undefined>;
+  showNotification?: boolean;
 }
 
 const STORE_PATH = process.env.PUSH_TOKEN_STORE
@@ -147,29 +150,43 @@ export async function sendPushNotification(
   for (const [appServerId, group] of groups) {
     const groupTokens = group.map((entry) => entry.token).filter(Boolean);
     if (groupTokens.length === 0) continue;
-    const response = await getMessaging().sendEachForMulticast({
+    const data: Record<string, string> = {
+      title: payload.title,
+      body: payload.body || "",
+      sessionId: payload.sessionId || "",
+      serverId: appServerId,
+      status: payload.status || "manual",
+      kind: payload.kind || "",
+    };
+    for (const [key, value] of Object.entries(payload.data || {})) {
+      data[key] = value == null ? "" : String(value);
+    }
+
+    const message: MulticastMessage = {
       tokens: groupTokens,
-      notification: {
-        title: payload.title,
-        body: payload.body || "",
-      },
-      data: {
-        title: payload.title,
-        body: payload.body || "",
-        sessionId: payload.sessionId || "",
-        serverId: appServerId,
-        status: payload.status || "manual",
-      },
+      data,
       android: {
         priority: "high",
+      },
+    };
+
+    if (payload.showNotification !== false) {
+      message.notification = {
+        title: payload.title,
+        body: payload.body || "",
+      };
+      message.android = {
+        ...message.android,
         notification: {
           channelId: "session_alerts",
           priority: "high",
           defaultSound: true,
           defaultVibrateTimings: true,
         },
-      },
-    });
+      };
+    }
+
+    const response = await getMessaging().sendEachForMulticast(message);
     sent += response.successCount;
     response.responses.forEach((item, index) => {
       if (!item.success) {

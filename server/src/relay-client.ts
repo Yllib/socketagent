@@ -148,6 +148,10 @@ export class RelayClient {
     return this.status;
   }
 
+  get bufferedAmount(): number {
+    return this.ws?.bufferedAmount ?? 0;
+  }
+
   /** Disconnect and stop reconnecting */
   close(): void {
     this.closed = true;
@@ -445,6 +449,10 @@ export class VirtualRelaySocket {
   private _onCloseCallbacks: (() => void)[] = [];
 
   constructor(private relay: RelayClient) {}
+
+  get bufferedAmount(): number {
+    return this.relay.bufferedAmount;
+  }
 
   send(data: string): void {
     try {

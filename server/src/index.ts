@@ -696,6 +696,7 @@ function syncExternalNativeHistory(sessionInfo: SessionInfo): any[] {
  */
 interface ClientTransport {
   readonly readyState: number;
+  readonly bufferedAmount?: number;
   send(data: string): void;
 }
 
@@ -882,7 +883,7 @@ function createConnectionHandler(transport: ClientTransport) {
   }
 
   async function waitForFileSendBackpressure(): Promise<void> {
-    const maxBufferedBytes = 2 * 1024 * 1024;
+    const maxBufferedBytes = 512 * 1024;
     while (transport.readyState === WebSocket.OPEN) {
       const bufferedAmount = Number((transport as any).bufferedAmount || 0);
       if (!Number.isFinite(bufferedAmount) || bufferedAmount <= maxBufferedBytes) {
@@ -907,7 +908,7 @@ function createConnectionHandler(transport: ClientTransport) {
     }
     const transferId = fileId || crypto.randomUUID();
     const fileName = path.basename(filePath);
-    const CHUNK_SIZE = 256 * 1024; // Keep base64 JSON frames modest for mobile links.
+    const CHUNK_SIZE = 96 * 1024; // Keep encrypted/base64 JSON frames modest for mobile links.
     const totalChunks = Math.ceil(stat.size / CHUNK_SIZE);
     const startOffset = Math.max(0, Math.min(Math.floor(offsetBytes || 0), stat.size));
     console.log(`Sending file in ${totalChunks} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB${startOffset > 0 ? `, resume=${startOffset}` : ""})`);
@@ -929,12 +930,13 @@ function createConnectionHandler(transport: ClientTransport) {
           fileId: transferId,
           fileName,
           fileSize: stat.size,
+          offsetBytes: position,
           chunkIndex,
           totalChunks,
           data: chunk,
         });
         position += bytesRead;
-        await sleep(4);
+        await sleep(8);
       }
     } finally {
       fs.closeSync(fd);

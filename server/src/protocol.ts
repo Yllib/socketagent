@@ -926,6 +926,7 @@ export interface FileChunkServerMessage {
   fileId: string;
   fileName: string;
   fileSize: number;
+  offsetBytes?: number;
   chunkIndex: number;
   totalChunks: number;
   data: string;

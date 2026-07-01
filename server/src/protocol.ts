@@ -137,6 +137,7 @@ export interface RequestFileMessage {
   type: "request_file";
   filePath: string;
   fileId?: string;
+  offsetBytes?: number;
 }
 
 export interface LoadMoreHistoryMessage {
@@ -179,6 +180,7 @@ export interface FileManagerDownloadMessage {
   requestId?: string;
   path: string;
   fileId?: string;
+  offsetBytes?: number;
 }
 
 export interface FileManagerReadTextMessage {

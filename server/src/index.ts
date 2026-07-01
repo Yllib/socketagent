@@ -257,6 +257,10 @@ function getSessionActiveStartedAt(session: Session): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function sessionSuppressesOngoingNotification(session: Session): boolean {
+  return (session as any)._suppressOngoingNotification === true;
+}
+
 function sessionShouldRemainPooled(session: Session): boolean {
   return Boolean((session as any)._authRequest || (session as any).isWarmIdle === true);
 }
@@ -429,6 +433,15 @@ function sessionNotificationTitle(sessionId: string, session: Session): string {
   const title = info?.title?.trim();
   if (title && title !== "Untitled") return notificationText(title, "SocketAgent");
   const cwd = info?.cwd || session.getCwd?.() || "";
+  return notificationText(cwd ? path.basename(cwd) || cwd : "", "SocketAgent");
+}
+
+function storedSessionNotificationTitle(sessionId: string): string | undefined {
+  const info = getSession(sessionId);
+  if (!info) return undefined;
+  const title = info.title?.trim();
+  if (title && title !== "Untitled") return notificationText(title, "SocketAgent");
+  const cwd = info.cwd || "";
   return notificationText(cwd ? path.basename(cwd) || cwd : "", "SocketAgent");
 }
 
@@ -879,7 +892,7 @@ function createConnectionHandler(transport: ClientTransport) {
     }
   }
 
-  async function sendFileChunks(filePath: string, fileId?: string): Promise<void> {
+  async function sendFileChunks(filePath: string, fileId?: string, offsetBytes = 0): Promise<void> {
     if (!filePath || !fs.existsSync(filePath)) {
       sendJson({
         type: "error",
@@ -896,28 +909,31 @@ function createConnectionHandler(transport: ClientTransport) {
     const fileName = path.basename(filePath);
     const CHUNK_SIZE = 256 * 1024; // Keep base64 JSON frames modest for mobile links.
     const totalChunks = Math.ceil(stat.size / CHUNK_SIZE);
-    console.log(`Sending file in ${totalChunks} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
+    const startOffset = Math.max(0, Math.min(Math.floor(offsetBytes || 0), stat.size));
+    console.log(`Sending file in ${totalChunks} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB${startOffset > 0 ? `, resume=${startOffset}` : ""})`);
 
     const fd = fs.openSync(filePath, "r");
     try {
       const buf = Buffer.alloc(CHUNK_SIZE);
-      for (let i = 0; i < totalChunks; i++) {
+      for (let position = startOffset; position < stat.size;) {
         if (transport.readyState !== WebSocket.OPEN) {
-          console.warn(`File transfer aborted, socket closed: ${fileName} (id=${transferId}, chunk=${i}/${totalChunks})`);
+          console.warn(`File transfer aborted, socket closed: ${fileName} (id=${transferId}, offset=${position}/${stat.size})`);
           return;
         }
         await waitForFileSendBackpressure();
-        const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, i * CHUNK_SIZE);
+        const chunkIndex = Math.floor(position / CHUNK_SIZE);
+        const bytesRead = fs.readSync(fd, buf, 0, Math.min(CHUNK_SIZE, stat.size - position), position);
         const chunk = buf.subarray(0, bytesRead).toString("base64");
         sendJson({
           type: "file_chunk",
           fileId: transferId,
           fileName,
           fileSize: stat.size,
-          chunkIndex: i,
+          chunkIndex,
           totalChunks,
           data: chunk,
         });
+        position += bytesRead;
         await sleep(4);
       }
     } finally {
@@ -3640,7 +3656,8 @@ function createConnectionHandler(transport: ClientTransport) {
       case "request_file": {
         const filePath = (msg as any).filePath as string;
         const fileId = (msg as any).fileId as string;
-        await sendFileChunks(filePath, fileId);
+        const offsetBytes = Number((msg as any).offsetBytes || 0);
+        await sendFileChunks(filePath, fileId, Number.isFinite(offsetBytes) ? offsetBytes : 0);
         break;
       }
 
@@ -3663,7 +3680,8 @@ function createConnectionHandler(transport: ClientTransport) {
             path: resolved,
             fileId,
           });
-          await sendFileChunks(resolved, fileId);
+          const offsetBytes = Number((msg as any).offsetBytes || 0);
+          await sendFileChunks(resolved, fileId, Number.isFinite(offsetBytes) ? offsetBytes : 0);
         } catch (e: any) {
           sendJson({
             type: "file_manager_operation_result",
@@ -4065,13 +4083,75 @@ const httpServer = http.createServer((req, res) => {
     }
 
     const fileName = path.basename(filePath).replace(/["\r\n]/g, "_");
-    console.log(`[HTTP Download] Serving ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
-    res.writeHead(200, {
+    const fileSize = stat.size;
+    if (fileSize === 0) {
+      console.log(`[HTTP Download] Serving empty file ${fileName}`);
+      res.writeHead(200, {
+        "Accept-Ranges": "bytes",
+        "Content-Type": "application/octet-stream",
+        "Content-Length": "0",
+        "Content-Disposition": `attachment; filename="${fileName}"`,
+      });
+      res.end();
+      return;
+    }
+
+    let start = 0;
+    let end = fileSize - 1;
+    let statusCode = 200;
+    const rangeHeader = req.headers.range;
+    if (rangeHeader) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+      if (!match) {
+        res.writeHead(416, {
+          "Accept-Ranges": "bytes",
+          "Content-Range": `bytes */${fileSize}`,
+        });
+        res.end();
+        return;
+      }
+
+      const rawStart = match[1];
+      const rawEnd = match[2];
+      if (rawStart === "" && rawEnd !== "") {
+        const suffixLength = Number.parseInt(rawEnd, 10);
+        if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+          res.writeHead(416, {
+            "Accept-Ranges": "bytes",
+            "Content-Range": `bytes */${fileSize}`,
+          });
+          res.end();
+          return;
+        }
+        start = Math.max(0, fileSize - suffixLength);
+      } else if (rawStart !== "") {
+        start = Number.parseInt(rawStart, 10);
+      }
+      if (rawEnd !== "" && rawStart !== "") {
+        end = Number.parseInt(rawEnd, 10);
+      }
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= fileSize) {
+        res.writeHead(416, {
+          "Accept-Ranges": "bytes",
+          "Content-Range": `bytes */${fileSize}`,
+        });
+        res.end();
+        return;
+      }
+      end = Math.min(end, fileSize - 1);
+      statusCode = 206;
+    }
+
+    const contentLength = end - start + 1;
+    console.log(`[HTTP Download] Serving ${fileName} (${(contentLength / 1024 / 1024).toFixed(1)} MB${statusCode === 206 ? ` range=${start}-${end}/${fileSize}` : ""})`);
+    res.writeHead(statusCode, {
+      "Accept-Ranges": "bytes",
       "Content-Type": "application/octet-stream",
-      "Content-Length": stat.size.toString(),
+      "Content-Length": contentLength.toString(),
       "Content-Disposition": `attachment; filename="${fileName}"`,
+      ...(statusCode === 206 ? { "Content-Range": `bytes ${start}-${end}/${fileSize}` } : {}),
     });
-    const stream = fs.createReadStream(filePath);
+    const stream = fs.createReadStream(filePath, { start, end });
     stream.pipe(res);
     stream.on("error", (err) => {
       console.error(`[HTTP Download] Stream error for ${filePath}: ${err.message}`);
@@ -4403,8 +4483,10 @@ function sendStatusSyncTo(ws: WebSocket): void {
 function buildStatusSyncMessage(): string {
   let anyRunning = false;
   const runningSessions: string[] = [];
+  const notificationSuppressedSessions: string[] = [];
   const compactingSessions: string[] = [];
   const sessionActiveStartedAt: Record<string, string> = {};
+  const sessionTitles: Record<string, string> = {};
   const backgroundTaskIds: string[] = [];
   const sessionModels: Record<string, string> = {};
   for (const [sid, session] of activeSessions) {
@@ -4414,6 +4496,10 @@ function buildStatusSyncMessage(): string {
     }
     if (busy) {
       runningSessions.push(sid);
+      sessionTitles[sid] = sessionNotificationTitle(sid, session);
+      if (sessionSuppressesOngoingNotification(session)) {
+        notificationSuppressedSessions.push(sid);
+      }
       const activeStartedAt = getSessionActiveStartedAt(session);
       if (activeStartedAt) {
         sessionActiveStartedAt[sid] = activeStartedAt;
@@ -4433,18 +4519,24 @@ function buildStatusSyncMessage(): string {
     if (!runningSessions.includes(sid)) {
       runningSessions.push(sid);
     }
+    if (!sessionTitles[sid]) {
+      const title = storedSessionNotificationTitle(sid);
+      if (title) sessionTitles[sid] = title;
+    }
     anyRunning = true;
   }
   return JSON.stringify({
     type: "status_sync",
     running: anyRunning || compactingSessions.length > 0,
     runningSessions,
+    notificationSuppressedSessions,
     compactingSessions,
     serverStartedAt: SERVER_STARTED_AT,
     serverPid: process.pid,
     serverVersion: SERVER_GIT_HASH || undefined,
     backgroundTaskIds,
     ...(Object.keys(sessionActiveStartedAt).length > 0 ? { sessionActiveStartedAt } : {}),
+    ...(Object.keys(sessionTitles).length > 0 ? { sessionTitles } : {}),
     ...(Object.keys(sessionModels).length > 0 ? { sessionModels } : {}),
     plugins: plugins.map(p => p.name),
   });
@@ -4549,6 +4641,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       send: (data: string) => forwardHeadlessScheduledAgentMessage(data, session?.getSessionId() || task.sessionId || ""),
     } as any;
     session = createSession(backend, ws, task.cwd, plugins, codexDriver);
+    (session as any)._suppressOngoingNotification = task.notificationMode === "quiet";
     await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
     attachSessionLifecycleCallbacks(session);
 

@@ -495,7 +495,8 @@ function broadcastScheduledTaskNotification(
   title: string,
   body: string,
   sessionId: string,
-  status: "completed" | "failed" | "manual"
+  status: "completed" | "failed" | "manual",
+  options: { sendPush?: boolean } = {},
 ): void {
   const payload = { type: "scheduled_task_notification" as const, title, body, sessionId, status };
   const msg = JSON.stringify(payload);
@@ -503,7 +504,7 @@ function broadcastScheduledTaskNotification(
     if (client.readyState === WebSocket.OPEN) client.send(msg);
   }
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
-  maybeSendPushNotification(payload);
+  if (options.sendPush !== false) maybeSendPushNotification(payload);
 }
 
 function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: string): void {
@@ -4558,6 +4559,14 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
 
     const tempId = `scheduled-${task.id}`;
     activeSessions.set(tempId, session);
+    let scheduledStartPushSent = false;
+    const maybeSendScheduledStartPush = () => {
+      if (task.notificationMode === "quiet") return;
+      if (scheduledStartPushSent) return;
+      const sid = session.getSessionId();
+      if (!sid || sid === tempId) return;
+      scheduledStartPushSent = sendSessionStartedPush(session);
+    };
 
     const currentRun: import("./scheduled-task-store").TaskRun = {
       sessionId: "",
@@ -4575,6 +4584,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         task.sessionId = sid;
         currentRun.sessionId = sid;
         saveScheduledTask(task);
+        maybeSendScheduledStartPush();
         broadcastSessionList();
       }
     }, 500);
@@ -4625,13 +4635,20 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       broadcastScheduledTaskList();
       broadcastSessionList();
       if (task.notificationMode !== "quiet") {
+        const title = manualRun
+          ? "Scheduled task run complete"
+          : runIsRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete";
+        const body = task.resultSummary || task.prompt;
+        const hasRealSessionId = Boolean(session.getSessionId());
+        if (hasRealSessionId) {
+          sendSessionCompletionPush(session, "completed", body);
+        }
         broadcastScheduledTaskNotification(
-          manualRun
-            ? "Scheduled task run complete"
-            : runIsRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete",
-          task.resultSummary || task.prompt,
+          title,
+          body,
           task.sessionId || "",
-          "completed"
+          "completed",
+          hasRealSessionId ? { sendPush: false } : {},
         );
       }
       console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
@@ -4676,13 +4693,19 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
 
       broadcastScheduledTaskList();
       if (task.notificationMode !== "quiet") {
+        const title = manualRun
+          ? "Scheduled task run failed"
+          : runIsRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed";
+        const body = currentRun.error || task.prompt;
+        if (session.getSessionId()) {
+          sendSessionCompletionPush(session, "failed", body);
+        }
         broadcastScheduledTaskNotification(
-          manualRun
-            ? "Scheduled task run failed"
-            : runIsRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed",
-          currentRun.error || task.prompt,
+          title,
+          body,
           task.sessionId || "",
-          "failed"
+          "failed",
+          session.getSessionId() ? { sendPush: false } : {},
         );
       }
       console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);

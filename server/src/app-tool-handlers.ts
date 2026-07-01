@@ -7,6 +7,7 @@ import { generateKokoroAudio } from "./kokoro-tts";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
 import { requestSecureInput, SecureInputRequestArgs } from "./secure-input-store";
+import { sendPushNotification } from "./push-notifications";
 
 export interface AppToolContext {
   getSessionId(): string;
@@ -284,6 +285,20 @@ export async function handleNotifyUserTool(
     sessionId: ctx.getSessionId(),
     status: "manual",
   } as any);
+  sendPushNotification({
+    title,
+    body,
+    sessionId: ctx.getSessionId(),
+    status: "manual",
+    kind: "tool_notification",
+    showNotification: false,
+  }).then((result) => {
+    if (result.attempted > 0) {
+      console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for NotifyUser session=${ctx.getSessionId() || "none"}`);
+    }
+  }).catch((err) => {
+    console.warn(`[Push] NotifyUser push error: ${err?.message || err}`);
+  });
   ctx.appendHistory?.({
     role: "notification",
     content: body ? `${title}\n${body}` : title,

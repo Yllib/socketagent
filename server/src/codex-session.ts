@@ -62,6 +62,7 @@ type QueuedPrompt = {
 
 type PendingAppServerSteer = QueuedPrompt & {
   uuid: string;
+  steerSent?: boolean;
 };
 
 export type CodexSlashCommand = {
@@ -990,47 +991,29 @@ export class CodexSession {
     if (!this._isRunning) {
       // Race: turn finished between the client deciding to queue and us
       // receiving the message. Just run it directly.
-      void this.runQueryWithOptions(text, undefined, options).catch((err) => {
-        console.error(`[codex] direct-run injected message failed: ${err.message}`);
+      return this.runQueryWithOptions(text, undefined, {
+        ...options,
+        messageId,
       });
-      return;
     }
 
-    if (this.threadId && this.activeAppServerTurnId) {
-      try {
-        await this.ensureAppServer();
-        return new Promise<void>((resolve, reject) => {
-          const pending: PendingAppServerSteer = {
-            text,
-            priority,
-            messageId,
-            fastMode: options.fastMode,
-            resolve,
-            reject,
-            uuid: crypto.randomUUID(),
-          };
-          this._pendingAppServerSteers.push(pending);
-          try {
-            const turnId = this.activeAppServerTurnId!;
-            console.log(`[codex app-server] steering message mid-turn (thread=${this.threadId}, turn=${turnId}, priority=${priority}, messageId=${messageId || ""})`);
-            this.appServer!.steerTurn({
-              threadId: this.threadId!,
-              expectedTurnId: turnId,
-              input: this.buildAppServerTurnInput(text),
-            })
-              .then(() => {
-                console.log(`[codex app-server] turn/steer accepted (turn=${turnId}, messageId=${messageId || ""})`);
-              })
-              .catch((err: any) => {
-                this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
-              });
-          } catch (err: any) {
-            this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
-          }
-        });
-      } catch (err: any) {
-        console.warn(`[codex app-server] turn/steer failed; queueing follow-up: ${err?.message || String(err)}`);
-      }
+    try {
+      await this.ensureAppServer();
+      return new Promise<void>((resolve, reject) => {
+        const pending: PendingAppServerSteer = {
+          text,
+          priority,
+          messageId,
+          fastMode: options.fastMode,
+          resolve,
+          reject,
+          uuid: crypto.randomUUID(),
+        };
+        this._pendingAppServerSteers.push(pending);
+        this.flushPendingAppServerSteers();
+      });
+    } catch (err: any) {
+      console.warn(`[codex app-server] turn/steer failed; queueing follow-up: ${err?.message || String(err)}`);
     }
 
     console.warn(`[codex app-server] no active turn for injection; queueing follow-up (thread=${this.threadId || ""}, turn=${this.activeAppServerTurnId || ""}, priority=${priority}, messageId=${messageId || ""})`);
@@ -1210,22 +1193,29 @@ export class CodexSession {
       });
       this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
       this.flushPendingUserPrompt();
+      this.flushPendingAppServerSteers();
 
       await completion;
 
       const nextPrompt = this._abortRequested ? null : this.dequeueNextPrompt();
       if (nextPrompt) {
-        nextPrompt.resolve();
         this._isRunning = false;
         this._runStartedAt = null;
         this.activeAppServerTurnId = null;
         this.appServerTurnSettler = null;
-        await this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, {
-          fastMode: nextPrompt.fastMode,
-          messageId: nextPrompt.messageId,
-        });
+        try {
+          await this.runQueryWithOptions(nextPrompt.text, this.sessionId ?? undefined, {
+            fastMode: nextPrompt.fastMode,
+            messageId: nextPrompt.messageId,
+          });
+          nextPrompt.resolve();
+        } catch (err: any) {
+          nextPrompt.reject(err instanceof Error ? err : new Error(String(err)));
+          throw err;
+        }
       }
     } catch (err: any) {
+      this.clearPendingAppServerSteers(`codex app-server error: ${err?.message || String(err)}`);
       if (!isCodexAuthError(err)) {
         this.send({
           type: "error",
@@ -1650,33 +1640,65 @@ export class CodexSession {
     if (this._isRunning || this._abortRequested) return;
     const nextPrompt = this.dequeueNextPrompt();
     if (!nextPrompt) return;
-    nextPrompt.resolve();
     void this.runQueryWithOptions(nextPrompt.text, undefined, {
       fastMode: nextPrompt.fastMode,
       messageId: nextPrompt.messageId,
     })
+      .then(() => nextPrompt.resolve())
       .catch((err) => nextPrompt.reject(err instanceof Error ? err : new Error(String(err))));
   }
 
-  private acknowledgeNextAppServerSteer(): void {
-    const pending = this._pendingAppServerSteers.shift();
-    if (!pending) return;
-    const sid = this.sessionId;
-    if (sid) {
-      appendHistory(sid, {
-        role: "user",
-        content: pending.text,
-        uuid: pending.uuid,
-        timestamp: now(),
-      });
-      this.send({
-        type: "user_message_uuid",
-        uuid: pending.uuid,
-        sessionId: sid,
-        ...(pending.messageId ? { clientMessageId: pending.messageId } : {}),
-      } as any);
+  private flushPendingAppServerSteers(): void {
+    if (!this.appServer || !this.threadId || !this.activeAppServerTurnId) return;
+    this.flushPendingUserPrompt();
+    for (const pending of [...this._pendingAppServerSteers]) {
+      this.sendPendingAppServerSteer(pending);
     }
+  }
+
+  private sendPendingAppServerSteer(pending: PendingAppServerSteer): void {
+    if (pending.steerSent) return;
+    if (!this.appServer || !this.threadId || !this.activeAppServerTurnId) return;
+    pending.steerSent = true;
+    const turnId = this.activeAppServerTurnId;
+    console.log(`[codex app-server] steering message mid-turn (thread=${this.threadId}, turn=${turnId}, priority=${pending.priority}, messageId=${pending.messageId || ""})`);
+    this.appServer.steerTurn({
+      threadId: this.threadId,
+      expectedTurnId: turnId,
+      input: this.buildAppServerTurnInput(pending.text),
+    })
+      .then(() => {
+        console.log(`[codex app-server] turn/steer accepted (turn=${turnId}, messageId=${pending.messageId || ""})`);
+        this.acknowledgeAcceptedAppServerSteer(pending);
+      })
+      .catch((err: any) => {
+        this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
+      });
+  }
+
+  private acknowledgeAcceptedAppServerSteer(pending: PendingAppServerSteer): void {
+    const idx = this._pendingAppServerSteers.indexOf(pending);
+    if (idx < 0) return;
+    this._pendingAppServerSteers.splice(idx, 1);
+    this.persistAcceptedInjectedPrompt(pending);
     pending.resolve();
+  }
+
+  private persistAcceptedInjectedPrompt(prompt: { text: string; uuid: string; messageId?: string }): void {
+    const sid = this.sessionId;
+    if (!sid) return;
+    appendHistory(sid, {
+      role: "user",
+      content: prompt.text,
+      uuid: prompt.uuid,
+      timestamp: now(),
+    });
+    this.send({
+      type: "user_message_uuid",
+      uuid: prompt.uuid,
+      sessionId: sid,
+      ...(prompt.messageId ? { clientMessageId: prompt.messageId } : {}),
+    } as any);
   }
 
   private async handleAppServerRequest(
@@ -1855,6 +1877,7 @@ export class CodexSession {
 
       case "turn/started":
         this.activeAppServerTurnId = p?.turn?.id || p?.turnId || this.activeAppServerTurnId;
+        this.flushPendingAppServerSteers();
         return;
 
       case "thread/status/changed": {
@@ -2176,7 +2199,6 @@ export class CodexSession {
     if (item.type === "userMessage") {
       if (!this.appServerSeenUserMessageItems.has(item.id)) {
         this.appServerSeenUserMessageItems.add(item.id);
-        this.acknowledgeNextAppServerSteer();
       }
       return;
     }
@@ -2334,6 +2356,14 @@ export class CodexSession {
           toolUseId: item.id,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: toolName,
+          toolName,
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp: now(),
+        });
       } else {
         const output = item.error
           ? `Error: ${JSON.stringify(item.error)}`
@@ -2344,6 +2374,13 @@ export class CodexSession {
           output,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
+          timestamp: now(),
+        });
       }
       return;
     }
@@ -2414,6 +2451,14 @@ export class CodexSession {
           toolUseId: item.id,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: toolName,
+          toolName,
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp: now(),
+        });
       } else {
         const output = item.contentItems
           ? JSON.stringify(item.contentItems, null, 2)
@@ -2426,47 +2471,88 @@ export class CodexSession {
           output,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
+          timestamp: now(),
+        });
       }
       return;
     }
 
     if (item.type === "webSearch") {
       if (method === "item/started") {
+        const input = { query: item.query, action: item.action ?? null };
         this.send({
           type: "tool_call",
           tool: "WebSearch",
-          input: { query: item.query, action: item.action ?? null },
+          input,
           toolUseId: item.id,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: String(item.query || ""),
+          toolName: "WebSearch",
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp: now(),
+        });
       } else {
+        const output = item.action ? JSON.stringify(item.action, null, 2) : "Search completed";
         this.send({
           type: "tool_result",
           toolUseId: item.id,
-          output: item.action ? JSON.stringify(item.action, null, 2) : "Search completed",
+          output,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
+          timestamp: now(),
+        });
       }
       return;
     }
 
     if (item.type === "imageView") {
       if (method === "item/started") {
+        const input = { path: item.path };
         this.send({
           type: "tool_call",
           tool: "ViewImage",
-          input: { path: item.path },
+          input,
           toolUseId: item.id,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: String(item.path || ""),
+          toolName: "ViewImage",
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp: now(),
+        });
       } else {
         this.sendToolImageForPath(sid, item.id, item.path);
+        const output = item.path || "Image viewed";
         this.send({
           type: "tool_result",
           toolUseId: item.id,
-          output: item.path || "Image viewed",
+          output,
           sessionId: sid,
         } as ServerMessage);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId: item.id,
+          toolOutput: output,
+          timestamp: now(),
+        });
       }
       return;
     }

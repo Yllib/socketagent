@@ -57,6 +57,9 @@ if systemctl --user list-unit-files socketagent.service >/dev/null 2>&1; then
 else
   SERVICE_NAME="socketclaude"
 fi
+NODE_MIN_VERSION="${SOCKETAGENT_NODE_MIN_VERSION:-22}"
+NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"
+USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
 
 COMPILE=true
 EXTRA_SESSION=""
@@ -87,6 +90,111 @@ AUTH_TOKEN="${AUTH_TOKEN:-}"
 
 # Ensure history directory exists
 mkdir -p "$HISTORY_DIR"
+
+node_major_version() {
+  local candidate="$1"
+  local version
+  version="$("$candidate" --version 2>/dev/null | sed 's/^v//' | cut -d. -f1 || true)"
+  [[ "$version" =~ ^[0-9]+$ ]] || return 1
+  echo "$version"
+}
+
+node_is_usable() {
+  local candidate="$1"
+  [[ -n "$candidate" ]] || return 1
+  if [[ "$candidate" != */* ]]; then
+    candidate="$(command -v "$candidate" 2>/dev/null || true)"
+  fi
+  [[ -x "$candidate" ]] || return 1
+
+  local major
+  major="$(node_major_version "$candidate")" || return 1
+  (( major >= NODE_MIN_VERSION ))
+}
+
+prepend_node_runtime() {
+  local candidate="$1"
+  if [[ "$candidate" != */* ]]; then
+    candidate="$(command -v "$candidate" 2>/dev/null || true)"
+  fi
+
+  local node_dir
+  node_dir="$(dirname "$candidate")"
+  export PATH="$node_dir:$PATH"
+  export SOCKETAGENT_NODE="$candidate"
+  export SOCKETAGENT_NPM="$node_dir/npm"
+  export SOCKETAGENT_NPX="$node_dir/npx"
+  echo "Using Node.js $("$candidate" --version) at $candidate"
+}
+
+install_managed_node() {
+  command -v curl >/dev/null 2>&1 || {
+    echo "curl is required to install managed Node.js"
+    return 1
+  }
+  command -v tar >/dev/null 2>&1 || {
+    echo "tar is required to install managed Node.js"
+    return 1
+  }
+
+  local node_arch
+  case "$(uname -m)" in
+    x86_64) node_arch="x64" ;;
+    aarch64) node_arch="arm64" ;;
+    armv7l) node_arch="armv7l" ;;
+    *)
+      echo "Unsupported architecture for managed Node.js: $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  local tarball url tmp
+  tarball="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.xz"
+  url="https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}/${tarball}"
+  tmp="${TMPDIR:-/tmp}/${tarball}.$$"
+
+  echo "Installing managed Node.js v${NODE_RUNTIME_VERSION} to $USER_NODE_DIR"
+  curl -fSL --retry 3 --connect-timeout 15 -o "$tmp" "$url"
+
+  rm -rf "$USER_NODE_DIR"
+  mkdir -p "$USER_NODE_DIR"
+  tar -xJf "$tmp" -C "$USER_NODE_DIR" --strip-components=1
+  rm -f "$tmp"
+
+  node_is_usable "$USER_NODE_DIR/bin/node"
+}
+
+select_node_runtime() {
+  local configured_node="${SOCKETAGENT_NODE:-}"
+  if node_is_usable "$configured_node"; then
+    prepend_node_runtime "$configured_node"
+    return
+  fi
+
+  if node_is_usable "$USER_NODE_DIR/bin/node"; then
+    prepend_node_runtime "$USER_NODE_DIR/bin/node"
+    return
+  fi
+
+  local system_node
+  system_node="$(command -v node 2>/dev/null || true)"
+  if node_is_usable "$system_node"; then
+    prepend_node_runtime "$system_node"
+    return
+  fi
+
+  if [[ -n "$configured_node" ]]; then
+    echo "Configured Node.js at $configured_node is missing or older than v${NODE_MIN_VERSION}"
+  fi
+  if [[ -n "$system_node" ]]; then
+    echo "System Node.js at $system_node is missing or older than v${NODE_MIN_VERSION}"
+  fi
+
+  install_managed_node
+  prepend_node_runtime "$USER_NODE_DIR/bin/node"
+}
+
+select_node_runtime
 
 # Inject a message into a session's history file
 # Usage: inject_history SESSION_ID ROLE CONTENT

@@ -10,9 +10,12 @@ set -euo pipefail
 SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SERVER_DIR"
 
-NODE_BIN="${SOCKETAGENT_NODE:-node}"
-NPM_BIN="${SOCKETAGENT_NPM:-npm}"
-NPX_BIN="${SOCKETAGENT_NPX:-npx}"
+NODE_MIN_VERSION="${SOCKETAGENT_NODE_MIN_VERSION:-22}"
+NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"
+USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
+NODE_BIN=""
+NPM_BIN=""
+NPX_BIN=""
 RETRY_WINDOW_SECONDS="${SOCKETAGENT_STARTUP_REPAIR_RETRY_SECONDS:-300}"
 LOCK_DIR="$SERVER_DIR/.startup-repair.lock"
 LOCK_HELD=false
@@ -66,6 +69,129 @@ acquire_lock() {
   done
   LOCK_HELD=true
   trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+}
+
+node_major_version() {
+  local candidate="$1"
+  local version
+  version="$("$candidate" --version 2>/dev/null | sed 's/^v//' | cut -d. -f1 || true)"
+  [[ "$version" =~ ^[0-9]+$ ]] || return 1
+  echo "$version"
+}
+
+node_is_usable() {
+  local candidate="$1"
+  [[ -n "$candidate" ]] || return 1
+  if [[ "$candidate" != */* ]]; then
+    candidate="$(command -v "$candidate" 2>/dev/null || true)"
+  fi
+  [[ -x "$candidate" ]] || return 1
+
+  local major
+  major="$(node_major_version "$candidate")" || return 1
+  (( major >= NODE_MIN_VERSION ))
+}
+
+set_node_runtime() {
+  local candidate="$1"
+  if [[ "$candidate" != */* ]]; then
+    candidate="$(command -v "$candidate" 2>/dev/null || true)"
+  fi
+
+  NODE_BIN="$candidate"
+  local node_dir
+  node_dir="$(dirname "$NODE_BIN")"
+  export PATH="$node_dir:$PATH"
+
+  NPM_BIN="$node_dir/npm"
+  NPX_BIN="$node_dir/npx"
+
+  if [[ -n "${SOCKETAGENT_NPM:-}" && -x "${SOCKETAGENT_NPM:-}" ]]; then
+    NPM_BIN="$SOCKETAGENT_NPM"
+  elif [[ ! -x "$NPM_BIN" ]]; then
+    NPM_BIN="$(command -v npm 2>/dev/null || true)"
+  fi
+
+  if [[ -n "${SOCKETAGENT_NPX:-}" && -x "${SOCKETAGENT_NPX:-}" ]]; then
+    NPX_BIN="$SOCKETAGENT_NPX"
+  elif [[ ! -x "$NPX_BIN" ]]; then
+    NPX_BIN="$(command -v npx 2>/dev/null || true)"
+  fi
+
+  log "Using Node.js $("$NODE_BIN" --version) at $NODE_BIN"
+}
+
+install_managed_node() {
+  command -v curl >/dev/null 2>&1 || {
+    log "curl is required to install managed Node.js"
+    return 1
+  }
+  command -v tar >/dev/null 2>&1 || {
+    log "tar is required to install managed Node.js"
+    return 1
+  }
+
+  local node_arch
+  case "$(uname -m)" in
+    x86_64) node_arch="x64" ;;
+    aarch64) node_arch="arm64" ;;
+    armv7l) node_arch="armv7l" ;;
+    *)
+      log "Unsupported architecture for managed Node.js: $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  local tarball url tmp
+  tarball="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.xz"
+  url="https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}/${tarball}"
+  tmp="${TMPDIR:-/tmp}/${tarball}.$$"
+
+  log "Installing managed Node.js v${NODE_RUNTIME_VERSION} to $USER_NODE_DIR"
+  curl -fSL --retry 3 --connect-timeout 15 -o "$tmp" "$url"
+
+  rm -rf "$USER_NODE_DIR"
+  mkdir -p "$USER_NODE_DIR"
+  tar -xJf "$tmp" -C "$USER_NODE_DIR" --strip-components=1
+  rm -f "$tmp"
+
+  node_is_usable "$USER_NODE_DIR/bin/node"
+}
+
+select_node_runtime() {
+  local configured_node="${SOCKETAGENT_NODE:-}"
+  if node_is_usable "$configured_node"; then
+    set_node_runtime "$configured_node"
+    return
+  fi
+
+  if [[ -n "$configured_node" ]]; then
+    log "Configured Node.js at $configured_node is missing or older than v${NODE_MIN_VERSION}; checking managed runtime"
+  fi
+
+  if node_is_usable "$USER_NODE_DIR/bin/node"; then
+    set_node_runtime "$USER_NODE_DIR/bin/node"
+    return
+  fi
+
+  local system_node
+  system_node="$(command -v node 2>/dev/null || true)"
+  if node_is_usable "$system_node"; then
+    set_node_runtime "$system_node"
+    return
+  fi
+
+  if [[ -n "$system_node" ]]; then
+    log "System Node.js at $system_node is missing or older than v${NODE_MIN_VERSION}; installing managed runtime"
+  else
+    log "Node.js v${NODE_MIN_VERSION}+ not found; installing managed runtime"
+  fi
+
+  acquire_lock
+  if ! node_is_usable "$USER_NODE_DIR/bin/node"; then
+    run_repair "node" install_managed_node
+  fi
+  set_node_runtime "$USER_NODE_DIR/bin/node"
 }
 
 deps_resolve() {
@@ -132,6 +258,8 @@ build_needs_compile() {
 
   return 1
 }
+
+select_node_runtime
 
 if deps_need_install; then
   acquire_lock

@@ -1705,6 +1705,11 @@ function createConnectionHandler(transport: ClientTransport) {
               console.log(`[Inject] Queued prompt retracted (messageId=${messageId})`);
             } else {
               console.error(`[Inject] Failed: ${e}`);
+              sendJson({
+                type: "injection_failed",
+                messageId,
+                message: e?.message || String(e),
+              } as any);
             }
           });
           break;
@@ -2231,8 +2236,7 @@ function createConnectionHandler(transport: ClientTransport) {
           const tscDir = fs.existsSync(path.join(GIT_ROOT, "server", "tsconfig.json"))
             ? path.join(GIT_ROOT, "server")
             : GIT_ROOT;
-          execSync("npm ci --include=optional", { cwd: tscDir, stdio: "pipe", timeout: 120000 });
-          execSync("npx tsc", { cwd: tscDir, stdio: "pipe", timeout: 120000 });
+          runPackageUpdateSync(tscDir);
           installSocketAgentCliFromRepo(GIT_ROOT);
 
           if (beforeHash === afterHash) {
@@ -5012,6 +5016,172 @@ const GIT_ROOT: string = (() => {
 })();
 let lastAutoUpdateError: string | null = null;
 
+const NODE_MIN_VERSION = parseInt(process.env.SOCKETAGENT_NODE_MIN_VERSION || "22", 10);
+const NODE_RUNTIME_VERSION = process.env.SOCKETAGENT_NODE_VERSION || "22.22.1";
+
+interface UpdateRuntimeTools {
+  env: NodeJS.ProcessEnv;
+  npm: string;
+  npx: string;
+  shell: boolean;
+}
+
+function nodeCommandName(base: string): string {
+  return process.platform === "win32" ? `${base}.cmd` : base;
+}
+
+function defaultManagedNodeDir(): string {
+  const home = process.env.HOME || os.homedir();
+  return process.env.SOCKETAGENT_NODE_DIR || path.join(home, ".local", "share", "socketagent", "node");
+}
+
+function defaultManagedNodePath(): string {
+  return process.platform === "win32"
+    ? path.join(defaultManagedNodeDir(), "node.exe")
+    : path.join(defaultManagedNodeDir(), "bin", "node");
+}
+
+function nodeMajorVersion(nodePath: string): number | null {
+  try {
+    const raw = execFileSync(nodePath, ["--version"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const major = parseInt(raw.replace(/^v/, "").split(".")[0] || "", 10);
+    return Number.isFinite(major) ? major : null;
+  } catch {
+    return null;
+  }
+}
+
+function nodeIsUsable(nodePath: string | undefined): nodePath is string {
+  if (!nodePath) return false;
+  try {
+    if (!fs.existsSync(nodePath)) return false;
+    const major = nodeMajorVersion(nodePath);
+    return major !== null && major >= NODE_MIN_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+function installManagedNodeRuntime(): void {
+  if (process.platform === "win32") {
+    throw new Error("Managed Node auto-install is only supported on Linux; install Node.js 22+ manually on Windows");
+  }
+
+  const arch = os.arch();
+  const nodeArch = arch === "x64"
+    ? "x64"
+    : arch === "arm64"
+      ? "arm64"
+      : arch === "arm"
+        ? "armv7l"
+        : "";
+  if (!nodeArch) throw new Error(`Unsupported architecture for managed Node.js: ${arch}`);
+
+  const nodeDir = defaultManagedNodeDir();
+  const tarball = `node-v${NODE_RUNTIME_VERSION}-linux-${nodeArch}.tar.xz`;
+  const url = `https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}/${tarball}`;
+  const tmp = path.join(os.tmpdir(), `${tarball}.${process.pid}`);
+
+  console.log(`[UpdateRuntime] Installing managed Node.js v${NODE_RUNTIME_VERSION} to ${nodeDir}`);
+  execFileSync("curl", ["-fSL", "--retry", "3", "--connect-timeout", "15", "-o", tmp, url], { stdio: "pipe", timeout: 120000 });
+  fs.rmSync(nodeDir, { recursive: true, force: true });
+  fs.mkdirSync(nodeDir, { recursive: true });
+  execFileSync("tar", ["-xJf", tmp, "-C", nodeDir, "--strip-components=1"], { stdio: "pipe", timeout: 120000 });
+  fs.rmSync(tmp, { force: true });
+
+  if (!nodeIsUsable(defaultManagedNodePath())) {
+    throw new Error(`Managed Node.js install did not produce a usable Node ${NODE_MIN_VERSION}+ runtime`);
+  }
+}
+
+function resolveUpdateRuntimeTools(): UpdateRuntimeTools {
+  let nodePath = [
+    process.env.SOCKETAGENT_NODE,
+    defaultManagedNodePath(),
+    process.execPath,
+  ].find(nodeIsUsable);
+
+  if (!nodePath && process.platform !== "win32") {
+    installManagedNodeRuntime();
+    nodePath = defaultManagedNodePath();
+  }
+
+  if (!nodePath) {
+    const currentMajor = nodeMajorVersion(process.execPath);
+    console.warn(`[UpdateRuntime] Node.js ${currentMajor || "unknown"} is older than v${NODE_MIN_VERSION}; falling back to PATH npm/npx`);
+    return {
+      env: { ...process.env },
+      npm: nodeCommandName("npm"),
+      npx: nodeCommandName("npx"),
+      shell: process.platform === "win32",
+    };
+  }
+
+  const nodeDir = path.dirname(nodePath);
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
+  env[pathKey] = env[pathKey] ? `${nodeDir}${path.delimiter}${env[pathKey]}` : nodeDir;
+  env.PATH = env[pathKey];
+  env.SOCKETAGENT_NODE = nodePath;
+  env.SOCKETAGENT_NPM = process.platform === "win32"
+    ? path.join(nodeDir, "npm.cmd")
+    : path.join(nodeDir, "npm");
+  env.SOCKETAGENT_NPX = process.platform === "win32"
+    ? path.join(nodeDir, "npx.cmd")
+    : path.join(nodeDir, "npx");
+
+  console.log(`[UpdateRuntime] Using Node.js ${execFileSync(nodePath, ["--version"], { encoding: "utf-8" }).trim()} at ${nodePath}`);
+  return {
+    env,
+    npm: env.SOCKETAGENT_NPM,
+    npx: env.SOCKETAGENT_NPX,
+    shell: process.platform === "win32",
+  };
+}
+
+function runPackageUpdateSync(cwd: string): void {
+  const runtime = resolveUpdateRuntimeTools();
+  execFileSync(runtime.npm, ["ci", "--include=optional"], {
+    cwd,
+    env: runtime.env,
+    shell: runtime.shell,
+    stdio: "pipe",
+    timeout: 120000,
+  });
+  execFileSync(runtime.npx, ["tsc"], {
+    cwd,
+    env: runtime.env,
+    shell: runtime.shell,
+    stdio: "pipe",
+    timeout: 120000,
+  });
+}
+
+function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: string[], cwd: string): Promise<string> {
+  const { execFile } = require("child_process");
+  return new Promise((resolve, reject) => {
+    execFile(command, args, {
+      cwd,
+      env: runtime.env,
+      shell: runtime.shell,
+      timeout: 120000,
+    }, (err: any, stdout: any, stderr: any) => {
+      if (err) {
+        err.message = stderr ? `${err.message}\n${stderr}` : err.message;
+        reject(err);
+      } else {
+        resolve(String(stdout).trim());
+      }
+    });
+  });
+}
+
+async function runPackageUpdate(cwd: string): Promise<void> {
+  const runtime = resolveUpdateRuntimeTools();
+  await runUpdateToolAsync(runtime, runtime.npm, ["ci", "--include=optional"], cwd);
+  await runUpdateToolAsync(runtime, runtime.npx, ["tsc"], cwd);
+}
+
 function pathIncludesDir(pathValue: string | undefined, dir: string): boolean {
   if (!pathValue) return false;
   const entries = pathValue.split(path.delimiter).map((entry) => path.resolve(entry || "."));
@@ -5216,8 +5386,7 @@ async function checkForUpdates(): Promise<void> {
       ? path.join(GIT_ROOT, "server")
       : GIT_ROOT;
     // Install/update deps so SDK and other package changes are picked up
-    await execAsync("npm ci --include=optional", { cwd: tscDir, timeout: 120000 });
-    await execAsync("npx tsc", { cwd: tscDir, timeout: 120000 });
+    await runPackageUpdate(tscDir);
     installSocketAgentCliFromRepo(GIT_ROOT);
 
     lastAutoUpdateError = null;

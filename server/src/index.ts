@@ -697,6 +697,7 @@ function syncExternalNativeHistory(sessionInfo: SessionInfo): any[] {
 interface ClientTransport {
   readonly readyState: number;
   readonly bufferedAmount?: number;
+  readonly connectionGeneration?: number;
   send(data: string): void;
 }
 
@@ -754,7 +755,8 @@ function createConnectionHandler(transport: ClientTransport) {
     totalBytes: number;
     bytesReceived: number;
     lastProgressEmit: number;
-  }>();
+	  }>();
+  const activeFileSendVersions = new Map<string, number>();
   let externalNativeWatchTimer: ReturnType<typeof setInterval> | null = null;
   let externalNativeWatchSessionId: string | null = null;
   let externalNativeWatchFingerprint: string | null = null;
@@ -908,6 +910,12 @@ function createConnectionHandler(transport: ClientTransport) {
     }
     const transferId = fileId || crypto.randomUUID();
     const fileName = path.basename(filePath);
+    const transferVersion = (activeFileSendVersions.get(transferId) || 0) + 1;
+    const connectionGeneration = transport.connectionGeneration;
+    activeFileSendVersions.set(transferId, transferVersion);
+    const isCurrentTransfer = () =>
+      activeFileSendVersions.get(transferId) === transferVersion &&
+      (connectionGeneration === undefined || transport.connectionGeneration === connectionGeneration);
     const CHUNK_SIZE = 96 * 1024; // Keep encrypted/base64 JSON frames modest for mobile links.
     const totalChunks = Math.ceil(stat.size / CHUNK_SIZE);
     const startOffset = Math.max(0, Math.min(Math.floor(offsetBytes || 0), stat.size));
@@ -917,11 +925,15 @@ function createConnectionHandler(transport: ClientTransport) {
     try {
       const buf = Buffer.alloc(CHUNK_SIZE);
       for (let position = startOffset; position < stat.size;) {
-        if (transport.readyState !== WebSocket.OPEN) {
+        if (transport.readyState !== WebSocket.OPEN || !isCurrentTransfer()) {
           console.warn(`File transfer aborted, socket closed: ${fileName} (id=${transferId}, offset=${position}/${stat.size})`);
           return;
         }
         await waitForFileSendBackpressure();
+        if (!isCurrentTransfer()) {
+          console.warn(`File transfer superseded: ${fileName} (id=${transferId}, offset=${position}/${stat.size})`);
+          return;
+        }
         const chunkIndex = Math.floor(position / CHUNK_SIZE);
         const bytesRead = fs.readSync(fd, buf, 0, Math.min(CHUNK_SIZE, stat.size - position), position);
         const chunk = buf.subarray(0, bytesRead).toString("base64");
@@ -943,11 +955,19 @@ function createConnectionHandler(transport: ClientTransport) {
     }
 
     await waitForFileSendBackpressure();
+    if (transport.readyState !== WebSocket.OPEN || !isCurrentTransfer()) {
+      console.warn(`File transfer completion suppressed: ${fileName} (id=${transferId})`);
+      return;
+    }
     sendJson({
       type: "file_complete",
       fileId: transferId,
       fileName,
+      fileSize: stat.size,
     });
+    if (activeFileSendVersions.get(transferId) === transferVersion) {
+      activeFileSendVersions.delete(transferId);
+    }
     console.log(`File transfer complete: ${fileName}`);
   }
 

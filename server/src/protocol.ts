@@ -936,6 +936,7 @@ export interface FileCompleteServerMessage {
   type: "file_complete";
   fileId: string;
   fileName: string;
+  fileSize?: number;
 }
 
 export interface UploadCompleteServerMessage {

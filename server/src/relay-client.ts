@@ -445,6 +445,7 @@ export class RelayClient {
  */
 export class VirtualRelaySocket {
   readyState: number = WebSocket.CLOSED;
+  connectionGeneration = 0;
   private _onMessageCallbacks: ((data: Buffer) => void)[] = [];
   private _onCloseCallbacks: (() => void)[] = [];
 
@@ -467,7 +468,11 @@ export class VirtualRelaySocket {
   /** Called by RelayClient when pairing status changes */
   _setOpen(open: boolean): void {
     const wasOpen = this.readyState === WebSocket.OPEN;
-    this.readyState = open ? WebSocket.OPEN : WebSocket.CLOSED;
+    const nextReadyState = open ? WebSocket.OPEN : WebSocket.CLOSED;
+    if (this.readyState !== nextReadyState) {
+      this.connectionGeneration++;
+    }
+    this.readyState = nextReadyState;
     if (wasOpen && !open) {
       for (const cb of this._onCloseCallbacks) cb();
     }

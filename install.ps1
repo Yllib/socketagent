@@ -874,6 +874,9 @@ exit /b 0
 
 :preflight
 cd /d "%REPO_ROOT%"
+if /I "%SOCKETAGENT_AUTO_UPDATE%"=="0" exit /b 0
+if /I "%SOCKETAGENT_AUTO_UPDATE%"=="false" exit /b 0
+if /I "%SOCKETAGENT_AUTO_UPDATE%"=="off" exit /b 0
 git rev-parse --is-inside-work-tree >nul 2>&1 || exit /b 0
 git fetch origin
 if errorlevel 1 exit /b 0
@@ -886,6 +889,8 @@ for /f %%H in ('git rev-parse HEAD 2^>nul') do set "LOCAL_HASH=%%H"
 for /f %%H in ('git rev-parse origin/%BRANCH% 2^>nul') do set "REMOTE_HASH=%%H"
 if not defined REMOTE_HASH exit /b 0
 if "%LOCAL_HASH%"=="%REMOTE_HASH%" exit /b 0
+call :verify_update "%REMOTE_HASH%"
+if errorlevel 1 exit /b 1
 echo [Auto-update] Applying %REMOTE_HASH:~0,7% from origin/%BRANCH%
 git reset --hard origin/%BRANCH%
 if errorlevel 1 exit /b 1
@@ -896,6 +901,31 @@ call "%NPX_CMD%" tsc
 if errorlevel 1 exit /b 1
 > "%REPO_ROOT%\.last-auto-update-hash" echo %REMOTE_HASH%
 exit /b 0
+
+:verify_update
+set "VERIFY_MODE=%SOCKETAGENT_AUTO_UPDATE_VERIFY%"
+set "REQUIRE_SIGNED=%SOCKETAGENT_AUTO_UPDATE_REQUIRE_SIGNED_COMMITS%"
+if not defined VERIFY_MODE set "VERIFY_MODE=commit"
+if /I "%VERIFY_MODE%"=="none" exit /b 0
+if /I "%VERIFY_MODE%"=="0" exit /b 0
+if /I "%VERIFY_MODE%"=="false" exit /b 0
+if /I "%VERIFY_MODE%"=="off" exit /b 0
+if /I "%SOCKETAGENT_UPDATE_VERIFY%"=="commit" set "VERIFY_MODE=commit"
+if /I "%SOCKETAGENT_UPDATE_VERIFY%"=="signed-commit" set "VERIFY_MODE=commit"
+if /I "%SOCKETAGENT_UPDATE_REQUIRE_SIGNED_COMMITS%"=="1" set "REQUIRE_SIGNED=1"
+if /I "%REQUIRE_SIGNED%"=="0" exit /b 0
+if /I "%REQUIRE_SIGNED%"=="false" exit /b 0
+if /I "%REQUIRE_SIGNED%"=="off" exit /b 0
+if /I "%VERIFY_MODE%"=="signed" set "VERIFY_MODE=commit"
+if /I "%VERIFY_MODE%"=="signed-commit" set "VERIFY_MODE=commit"
+if /I "%REQUIRE_SIGNED%"=="true" set "VERIFY_MODE=commit"
+if /I "%REQUIRE_SIGNED%"=="yes" set "VERIFY_MODE=commit"
+if "%REQUIRE_SIGNED%"=="1" set "VERIFY_MODE=commit"
+if /I not "%VERIFY_MODE%"=="commit" exit /b 0
+set "SIGNERS=%REPO_ROOT%\.github\allowed_signers"
+if not exist "%SIGNERS%" exit /b 1
+git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=%SIGNERS%" verify-commit "%~1"
+exit /b %ERRORLEVEL%
 "@
 Set-Content -Path $batFile -Value $batContent -Encoding ASCII
 Write-Ok "Generated run-service.bat"

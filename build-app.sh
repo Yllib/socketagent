@@ -15,6 +15,8 @@ VERSION_FILE="$REPO_ROOT/app-version.json"
 SERVER_REPO="Yllib/socketagent"
 APK_PATH="$APP_DIR/build/app/outputs/flutter-apk/app-release.apk"
 APP_ID_OVERRIDE="${SOCKETAGENT_APPLICATION_ID:-}"
+SIGN_RELEASES="${SOCKETAGENT_SIGN_RELEASES:-1}"
+SIGNING_KEY="${SOCKETAGENT_GIT_SIGNING_KEY:-$HOME/.ssh/id_rsa.pub}"
 
 FLUTTER_BIN="${FLUTTER_BIN:-/opt/flutter/bin}"
 export PATH="$FLUTTER_BIN:/home/rdp/Android/Sdk/platform-tools:$PATH"
@@ -36,6 +38,45 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1"; echo "Usage: $0 [--deploy] [--bump major|minor|patch]"; exit 1 ;;
   esac
 done
+
+git_signed() {
+  if [[ "$SIGN_RELEASES" == "0" || "$SIGN_RELEASES" == "false" || "$SIGN_RELEASES" == "off" ]]; then
+    git "$@"
+  else
+    git -c gpg.format=ssh -c user.signingkey="$SIGNING_KEY" "$@"
+  fi
+}
+
+git_commit_release() {
+  local message="$1"
+  if git diff --cached --quiet; then
+    echo "No staged changes for: $message"
+    return 0
+  fi
+  if [[ "$SIGN_RELEASES" == "0" || "$SIGN_RELEASES" == "false" || "$SIGN_RELEASES" == "off" ]]; then
+    git commit -m "$message"
+  else
+    git_signed commit -S -m "$message"
+  fi
+}
+
+git_tag_release() {
+  local tag="$1"
+  local message="$2"
+  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    echo "Tag already exists: $tag"
+    return 0
+  fi
+  if [[ "$SIGN_RELEASES" == "0" || "$SIGN_RELEASES" == "false" || "$SIGN_RELEASES" == "off" ]]; then
+    git tag -a "$tag" -m "$message"
+  else
+    git_signed tag -s "$tag" -m "$message"
+  fi
+}
+
+if $DEPLOY && [[ ! "$SIGN_RELEASES" =~ ^(0|false|off)$ ]]; then
+  [[ -f "$SIGNING_KEY" ]] || { echo "Signing key not found: $SIGNING_KEY"; exit 1; }
+fi
 
 # ── Read current version ──
 CURRENT=$(grep '^version:' "$PUBSPEC" | sed 's/version: //' | cut -d+ -f1)
@@ -112,6 +153,20 @@ scp "$REMOTE_HOST:$REMOTE_DIR/build/app/outputs/flutter-apk/app-release.apk" "$A
 ELAPSED=$((SECONDS - BUILD_START))
 echo "Remote build completed in ${ELAPSED}s"
 echo "APK: $APK_PATH"
+APK_SHA256="$(sha256sum "$APK_PATH" | awk '{print $1}')"
+APK_SIZE="$(stat -c%s "$APK_PATH")"
+APK_CERT_SHA256=""
+APKSIGNER="${APKSIGNER:-}"
+if [[ -z "$APKSIGNER" ]]; then
+  APKSIGNER="$(find "${ANDROID_HOME:-/home/rdp/Android/Sdk}/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -1 || true)"
+fi
+if [[ -n "$APKSIGNER" && -x "$APKSIGNER" ]]; then
+  APK_CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK_PATH" 2>/dev/null | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2; exit}' | tr -d ':')"
+fi
+echo "APK SHA-256: $APK_SHA256"
+if [[ -n "$APK_CERT_SHA256" ]]; then
+  echo "Signing cert SHA-256: $APK_CERT_SHA256"
+fi
 
 if ! $DEPLOY; then
   echo ""
@@ -124,7 +179,7 @@ fi
 # ── Commit app repo ──
 cd "$APP_DIR"
 git add -A
-git commit -m "Release v$NEW_VERSION" || true
+git_commit_release "Release v$NEW_VERSION"
 APP_VERSION_COMMITTED=true
 git push
 
@@ -133,13 +188,18 @@ cd "$REPO_ROOT"
 cat > "$VERSION_FILE" << EOF
 {
   "version": "$NEW_VERSION",
-  "url": "https://github.com/$SERVER_REPO/releases/download/v$NEW_VERSION/app-release.apk"
+  "url": "https://github.com/$SERVER_REPO/releases/download/v$NEW_VERSION/app-release.apk",
+  "sha256": "$APK_SHA256",
+  "size": $APK_SIZE,
+  "signingCertSha256": "$APK_CERT_SHA256"
 }
 EOF
 
 git add "$VERSION_FILE"
-git commit -m "Release app v$NEW_VERSION" || true
+git_commit_release "Release app v$NEW_VERSION"
+git_tag_release "v$NEW_VERSION" "SocketAgent v$NEW_VERSION"
 git push
+git push origin "v$NEW_VERSION"
 
 # ── Create GitHub release with APK ──
 echo "Creating GitHub release v$NEW_VERSION..."

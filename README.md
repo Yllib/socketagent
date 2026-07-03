@@ -225,6 +225,9 @@ Common values:
 - `DEFAULT_CWD` - default working directory for new sessions.
 - `RELAY_URL` - relay endpoint.
 - `PAIRING_TOKEN` - token encoded in the pairing QR.
+- `SOCKETAGENT_AUTO_UPDATE` - set to `0`/`false`/`off` to disable git auto-update.
+- `SOCKETAGENT_AUTO_UPDATE_VERIFY` - defaults to `commit`, requiring `git verify-commit` against `.github/allowed_signers` before auto-update applies a fetched commit. Set to `none` to disable signature enforcement.
+- `SOCKETAGENT_AUTO_UPDATE_REQUIRE_SIGNED_COMMITS` - set to `0`/`false`/`off` as an alias for disabling signed-commit update enforcement.
 - `SOCKETAGENT_SHOW_PAIRING_QR_ON_STARTUP` - set to `1` only for an explicit pairing session; otherwise startup logs redact pairing secrets.
 
 Runtime data is stored under `~/.claude-assistant/`, including session metadata, chat history, scheduled tasks, relay keys, recent working directories, and local app/server state. SocketAgent intentionally keeps this legacy path so upgrades preserve existing pairings and history.

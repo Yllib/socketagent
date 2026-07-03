@@ -2426,11 +2426,14 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "version_check": {
-        const { execSync, exec: execCb } = require("child_process");
         const info: any = {
           type: "version_info",
           gitAvailable: !!GIT_ROOT,
           autoUpdateError: lastAutoUpdateError,
+          autoUpdate: {
+            enabled: autoUpdateEnabled(),
+            verify: autoUpdateVerifyMode(),
+          },
           running: {
             hash: SERVER_GIT_HASH || undefined,
             startedAt: SERVER_STARTED_AT,
@@ -2441,10 +2444,10 @@ function createConnectionHandler(transport: ClientTransport) {
         if (localAppVersion) attachAppVersionInfo(info, localAppVersion);
         if (GIT_ROOT) {
           try {
-            const localHash = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
-            const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
-            const localMsg = execSync("git log -1 --format=%s", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
-            const localDate = execSync("git log -1 --format=%ci", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+            const localHash = gitOutput(["rev-parse", "HEAD"]);
+            const branch = gitOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
+            const localMsg = gitOutput(["log", "-1", "--format=%s"]);
+            const localDate = gitOutput(["log", "-1", "--format=%ci"]);
             info.local = { hash: localHash, branch, message: localMsg, date: localDate };
             if (
               SERVER_GIT_HASH &&
@@ -2456,24 +2459,33 @@ function createConnectionHandler(transport: ClientTransport) {
             }
 
             // Fetch remote async to avoid blocking event loop (relay ping/pong)
-            execCb("git fetch origin", { cwd: GIT_ROOT, timeout: 15000 }, (err: any) => {
+            gitOutputAsync(["fetch", "origin"], { timeout: 15000 }).then(() => {
               try {
-                if (!err) {
-                  const remoteHash = execSync(`git rev-parse origin/${branch}`, { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
-                  const remoteMsg = execSync(`git log origin/${branch} -1 --format=%s`, { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
-                  const remoteDate = execSync(`git log origin/${branch} -1 --format=%ci`, { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
-                  const commitsBehind = parseInt(execSync(`git rev-list --count HEAD..origin/${branch}`, { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim(), 10);
-                  info.remote = { hash: remoteHash, message: remoteMsg, date: remoteDate };
-                  info.updateAvailable = localHash !== remoteHash;
-                  info.commitsBehind = commitsBehind;
-                  const remoteAppVersion = readRemoteAppVersionInfo(branch);
-                  if (remoteAppVersion) attachAppVersionInfo(info, remoteAppVersion);
-                } else {
-                  info.fetchError = err.message;
+                const remoteRef = `origin/${branch}`;
+                const remoteHash = gitOutput(["rev-parse", remoteRef]);
+                const remoteMsg = gitOutput(["log", remoteRef, "-1", "--format=%s"]);
+                const remoteDate = gitOutput(["log", remoteRef, "-1", "--format=%ci"]);
+                const commitsBehind = parseInt(gitOutput(["rev-list", "--count", `HEAD..${remoteRef}`]), 10);
+                info.remote = { hash: remoteHash, message: remoteMsg, date: remoteDate };
+                info.updateAvailable = localHash !== remoteHash;
+                info.commitsBehind = commitsBehind;
+                if (autoUpdateVerifyMode() === "commit") {
+                  try {
+                    verifyAutoUpdateTarget(remoteHash);
+                    info.remote.verified = true;
+                  } catch (verifyErr: any) {
+                    info.remote.verified = false;
+                    info.remote.verifyError = verifyErr?.message || String(verifyErr);
+                  }
                 }
+                const remoteAppVersion = readRemoteAppVersionInfo(branch);
+                if (remoteAppVersion) attachAppVersionInfo(info, remoteAppVersion);
               } catch (e: any) {
                 info.fetchError = e.message;
               }
+              sendJson(info);
+            }).catch((err: any) => {
+              info.fetchError = err.message;
               sendJson(info);
             });
           } catch (e: any) {
@@ -2487,12 +2499,11 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "force_update": {
-        const { execSync } = require("child_process");
         try {
           if (process.platform === "win32") {
             let hash = "";
             try {
-              hash = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+              hash = gitOutput(["rev-parse", "HEAD"]);
             } catch {}
             try {
               armRestartRecoveryGuard("force-update", 300);
@@ -2514,13 +2525,21 @@ function createConnectionHandler(transport: ClientTransport) {
             break;
           }
 
-          const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
-          const beforeHash = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+          if (!autoUpdateEnabled()) {
+            sendJson({ type: "update_result", success: false, error: "Auto-update is disabled by SOCKETAGENT_AUTO_UPDATE" });
+            break;
+          }
+
+          const branch = gitOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
+          const beforeHash = gitOutput(["rev-parse", "HEAD"]);
+          const remoteRef = `origin/${branch}`;
 
           // Hard reset to origin — remote servers are deployment mirrors, not dev environments
-          execSync("git fetch origin", { cwd: GIT_ROOT, stdio: "pipe", timeout: 30000 });
-          execSync(`git reset --hard origin/${branch}`, { cwd: GIT_ROOT, stdio: "pipe" });
-          const afterHash = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+          gitRun(["fetch", "origin"], { timeout: 30000 });
+          const remoteHash = gitOutput(["rev-parse", remoteRef]);
+          verifyAutoUpdateTarget(remoteHash);
+          gitRun(["reset", "--hard", remoteRef], { timeout: 30000 });
+          const afterHash = gitOutput(["rev-parse", "HEAD"]);
 
           // Always install deps + compile — source/deps may have changed
           const tscDir = fs.existsSync(path.join(GIT_ROOT, "server", "tsconfig.json"))
@@ -2548,7 +2567,7 @@ function createConnectionHandler(transport: ClientTransport) {
             break;
           }
 
-          const afterMsg = execSync("git log -1 --format=%s", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+          const afterMsg = gitOutput(["log", "-1", "--format=%s"]);
           try {
             armRestartRecoveryGuard("force-update", 180);
           } catch (guardErr: any) {
@@ -5441,6 +5460,86 @@ const GIT_ROOT: string = (() => {
 })();
 let lastAutoUpdateError: string | null = null;
 let autoUpdateInProgress = false;
+const AUTO_UPDATE_ALLOWED_SIGNERS_FILE = path.join(GIT_ROOT, ".github", "allowed_signers");
+
+function gitOutput(args: string[], options: { timeout?: number } = {}): string {
+  return execFileSync("git", args, {
+    cwd: GIT_ROOT,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: options.timeout,
+  }).trim();
+}
+
+function gitRun(args: string[], options: { timeout?: number } = {}): void {
+  execFileSync("git", args, {
+    cwd: GIT_ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: options.timeout,
+  });
+}
+
+function gitOutputAsync(args: string[], options: { timeout?: number } = {}): Promise<string> {
+  const { execFile } = require("child_process");
+  return new Promise((resolve, reject) => {
+    execFile("git", args, {
+      cwd: GIT_ROOT,
+      encoding: "utf-8",
+      timeout: options.timeout,
+    }, (err: any, stdout: string, stderr: string) => {
+      if (err) {
+        err.message = stderr ? `${err.message}\n${stderr}` : err.message;
+        reject(err);
+      } else {
+        resolve(String(stdout).trim());
+      }
+    });
+  });
+}
+
+function autoUpdateEnabled(): boolean {
+  const value = (process.env.SOCKETAGENT_AUTO_UPDATE || "1").trim().toLowerCase();
+  return value !== "0" && value !== "false" && value !== "off";
+}
+
+function autoUpdateVerifyMode(): "none" | "commit" {
+  const raw = (
+    process.env.SOCKETAGENT_AUTO_UPDATE_VERIFY ||
+    process.env.SOCKETAGENT_UPDATE_VERIFY ||
+    "commit"
+  ).trim().toLowerCase();
+  const requireSigned = (
+    process.env.SOCKETAGENT_AUTO_UPDATE_REQUIRE_SIGNED_COMMITS ||
+    process.env.SOCKETAGENT_UPDATE_REQUIRE_SIGNED_COMMITS ||
+    ""
+  ).trim().toLowerCase();
+  if (raw === "none" || raw === "0" || raw === "false" || raw === "off") return "none";
+  if (raw === "commit" || raw === "signed-commit" || raw === "signed") return "commit";
+  if (requireSigned === "0" || requireSigned === "false" || requireSigned === "off") return "none";
+  if (requireSigned === "1" || requireSigned === "true" || requireSigned === "yes") return "commit";
+  return "commit";
+}
+
+function verifyAutoUpdateTarget(commit: string): void {
+  if (autoUpdateVerifyMode() !== "commit") return;
+  if (!fs.existsSync(AUTO_UPDATE_ALLOWED_SIGNERS_FILE)) {
+    throw new Error(`Auto-update trusted signers file is missing: ${AUTO_UPDATE_ALLOWED_SIGNERS_FILE}`);
+  }
+  try {
+    gitRun([
+      "-c",
+      "gpg.format=ssh",
+      "-c",
+      `gpg.ssh.allowedSignersFile=${AUTO_UPDATE_ALLOWED_SIGNERS_FILE}`,
+      "verify-commit",
+      commit,
+    ], { timeout: 15000 });
+  } catch (e: any) {
+    throw new Error(
+      `Auto-update target ${commit.substring(0, 7)} does not have a valid trusted git commit signature`
+    );
+  }
+}
 
 const NODE_MIN_VERSION = parseInt(process.env.SOCKETAGENT_NODE_MIN_VERSION || "22", 10);
 const NODE_RUNTIME_VERSION = process.env.SOCKETAGENT_NODE_VERSION || "22.22.1";
@@ -5799,6 +5898,9 @@ function windowsRunServiceBatContent(): string {
     "",
     ":preflight",
     'cd /d "%REPO_ROOT%"',
+    'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="0" exit /b 0',
+    'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="false" exit /b 0',
+    'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="off" exit /b 0',
     "git rev-parse --is-inside-work-tree >nul 2>&1 || exit /b 0",
     "git fetch origin",
     "if errorlevel 1 exit /b 0",
@@ -5811,6 +5913,8 @@ function windowsRunServiceBatContent(): string {
     "for /f %%H in ('git rev-parse origin/%BRANCH% 2^>nul') do set \"REMOTE_HASH=%%H\"",
     "if not defined REMOTE_HASH exit /b 0",
     'if "%LOCAL_HASH%"=="%REMOTE_HASH%" exit /b 0',
+    'call :verify_update "%REMOTE_HASH%"',
+    "if errorlevel 1 exit /b 1",
     "echo [Auto-update] Applying %REMOTE_HASH:~0,7% from origin/%BRANCH%",
     "git reset --hard origin/%BRANCH%",
     "if errorlevel 1 exit /b 1",
@@ -5821,6 +5925,31 @@ function windowsRunServiceBatContent(): string {
     "if errorlevel 1 exit /b 1",
     '> "%REPO_ROOT%\\.last-auto-update-hash" echo %REMOTE_HASH%',
     "exit /b 0",
+    "",
+    ":verify_update",
+    'set "VERIFY_MODE=%SOCKETAGENT_AUTO_UPDATE_VERIFY%"',
+    'set "REQUIRE_SIGNED=%SOCKETAGENT_AUTO_UPDATE_REQUIRE_SIGNED_COMMITS%"',
+    'if not defined VERIFY_MODE set "VERIFY_MODE=commit"',
+    'if /I "%VERIFY_MODE%"=="none" exit /b 0',
+    'if /I "%VERIFY_MODE%"=="0" exit /b 0',
+    'if /I "%VERIFY_MODE%"=="false" exit /b 0',
+    'if /I "%VERIFY_MODE%"=="off" exit /b 0',
+    'if /I "%SOCKETAGENT_UPDATE_VERIFY%"=="commit" set "VERIFY_MODE=commit"',
+    'if /I "%SOCKETAGENT_UPDATE_VERIFY%"=="signed-commit" set "VERIFY_MODE=commit"',
+    'if /I "%SOCKETAGENT_UPDATE_REQUIRE_SIGNED_COMMITS%"=="1" set "REQUIRE_SIGNED=1"',
+    'if /I "%REQUIRE_SIGNED%"=="0" exit /b 0',
+    'if /I "%REQUIRE_SIGNED%"=="false" exit /b 0',
+    'if /I "%REQUIRE_SIGNED%"=="off" exit /b 0',
+    'if /I "%VERIFY_MODE%"=="signed" set "VERIFY_MODE=commit"',
+    'if /I "%VERIFY_MODE%"=="signed-commit" set "VERIFY_MODE=commit"',
+    'if /I "%REQUIRE_SIGNED%"=="true" set "VERIFY_MODE=commit"',
+    'if /I "%REQUIRE_SIGNED%"=="yes" set "VERIFY_MODE=commit"',
+    'if "%REQUIRE_SIGNED%"=="1" set "VERIFY_MODE=commit"',
+    'if /I not "%VERIFY_MODE%"=="commit" exit /b 0',
+    'set "SIGNERS=%REPO_ROOT%\\.github\\allowed_signers"',
+    'if not exist "%SIGNERS%" exit /b 1',
+    'git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=%SIGNERS%" verify-commit "%~1"',
+    "exit /b %ERRORLEVEL%",
     "",
   ].join("\r\n");
 }
@@ -5960,29 +6089,27 @@ function armRestartRecoveryGuard(reason: string, delaySeconds = 180): string | n
 }
 
 async function checkForUpdates(): Promise<void> {
+  if (!autoUpdateEnabled()) return;
   if (autoUpdateInProgress) return;
   autoUpdateInProgress = true;
   try {
-    const { execSync, exec } = require("child_process");
-    const execAsync = (cmd: string, opts: any): Promise<string> =>
-      new Promise((resolve, reject) => {
-        exec(cmd, opts, (err: any, stdout: any) => err ? reject(err) : resolve(String(stdout).trim()));
-      });
-
     // Fetch latest from origin (async to avoid blocking event loop / relay pings)
-    await execAsync("git fetch origin", { cwd: GIT_ROOT, timeout: 30000 });
+    await gitOutputAsync(["fetch", "origin"], { timeout: 30000 });
 
     // These are fast local git operations — safe to use execSync
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+    const branch = gitOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
+    const remoteRef = `origin/${branch}`;
 
     let remote: string;
     try {
-      remote = execSync(`git rev-parse origin/${branch}`, { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+      remote = gitOutput(["rev-parse", remoteRef]);
     } catch {
       return; // No remote tracking branch
     }
 
-    const local = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+    verifyAutoUpdateTarget(remote);
+
+    const local = gitOutput(["rev-parse", "HEAD"]);
     if (process.platform === "win32") {
       if (remote === local) return;
       const blockReason = autoUpdateBlockReason();
@@ -6018,7 +6145,7 @@ async function checkForUpdates(): Promise<void> {
     console.log(`[Auto-update] Pulling to ${remote.substring(0, 7)}...`);
 
     // Hard reset to origin — remote servers are deployment mirrors, not dev environments
-    await execAsync(`git reset --hard origin/${branch}`, { cwd: GIT_ROOT, timeout: 30000 });
+    await gitOutputAsync(["reset", "--hard", remoteRef], { timeout: 30000 });
 
     const tscDir = fs.existsSync(path.join(GIT_ROOT, "server", "tsconfig.json"))
       ? path.join(GIT_ROOT, "server")
@@ -6055,8 +6182,12 @@ async function checkForUpdates(): Promise<void> {
 installSocketAgentCliFromRepo(GIT_ROOT);
 ensureStartupPreflightService();
 ensureWindowsServiceWrapper();
-console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s)`);
-setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
+if (autoUpdateEnabled()) {
+  console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s, verify=${autoUpdateVerifyMode()})`);
+  setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
+} else {
+  console.log("[Auto-update] Disabled by SOCKETAGENT_AUTO_UPDATE");
+}
 
 // Graceful shutdown — clean up plugins, relay, and watchers
 for (const sig of ["SIGTERM", "SIGINT"] as const) {

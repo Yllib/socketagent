@@ -1,7 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
-import { getMessaging, MulticastMessage } from "firebase-admin/messaging";
+import { GoogleAuth } from "google-auth-library";
 import { socketAgentDataPath } from "./socket-agent-paths";
 
 interface StoredPushToken {
@@ -24,7 +23,10 @@ export interface PushNotificationPayload {
 const STORE_PATH = process.env.PUSH_TOKEN_STORE
   || socketAgentDataPath("push-tokens.json");
 
-let firebaseReady: boolean | null = null;
+const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
+let cachedCredentials: Record<string, unknown> | null | undefined;
+let fcmAuth: GoogleAuth | null = null;
+let fcmProjectId: string | null = null;
 
 function readStore(): StoredPushToken[] {
   try {
@@ -91,38 +93,67 @@ export function isPushConfigured(): boolean {
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON
       || process.env.FIREBASE_SERVICE_ACCOUNT_PATH
       || process.env.GOOGLE_APPLICATION_CREDENTIALS
-      || getApps().length > 0
   );
 }
 
-function ensureFirebase(): boolean {
-  if (firebaseReady !== null) return firebaseReady;
-  if (getApps().length > 0) {
-    firebaseReady = true;
-    return true;
-  }
-
+function loadServiceAccountCredentials(): Record<string, unknown> | null {
+  if (cachedCredentials !== undefined) return cachedCredentials;
   try {
     const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
     const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
     if (rawJson) {
-      initializeApp({ credential: cert(JSON.parse(rawJson)) });
-    } else if (serviceAccountPath) {
-      initializeApp({ credential: cert(JSON.parse(fs.readFileSync(serviceAccountPath, "utf-8"))) });
-    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      initializeApp({ credential: applicationDefault() });
-    } else {
-      console.warn("[Push] Firebase credentials not configured; push notifications disabled");
-      firebaseReady = false;
-      return false;
+      const credentials = JSON.parse(rawJson) as Record<string, unknown>;
+      cachedCredentials = credentials;
+      return credentials;
     }
-    firebaseReady = true;
-    console.log("[Push] Firebase Admin initialized");
-    return true;
+    if (serviceAccountPath) {
+      const credentials = JSON.parse(fs.readFileSync(serviceAccountPath, "utf-8")) as Record<string, unknown>;
+      cachedCredentials = credentials;
+      return credentials;
+    }
+    cachedCredentials = null;
+    return null;
   } catch (err: any) {
-    console.error(`[Push] Firebase initialization failed: ${err.message || err}`);
-    firebaseReady = false;
-    return false;
+    console.error(`[Push] Firebase credentials could not be read: ${err.message || err}`);
+    cachedCredentials = null;
+    return null;
+  }
+}
+
+function getFcmAuth(): GoogleAuth | null {
+  if (fcmAuth) return fcmAuth;
+  const credentials = loadServiceAccountCredentials();
+  if (credentials) {
+    fcmAuth = new GoogleAuth({ credentials, scopes: [FCM_SCOPE] });
+    return fcmAuth;
+  }
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    fcmAuth = new GoogleAuth({ scopes: [FCM_SCOPE] });
+    return fcmAuth;
+  }
+  console.warn("[Push] Firebase credentials not configured; push notifications disabled");
+  return null;
+}
+
+async function getFcmProjectId(auth: GoogleAuth): Promise<string | null> {
+  if (fcmProjectId) return fcmProjectId;
+  const explicit = process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+  if (explicit) {
+    fcmProjectId = explicit;
+    return fcmProjectId;
+  }
+  const credentials = loadServiceAccountCredentials();
+  const credentialProject = typeof credentials?.project_id === "string" ? credentials.project_id : "";
+  if (credentialProject) {
+    fcmProjectId = credentialProject;
+    return fcmProjectId;
+  }
+  try {
+    fcmProjectId = await auth.getProjectId();
+    return fcmProjectId;
+  } catch (err: any) {
+    console.error(`[Push] Firebase project ID could not be resolved: ${err.message || err}`);
+    return null;
   }
 }
 
@@ -131,13 +162,79 @@ function removeTokens(tokensToRemove: Set<string>): void {
   writeStore(readStore().filter((entry) => !tokensToRemove.has(entry.token)));
 }
 
+function fcmDetailErrorCode(err: any): string {
+  const details = err?.response?.data?.error?.details;
+  if (Array.isArray(details)) {
+    for (const detail of details) {
+      const type = typeof detail?.["@type"] === "string" ? detail["@type"] : "";
+      if (type.includes("google.firebase.fcm.v1.FcmError") && typeof detail?.errorCode === "string") {
+        return detail.errorCode;
+      }
+    }
+  }
+  return "";
+}
+
+function fcmErrorCode(err: any): string {
+  const fcmCode = fcmDetailErrorCode(err);
+  if (fcmCode) return fcmCode;
+  return err?.response?.data?.error?.status || err?.code || "";
+}
+
+function isInvalidFcmTokenError(err: any): boolean {
+  const code = fcmDetailErrorCode(err);
+  return code === "UNREGISTERED" || code === "INVALID_ARGUMENT";
+}
+
+async function sendFcmHttpV1(
+  auth: GoogleAuth,
+  projectId: string,
+  token: string,
+  data: Record<string, string>,
+  payload: PushNotificationPayload,
+): Promise<void> {
+  const client = await auth.getClient();
+  const message: Record<string, unknown> = {
+    token,
+    data,
+    android: {
+      priority: "HIGH",
+    },
+  };
+
+  if (payload.showNotification !== false) {
+    message.notification = {
+      title: payload.title,
+      body: payload.body || "",
+    };
+    message.android = {
+      priority: "HIGH",
+      notification: {
+        channel_id: "session_alerts",
+        notification_priority: "PRIORITY_HIGH",
+        default_sound: true,
+        default_vibrate_timings: true,
+      },
+    };
+  }
+
+  await client.request({
+    method: "POST",
+    url: `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/messages:send`,
+    data: { message },
+  });
+}
+
 export async function sendPushNotification(
   payload: PushNotificationPayload,
 ): Promise<{ sent: number; attempted: number }> {
   const entries = readStore();
   const tokens = entries.map((entry) => entry.token).filter(Boolean);
   if (tokens.length === 0) return { sent: 0, attempted: 0 };
-  if (!ensureFirebase()) return { sent: 0, attempted: tokens.length };
+  const auth = getFcmAuth();
+  if (!auth) return { sent: 0, attempted: tokens.length };
+  const projectId = await getFcmProjectId(auth);
+  if (!projectId) return { sent: 0, attempted: tokens.length };
 
   const groups = new Map<string, StoredPushToken[]>();
   for (const entry of entries) {
@@ -162,41 +259,18 @@ export async function sendPushNotification(
       data[key] = value == null ? "" : String(value);
     }
 
-    const message: MulticastMessage = {
-      tokens: groupTokens,
-      data,
-      android: {
-        priority: "high",
-      },
-    };
-
-    if (payload.showNotification !== false) {
-      message.notification = {
-        title: payload.title,
-        body: payload.body || "",
-      };
-      message.android = {
-        ...message.android,
-        notification: {
-          channelId: "session_alerts",
-          priority: "high",
-          defaultSound: true,
-          defaultVibrateTimings: true,
-        },
-      };
-    }
-
-    const response = await getMessaging().sendEachForMulticast(message);
-    sent += response.successCount;
-    response.responses.forEach((item, index) => {
-      if (!item.success) {
-        const code = item.error?.code || "";
-        if (code === "messaging/registration-token-not-registered" || code === "messaging/invalid-registration-token") {
-          invalid.add(groupTokens[index]);
+    for (const token of groupTokens) {
+      try {
+        await sendFcmHttpV1(auth, projectId, token, data, payload);
+        sent++;
+      } catch (err: any) {
+        const code = fcmErrorCode(err);
+        if (isInvalidFcmTokenError(err)) {
+          invalid.add(token);
         }
-        console.warn(`[Push] FCM send failed: ${code || item.error?.message || "unknown error"}`);
+        console.warn(`[Push] FCM send failed: ${code || err?.message || "unknown error"}`);
       }
-    });
+    }
   }
   removeTokens(invalid);
   return { sent, attempted: tokens.length };

@@ -5140,6 +5140,7 @@ const GIT_ROOT: string = (() => {
   return root;
 })();
 let lastAutoUpdateError: string | null = null;
+let autoUpdateInProgress = false;
 
 const NODE_MIN_VERSION = parseInt(process.env.SOCKETAGENT_NODE_MIN_VERSION || "22", 10);
 const NODE_RUNTIME_VERSION = process.env.SOCKETAGENT_NODE_VERSION || "22.22.1";
@@ -5565,6 +5566,8 @@ function ensureStartupPreflightService(): void {
 }
 
 async function checkForUpdates(): Promise<void> {
+  if (autoUpdateInProgress) return;
+  autoUpdateInProgress = true;
   try {
     const { execSync, exec } = require("child_process");
     const execAsync = (cmd: string, opts: any): Promise<string> =>
@@ -5636,6 +5639,8 @@ async function checkForUpdates(): Promise<void> {
   } catch (e: any) {
     lastAutoUpdateError = e.message;
     console.error(`[Auto-update] Error: ${e.message}`);
+  } finally {
+    autoUpdateInProgress = false;
   }
 }
 

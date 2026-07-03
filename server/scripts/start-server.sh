@@ -93,6 +93,14 @@ lock_is_stale() {
   return 1
 }
 
+release_lock() {
+  if [[ "$LOCK_HELD" == "true" ]]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    LOCK_HELD=false
+    trap - EXIT
+  fi
+}
+
 acquire_lock() {
   if [[ "$LOCK_HELD" == "true" ]]; then
     return
@@ -111,7 +119,7 @@ acquire_lock() {
   done
   echo "$$" > "$LOCK_PID_FILE"
   LOCK_HELD=true
-  trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT
+  trap 'release_lock' EXIT
 }
 
 node_major_version() {
@@ -319,4 +327,5 @@ if build_needs_compile; then
 fi
 
 log "Starting SocketAgent server"
+release_lock
 exec "$NODE_BIN" "$SERVER_DIR/dist/index.js"

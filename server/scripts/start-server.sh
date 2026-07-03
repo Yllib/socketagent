@@ -18,6 +18,8 @@ NPM_BIN=""
 NPX_BIN=""
 RETRY_WINDOW_SECONDS="${SOCKETAGENT_STARTUP_REPAIR_RETRY_SECONDS:-300}"
 LOCK_DIR="$SERVER_DIR/.startup-repair.lock"
+LOCK_PID_FILE="$LOCK_DIR/pid"
+LOCK_STALE_SECONDS="${SOCKETAGENT_STARTUP_LOCK_STALE_SECONDS:-600}"
 LOCK_HELD=false
 
 log() {
@@ -52,6 +54,45 @@ recent_failure() {
   return 1
 }
 
+lock_age_seconds() {
+  local mtime now
+  mtime="$(stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0)"
+  [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
+  now="$(date +%s)"
+  echo $((now - mtime))
+}
+
+lock_is_stale() {
+  if [[ ! -d "$LOCK_DIR" ]]; then
+    return 1
+  fi
+
+  local pid
+  pid="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]]; then
+    if kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+    log "Removing stale startup repair lock (dead pid=$pid)"
+    rm -rf "$LOCK_DIR"
+    return 0
+  fi
+
+  local age
+  age="$(lock_age_seconds)"
+  if [[ -z "$pid" && "$age" -lt 10 ]]; then
+    return 1
+  fi
+
+  if [[ -z "$pid" || "$age" -ge "$LOCK_STALE_SECONDS" ]]; then
+    log "Removing stale startup repair lock (pid=${pid:-none}, age=${age}s)"
+    rm -rf "$LOCK_DIR"
+    return 0
+  fi
+
+  return 1
+}
+
 acquire_lock() {
   if [[ "$LOCK_HELD" == "true" ]]; then
     return
@@ -59,6 +100,7 @@ acquire_lock() {
 
   local waited=0
   while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    lock_is_stale && continue
     if (( waited >= 60 )); then
       log "Timed out waiting for startup repair lock"
       exit 1
@@ -67,8 +109,9 @@ acquire_lock() {
     sleep 2
     waited=$((waited + 2))
   done
+  echo "$$" > "$LOCK_PID_FILE"
   LOCK_HELD=true
-  trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+  trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT
 }
 
 node_major_version() {

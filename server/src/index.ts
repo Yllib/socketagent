@@ -1,5 +1,21 @@
 import * as dotenv from "dotenv";
-dotenv.config({ path: require("path").join(__dirname, "..", ".env") });
+const bootstrapPath = require("path") as typeof import("path");
+const bootstrapFs = require("fs") as typeof import("fs");
+const ENV_PATH = bootstrapPath.join(__dirname, "..", ".env");
+
+function secureSecretFileMode(filePath: string): void {
+  if (process.platform === "win32") return;
+  try {
+    if (bootstrapFs.existsSync(filePath)) {
+      bootstrapFs.chmodSync(filePath, 0o600);
+    }
+  } catch (e: any) {
+    console.warn(`[Security] Failed to restrict permissions on ${filePath}: ${e.message || e}`);
+  }
+}
+
+secureSecretFileMode(ENV_PATH);
+dotenv.config({ path: ENV_PATH });
 
 import * as crypto from "crypto";
 import * as fs from "fs";
@@ -38,6 +54,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const PORT = parseInt(process.env.PORT || "8085", 10);
+const BIND_HOST = (process.env.BIND_HOST || process.env.SOCKETAGENT_BIND_HOST || "127.0.0.1").trim() || "127.0.0.1";
 type AppVersionInfo = { version: string; url: string };
 const WS_QUEUE_WARN_MS = Number(process.env.SOCKETAGENT_WS_QUEUE_WARN_MS || 250);
 const WS_HANDLER_WARN_MS = Number(process.env.SOCKETAGENT_WS_HANDLER_WARN_MS || 500);
@@ -154,7 +171,7 @@ function sendCwdCheck(sendJson: (payload: any) => void, rawPath: unknown, overri
 
 // ── .env migrations (run once on startup, before reading config) ──
 (function migrateEnv() {
-  const envPath = path.join(__dirname, "..", ".env");
+  const envPath = ENV_PATH;
   if (!fs.existsSync(envPath)) return;
   let content = fs.readFileSync(envPath, "utf-8");
   const migrations: [RegExp, string, string][] = [
@@ -169,7 +186,8 @@ function sendCwdCheck(sendJson: (payload: any) => void, rawPath: unknown, overri
     }
   }
   if (changed) {
-    fs.writeFileSync(envPath, content);
+    fs.writeFileSync(envPath, content, { mode: 0o600 });
+    secureSecretFileMode(envPath);
     dotenv.config({ path: envPath, override: true });
   }
 })();
@@ -180,11 +198,12 @@ const RELAY_URL = process.env.RELAY_URL || "";
 let AUTH_TOKEN = process.env.AUTH_TOKEN || "";
 if (!AUTH_TOKEN) {
   AUTH_TOKEN = crypto.randomBytes(32).toString("hex");
-  const envPath = path.join(__dirname, "..", ".env");
+  const envPath = ENV_PATH;
   const existing = fs.existsSync(envPath)
     ? fs.readFileSync(envPath, "utf-8")
     : "";
-  fs.writeFileSync(envPath, existing.trimEnd() + `\nAUTH_TOKEN=${AUTH_TOKEN}\n`);
+  fs.writeFileSync(envPath, existing.trimEnd() + `\nAUTH_TOKEN=${AUTH_TOKEN}\n`, { mode: 0o600 });
+  secureSecretFileMode(envPath);
   console.log(`Generated new auth token. Add this to your app settings:`);
   console.log(`  Token: ${AUTH_TOKEN}`);
 } else {
@@ -195,11 +214,12 @@ if (!AUTH_TOKEN) {
 let PAIRING_TOKEN = process.env.PAIRING_TOKEN || "";
 if (RELAY_URL && !PAIRING_TOKEN) {
   PAIRING_TOKEN = crypto.randomUUID();
-  const envPath = path.join(__dirname, "..", ".env");
+  const envPath = ENV_PATH;
   const existing = fs.existsSync(envPath)
     ? fs.readFileSync(envPath, "utf-8")
     : "";
-  fs.writeFileSync(envPath, existing.trimEnd() + `\nPAIRING_TOKEN=${PAIRING_TOKEN}\n`);
+  fs.writeFileSync(envPath, existing.trimEnd() + `\nPAIRING_TOKEN=${PAIRING_TOKEN}\n`, { mode: 0o600 });
+  secureSecretFileMode(envPath);
   console.log(`Generated new pairing token`);
 }
 
@@ -4523,10 +4543,18 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ noServer: true });
 
+function getBearerToken(req: http.IncomingMessage): string | null {
+  const header = req.headers.authorization;
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value) return null;
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
 // Handle WebSocket upgrade with auth
 httpServer.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", `ws://localhost:${PORT}`);
-  const token = url.searchParams.get("token");
+  const token = getBearerToken(req) || url.searchParams.get("token");
   if (token !== AUTH_TOKEN) {
     console.log("Rejected connection: invalid token");
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
@@ -4543,8 +4571,11 @@ let relayClient: RelayClient | null = null;
 let relayConnectionHandler: ReturnType<typeof createConnectionHandler> | null = null;
 let relayMessageQueue = Promise.resolve();
 
-httpServer.listen(PORT, async () => {
-  console.log(`Server listening on port ${PORT} (WebSocket + HTTP)`);
+httpServer.listen(PORT, BIND_HOST, async () => {
+  console.log(`Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)`);
+  if (!["127.0.0.1", "::1", "localhost"].includes(BIND_HOST)) {
+    console.warn(`[Security] Direct HTTP/WebSocket server is bound to ${BIND_HOST}. Use relay mode or TLS for untrusted networks.`);
+  }
   console.log(`Default working directory: ${getDefaultCwd()}`);
   console.log(`Supported backends: ${detectAvailableBackends().join(", ")}`);
 

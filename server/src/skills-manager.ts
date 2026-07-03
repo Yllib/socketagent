@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { execFile, execFileSync } from "child_process";
 
 export type SkillAgent = "claude" | "codex";
 
@@ -409,12 +410,60 @@ function getMarketplacesDir(): string {
   return path.join(os.homedir(), ".claude", "plugins", "marketplaces");
 }
 
+function sanitizeMarketplaceDirName(name: string): string {
+  const sanitized = name
+    .trim()
+    .replace(/\.git$/i, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  if (!sanitized || sanitized === "." || sanitized === "..") return "marketplace";
+  return sanitized;
+}
+
+function deriveMarketplaceDirName(url: string): string {
+  const cleaned = url.trim().replace(/[?#].*$/, "").replace(/\/+$/, "");
+  const rawName = cleaned.split(/[/:\\]/).filter(Boolean).pop() || "marketplace";
+  return sanitizeMarketplaceDirName(rawName);
+}
+
+function validateMarketplaceName(name: string): string {
+  const trimmed = name.trim();
+  if (!/^[A-Za-z0-9._-]+$/.test(trimmed) || trimmed === "." || trimmed === "..") {
+    throw new Error("Invalid marketplace name");
+  }
+  return trimmed;
+}
+
+function resolveMarketplacePath(name: string): string {
+  const safeName = validateMarketplaceName(name);
+  const base = path.resolve(getMarketplacesDir());
+  const target = path.resolve(base, safeName);
+  if (target !== base && target.startsWith(base + path.sep)) return target;
+  throw new Error("Invalid marketplace path");
+}
+
+function validateGitUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed || /[\0\r\n]/.test(trimmed)) {
+    throw new Error("Invalid marketplace URL");
+  }
+  return trimmed;
+}
+
+function validatePluginId(pluginId: string): string {
+  const trimmed = pluginId.trim();
+  if (!trimmed || trimmed.startsWith("-") || /[\0\r\n\s]/.test(trimmed)) {
+    throw new Error("Invalid plugin ID");
+  }
+  return trimmed;
+}
+
 /** List all installed marketplaces with metadata */
 export function listMarketplaces(): MarketplaceInfo[] {
   const base = getMarketplacesDir();
   if (!fs.existsSync(base)) return [];
 
-  const { execSync } = require("child_process") as typeof import("child_process");
   const results: MarketplaceInfo[] = [];
 
   for (const name of fs.readdirSync(base)) {
@@ -423,7 +472,7 @@ export function listMarketplaces(): MarketplaceInfo[] {
 
     let url = "";
     try {
-      url = execSync("git remote get-url origin", { cwd: mpDir, stdio: "pipe", timeout: 5000 }).toString().trim();
+      url = execFileSync("git", ["remote", "get-url", "origin"], { cwd: mpDir, stdio: "pipe", timeout: 5000, encoding: "utf8" }).trim();
     } catch {}
 
     let pluginCount = 0;
@@ -447,24 +496,24 @@ export function listMarketplaces(): MarketplaceInfo[] {
 
 /** Add a marketplace by cloning a git repo */
 export async function addMarketplace(url: string): Promise<MarketplaceInfo> {
-  const { exec } = require("child_process") as typeof import("child_process");
+  const gitUrl = validateGitUrl(url);
   const base = getMarketplacesDir();
   fs.mkdirSync(base, { recursive: true });
 
   // Derive directory name from URL (e.g. "https://github.com/user/my-plugins.git" → "my-plugins")
-  const urlName = url.replace(/\.git$/, "").split("/").pop() || "marketplace";
+  const urlName = deriveMarketplaceDirName(gitUrl);
 
   // Ensure unique name
   let dirName = urlName;
   let i = 2;
-  while (fs.existsSync(path.join(base, dirName))) {
+  while (fs.existsSync(resolveMarketplacePath(dirName))) {
     dirName = `${urlName}-${i++}`;
   }
 
-  const target = path.join(base, dirName);
+  const target = resolveMarketplacePath(dirName);
 
   return new Promise((resolve, reject) => {
-    exec(`git clone "${url}" "${target}"`, { timeout: 120000 }, (err, stdout, stderr) => {
+    execFile("git", ["clone", "--", gitUrl, target], { timeout: 120000, encoding: "utf8" }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || stdout || err.message || "git clone failed"));
         return;
@@ -472,33 +521,33 @@ export async function addMarketplace(url: string): Promise<MarketplaceInfo> {
       // Read back the marketplace info
       const all = listMarketplaces();
       const info = all.find(m => m.name === dirName);
-      resolve(info || { name: dirName, url, pluginCount: 0, owner: "", description: "" });
+      resolve(info || { name: dirName, url: gitUrl, pluginCount: 0, owner: "", description: "" });
     });
   });
 }
 
 /** Update a marketplace by pulling latest from git */
 export async function updateMarketplace(name: string): Promise<MarketplaceInfo> {
-  const { exec } = require("child_process") as typeof import("child_process");
-  const mpDir = path.join(getMarketplacesDir(), name);
+  const safeName = validateMarketplaceName(name);
+  const mpDir = resolveMarketplacePath(safeName);
   if (!fs.existsSync(mpDir)) throw new Error(`Marketplace "${name}" not found`);
 
   return new Promise((resolve, reject) => {
-    exec("git pull", { cwd: mpDir, timeout: 60000 }, (err, stdout, stderr) => {
+    execFile("git", ["pull"], { cwd: mpDir, timeout: 60000, encoding: "utf8" }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || stdout || err.message || "git pull failed"));
         return;
       }
       const all = listMarketplaces();
-      const info = all.find(m => m.name === name);
-      resolve(info || { name, url: "", pluginCount: 0, owner: "", description: "" });
+      const info = all.find(m => m.name === safeName);
+      resolve(info || { name: safeName, url: "", pluginCount: 0, owner: "", description: "" });
     });
   });
 }
 
 /** Remove a marketplace directory */
 export function removeMarketplace(name: string): void {
-  const mpDir = path.join(getMarketplacesDir(), name);
+  const mpDir = resolveMarketplacePath(name);
   if (!fs.existsSync(mpDir)) throw new Error(`Marketplace "${name}" not found`);
   fs.rmSync(mpDir, { recursive: true, force: true });
 }
@@ -510,13 +559,11 @@ let _claudeBinary: string | null = null;
 function resolveClaudeBinary(): string {
   if (_claudeBinary) return _claudeBinary;
 
-  const { execSync } = require("child_process") as typeof import("child_process");
   const isWindows = process.platform === "win32";
 
   // Try which/where first
   try {
-    const cmd = isWindows ? "where claude" : "which claude";
-    const result = execSync(cmd, { timeout: 5000, encoding: "utf-8" }).trim().split("\n")[0];
+    const result = execFileSync(isWindows ? "where" : "which", ["claude"], { timeout: 5000, encoding: "utf8" }).trim().split(/\r?\n/)[0];
     if (result) {
       _claudeBinary = result;
       console.log(`[Plugin] Resolved claude binary via ${isWindows ? 'where' : 'which'}: ${result}`);
@@ -553,12 +600,12 @@ function resolveClaudeBinary(): string {
 
 /** Run a claude CLI plugin command. Returns stdout on success, throws on failure. */
 export async function runPluginCommand(action: "install" | "uninstall" | "enable" | "disable", pluginId: string): Promise<string> {
-  const { exec } = require("child_process") as typeof import("child_process");
   const claudeBin = resolveClaudeBinary();
-  const cmd = `"${claudeBin}" plugin ${action} ${pluginId} --scope user`;
-  console.log(`[Plugin] Running: ${cmd}`);
+  const safePluginId = validatePluginId(pluginId);
+  const args = ["plugin", action, safePluginId, "--scope", "user"];
+  console.log(`[Plugin] Running: ${claudeBin} ${args.join(" ")}`);
   return new Promise((resolve, reject) => {
-    exec(cmd, { timeout: 60000, env: { ...process.env, HOME: os.homedir() } }, (err: any, stdout: string, stderr: string) => {
+    execFile(claudeBin, args, { timeout: 60000, env: { ...process.env, HOME: os.homedir() }, encoding: "utf8" }, (err, stdout, stderr) => {
       const output = (stdout || "") + (stderr || "");
       if (err) {
         console.error(`[Plugin] ${action} failed: ${output}`);

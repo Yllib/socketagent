@@ -7,7 +7,7 @@
  * Preserves existing values on re-run (safe for upgrades).
  * Outputs QR payload JSON on the last line of stdout.
  *
- * Usage: node setup.js --env-file <path> --keys-file <path> --relay-url <url> [--default-cwd <path>] [--port <port>]
+ * Usage: node setup.js --env-file <path> --keys-file <path> --relay-url <url> [--default-cwd <path>] [--port <port>] [--bind-host <host>]
  */
 
 const crypto = require("crypto");
@@ -27,10 +27,11 @@ const keysFile = args["keysfile"] || args["keys-file"];
 const relayUrl = args["relay-url"] || "";
 const defaultCwd = args["default-cwd"] || process.cwd();
 const port = args["port"] || "8085";
+const bindHost = args["bind-host"] || args["bindhost"] || "";
 
 if (!envFile || !keysFile) {
   console.error(
-    "Usage: node setup.js --envfile <path> --keysfile <path> [--relay-url <url>] [--default-cwd <path>] [--port <port>]"
+    "Usage: node setup.js --envfile <path> --keysfile <path> [--relay-url <url>] [--default-cwd <path>] [--port <port>] [--bind-host <host>]"
   );
   process.exit(1);
 }
@@ -51,19 +52,32 @@ const authToken =
   existingEnv.AUTH_TOKEN || crypto.randomBytes(32).toString("hex");
 const pairingToken = existingEnv.PAIRING_TOKEN || crypto.randomUUID();
 const envPort = existingEnv.PORT || port;
+const envBindHost = existingEnv.BIND_HOST || bindHost || "127.0.0.1";
 const envRelay = existingEnv.RELAY_URL || relayUrl;
 const envCwd = existingEnv.DEFAULT_CWD || defaultCwd;
+
+function secureSecretFileMode(filePath) {
+  if (process.platform === "win32") return;
+  try {
+    if (fs.existsSync(filePath)) fs.chmodSync(filePath, 0o600);
+  } catch (e) {
+    console.warn(`Warning: failed to restrict permissions on ${filePath}: ${e.message || e}`);
+  }
+}
 
 // --- Write .env ---
 const envContent = [
   `PORT=${envPort}`,
+  `BIND_HOST=${envBindHost}`,
   `AUTH_TOKEN=${authToken}`,
   `DEFAULT_CWD=${envCwd}`,
   `RELAY_URL=${envRelay}`,
   `PAIRING_TOKEN=${pairingToken}`,
 ].join("\n") + "\n";
 
-fs.writeFileSync(envFile, envContent);
+fs.mkdirSync(path.dirname(envFile), { recursive: true });
+fs.writeFileSync(envFile, envContent, { mode: 0o600 });
+secureSecretFileMode(envFile);
 console.log(`Wrote ${envFile}`);
 
 // --- Generate or load NaCl key pair ---
@@ -73,6 +87,7 @@ if (fs.existsSync(keysFile)) {
   const data = JSON.parse(fs.readFileSync(keysFile, "utf-8"));
   publicKeyB64 = data.publicKey;
   secretKeyB64 = data.secretKey;
+  secureSecretFileMode(keysFile);
   console.log(`Loaded existing key pair from ${keysFile}`);
 } else {
   const kp = nacl.box.keyPair();
@@ -90,8 +105,10 @@ if (fs.existsSync(keysFile)) {
       { publicKey: publicKeyB64, secretKey: secretKeyB64 },
       null,
       2
-    )
+    ),
+    { mode: 0o600 }
   );
+  secureSecretFileMode(keysFile);
   console.log(`Generated new key pair -> ${keysFile}`);
 }
 

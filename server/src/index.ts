@@ -169,6 +169,17 @@ function sendCwdCheck(sendJson: (payload: any) => void, rawPath: unknown, overri
   return payload;
 }
 
+function resolveAllowedDownloadFile(inputPath: string): { resolvedPath: string; stat: fs.Stats } {
+  if (!inputPath) throw new Error("Missing path");
+  const roots = getFileManagerRoots(getDefaultCwd());
+  const resolvedPath = resolveFileManagerPath(inputPath, getDefaultCwd());
+  assertFileManagerPathAllowed(resolvedPath, roots);
+  if (!fs.existsSync(resolvedPath)) throw new Error(`File not found: ${resolvedPath}`);
+  const stat = fs.statSync(resolvedPath);
+  if (!stat.isFile()) throw new Error(`Not a file: ${resolvedPath}`);
+  return { resolvedPath, stat };
+}
+
 // ── .env migrations (run once on startup, before reading config) ──
 (function migrateEnv() {
   const envPath = ENV_PATH;
@@ -3822,7 +3833,12 @@ function createConnectionHandler(transport: ClientTransport) {
         const filePath = (msg as any).filePath as string;
         const fileId = (msg as any).fileId as string;
         const offsetBytes = Number((msg as any).offsetBytes || 0);
-        await sendFileChunks(filePath, fileId, Number.isFinite(offsetBytes) ? offsetBytes : 0);
+        try {
+          const { resolvedPath } = resolveAllowedDownloadFile(filePath);
+          await sendFileChunks(resolvedPath, fileId, Number.isFinite(offsetBytes) ? offsetBytes : 0);
+        } catch (e: any) {
+          sendJson({ type: "error", message: e.message || String(e) });
+        }
         break;
       }
 
@@ -3831,22 +3847,17 @@ function createConnectionHandler(transport: ClientTransport) {
         const filePath = String((msg as any).path || "");
         const fileId = (msg as any).fileId as string || `fm_${crypto.randomUUID()}`;
         try {
-          const roots = getFileManagerRoots(getDefaultCwd());
-          const resolved = resolveFileManagerPath(filePath, getDefaultCwd());
-          assertFileManagerPathAllowed(resolved, roots);
-          if (!filePath || !fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-            throw new Error(!filePath ? "Missing path" : `Not a file: ${resolved}`);
-          }
+          const { resolvedPath } = resolveAllowedDownloadFile(filePath);
           sendJson({
             type: "file_manager_operation_result",
             requestId,
             operation: "download",
             ok: true,
-            path: resolved,
+            path: resolvedPath,
             fileId,
           });
           const offsetBytes = Number((msg as any).offsetBytes || 0);
-          await sendFileChunks(resolved, fileId, Number.isFinite(offsetBytes) ? offsetBytes : 0);
+          await sendFileChunks(resolvedPath, fileId, Number.isFinite(offsetBytes) ? offsetBytes : 0);
         } catch (e: any) {
           sendJson({
             type: "file_manager_operation_result",
@@ -4233,17 +4244,15 @@ const httpServer = http.createServer((req, res) => {
       return;
     }
 
-    const filePath = url.searchParams.get("path") || "";
-    if (!filePath || !fs.existsSync(filePath)) {
-      res.writeHead(404);
-      res.end("File not found");
-      return;
-    }
-
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) {
-      res.writeHead(400);
-      res.end("Not a file");
+    let filePath: string;
+    let stat: fs.Stats;
+    try {
+      const resolved = resolveAllowedDownloadFile(url.searchParams.get("path") || "");
+      filePath = resolved.resolvedPath;
+      stat = resolved.stat;
+    } catch (e: any) {
+      res.writeHead(403);
+      res.end(e.message || "File download not allowed");
       return;
     }
 
@@ -5112,26 +5121,36 @@ wss.on("connection", (ws: WebSocket) => {
 });
 
 // ── Relay client setup ──
+function redactSecretForLog(secret: string): string {
+  if (!secret) return "<empty>";
+  if (secret.length <= 12) return "<redacted>";
+  return `${secret.slice(0, 6)}...${secret.slice(-4)}`;
+}
+
 function startRelayClient(): void {
   const keysPath = socketAgentDataPath("relay-keys.json");
   const keyPair = loadOrCreateKeyPair(keysPath);
   const pubkeyBase64 = toBase64(keyPair.publicKey);
 
   console.log(`[Relay] Connecting to ${RELAY_URL}`);
-  console.log(`[Relay] Pairing token: ${PAIRING_TOKEN}`);
+  console.log(`[Relay] Pairing token: ${redactSecretForLog(PAIRING_TOKEN)}`);
 
   // Display QR code for pairing. The SC prefix is kept as the wire-format
   // marker so existing SocketClaude app builds can still re-pair.
   const qrPayload = `SC|${PAIRING_TOKEN}|${pubkeyBase64}`;
 
-  try {
-    const qrcode = require("qrcode-terminal");
-    console.log(`\n[Relay] Scan this QR code with SocketAgent app to pair:\n`);
-    qrcode.generate(qrPayload, { small: true }, (qr: string) => {
-      console.log(qr);
-    });
-  } catch {
-    console.log(`[Relay] QR payload (paste into app): ${qrPayload}`);
+  if (process.env.SOCKETAGENT_SHOW_PAIRING_QR_ON_STARTUP === "1") {
+    try {
+      const qrcode = require("qrcode-terminal");
+      console.log(`\n[Relay] Scan this QR code with SocketAgent app to pair:\n`);
+      qrcode.generate(qrPayload, { small: true }, (qr: string) => {
+        console.log(qr);
+      });
+    } catch {
+      console.log(`[Relay] QR payload (paste into app): ${qrPayload}`);
+    }
+  } else {
+    console.log("[Relay] Pairing QR suppressed in logs. Set SOCKETAGENT_SHOW_PAIRING_QR_ON_STARTUP=1 for an explicit pairing session.");
   }
 
   relayClient = new RelayClient({

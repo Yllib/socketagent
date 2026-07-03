@@ -64,6 +64,74 @@ function buildFileContent(frontmatter: Record<string, string>, body: string): st
   return `---\n${fmLines.join("\n")}\n---\n\n${body}`;
 }
 
+function isPathInside(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function realpathOrResolved(filePath: string): string {
+  try {
+    return fs.realpathSync.native(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function policyPathFor(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  if (fs.existsSync(resolved)) return realpathOrResolved(resolved);
+
+  const missingParts: string[] = [];
+  let current = resolved;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    missingParts.unshift(path.basename(current));
+    current = parent;
+  }
+  return path.join(realpathOrResolved(current), ...missingParts);
+}
+
+function validateSkillName(name: string): string {
+  const trimmed = name.trim();
+  if (
+    !trimmed ||
+    trimmed === "." ||
+    trimmed === ".." ||
+    /[\0\r\n/\\]/.test(trimmed) ||
+    path.basename(trimmed) !== trimmed ||
+    path.win32.basename(trimmed) !== trimmed
+  ) {
+    throw new Error("Invalid skill name");
+  }
+  return trimmed;
+}
+
+function validateSkillScope(scope: string): "user" | "project" {
+  if (scope === "user" || scope === "project") return scope;
+  throw new Error("Invalid skill scope");
+}
+
+function validateSkillFormat(format: string): "command" | "skill" {
+  if (format === "command" || format === "skill") return format;
+  throw new Error("Invalid skill format");
+}
+
+function skillBaseDir(scope: "user" | "project", agent: SkillAgent, projectCwd?: string): string {
+  const agentDir = agent === "codex" ? ".codex" : ".claude";
+  return scope === "user"
+    ? path.join(os.homedir(), agentDir)
+    : path.join(projectCwd || process.cwd(), agentDir);
+}
+
+function assertSkillPathAllowed(targetPath: string, roots: string[]): void {
+  const policyPath = policyPathFor(targetPath);
+  const allowed = roots.some((root) => isPathInside(policyPath, realpathOrResolved(root)));
+  if (!allowed) {
+    throw new Error("Skill path is outside allowed skill directories");
+  }
+}
+
 /** Scan a commands directory for *.md files */
 function scanCommandsDir(dir: string, scope: SkillEntry["scope"], agent: SkillAgent, pluginName?: string): SkillEntry[] {
   if (!fs.existsSync(dir)) return [];
@@ -235,28 +303,38 @@ export function saveSkill(opts: {
   body: string;
   projectCwd?: string;
 }): string {
-  const home = os.homedir();
+  const scope = validateSkillScope(opts.scope);
+  const format = validateSkillFormat(opts.format);
+  const agent = opts.agent || "claude";
+  const skillName = validateSkillName(opts.name);
+  const baseDir = skillBaseDir(scope, agent, opts.projectCwd);
+  const saveAsSkill = format === "skill" || agent === "codex";
+  const allowedRoots = [
+    path.join(baseDir, saveAsSkill ? "skills" : "commands"),
+  ];
   let targetPath = opts.filePath;
 
   if (!targetPath) {
-    const agent = opts.agent || "claude";
-    // New file — compute path from scope + format + name
-    const baseDir = opts.scope === "user"
-      ? path.join(home, agent === "codex" ? ".codex" : ".claude")
-      : path.join(opts.projectCwd || process.cwd(), agent === "codex" ? ".codex" : ".claude");
-
-    if (opts.format === "skill" || agent === "codex") {
-      const dir = path.join(baseDir, "skills", opts.name);
-      fs.mkdirSync(dir, { recursive: true });
+    if (saveAsSkill) {
+      const dir = path.join(baseDir, "skills", skillName);
       targetPath = path.join(dir, "SKILL.md");
     } else {
-      const dir = path.join(baseDir, "commands");
-      fs.mkdirSync(dir, { recursive: true });
-      targetPath = path.join(dir, `${opts.name}.md`);
+      targetPath = path.join(baseDir, "commands", `${skillName}.md`);
     }
   }
 
+  targetPath = path.resolve(targetPath);
+  assertSkillPathAllowed(targetPath, allowedRoots);
+  if (saveAsSkill) {
+    if (path.basename(targetPath) !== "SKILL.md") {
+      throw new Error("Skill files must be named SKILL.md");
+    }
+  } else if (path.extname(targetPath).toLowerCase() !== ".md") {
+    throw new Error("Command files must use the .md extension");
+  }
+
   const content = buildFileContent(opts.frontmatter, opts.body);
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
   fs.writeFileSync(targetPath, content);
   return targetPath;
 }

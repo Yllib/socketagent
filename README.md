@@ -225,6 +225,7 @@ Common values:
 - `DEFAULT_CWD` - default working directory for new sessions.
 - `RELAY_URL` - relay endpoint.
 - `PAIRING_TOKEN` - token encoded in the pairing QR.
+- `SOCKETAGENT_SHOW_PAIRING_QR_ON_STARTUP` - set to `1` only for an explicit pairing session; otherwise startup logs redact pairing secrets.
 
 Runtime data is stored under `~/.claude-assistant/`, including session metadata, chat history, scheduled tasks, relay keys, recent working directories, and local app/server state. SocketAgent intentionally keeps this legacy path so upgrades preserve existing pairings and history.
 

@@ -256,7 +256,22 @@ export function isCodexAppMcpRequest(req: IncomingMessage): boolean {
   return !!req.url?.startsWith("/codex-mcp/");
 }
 
+function isLoopbackRemoteAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
+  return normalized === "::1" || normalized === "localhost" || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
 export async function handleCodexAppMcpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!isLoopbackRemoteAddress(req.socket.remoteAddress)) {
+    writeJson(res, 403, {
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "SocketAgent MCP is only available from loopback" },
+      id: null,
+    });
+    return;
+  }
+
   const url = new URL(req.url || "/", "http://127.0.0.1");
   const token = decodeURIComponent(url.pathname.slice("/codex-mcp/".length));
   const registration = registrations.get(token);

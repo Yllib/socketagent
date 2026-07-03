@@ -303,6 +303,13 @@ export interface ClientCapabilitiesMessage {
   binaryEnvelope?: boolean;
 }
 
+/** Direct E2E auth token proof, sent only after the NaCl key exchange. */
+export interface DirectAuthMessage {
+  type: "direct_auth";
+  token: string;
+  binaryEnvelope?: boolean;
+}
+
 export interface TerminalAttachMessage {
   type: "terminal_attach";
   cwd?: string;
@@ -571,6 +578,7 @@ export type ClientMessage =
   | UploadChunkMessage
   | UploadChunkBinMessage
   | ClientCapabilitiesMessage
+  | DirectAuthMessage
   | TerminalAttachMessage
   | TerminalInputMessage
   | TerminalResizeMessage
@@ -811,6 +819,14 @@ export interface ServerCapabilitiesMessage {
   codexDriver?: CodexDriver;
   codexDriversAvailable?: CodexDriver[];
   backendHealth?: BackendHealthInfo[];
+  directE2e?: {
+    serverPubkey: string;
+  };
+  relayPairing?: {
+    relayUrl: string;
+    pairingToken: string;
+    serverPubkey: string;
+  };
 }
 
 export interface BackendHealthInfo {

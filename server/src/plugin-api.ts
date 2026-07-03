@@ -1,11 +1,15 @@
-import { WebSocket } from "ws";
 import { ServerMessage, HistoryEntry } from "./protocol";
 import * as http from "http";
+
+export interface PluginClientTransport {
+  readonly readyState: number;
+  send(data: string): void;
+}
 
 /** Context provided to plugins at init time (server-level state) */
 export interface PluginContext {
   getActiveSessions: () => Map<string, any>;
-  getConnectedClients: () => Set<WebSocket>;
+  getConnectedClients: () => Set<PluginClientTransport>;
   /** Broadcast a message to all connected clients (direct + relay) */
   broadcast: (msg: string) => void;
   getPort: () => number;

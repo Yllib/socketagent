@@ -28,7 +28,7 @@ SocketAgent Server
     \--- Codex backend: OpenAI Codex CLI app-server by default, exec fallback
 ```
 
-The relay forwards NaCl-encrypted traffic and cannot read your chat or tool output. Local/direct connections bypass the relay when your phone can reach the server and are protected by the server auth token on your LAN or VPN.
+The relay forwards NaCl-encrypted traffic and cannot read your chat or tool output. Local/direct connections bypass the relay when your phone can reach the server. If the app has the server public key from pairing/config import, direct mode uses the same NaCl E2E envelope and sends the auth token only inside that encrypted channel. Legacy direct connections without a saved server public key still use bearer-token WebSocket auth for compatibility and should stay on trusted LAN/VPN only.
 
 ## Agent Backends
 

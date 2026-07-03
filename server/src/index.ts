@@ -31,7 +31,7 @@ import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteSchedule
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
-import { loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
+import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getDefaultCwd, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, markBackendAuthRequired, setDefaultCwd } from "./server-settings";
@@ -255,8 +255,169 @@ if (fs.existsSync(pluginsDir)) {
   }
 }
 
-// Track all connected WebSocket clients for broadcasting
-const connectedClients = new Set<WebSocket>();
+// Binary envelope plaintext markers — first byte of the decrypted payload.
+const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
+const BIN_MARKER_UPLOAD_CHUNK = 0x42;  // 'B' — upload chunk: [1 idLen][idBytes][4 chunkIdx BE][bytes]
+
+/**
+ * Transport interface — abstracts over real WebSocket and relay virtual socket.
+ * ClaudeSession needs readyState + send(). Connection handler needs send().
+ */
+interface ClientTransport {
+  readonly readyState: number;
+  readonly bufferedAmount?: number;
+  readonly connectionGeneration?: number;
+  send(data: string): void;
+}
+
+class DirectClientTransport implements ClientTransport {
+  private peerPublicKey: Uint8Array | null = null;
+  private binaryEnabled = false;
+  private authenticated: boolean;
+  private authTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private readonly ws: WebSocket,
+    private readonly keyPair: KeyPair,
+    opts: { authenticated: boolean; requireEncryptedAuth: boolean },
+  ) {
+    this.authenticated = opts.authenticated && !opts.requireEncryptedAuth;
+    if (opts.requireEncryptedAuth) {
+      this.authTimer = setTimeout(() => {
+        if (this.authenticated || this.ws.readyState !== WebSocket.OPEN) return;
+        console.warn("[Direct E2E] Closing unauthenticated encrypted direct socket after timeout");
+        this.ws.close(1008, "Authentication timeout");
+      }, 15_000);
+    }
+  }
+
+  get readyState(): number {
+    return this.ws.readyState;
+  }
+
+  get bufferedAmount(): number {
+    return this.ws.bufferedAmount;
+  }
+
+  get isAuthenticated(): boolean {
+    return this.authenticated;
+  }
+
+  get usesBinaryEnvelope(): boolean {
+    return this.binaryEnabled;
+  }
+
+  get hasPeerKey(): boolean {
+    return this.peerPublicKey !== null;
+  }
+
+  send(data: string): void {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.peerPublicKey) {
+      this.ws.send(data);
+      return;
+    }
+
+    if (this.binaryEnabled) {
+      const jsonBytes = new TextEncoder().encode(data);
+      const plaintext = new Uint8Array(jsonBytes.length + 1);
+      plaintext[0] = BIN_MARKER_JSON;
+      plaintext.set(jsonBytes, 1);
+      this.ws.send(encryptBinary(plaintext, this.peerPublicKey, this.keyPair.secretKey), { binary: true });
+      return;
+    }
+
+    this.ws.send(JSON.stringify(encrypt(data, this.peerPublicKey, this.keyPair.secretKey)));
+  }
+
+  sendPlain(msg: Record<string, unknown>): void {
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  handleKeyExchange(pubkey: unknown): void {
+    if (typeof pubkey !== "string" || !pubkey) {
+      throw new Error("Missing direct key exchange public key");
+    }
+    const nextPublicKey = fromBase64(pubkey);
+    if (nextPublicKey.length !== 32) {
+      throw new Error("Invalid direct key exchange public key");
+    }
+    if (this.peerPublicKey && toBase64(this.peerPublicKey) !== toBase64(nextPublicKey)) {
+      console.warn("[Direct E2E] Phone public key changed; replacing peer crypto state");
+    }
+    this.peerPublicKey = nextPublicKey;
+    this.sendPlain({ type: "key_exchange_ack" });
+    console.log("[Direct E2E] Key exchange complete — waiting for encrypted auth");
+  }
+
+  authenticate(binaryEnvelope: boolean): void {
+    this.authenticated = true;
+    this.binaryEnabled = binaryEnvelope;
+    if (this.authTimer) {
+      clearTimeout(this.authTimer);
+      this.authTimer = null;
+    }
+  }
+
+  decryptTextEnvelope(parsed: unknown): ClientMessage {
+    if (!this.peerPublicKey) {
+      throw new Error("Encrypted direct message before key exchange");
+    }
+    const plaintext = decrypt(parsed as EncryptedEnvelope, this.peerPublicKey, this.keyPair.secretKey);
+    return JSON.parse(plaintext) as ClientMessage;
+  }
+
+  decryptBinaryFrame(buf: Buffer): ClientMessage {
+    if (!this.peerPublicKey) {
+      throw new Error("Encrypted direct binary frame before key exchange");
+    }
+    const plaintext = decryptBinary(buf, this.peerPublicKey, this.keyPair.secretKey);
+    if (plaintext.length === 0) {
+      throw new Error("Empty direct binary frame");
+    }
+    const marker = plaintext[0];
+
+    if (marker === BIN_MARKER_JSON) {
+      const json = new TextDecoder().decode(plaintext.subarray(1));
+      return JSON.parse(json) as ClientMessage;
+    }
+
+    if (marker === BIN_MARKER_UPLOAD_CHUNK) {
+      if (plaintext.length < 6) throw new Error("Binary upload frame too short");
+      const idLen = plaintext[1];
+      const headerEnd = 2 + idLen + 4;
+      if (plaintext.length < headerEnd) throw new Error("Binary upload frame header too short");
+      const uploadId = new TextDecoder().decode(plaintext.subarray(2, 2 + idLen));
+      const off = 2 + idLen;
+      const chunkIndex =
+        ((plaintext[off] << 24) >>> 0) |
+        (plaintext[off + 1] << 16) |
+        (plaintext[off + 2] << 8) |
+        plaintext[off + 3];
+      const data = Buffer.from(plaintext.subarray(headerEnd));
+      return { type: "upload_chunk_bin", uploadId, chunkIndex, data } as any;
+    }
+
+    throw new Error(`Unknown direct binary marker: 0x${marker.toString(16)}`);
+  }
+
+  close(): void {
+    if (this.authTimer) {
+      clearTimeout(this.authTimer);
+      this.authTimer = null;
+    }
+  }
+}
+
+// Track all connected clients for broadcasting. Direct clients may encrypt in
+// this transport; relay clients encrypt in RelayClient before they get here.
+const connectedClients = new Set<ClientTransport>();
+
+function loadServerKeyPair(): KeyPair {
+  return loadOrCreateKeyPair(socketAgentDataPath("relay-keys.json"));
+}
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
@@ -333,7 +494,7 @@ function autoUpdateBlockReason(): string | null {
 // endpoint can use the real WebSocket instead of a dummy when the app has
 // already reconnected before the continue script runs.
 interface SessionClient {
-  ws: WebSocket;
+  ws: ClientTransport;
   setActiveSession: (s: Session) => void;
 }
 const sessionClients = new Map<string, SessionClient>();
@@ -447,8 +608,7 @@ function broadcastScheduledTaskList(): void {
 
 function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPubkey: string } | undefined {
   if (!RELAY_URL || !PAIRING_TOKEN) return undefined;
-  const keysPath = socketAgentDataPath("relay-keys.json");
-  const keyPair = loadOrCreateKeyPair(keysPath);
+  const keyPair = loadServerKeyPair();
   return {
     relayUrl: publicRelayUrl(RELAY_URL),
     pairingToken: PAIRING_TOKEN,
@@ -476,6 +636,9 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
     codexDriver: settings.codexDriver,
     codexDriversAvailable: settings.codexDriversAvailable,
     backendHealth: settings.backendHealth,
+    directE2e: {
+      serverPubkey: toBase64(loadServerKeyPair().publicKey),
+    },
     relayPairing: relayPairingInfo(),
     pushNotifications: {
       directFcm: true,
@@ -789,17 +952,6 @@ function syncExternalNativeHistory(sessionInfo: SessionInfo): any[] {
   if (sessionInfo.backend === "codex") return syncCodexRolloutHistory(sessionInfo);
   if (sessionInfo.backend === "claude" || !sessionInfo.backend) return syncClaudeNativeHistory(sessionInfo);
   return [];
-}
-
-/**
- * Transport interface — abstracts over real WebSocket and relay virtual socket.
- * ClaudeSession needs readyState + send(). Connection handler needs send().
- */
-interface ClientTransport {
-  readonly readyState: number;
-  readonly bufferedAmount?: number;
-  readonly connectionGeneration?: number;
-  send(data: string): void;
 }
 
 function normalizeCodexPermissionMode(mode: unknown): string | null {
@@ -4564,12 +4716,21 @@ function getBearerToken(req: http.IncomingMessage): string | null {
 httpServer.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", `ws://localhost:${PORT}`);
   const token = getBearerToken(req) || url.searchParams.get("token");
-  if (token !== AUTH_TOKEN) {
+  const wantsEncryptedDirectAuth = url.searchParams.get("e2e") === "1";
+  if (token && token !== AUTH_TOKEN) {
     console.log("Rejected connection: invalid token");
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
     return;
   }
+  if (!token && !wantsEncryptedDirectAuth) {
+    console.log("Rejected connection: missing token");
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  (req as any).socketAgentAuthenticated = token === AUTH_TOKEN;
+  (req as any).socketAgentWantsEncryptedDirectAuth = wantsEncryptedDirectAuth;
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req);
   });
@@ -4682,9 +4843,9 @@ function broadcastStatusSync(): void {
 }
 
 /** Send status_sync to a single client. */
-function sendStatusSyncTo(ws: WebSocket): void {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(buildStatusSyncMessage());
+function sendStatusSyncTo(transport: ClientTransport): void {
+  if (transport.readyState === WebSocket.OPEN) {
+    transport.send(buildStatusSyncMessage());
   }
 }
 
@@ -5037,32 +5198,48 @@ setInterval(checkScheduledTasks, SCHEDULER_INTERVAL);
 setTimeout(checkScheduledTasks, 5000);
 
 // ── Direct WebSocket connections ──
-wss.on("connection", (ws: WebSocket) => {
-  console.log("Client connected (authenticated)");
-  connectedClients.add(ws);
+wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
+  const wantsEncryptedDirectAuth = (req as any).socketAgentWantsEncryptedDirectAuth === true;
+  const transport = new DirectClientTransport(ws, loadServerKeyPair(), {
+    authenticated: (req as any).socketAgentAuthenticated === true,
+    requireEncryptedAuth: wantsEncryptedDirectAuth,
+  });
+  console.log(wantsEncryptedDirectAuth ? "Client connected (direct E2E pending auth)" : "Client connected (authenticated)");
 
-  // Send immediate status so the app knows server state right away
-  sendStatusSyncTo(ws);
+  // Legacy direct clients are already authenticated by the upgrade request.
+  // Direct E2E clients get status only after encrypted direct_auth succeeds.
+  if (transport.isAuthenticated) {
+    connectedClients.add(transport);
+    sendStatusSyncTo(transport);
+  }
 
-  const handler = createConnectionHandler(ws);
+  const handler = createConnectionHandler(transport);
   let messageQueue = Promise.resolve();
 
   ws.on("message", (data: Buffer, isBinary: boolean) => {
     let msg: ClientMessage;
 
     console.log(`[WS Recv] isBinary=${isBinary} bytes=${data.length}`);
-    if (isBinary) {
-      // Direct-WS binary frame — currently only used for upload chunks.
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+    if (isBinary && transport.hasPeerKey) {
+      try {
+        msg = transport.decryptBinaryFrame(buf);
+      } catch (err: any) {
+        console.warn(`[Direct E2E] Binary frame rejected: ${err?.message || err}`);
+        transport.send(JSON.stringify({ type: "error", message: "Invalid encrypted binary frame" }));
+        return;
+      }
+    } else if (isBinary) {
+      // Legacy direct binary frame — currently only used for upload chunks.
       // Format: [1 marker(0x42)][1 idLen][idBytes][4 chunkIdx BE][bytes]
-      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-      if (buf.length < 6 || buf[0] !== 0x42) {
-        ws.send(JSON.stringify({ type: "error", message: "Unknown binary frame" }));
+      if (buf.length < 6 || buf[0] !== BIN_MARKER_UPLOAD_CHUNK) {
+        transport.send(JSON.stringify({ type: "error", message: "Unknown binary frame" }));
         return;
       }
       const idLen = buf[1];
       const headerEnd = 2 + idLen + 4;
       if (buf.length < headerEnd) {
-        ws.send(JSON.stringify({ type: "error", message: "Binary frame too short" }));
+        transport.send(JSON.stringify({ type: "error", message: "Binary frame too short" }));
         return;
       }
       const uploadId = buf.subarray(2, 2 + idLen).toString("utf-8");
@@ -5072,11 +5249,47 @@ wss.on("connection", (ws: WebSocket) => {
       msg = { type: "upload_chunk_bin", uploadId, chunkIndex, data: chunkBytes } as any;
     } else {
       try {
-        msg = JSON.parse(data.toString()) as ClientMessage;
+        const parsed = JSON.parse(buf.toString());
+        if (parsed?.type === "key_exchange") {
+          try {
+            transport.handleKeyExchange(parsed.pubkey);
+          } catch (err: any) {
+            console.warn(`[Direct E2E] Key exchange rejected: ${err?.message || err}`);
+            ws.close(1008, "Invalid key exchange");
+          }
+          return;
+        }
+        if (parsed?.n && parsed?.c) {
+          msg = transport.decryptTextEnvelope(parsed);
+        } else {
+          msg = parsed as ClientMessage;
+        }
       } catch {
-        ws.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
+        transport.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
         return;
       }
+    }
+
+    if ((msg as any)?.type === "direct_auth") {
+      const token = typeof (msg as any).token === "string" ? (msg as any).token : "";
+      if (token !== AUTH_TOKEN) {
+        console.log("Rejected direct E2E auth: invalid token");
+        transport.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
+        ws.close(1008, "Unauthorized");
+        return;
+      }
+      transport.authenticate((msg as any).binaryEnvelope === true);
+      console.log(`[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope})`);
+      connectedClients.add(transport);
+      sendStatusSyncTo(transport);
+      transport.send(JSON.stringify(serverCapabilitiesPayload(transport.usesBinaryEnvelope)));
+      return;
+    }
+
+    if (!transport.isAuthenticated) {
+      transport.send(JSON.stringify({ type: "error", message: "Authentication required" }));
+      ws.close(1008, "Authentication required");
+      return;
     }
 
     const receivedAt = Date.now();
@@ -5092,7 +5305,7 @@ wss.on("connection", (ws: WebSocket) => {
         }
       })
       .catch((err: any) => {
-        ws.send(
+        transport.send(
           JSON.stringify({
             type: "error",
             message: err.message || "Server error",
@@ -5104,11 +5317,12 @@ wss.on("connection", (ws: WebSocket) => {
   ws.on("close", () => {
     console.log("Client disconnected");
     handler.close();
-    connectedClients.delete(ws);
+    transport.close();
+    connectedClients.delete(transport);
     // Clean up session client mapping for this connection
     if (handler.activeSessionId) {
       const client = sessionClients.get(handler.activeSessionId);
-      if (client && client.ws === ws) {
+      if (client && client.ws === transport) {
         sessionClients.delete(handler.activeSessionId);
       }
     }
@@ -5128,8 +5342,7 @@ function redactSecretForLog(secret: string): string {
 }
 
 function startRelayClient(): void {
-  const keysPath = socketAgentDataPath("relay-keys.json");
-  const keyPair = loadOrCreateKeyPair(keysPath);
+  const keyPair = loadServerKeyPair();
   const pubkeyBase64 = toBase64(keyPair.publicKey);
 
   console.log(`[Relay] Connecting to ${RELAY_URL}`);

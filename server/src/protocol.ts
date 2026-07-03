@@ -757,6 +757,8 @@ export interface SessionInfo {
   messagePreview: string;
   /** Number of user turns/prompts in this session when known. */
   turnCount?: number;
+  /** Number of SocketAgent history entries when known. */
+  historyCount?: number;
   running?: boolean;
   /** Server-owned ISO timestamp for the current active turn/compaction. */
   activeStartedAt?: string;
@@ -867,6 +869,13 @@ export interface HistoryEntry {
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
   toolOutput?: string;
+  // Server-internal large-output storage. These fields may be present in
+  // persisted history; the server hydrates toolOutput before sending to clients.
+  toolOutputRef?: string;
+  toolOutputBytes?: number;
+  toolOutputStoredBytes?: number;
+  toolOutputPreview?: string;
+  toolOutputEncoding?: "gzip";
   timestamp: string;
   // Question fields (role === "question")
   questionId?: string;

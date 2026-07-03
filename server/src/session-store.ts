@@ -1,5 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
+import * as crypto from "crypto";
+import * as zlib from "zlib";
 import { execFileSync } from "child_process";
 import { listSessions as sdkListSessions, type SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
 import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
@@ -12,7 +14,26 @@ import { socketAgentDataPath } from "./socket-agent-paths";
 const STORE_DIR = socketAgentDataPath();
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
 const HISTORY_DIR = path.join(STORE_DIR, "history");
+const TOOL_OUTPUT_DIR = path.join(STORE_DIR, "tool-output");
 const ARCHIVED_SESSION_IDS_FILE = path.join(STORE_DIR, "archived-session-ids.json");
+const HISTORY_IO_WARN_MS = Number(process.env.SOCKETAGENT_HISTORY_IO_WARN_MS || 500);
+const HISTORY_PAGE_WARN_MS = Number(process.env.SOCKETAGENT_HISTORY_PAGE_WARN_MS || 250);
+const SESSION_LIST_WARN_MS = Number(process.env.SOCKETAGENT_SESSION_LIST_WARN_MS || 500);
+const TOOL_OUTPUT_BLOB_THRESHOLD = Number(process.env.SOCKETAGENT_TOOL_OUTPUT_BLOB_THRESHOLD || 8 * 1024);
+const TOOL_OUTPUT_PREVIEW_CHARS = Number(process.env.SOCKETAGENT_TOOL_OUTPUT_PREVIEW_CHARS || 1024);
+const HISTORY_COMPACT_MIN_BYTES = Number(process.env.SOCKETAGENT_HISTORY_COMPACT_MIN_BYTES || 8 * 1024 * 1024);
+
+function warnIfSlow(label: string, startedAt: number, details: Record<string, unknown> = {}): void {
+  const elapsedMs = Date.now() - startedAt;
+  const threshold = label.startsWith("history_page") ? HISTORY_PAGE_WARN_MS
+    : label.startsWith("session_list") ? SESSION_LIST_WARN_MS
+      : HISTORY_IO_WARN_MS;
+  if (elapsedMs < threshold) return;
+  const suffix = Object.entries(details)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" ");
+  console.warn(`[Perf] ${label} ms=${elapsedMs}${suffix ? ` ${suffix}` : ""}`);
+}
 
 function ensureStoreDir(): void {
   if (!fs.existsSync(STORE_DIR)) {
@@ -113,6 +134,17 @@ function unlinkIfExists(filePath: string | undefined, removed: string[], label =
   }
 }
 
+function rmDirIfExists(dirPath: string | undefined, removed: string[], label = "dir"): void {
+  if (!dirPath) return;
+  try {
+    if (!fs.existsSync(dirPath)) return;
+    fs.rmSync(dirPath, { recursive: true, force: true });
+    removed.push(`${label}:${dirPath}`);
+  } catch (err: any) {
+    throw new Error(`Failed to delete ${label} ${dirPath}: ${err?.message || String(err)}`);
+  }
+}
+
 function deleteCodexThreadState(sessionId: string, removed: string[], warnings: string[]): void {
   const homeDir = process.env.HOME || require("os").homedir();
   const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
@@ -138,6 +170,7 @@ export function deleteSessionArtifacts(sessionId: string, sessionInfo?: SessionI
 
   unlinkIfExists(historyFile(sessionId), removed, "history");
   historyCache.delete(sessionId);
+  rmDirIfExists(toolOutputSessionDir(sessionId), removed, "tool-output");
   unlinkIfExists(todosFile(sessionId), removed, "todos");
   unlinkIfExists(sdkEventsFile(sessionId), removed, "sdk-events");
 
@@ -221,7 +254,7 @@ export function updateSessionActivity(
   if (session) {
     session.lastActive = new Date().toISOString();
     session.messagePreview = cleanPreviewText(messagePreview);
-    session.turnCount = conversationTurnCountForSession(id, session.turnCount);
+    session.turnCount = normalizedTurnCount(session.turnCount) ?? 0;
     if (lastUsage) {
       (session as any).lastUsage = lastUsage;
     }
@@ -250,6 +283,153 @@ function historyFile(sessionId: string): string {
   return path.join(HISTORY_DIR, `${sessionId}.json`);
 }
 
+function toolOutputSessionDir(sessionId: string): string {
+  const root = path.resolve(TOOL_OUTPUT_DIR);
+  const resolved = path.resolve(TOOL_OUTPUT_DIR, sessionId);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error(`Invalid tool output session id: ${sessionId}`);
+  }
+  return resolved;
+}
+
+function ensureToolOutputDir(sessionId?: string): string {
+  const dir = sessionId ? toolOutputSessionDir(sessionId) : TOOL_OUTPUT_DIR;
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+function sanitizeBlobSegment(value: string): string {
+  const safe = value.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+  return safe.slice(0, 80) || "entry";
+}
+
+function toolOutputBlobRef(sessionId: string, entry: HistoryEntry, index: number, output: string): string {
+  const idPart = sanitizeBlobSegment(entry.toolUseId || `${entry.role}-${index}`);
+  const hash = crypto
+    .createHash("sha256")
+    .update(sessionId)
+    .update("\0")
+    .update(entry.toolUseId || "")
+    .update("\0")
+    .update(entry.timestamp || "")
+    .update("\0")
+    .update(String(index))
+    .update("\0")
+    .update(output)
+    .digest("hex")
+    .slice(0, 16);
+  return `${sessionId}/${idPart}-${hash}.txt.gz`;
+}
+
+function toolOutputBlobPath(ref: string | undefined): string | null {
+  if (!ref) return null;
+  const root = path.resolve(TOOL_OUTPUT_DIR);
+  const resolved = path.resolve(TOOL_OUTPUT_DIR, ref);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) return null;
+  return resolved;
+}
+
+function writeToolOutputBlob(sessionId: string, entry: HistoryEntry, index: number, output: string): {
+  ref: string;
+  bytes: number;
+  storedBytes: number;
+} {
+  const ref = toolOutputBlobRef(sessionId, entry, index, output);
+  const file = toolOutputBlobPath(ref);
+  if (!file) throw new Error(`Invalid tool output blob ref for ${sessionId}`);
+  ensureToolOutputDir(sessionId);
+  if (!fs.existsSync(file)) {
+    const compressed = zlib.gzipSync(Buffer.from(output, "utf8"));
+    fs.writeFileSync(file, compressed);
+  }
+  const stat = fs.statSync(file);
+  return {
+    ref,
+    bytes: Buffer.byteLength(output, "utf8"),
+    storedBytes: stat.size,
+  };
+}
+
+function readToolOutputBlob(entry: HistoryEntry): string | undefined {
+  const file = toolOutputBlobPath(entry.toolOutputRef);
+  if (!file || !fs.existsSync(file)) return undefined;
+  try {
+    const raw = fs.readFileSync(file);
+    return entry.toolOutputEncoding === "gzip"
+      ? zlib.gunzipSync(raw).toString("utf8")
+      : raw.toString("utf8");
+  } catch (err: any) {
+    console.warn(`[HistoryBlob] Failed to read ${entry.toolOutputRef}: ${err?.message || String(err)}`);
+    return undefined;
+  }
+}
+
+function cloneHistoryEntry(entry: HistoryEntry): HistoryEntry {
+  return { ...entry, toolInput: entry.toolInput ? { ...entry.toolInput } : entry.toolInput };
+}
+
+function compactHistoryEntryForStorage(sessionId: string, entry: HistoryEntry, index: number): HistoryEntry {
+  const compacted = cloneHistoryEntry(entry);
+  if (compacted.role !== "tool_result") return compacted;
+  if (compacted.toolOutputRef && typeof compacted.toolOutput !== "string") {
+    const preview = (compacted.toolOutputPreview || compacted.content || "").slice(0, TOOL_OUTPUT_PREVIEW_CHARS);
+    compacted.content = preview;
+    compacted.toolOutputPreview = preview;
+    return compacted;
+  }
+
+  const output = typeof compacted.toolOutput === "string"
+    ? compacted.toolOutput
+    : typeof compacted.content === "string"
+      ? compacted.content
+      : "";
+
+  if (!output) {
+    delete compacted.toolOutputRef;
+    delete compacted.toolOutputBytes;
+    delete compacted.toolOutputStoredBytes;
+    delete compacted.toolOutputPreview;
+    delete compacted.toolOutputEncoding;
+    return compacted;
+  }
+
+  if (Buffer.byteLength(output, "utf8") <= TOOL_OUTPUT_BLOB_THRESHOLD) {
+    compacted.toolOutput = output;
+    compacted.content = typeof compacted.content === "string" ? compacted.content : output;
+    delete compacted.toolOutputRef;
+    delete compacted.toolOutputBytes;
+    delete compacted.toolOutputStoredBytes;
+    delete compacted.toolOutputPreview;
+    delete compacted.toolOutputEncoding;
+    return compacted;
+  }
+
+  const blob = writeToolOutputBlob(sessionId, compacted, index, output);
+  compacted.content = output.slice(0, TOOL_OUTPUT_PREVIEW_CHARS);
+  compacted.toolOutputPreview = compacted.content;
+  compacted.toolOutputRef = blob.ref;
+  compacted.toolOutputBytes = blob.bytes;
+  compacted.toolOutputStoredBytes = blob.storedBytes;
+  compacted.toolOutputEncoding = "gzip";
+  delete compacted.toolOutput;
+  return compacted;
+}
+
+function hydrateHistoryEntry(entry: HistoryEntry): HistoryEntry {
+  if (entry.role !== "tool_result" || typeof entry.toolOutput === "string" || !entry.toolOutputRef) {
+    return cloneHistoryEntry(entry);
+  }
+  const hydrated = cloneHistoryEntry(entry);
+  hydrated.toolOutput = readToolOutputBlob(entry) ?? entry.toolOutputPreview ?? entry.content ?? "";
+  return hydrated;
+}
+
+function hydrateHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
+  return entries.map(hydrateHistoryEntry);
+}
+
 type HistoryCacheEntry = {
   file: string;
   size: number;
@@ -260,6 +440,7 @@ type HistoryCacheEntry = {
 const historyCache = new Map<string, HistoryCacheEntry>();
 
 function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: boolean } = {}): HistoryEntry[] {
+  const startedAt = Date.now();
   ensureHistoryDir();
   const file = historyFile(sessionId);
   if (!fs.existsSync(file)) {
@@ -279,11 +460,24 @@ function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: bo
 
   const entries = JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[];
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
+  warnIfSlow("history_read", startedAt, {
+    sessionId,
+    entries: entries.length,
+    mb: (stat.size / 1024 / 1024).toFixed(1),
+  });
   return entries;
 }
 
 function cleanPreviewText(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
+function latestHistoryTimestamp(entries: HistoryEntry[]): string | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const timestamp = entries[i]?.timestamp;
+    if (timestamp && Number.isFinite(Date.parse(timestamp))) return timestamp;
+  }
+  return undefined;
 }
 
 function latestConversationPreviewFromEntries(entries: HistoryEntry[]): string {
@@ -303,50 +497,26 @@ function conversationTurnCountFromEntries(entries: HistoryEntry[]): number {
   }, 0);
 }
 
-function latestConversationPreviewFromHistory(sessionId: string): string {
-  try {
-    return latestConversationPreviewFromEntries(readHistoryEntries(sessionId));
-  } catch {
-    /* ignore stale/corrupt history */
-  }
-  return "";
-}
+function updateSessionHistoryMetadata(sessionId: string, entries: HistoryEntry[]): void {
+  const sessions = readStore();
+  const session = sessions.find((s) => s.id === sessionId);
+  if (!session) return;
 
-function conversationTurnCountFromHistory(sessionId: string): number | undefined {
-  try {
-    if (!fs.existsSync(historyFile(sessionId))) return undefined;
-    return conversationTurnCountFromEntries(readHistoryEntries(sessionId));
-  } catch {
-    /* ignore stale/corrupt history */
-  }
-  return undefined;
-}
+  const preview = latestConversationPreviewFromEntries(entries);
+  if (preview) session.messagePreview = preview;
+  session.turnCount = conversationTurnCountFromEntries(entries);
+  (session as any).historyCount = entries.length;
 
-function latestConversationPreviewFromCodexRollout(sessionId: string): string {
-  try {
-    return latestConversationPreviewFromEntries(readCodexRolloutHistory(sessionId));
-  } catch {
-    /* ignore missing/corrupt rollout */
+  const latestTimestamp = latestHistoryTimestamp(entries);
+  if (latestTimestamp) {
+    const currentMs = Date.parse(session.lastActive);
+    const latestMs = Date.parse(latestTimestamp);
+    if (!Number.isFinite(currentMs) || (Number.isFinite(latestMs) && latestMs > currentMs)) {
+      session.lastActive = latestTimestamp;
+    }
   }
-  return "";
-}
 
-function conversationTurnCountFromCodexRollout(sessionId: string): number | undefined {
-  try {
-    if (!findCodexRolloutFile(sessionId)) return undefined;
-    return conversationTurnCountFromEntries(readCodexRolloutHistory(sessionId));
-  } catch {
-    /* ignore missing/corrupt rollout */
-  }
-  return undefined;
-}
-
-function latestConversationPreviewForSession(sessionId: string): string {
-  return (
-    latestConversationPreviewFromHistory(sessionId) ||
-    latestConversationPreviewFromSdkEvents(sessionId) ||
-    latestConversationPreviewFromCodexRollout(sessionId)
-  );
+  writeStore(sessions);
 }
 
 function normalizedTurnCount(value: unknown): number | undefined {
@@ -355,36 +525,29 @@ function normalizedTurnCount(value: unknown): number | undefined {
   return Math.floor(count);
 }
 
-function conversationTurnCountForSession(sessionId: string, fallback?: unknown): number {
-  return (
-    conversationTurnCountFromHistory(sessionId) ??
-    conversationTurnCountFromCodexRollout(sessionId) ??
-    normalizedTurnCount(fallback) ??
-    0
-  );
-}
-
-function withConversationTurnCount(session: SessionInfo): SessionInfo {
-  return {
-    ...session,
-    turnCount: conversationTurnCountForSession(session.id, (session as any).turnCount),
-  };
-}
-
 function withCachedTurnCount(session: SessionInfo): SessionInfo {
   return {
     ...session,
     turnCount: normalizedTurnCount((session as any).turnCount) ?? 0,
+    historyCount: normalizedTurnCount((session as any).historyCount),
   };
 }
 
 function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
+  const startedAt = Date.now();
   ensureHistoryDir();
   const file = historyFile(sessionId);
-  const safeEntries = redactSecretsDeep(entries);
+  const redacted = redactSecretsDeep(entries) as HistoryEntry[];
+  const safeEntries = redacted.map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
   fs.writeFileSync(file, JSON.stringify(safeEntries, null, 2), "utf-8");
   const stat = fs.statSync(file);
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries: safeEntries });
+  updateSessionHistoryMetadata(sessionId, safeEntries);
+  warnIfSlow("history_write", startedAt, {
+    sessionId,
+    entries: safeEntries.length,
+    mb: (stat.size / 1024 / 1024).toFixed(1),
+  });
 }
 
 export function appendHistory(sessionId: string, entry: HistoryEntry): void {
@@ -408,6 +571,14 @@ function nativeSyncTextKey(entry: HistoryEntry): string | null {
 }
 
 function nativeSyncEntryKey(entry: HistoryEntry): string {
+  if (entry.toolUseId && (entry.role === "tool_call" || entry.role === "tool_result" || entry.role === "tool_image")) {
+    return [
+      entry.role,
+      entry.toolName || "",
+      entry.toolUseId,
+      entry.filePath || "",
+    ].join("\u0001");
+  }
   const content = String(entry.content ?? "").trim().replace(/\s+/g, " ");
   return [
     entry.role,
@@ -615,7 +786,11 @@ export function markQuestionAnswered(sessionId: string, questionId: string): voi
 export function getHistory(sessionId: string): HistoryEntry[] {
   // Recover UUIDs on user prompts saved before self-assigned UUIDs (Apr 22 →
   // Apr 27). Once-per-process and a no-op when nothing's missing.
-  return readHistoryEntries(sessionId, { backfillUserUuids: true });
+  return hydrateHistoryEntries(readHistoryEntries(sessionId, { backfillUserUuids: true }));
+}
+
+export function getHistoryCount(sessionId: string): number {
+  return readHistoryEntries(sessionId).length;
 }
 
 /**
@@ -623,7 +798,7 @@ export function getHistory(sessionId: string): HistoryEntry[] {
  * Returns the suggestion string, or undefined if none exists.
  */
 export function getLastPromptSuggestion(sessionId: string): string | undefined {
-  const all = getHistory(sessionId);
+  const all = readHistoryEntries(sessionId);
   for (let i = all.length - 1; i >= 0; i--) {
     if (all[i].role === "prompt_suggestion") {
       return all[i].content;
@@ -642,9 +817,11 @@ export function getHistoryPage(
   limit: number,
   offset?: number
 ): { entries: HistoryEntry[]; total: number; offset: number } {
-  const all = getHistory(sessionId);
+  const startedAt = Date.now();
+  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
   const total = all.length;
   if (total === 0) {
+    warnIfSlow("history_page", startedAt, { sessionId, total, limit, offset: offset ?? "tail" });
     return { entries: [], total: 0, offset: 0 };
   }
 
@@ -656,7 +833,8 @@ export function getHistoryPage(
     start = Math.max(0, total - limit);
   }
   const end = Math.min(start + limit, total);
-  return { entries: all.slice(start, end), total, offset: start };
+  warnIfSlow("history_page", startedAt, { sessionId, total, limit, offset: start });
+  return { entries: hydrateHistoryEntries(all.slice(start, end)), total, offset: start };
 }
 
 /**
@@ -667,9 +845,11 @@ export function getHistoryPageToLastPrompt(
   sessionId: string,
   minEntries: number = 50
 ): { entries: HistoryEntry[]; total: number; offset: number } {
-  const all = getHistory(sessionId);
+  const startedAt = Date.now();
+  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
   const total = all.length;
   if (total === 0) {
+    warnIfSlow("history_page_to_prompt", startedAt, { sessionId, total, minEntries });
     return { entries: [], total: 0, offset: 0 };
   }
 
@@ -684,7 +864,8 @@ export function getHistoryPageToLastPrompt(
     }
   }
 
-  return { entries: all.slice(start), total, offset: start };
+  warnIfSlow("history_page_to_prompt", startedAt, { sessionId, total, minEntries, offset: start });
+  return { entries: hydrateHistoryEntries(all.slice(start)), total, offset: start };
 }
 
 /**
@@ -696,7 +877,7 @@ export function truncateHistoryAtMessage(
   sessionId: string,
   userMessageUuid: string
 ): { removed: number; kept: number } {
-  const all = getHistory(sessionId);
+  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
   // Find the index of the user message with this UUID
   const idx = all.findIndex(
     (e) => e.uuid === userMessageUuid && e.role === "user"
@@ -772,7 +953,7 @@ export function getJsonlPath(sessionId: string, cwd: string): string {
 
 /** Get the timestamp of the last entry in a session's history */
 export function getLastHistoryTimestamp(sessionId: string): string {
-  const history = getHistory(sessionId);
+  const history = readHistoryEntries(sessionId);
   return history.length > 0 ? history[history.length - 1].timestamp : "";
 }
 
@@ -949,57 +1130,6 @@ function readJsonlTailLines(
   }
 }
 
-function appServerUserContentPreview(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (typeof part === "string") return part;
-      if (!part || typeof part !== "object") return "";
-      const input = part as any;
-      if (input.type === "text") return String(input.text ?? "");
-      if (input.type === "input_text") return String(input.text ?? "");
-      if (input.type === "skill") return `/${String(input.name ?? "skill")}`;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function appServerItemPreview(item: any): string {
-  if (!item || typeof item !== "object") return "";
-  if (item.type === "agentMessage") {
-    return cleanPreviewText(item.text);
-  }
-  if (item.type === "userMessage") {
-    return cleanPreviewText(appServerUserContentPreview(item.content));
-  }
-  return "";
-}
-
-function latestConversationPreviewFromSdkEvents(sessionId: string): string {
-  const file = sdkEventsFile(sessionId);
-  if (!fs.existsSync(file)) return "";
-  try {
-    const lines = readJsonlTailLines(file, { maxLines: 1200, maxBytes: 16 * 1024 * 1024 });
-    for (let i = lines.length - 1; i >= 0; i--) {
-      let event: any;
-      try {
-        event = JSON.parse(lines[i]);
-      } catch {
-        continue;
-      }
-      const method = String(event?.method || "");
-      if (method !== "item/completed" && method !== "item/started") continue;
-      const preview = appServerItemPreview(event?.params?.item);
-      if (preview) return preview;
-    }
-  } catch {
-    /* ignore missing/corrupt sdk event history */
-  }
-  return "";
-}
-
 /** Get SDK event count for a session (for deciding whether to send) */
 export function getSdkEventCount(sessionId: string): number {
   const file = sdkEventsFile(sessionId);
@@ -1057,6 +1187,7 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
   if (fs.existsSync(histFile)) {
     const archiveName = `${sessionId}_${ts}_history.json`;
     fs.renameSync(histFile, path.join(ARCHIVE_DIR, archiveName));
+    historyCache.delete(sessionId);
     console.log(`[ClearContext] Archived history: ${archiveName}`);
   }
 
@@ -1264,7 +1395,7 @@ export function getArchiveHistory(sid: string, ts: string): HistoryEntry[] {
   const p = path.join(ARCHIVE_DIR, `${sid}_${ts}_history.json`);
   if (!fs.existsSync(p)) return [];
   try {
-    return JSON.parse(fs.readFileSync(p, "utf-8"));
+    return hydrateHistoryEntries(JSON.parse(fs.readFileSync(p, "utf-8")) as HistoryEntry[]);
   } catch {
     return [];
   }
@@ -1372,6 +1503,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     ensureHistoryDir();
     if (fs.existsSync(liveHist)) fs.unlinkSync(liveHist);
     fs.renameSync(histArchive, liveHist);
+    historyCache.delete(sid);
   }
   if (fs.existsSync(todosArchive)) {
     ensureTodosDir();
@@ -1533,7 +1665,6 @@ function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInf
   const createdAt = unixSecondsToIso(thread?.createdAt, stored?.createdAt || nowIso());
   const lastActive = unixSecondsToIso(thread?.updatedAt, stored?.lastActive || createdAt);
   const preview = codexThreadPreview(thread);
-  const recentPreview = stored ? latestConversationPreviewForSession(id) : "";
   return {
     ...(stored || {}),
     id,
@@ -1541,8 +1672,9 @@ function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInf
     cwd,
     createdAt,
     lastActive,
-    messagePreview: recentPreview || stored?.messagePreview || preview || "",
-    turnCount: conversationTurnCountForSession(id, stored?.turnCount),
+    messagePreview: stored?.messagePreview || preview || "",
+    turnCount: normalizedTurnCount(stored?.turnCount) ?? 0,
+    historyCount: normalizedTurnCount((stored as any)?.historyCount),
     backend: "codex",
     codexDriver: "app-server",
   } as SessionInfo;
@@ -1641,9 +1773,7 @@ function sdkSessionInfoToSessionInfo(info: SDKSessionInfo, tracked?: SessionInfo
   const fallbackMs = Date.now();
   const lastModified = typeof info.lastModified === "number" ? info.lastModified : fallbackMs;
   const nativeLastActive = isoFromMs(lastModified, fallbackMs);
-  const recentPreview = latestConversationPreviewForSession(info.sessionId);
   const messagePreview = cleanPreviewText(
-    recentPreview ||
     tracked?.messagePreview ||
     info.firstPrompt ||
     info.summary ||
@@ -1723,7 +1853,6 @@ function claudeNativeCwdCandidates(): string[] {
 }
 
 function mergeClaudeNativeSession(existing: SessionInfo, nativeSession: SessionInfo): SessionInfo {
-  const recentPreview = latestConversationPreviewForSession(existing.id);
   const existingTitle = existing.title && existing.title !== "Untitled" ? existing.title : "";
   return withCachedTurnCount({
     ...nativeSession,
@@ -1731,7 +1860,7 @@ function mergeClaudeNativeSession(existing: SessionInfo, nativeSession: SessionI
     title: existingTitle || nativeSession.title,
     cwd: existing.cwd || nativeSession.cwd,
     lastActive: newestIso([existing.lastActive, nativeSession.lastActive], nativeSession.lastActive),
-    messagePreview: recentPreview || existing.messagePreview || nativeSession.messagePreview,
+    messagePreview: existing.messagePreview || nativeSession.messagePreview,
     backend: "claude",
   } as SessionInfo);
 }
@@ -1751,15 +1880,12 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
   for (const session of stored) {
     const nativeSession = nativeById.get(session.id);
     if (nativeSession) {
-      const recentPreview = latestConversationPreviewForSession(session.id);
       merged.push({
         ...session,
         ...nativeSession,
-        messagePreview: recentPreview || session.messagePreview || nativeSession.messagePreview,
-        turnCount: conversationTurnCountForSession(
-          session.id,
-          session.turnCount ?? nativeSession.turnCount,
-        ),
+        messagePreview: session.messagePreview || nativeSession.messagePreview,
+        turnCount: normalizedTurnCount(session.turnCount ?? nativeSession.turnCount) ?? 0,
+        historyCount: normalizedTurnCount((session as any).historyCount ?? (nativeSession as any).historyCount),
         lastUsage: session.lastUsage,
         scheduledTaskId: session.scheduledTaskId,
         permissionMode: session.permissionMode,
@@ -1791,12 +1917,14 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
 }
 
 export async function listSessionsWithNativeBackends(useCache = true): Promise<SessionInfo[]> {
+  const startedAt = Date.now();
   const merged = await listSessionsWithNativeCodex(useCache);
   let claudeNative: SessionInfo[];
   try {
     claudeNative = await listClaudeNativeSessionsFromSdk(useCache);
   } catch (err: any) {
     console.warn(`[SdkSessions] Native Claude global listSessions failed: ${err?.message || err}`);
+    warnIfSlow("session_list_native", startedAt, { count: merged.length, claude: "failed", useCache });
     return merged;
   }
 
@@ -1812,7 +1940,9 @@ export async function listSessionsWithNativeBackends(useCache = true): Promise<S
     }
   }
 
-  return [...byId.values()].sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
+  const sessions = [...byId.values()].sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
+  warnIfSlow("session_list_native", startedAt, { count: sessions.length, useCache });
+  return sessions;
 }
 
 export async function listArchivesWithNativeCodex(useCache = true): Promise<ArchiveEntry[]> {
@@ -1970,6 +2100,54 @@ export function cleanupPendingToolCalls(): void {
       console.log(`Cleaned up pending tool calls in ${file}`);
     }
   }
+}
+
+export interface HistoryStorageCompactResult {
+  scanned: number;
+  compacted: number;
+  beforeBytes: number;
+  afterBytes: number;
+  warnings: string[];
+}
+
+export function compactHistoryStorage(options: { minBytes?: number } = {}): HistoryStorageCompactResult {
+  ensureHistoryDir();
+  const result: HistoryStorageCompactResult = {
+    scanned: 0,
+    compacted: 0,
+    beforeBytes: 0,
+    afterBytes: 0,
+    warnings: [],
+  };
+  if (!fs.existsSync(HISTORY_DIR)) return result;
+
+  const minBytes = Math.max(0, Math.floor(options.minBytes ?? HISTORY_COMPACT_MIN_BYTES));
+  const files = fs.readdirSync(HISTORY_DIR).filter((file) => file.endsWith(".json"));
+  for (const file of files) {
+    const sessionId = file.replace(/\.json$/, "");
+    const fullPath = path.join(HISTORY_DIR, file);
+    let before = 0;
+    try {
+      before = fs.statSync(fullPath).size;
+      if (before < minBytes) continue;
+      result.scanned++;
+      result.beforeBytes += before;
+      const entries = readHistoryEntries(sessionId, { backfillUserUuids: false });
+      writeHistoryEntries(sessionId, entries);
+      const after = fs.statSync(fullPath).size;
+      result.afterBytes += after;
+      if (after < before) {
+        result.compacted++;
+        console.log(`[HistoryCompact] ${sessionId}: ${(before / 1024 / 1024).toFixed(1)} MB -> ${(after / 1024 / 1024).toFixed(1)} MB`);
+      }
+    } catch (err: any) {
+      result.afterBytes += before;
+      const warning = `${sessionId}: ${err?.message || String(err)}`;
+      result.warnings.push(warning);
+      console.warn(`[HistoryCompact] ${warning}`);
+    }
+  }
+  return result;
 }
 
 // ── SDK session discovery ──
@@ -2385,7 +2563,7 @@ export function getCodexThreadSessionInfo(sessionId: string): SessionInfo | null
       createdAt,
       lastActive,
       messagePreview: preview.slice(0, 200),
-      turnCount: conversationTurnCountForSession(String(row.id)),
+      turnCount: 0,
       backend: "codex",
       codexDriver: "app-server",
     } as SessionInfo;

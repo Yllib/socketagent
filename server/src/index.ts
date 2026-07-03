@@ -10,7 +10,7 @@ import { execFileSync } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
+import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -39,6 +39,21 @@ process.on("unhandledRejection", (reason) => {
 
 const PORT = parseInt(process.env.PORT || "8085", 10);
 type AppVersionInfo = { version: string; url: string };
+const WS_QUEUE_WARN_MS = Number(process.env.SOCKETAGENT_WS_QUEUE_WARN_MS || 250);
+const WS_HANDLER_WARN_MS = Number(process.env.SOCKETAGENT_WS_HANDLER_WARN_MS || 500);
+const WS_SEND_WARN_MS = Number(process.env.SOCKETAGENT_WS_SEND_WARN_MS || 250);
+
+function logSlowWs(label: string, startedAt: number, details: Record<string, unknown> = {}): void {
+  const elapsedMs = Date.now() - startedAt;
+  const threshold = label.includes("queue") ? WS_QUEUE_WARN_MS
+    : label.includes("send") ? WS_SEND_WARN_MS
+      : WS_HANDLER_WARN_MS;
+  if (elapsedMs < threshold) return;
+  const suffix = Object.entries(details)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" ");
+  console.warn(`[Perf] ${label} ms=${elapsedMs}${suffix ? ` ${suffix}` : ""}`);
+}
 
 function parseAppVersionInfo(raw: string): AppVersionInfo | null {
   try {
@@ -321,11 +336,18 @@ async function getEnrichedSessions(): Promise<SessionInfo[]> {
     });
 }
 
-/** Broadcast current session list to all connected clients */
-async function broadcastSessionList(): Promise<void> {
+/** Broadcast current session list to all connected clients immediately. */
+async function broadcastSessionListNow(reason = "manual"): Promise<void> {
+  const startedAt = Date.now();
   try {
     const enriched = await getEnrichedSessions();
+    const stringifyStartedAt = Date.now();
     const msg = JSON.stringify({ type: "session_list", sessions: enriched });
+    logSlowWs("ws_send_session_list_stringify", stringifyStartedAt, {
+      reason,
+      count: enriched.length,
+      bytes: Buffer.byteLength(msg),
+    });
     for (const client of connectedClients) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(msg);
@@ -335,9 +357,52 @@ async function broadcastSessionList(): Promise<void> {
     if (relayConnectionHandler) {
       relayConnectionHandler.sendRaw(msg);
     }
+    logSlowWs("ws_send_session_list", startedAt, { reason, count: enriched.length });
   } catch (err: any) {
     console.warn(`[Sessions] failed to broadcast session list: ${err?.message || err}`);
   }
+}
+
+let sessionListBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionListBroadcastAt = 0;
+let sessionListBroadcastQueued = false;
+let sessionListBroadcastInFlight = false;
+
+function flushSessionListBroadcast(reason: string): void {
+  sessionListBroadcastTimer = null;
+  sessionListBroadcastAt = 0;
+  if (sessionListBroadcastInFlight) {
+    sessionListBroadcastQueued = true;
+    broadcastSessionList(250, `${reason}:queued`);
+    return;
+  }
+  if (!sessionListBroadcastQueued) return;
+
+  sessionListBroadcastQueued = false;
+  sessionListBroadcastInFlight = true;
+  broadcastSessionListNow(reason)
+    .catch((err: any) => {
+      console.warn(`[Sessions] failed to flush session list: ${err?.message || err}`);
+    })
+    .finally(() => {
+      sessionListBroadcastInFlight = false;
+      if (sessionListBroadcastQueued) {
+        broadcastSessionList(250, `${reason}:again`);
+      }
+    });
+}
+
+/** Coalesced session-list broadcast. Explicit list_sessions requests remain immediate. */
+function broadcastSessionList(delayMs = 500, reason = "update"): void {
+  sessionListBroadcastQueued = true;
+  const targetAt = Date.now() + Math.max(0, delayMs);
+  if (sessionListBroadcastTimer && targetAt >= sessionListBroadcastAt) return;
+  if (sessionListBroadcastTimer) clearTimeout(sessionListBroadcastTimer);
+  sessionListBroadcastAt = targetAt;
+  sessionListBroadcastTimer = setTimeout(
+    () => flushSessionListBroadcast(reason),
+    Math.max(0, targetAt - Date.now()),
+  );
 }
 
 /** Broadcast scheduled task list to all connected clients */
@@ -542,19 +607,8 @@ function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: 
   }
 }
 
-/** Debounced broadcast for intermediate updates during queries */
-let broadcastPending = false;
-function scheduleBroadcast(): void {
-  if (broadcastPending) return;
-  broadcastPending = true;
-  setTimeout(() => {
-    broadcastPending = false;
-    broadcastSessionList();
-  }, 2000);
-}
-
 function notifySessionActivity(): void {
-  scheduleBroadcast();
+  broadcastSessionList(2000, "activity");
   broadcastStatusSync();
 }
 
@@ -782,7 +836,13 @@ function createConnectionHandler(transport: ClientTransport) {
 
   function sendJson(obj: Record<string, unknown>): void {
     if (transport.readyState === WebSocket.OPEN) {
-      transport.send(JSON.stringify(redactSecretsDeep(obj)));
+      const startedAt = Date.now();
+      const raw = JSON.stringify(redactSecretsDeep(obj));
+      logSlowWs("ws_send_json", startedAt, {
+        type: obj.type || "unknown",
+        bytes: Buffer.byteLength(raw),
+      });
+      transport.send(raw);
     }
   }
 
@@ -830,7 +890,7 @@ function createConnectionHandler(transport: ClientTransport) {
 
   function emitExternalNativeHistory(sessionInfo: SessionInfo, added: any[]): void {
     if (added.length === 0) return;
-    const total = getHistory(sessionInfo.id).length;
+    const total = getHistoryCount(sessionInfo.id);
     sendJson({
       type: "session_history",
       sessionId: sessionInfo.id,
@@ -1502,7 +1562,7 @@ function createConnectionHandler(transport: ClientTransport) {
         // Send message history — if session is running, load back to last user prompt
         const historyStartMs = Date.now();
         const isRunning = activeSessions.has(msg.sessionId) && activeSessions.get(msg.sessionId)!.isRunning;
-        if (sessionInfo.backend === "codex" && !contextCleared && getHistory(msg.sessionId).length === 0) {
+        if (sessionInfo.backend === "codex" && !contextCleared && getHistoryCount(msg.sessionId) === 0) {
           syncCodexRolloutHistory(sessionInfo);
         }
         const page = isRunning
@@ -1522,14 +1582,11 @@ function createConnectionHandler(transport: ClientTransport) {
         console.log(`[ResumeHistory] sent initial history for ${msg.sessionId}: entries=${page.entries.length} total=${page.total} offset=${page.offset} ms=${Date.now() - historyStartMs}`);
 
         // Check for missed messages from Claude Code's session file
-        const allHistory = getHistory(msg.sessionId);
-        const lastTimestamp = allHistory.length > 0
-          ? allHistory[allHistory.length - 1].timestamp
-          : "";
+        const lastTimestamp = getLastHistoryTimestamp(msg.sessionId);
         if (sessionInfo.backend === "codex" && !contextCleared) {
           syncCodexNativeHistory(sessionInfo).then((added) => {
             if (added.length === 0) return;
-            const total = getHistory(msg.sessionId).length;
+            const total = getHistoryCount(msg.sessionId);
             sendJson({
               type: "session_history",
               sessionId: msg.sessionId,
@@ -1736,7 +1793,7 @@ function createConnectionHandler(transport: ClientTransport) {
           if (resumeSessionInfo?.backend === "codex") {
             const added = await syncCodexNativeHistory(resumeSessionInfo);
             if (added.length > 0) {
-              const total = getHistory(resumeId).length;
+              const total = getHistoryCount(resumeId);
               sendJson({
                 type: "session_history",
                 sessionId: resumeId,
@@ -4469,6 +4526,29 @@ httpServer.listen(PORT, async () => {
 // Clean up any tool calls left pending from a previous server crash
 cleanupPendingToolCalls();
 
+if (process.env.SOCKETAGENT_HISTORY_COMPACT_ON_STARTUP !== "0") {
+  const runStartupHistoryCompaction = () => {
+    const hasRunningSession = [...activeSessions.values()].some((session) => session.isRunning);
+    if (hasRunningSession) {
+      setTimeout(runStartupHistoryCompaction, 30_000).unref();
+      return;
+    }
+    try {
+      const result = compactHistoryStorage();
+      if (result.scanned > 0) {
+        console.log(
+          `[HistoryCompact] scanned=${result.scanned} compacted=${result.compacted} ` +
+          `before=${(result.beforeBytes / 1024 / 1024).toFixed(1)}MB ` +
+          `after=${(result.afterBytes / 1024 / 1024).toFixed(1)}MB warnings=${result.warnings.length}`,
+        );
+      }
+    } catch (err: any) {
+      console.warn(`[HistoryCompact] startup compaction failed: ${err?.message || String(err)}`);
+    }
+  };
+  setTimeout(runStartupHistoryCompaction, 15_000).unref();
+}
+
 
 // ── Periodic status sync heartbeat ──
 // Broadcasts current state to all connected clients so the app stays in sync
@@ -4897,8 +4977,18 @@ wss.on("connection", (ws: WebSocket) => {
       }
     }
 
+    const receivedAt = Date.now();
+    const msgType = (msg as any)?.type || "unknown";
     messageQueue = messageQueue
-      .then(() => handler.handleMessage(msg))
+      .then(async () => {
+        const startedAt = Date.now();
+        logSlowWs("ws_queue_wait", receivedAt, { type: msgType });
+        try {
+          await handler.handleMessage(msg);
+        } finally {
+          logSlowWs("ws_handler", startedAt, { type: msgType });
+        }
+      })
       .catch((err: any) => {
         ws.send(
           JSON.stringify({
@@ -4962,8 +5052,18 @@ function startRelayClient(): void {
         console.log(`[Relay] Created connection handler for phone`);
       }
       const handler = relayConnectionHandler;
+      const receivedAt = Date.now();
+      const msgType = (msg as any)?.type || "unknown";
       relayMessageQueue = relayMessageQueue
-        .then(() => handler.handleMessage(msg))
+        .then(async () => {
+          const startedAt = Date.now();
+          logSlowWs("relay_queue_wait", receivedAt, { type: msgType });
+          try {
+            await handler.handleMessage(msg);
+          } finally {
+            logSlowWs("relay_handler", startedAt, { type: msgType });
+          }
+        })
         .catch((err: any) => {
           console.error(`[Relay] Message handler error: ${err.message}`);
           handler.sendJson({

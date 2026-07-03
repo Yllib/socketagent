@@ -841,14 +841,53 @@ foreach ($commandName in @("claude", "codex")) {
 }
 $batContent = @"
 @echo off
+setlocal EnableExtensions
+rem SocketAgent Windows service wrapper v2
 set "HOME=$env:USERPROFILE"
 set "PATH=$servicePath"
-cd /d "$SERVER_DIR"
+set "SERVER_DIR=$SERVER_DIR"
+set "REPO_ROOT=$REPO_ROOT"
+set "LOG_FILE=$LOG_FILE"
+set "NODE_EXE=$nodeExe"
+set "SERVER_SCRIPT=$serverScript"
+set "NPM_CMD=npm.cmd"
+set "NPX_CMD=npx.cmd"
+if exist "%ProgramFiles%\nodejs\npm.cmd" set "NPM_CMD=%ProgramFiles%\nodejs\npm.cmd"
+if exist "%ProgramFiles%\nodejs\npx.cmd" set "NPX_CMD=%ProgramFiles%\nodejs\npx.cmd"
+
 :loop
-"$nodeExe" "$serverScript" >> "$LOG_FILE" 2>&1
-echo Server exited (%ERRORLEVEL%), restarting in 5s...
+call :preflight >> "%LOG_FILE%" 2>&1
+if errorlevel 1 echo [startup] Preflight update failed; launching existing build. >> "%LOG_FILE%" 2>&1
+cd /d "%SERVER_DIR%"
+"%NODE_EXE%" "%SERVER_SCRIPT%" >> "%LOG_FILE%" 2>&1
+echo Server exited (%ERRORLEVEL%), restarting in 5s... >> "%LOG_FILE%" 2>&1
 timeout /t 5 /nobreak >nul
 goto loop
+
+:preflight
+cd /d "%REPO_ROOT%"
+git rev-parse --is-inside-work-tree >nul 2>&1 || exit /b 0
+git fetch origin
+if errorlevel 1 exit /b 0
+set "BRANCH="
+set "LOCAL_HASH="
+set "REMOTE_HASH="
+for /f %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "BRANCH=%%B"
+if not defined BRANCH exit /b 0
+for /f %%H in ('git rev-parse HEAD 2^>nul') do set "LOCAL_HASH=%%H"
+for /f %%H in ('git rev-parse origin/%BRANCH% 2^>nul') do set "REMOTE_HASH=%%H"
+if not defined REMOTE_HASH exit /b 0
+if "%LOCAL_HASH%"=="%REMOTE_HASH%" exit /b 0
+echo [Auto-update] Applying %REMOTE_HASH:~0,7% from origin/%BRANCH%
+git reset --hard origin/%BRANCH%
+if errorlevel 1 exit /b 1
+cd /d "%SERVER_DIR%"
+call "%NPM_CMD%" ci --include=optional
+if errorlevel 1 exit /b 1
+call "%NPX_CMD%" tsc
+if errorlevel 1 exit /b 1
+> "%REPO_ROOT%\.last-auto-update-hash" echo %REMOTE_HASH%
+exit /b 0
 "@
 Set-Content -Path $batFile -Value $batContent -Encoding ASCII
 Write-Ok "Generated run-service.bat"

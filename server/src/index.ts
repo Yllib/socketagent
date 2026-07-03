@@ -5427,6 +5427,85 @@ function installSocketAgentCliFromRepo(gitRoot: string): void {
   }
 }
 
+function batchSetValue(value: string | undefined): string {
+  return String(value || "").replace(/"/g, "");
+}
+
+function windowsRunServiceBatContent(): string {
+  const userHome = process.env.USERPROFILE || os.homedir();
+  const logFile = path.join(SERVER_DIR, "socketagent.log");
+  const serverScript = path.join(SERVER_DIR, "dist", "index.js");
+  const nodeExe = process.env.SOCKETAGENT_NODE || process.execPath;
+  const servicePath = batchSetValue(process.env.PATH);
+
+  return [
+    "@echo off",
+    "setlocal EnableExtensions",
+    "rem SocketAgent Windows service wrapper v2",
+    `set "HOME=${batchSetValue(userHome)}"`,
+    `set "PATH=${servicePath}"`,
+    `set "SERVER_DIR=${batchSetValue(SERVER_DIR)}"`,
+    `set "REPO_ROOT=${batchSetValue(GIT_ROOT)}"`,
+    `set "LOG_FILE=${batchSetValue(logFile)}"`,
+    `set "NODE_EXE=${batchSetValue(nodeExe)}"`,
+    `set "SERVER_SCRIPT=${batchSetValue(serverScript)}"`,
+    'set "NPM_CMD=npm.cmd"',
+    'set "NPX_CMD=npx.cmd"',
+    'if exist "%ProgramFiles%\\nodejs\\npm.cmd" set "NPM_CMD=%ProgramFiles%\\nodejs\\npm.cmd"',
+    'if exist "%ProgramFiles%\\nodejs\\npx.cmd" set "NPX_CMD=%ProgramFiles%\\nodejs\\npx.cmd"',
+    "",
+    ":loop",
+    'call :preflight >> "%LOG_FILE%" 2>&1',
+    'if errorlevel 1 echo [startup] Preflight update failed; launching existing build. >> "%LOG_FILE%" 2>&1',
+    'cd /d "%SERVER_DIR%"',
+    '"%NODE_EXE%" "%SERVER_SCRIPT%" >> "%LOG_FILE%" 2>&1',
+    'echo Server exited (%ERRORLEVEL%), restarting in 5s... >> "%LOG_FILE%" 2>&1',
+    "timeout /t 5 /nobreak >nul",
+    "goto loop",
+    "",
+    ":preflight",
+    'cd /d "%REPO_ROOT%"',
+    "git rev-parse --is-inside-work-tree >nul 2>&1 || exit /b 0",
+    "git fetch origin",
+    "if errorlevel 1 exit /b 0",
+    "set \"BRANCH=\"",
+    "set \"LOCAL_HASH=\"",
+    "set \"REMOTE_HASH=\"",
+    "for /f %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set \"BRANCH=%%B\"",
+    "if not defined BRANCH exit /b 0",
+    "for /f %%H in ('git rev-parse HEAD 2^>nul') do set \"LOCAL_HASH=%%H\"",
+    "for /f %%H in ('git rev-parse origin/%BRANCH% 2^>nul') do set \"REMOTE_HASH=%%H\"",
+    "if not defined REMOTE_HASH exit /b 0",
+    'if "%LOCAL_HASH%"=="%REMOTE_HASH%" exit /b 0',
+    "echo [Auto-update] Applying %REMOTE_HASH:~0,7% from origin/%BRANCH%",
+    "git reset --hard origin/%BRANCH%",
+    "if errorlevel 1 exit /b 1",
+    'cd /d "%SERVER_DIR%"',
+    'call "%NPM_CMD%" ci --include=optional',
+    "if errorlevel 1 exit /b 1",
+    'call "%NPX_CMD%" tsc',
+    "if errorlevel 1 exit /b 1",
+    '> "%REPO_ROOT%\\.last-auto-update-hash" echo %REMOTE_HASH%',
+    "exit /b 0",
+    "",
+  ].join("\r\n");
+}
+
+function ensureWindowsServiceWrapper(): void {
+  if (process.platform !== "win32") return;
+  try {
+    const batFile = path.join(SERVER_DIR, "run-service.bat");
+    const content = windowsRunServiceBatContent();
+    let current = "";
+    try { current = fs.readFileSync(batFile, "utf-8"); } catch {}
+    if (current.replace(/\r\n/g, "\n") === content.replace(/\r\n/g, "\n")) return;
+    fs.writeFileSync(batFile, content, "ascii");
+    console.log(`[Startup] Updated Windows service wrapper at ${batFile}`);
+  } catch (e: any) {
+    console.warn(`[Startup] Could not update Windows service wrapper: ${e?.message || String(e)}`);
+  }
+}
+
 function unquoteSystemdValue(value: string): string {
   const trimmed = value.trim();
   if (
@@ -5506,6 +5585,18 @@ async function checkForUpdates(): Promise<void> {
       return; // No remote tracking branch
     }
 
+    const local = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+    if (process.platform === "win32") {
+      if (remote === local) return;
+      const blockReason = autoUpdateBlockReason();
+      if (blockReason) {
+        console.log(`[Auto-update] Update available (${remote.substring(0, 7)}) but ${blockReason}, deferring Windows wrapper restart...`);
+        return;
+      }
+      console.log(`[Auto-update] Update available (${remote.substring(0, 7)}); restarting for Windows wrapper update...`);
+      process.exit(1);
+    }
+
     // Track the last remote hash we successfully applied to prevent restart loops
     // when servers have local commits (local HEAD != origin HEAD permanently)
     const lastAppliedFile = path.join(GIT_ROOT, ".last-auto-update-hash");
@@ -5550,6 +5641,7 @@ async function checkForUpdates(): Promise<void> {
 
 installSocketAgentCliFromRepo(GIT_ROOT);
 ensureStartupPreflightService();
+ensureWindowsServiceWrapper();
 console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s)`);
 setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
 

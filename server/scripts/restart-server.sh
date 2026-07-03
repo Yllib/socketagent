@@ -79,6 +79,9 @@ if [[ -z "$EXTRA_SESSION" && -n "${CLAUDE_SESSION_ID:-}" ]]; then
   EXTRA_SESSION="$CLAUDE_SESSION_ID"
 fi
 
+RECOVERY_SCRIPT="$SERVER_DIR/scripts/recovery-guard.sh"
+RECOVERY_ID=""
+
 # Load .env for PORT and AUTH_TOKEN
 if [[ -f "$SERVER_DIR/.env" ]]; then
   set -a
@@ -334,6 +337,18 @@ fi
 # Step 3: Restart the systemd service
 echo ""
 echo "[3/5] Restarting $SERVICE_NAME service..."
+if [[ -x "$RECOVERY_SCRIPT" ]]; then
+  if RECOVERY_ID="$("$RECOVERY_SCRIPT" arm manual-restart 180)"; then
+    echo "  Recovery guard armed: $RECOVERY_ID"
+  else
+    echo "  Failed to arm recovery guard; restart aborted"
+    echo "$ALL_SESSIONS" | while read -r sid; do
+      [[ -z "$sid" ]] && continue
+      inject_history "$sid" "assistant" "[Server restart FAILED — recovery guard could not be armed. Server was NOT restarted.]"
+    done
+    exit 1
+  fi
+fi
 # After restart, the parent process (Claude/Codex session) is dead, so stdout is
 # a broken pipe. Redirect before invoking systemctl; otherwise systemctl/echo can
 # hit EPIPE and set -e exits before we write completion/continue messages.
@@ -373,6 +388,9 @@ while ! check_server 2>/dev/null; do
 done
 
 echo "  Server is up! (took ${WAITED}s)"
+if [[ -n "$RECOVERY_ID" && -x "$RECOVERY_SCRIPT" ]]; then
+  "$RECOVERY_SCRIPT" cancel "$RECOVERY_ID" || true
+fi
 
 # Step 5: Continue ALL sessions that were running
 echo ""

@@ -31,6 +31,21 @@ function Show-Usage {
     Write-Host "  socketagent help                Show this help"
 }
 
+function Register-SocketAgentRecovery {
+    $recoveryBat = Join-Path $serverDir "run-recovery.bat"
+    if (-not (Test-Path $recoveryBat)) { return }
+
+    $action = New-ScheduledTaskAction `
+        -Execute $env:ComSpec `
+        -Argument ('/d /c "' + $recoveryBat + '"')
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5)
+    Register-ScheduledTask `
+        -TaskName "SocketAgentRecovery" `
+        -Action $action `
+        -Trigger $trigger `
+        -Force | Out-Null
+}
+
 $cmd = if ($Args.Count -gt 0) { $Args[0] } else { "help" }
 $rest = if ($Args.Count -gt 1) { $Args[1..($Args.Count - 1)] } else { @() }
 
@@ -59,6 +74,7 @@ switch ($cmd.ToLowerInvariant()) {
     }
     "restart" {
         $taskName = Get-SocketAgentTaskName
+        Register-SocketAgentRecovery
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
         Start-ScheduledTask -TaskName $taskName

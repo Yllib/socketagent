@@ -10,6 +10,7 @@ set -euo pipefail
 SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SERVER_DIR"
 
+RECOVERY_SCRIPT="$SERVER_DIR/scripts/recovery-guard.sh"
 NODE_MIN_VERSION="${SOCKETAGENT_NODE_MIN_VERSION:-22}"
 NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"
 USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
@@ -21,6 +22,7 @@ LOCK_DIR="$SERVER_DIR/.startup-repair.lock"
 LOCK_PID_FILE="$LOCK_DIR/pid"
 LOCK_STALE_SECONDS="${SOCKETAGENT_STARTUP_LOCK_STALE_SECONDS:-600}"
 LOCK_HELD=false
+STARTUP_RECOVERY_ID=""
 
 log() {
   echo "[startup] $*"
@@ -98,6 +100,19 @@ release_lock() {
     rm -rf "$LOCK_DIR" 2>/dev/null || true
     LOCK_HELD=false
     trap - EXIT
+  fi
+}
+
+arm_startup_recovery() {
+  if [[ -n "$STARTUP_RECOVERY_ID" || ! -x "$RECOVERY_SCRIPT" ]]; then
+    return
+  fi
+
+  STARTUP_RECOVERY_ID="$("$RECOVERY_SCRIPT" arm startup-repair 600 2>/dev/null || true)"
+  if [[ -n "$STARTUP_RECOVERY_ID" ]]; then
+    log "Startup recovery guard armed: $STARTUP_RECOVERY_ID"
+  else
+    log "Warning: failed to arm startup recovery guard"
   fi
 }
 
@@ -239,6 +254,7 @@ select_node_runtime() {
   fi
 
   acquire_lock
+  arm_startup_recovery
   if ! node_is_usable "$USER_NODE_DIR/bin/node"; then
     run_repair "node" install_managed_node
   fi
@@ -314,6 +330,7 @@ select_node_runtime
 
 if deps_need_install; then
   acquire_lock
+  arm_startup_recovery
   if deps_need_install; then
     run_repair "npm" "$NPM_BIN" ci --include=optional
   fi
@@ -321,6 +338,7 @@ fi
 
 if build_needs_compile; then
   acquire_lock
+  arm_startup_recovery
   if build_needs_compile; then
     run_repair "tsc" "$NPX_BIN" tsc
   fi

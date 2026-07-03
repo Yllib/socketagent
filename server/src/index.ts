@@ -2306,6 +2306,31 @@ function createConnectionHandler(transport: ClientTransport) {
       case "force_update": {
         const { execSync } = require("child_process");
         try {
+          if (process.platform === "win32") {
+            let hash = "";
+            try {
+              hash = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+            } catch {}
+            try {
+              armRestartRecoveryGuard("force-update", 300);
+            } catch (guardErr: any) {
+              sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}` });
+              break;
+            }
+            sendJson({
+              type: "update_result",
+              success: true,
+              message: "Restarting Windows service wrapper to apply updates",
+              hash,
+              needsRestart: true,
+            });
+            setTimeout(() => {
+              console.log("[ForceUpdate] Restarting Windows server so service wrapper can apply updates");
+              process.exit(1);
+            }, 1000);
+            break;
+          }
+
           const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
           const beforeHash = execSync("git rev-parse HEAD", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
 
@@ -2323,6 +2348,12 @@ function createConnectionHandler(transport: ClientTransport) {
 
           if (beforeHash === afterHash) {
             if ((msg as any).forceRestart) {
+              try {
+                armRestartRecoveryGuard("force-update", 180);
+              } catch (guardErr: any) {
+                sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}` });
+                break;
+              }
               sendJson({ type: "update_result", success: true, message: "Recompiled and restarting", hash: afterHash, needsRestart: true });
               setTimeout(() => {
                 console.log(`[ForceUpdate] Force restart after recompile`);
@@ -2335,6 +2366,12 @@ function createConnectionHandler(transport: ClientTransport) {
           }
 
           const afterMsg = execSync("git log -1 --format=%s", { cwd: GIT_ROOT, stdio: "pipe" }).toString().trim();
+          try {
+            armRestartRecoveryGuard("force-update", 180);
+          } catch (guardErr: any) {
+            sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}` });
+            break;
+          }
           sendJson({ type: "update_result", success: true, message: `Updated to ${afterHash.substring(0, 7)}: ${afterMsg}`, hash: afterHash, needsRestart: true });
 
           // Auto-restart after a short delay so the response gets sent
@@ -5432,6 +5469,32 @@ function batchSetValue(value: string | undefined): string {
   return String(value || "").replace(/"/g, "");
 }
 
+function windowsRecoveryBatContent(): string {
+  const logFile = path.join(SERVER_DIR, "socketagent.log");
+  return [
+    "@echo off",
+    "setlocal EnableExtensions",
+    "rem SocketAgent Windows recovery guard",
+    `set "SERVER_DIR=${batchSetValue(SERVER_DIR)}"`,
+    `set "LOG_FILE=${batchSetValue(logFile)}"`,
+    'set "PORT=8085"',
+    'for /f "tokens=1,* delims==" %%A in (\'findstr /b "PORT=" "%SERVER_DIR%\\.env" 2^>nul\') do if /i "%%A"=="PORT" set "PORT=%%B"',
+    'set "PORT=%PORT:"=%"',
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=[int]$env:PORT; $c=New-Object Net.Sockets.TcpClient; try { $iar=$c.BeginConnect(\'127.0.0.1\',$p,$null,$null); if (-not $iar.AsyncWaitHandle.WaitOne(1500,$false)) { exit 1 }; $c.EndConnect($iar); exit 0 } catch { exit 1 } finally { $c.Close() }"',
+    "if not errorlevel 1 goto done",
+    'echo [recovery] SocketAgent is not listening on port %PORT%; restarting scheduled task. >> "%LOG_FILE%" 2>&1',
+    'set "TASK_NAME=SocketAgent"',
+    'schtasks /Query /TN SocketAgent >nul 2>&1 || set "TASK_NAME=SocketClaude"',
+    'schtasks /End /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1',
+    "timeout /t 2 /nobreak >nul",
+    'schtasks /Run /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1',
+    ":done",
+    "schtasks /Delete /TN SocketAgentRecovery /F >nul 2>&1",
+    "exit /b 0",
+    "",
+  ].join("\r\n");
+}
+
 function windowsRunServiceBatContent(): string {
   const userHome = process.env.USERPROFILE || os.homedir();
   const logFile = path.join(SERVER_DIR, "socketagent.log");
@@ -5450,12 +5513,14 @@ function windowsRunServiceBatContent(): string {
     `set "LOG_FILE=${batchSetValue(logFile)}"`,
     `set "NODE_EXE=${batchSetValue(nodeExe)}"`,
     `set "SERVER_SCRIPT=${batchSetValue(serverScript)}"`,
+    `set "RECOVERY_BAT=${batchSetValue(path.join(SERVER_DIR, "run-recovery.bat"))}"`,
     'set "NPM_CMD=npm.cmd"',
     'set "NPX_CMD=npx.cmd"',
     'if exist "%ProgramFiles%\\nodejs\\npm.cmd" set "NPM_CMD=%ProgramFiles%\\nodejs\\npm.cmd"',
     'if exist "%ProgramFiles%\\nodejs\\npx.cmd" set "NPX_CMD=%ProgramFiles%\\nodejs\\npx.cmd"',
     "",
     ":loop",
+    "call :arm_recovery",
     'call :preflight >> "%LOG_FILE%" 2>&1',
     'if errorlevel 1 echo [startup] Preflight update failed; launching existing build. >> "%LOG_FILE%" 2>&1',
     'cd /d "%SERVER_DIR%"',
@@ -5463,6 +5528,11 @@ function windowsRunServiceBatContent(): string {
     'echo Server exited (%ERRORLEVEL%), restarting in 5s... >> "%LOG_FILE%" 2>&1',
     "timeout /t 5 /nobreak >nul",
     "goto loop",
+    "",
+    ":arm_recovery",
+    'if not exist "%RECOVERY_BAT%" exit /b 0',
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$a=New-ScheduledTaskAction -Execute $env:ComSpec -Argument (\'/d /c \' + [char]34 + $env:RECOVERY_BAT + [char]34); $t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); Register-ScheduledTask -TaskName \'SocketAgentRecovery\' -Action $a -Trigger $t -Force | Out-Null" >nul 2>&1',
+    "exit /b 0",
     "",
     ":preflight",
     'cd /d "%REPO_ROOT%"',
@@ -5496,12 +5566,21 @@ function ensureWindowsServiceWrapper(): void {
   if (process.platform !== "win32") return;
   try {
     const batFile = path.join(SERVER_DIR, "run-service.bat");
+    const recoveryFile = path.join(SERVER_DIR, "run-recovery.bat");
     const content = windowsRunServiceBatContent();
+    const recoveryContent = windowsRecoveryBatContent();
     let current = "";
     try { current = fs.readFileSync(batFile, "utf-8"); } catch {}
-    if (current.replace(/\r\n/g, "\n") === content.replace(/\r\n/g, "\n")) return;
-    fs.writeFileSync(batFile, content, "ascii");
-    console.log(`[Startup] Updated Windows service wrapper at ${batFile}`);
+    if (current.replace(/\r\n/g, "\n") !== content.replace(/\r\n/g, "\n")) {
+      fs.writeFileSync(batFile, content, "ascii");
+      console.log(`[Startup] Updated Windows service wrapper at ${batFile}`);
+    }
+    let currentRecovery = "";
+    try { currentRecovery = fs.readFileSync(recoveryFile, "utf-8"); } catch {}
+    if (currentRecovery.replace(/\r\n/g, "\n") !== recoveryContent.replace(/\r\n/g, "\n")) {
+      fs.writeFileSync(recoveryFile, recoveryContent, "ascii");
+      console.log(`[Startup] Updated Windows recovery wrapper at ${recoveryFile}`);
+    }
   } catch (e: any) {
     console.warn(`[Startup] Could not update Windows service wrapper: ${e?.message || String(e)}`);
   }
@@ -5565,6 +5644,58 @@ function ensureStartupPreflightService(): void {
   }
 }
 
+function armUnixRecoveryGuard(reason: string, delaySeconds = 180): string | null {
+  if (process.platform === "win32") return null;
+  const script = path.join(SERVER_DIR, "scripts", "recovery-guard.sh");
+  if (!fs.existsSync(script)) {
+    throw new Error(`Recovery guard script is missing: ${script}`);
+  }
+  fs.chmodSync(script, 0o755);
+  const id = execFileSync(script, ["arm", reason, String(delaySeconds)], {
+    cwd: SERVER_DIR,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 10000,
+  }).trim();
+  if (!id) throw new Error("Recovery guard did not return an id");
+  console.log(`[Recovery] Armed ${reason} guard: ${id}`);
+  return id;
+}
+
+function armWindowsRecoveryGuard(reason: string, delaySeconds = 300): string | null {
+  if (process.platform !== "win32") return null;
+  ensureWindowsServiceWrapper();
+  const recoveryFile = path.join(SERVER_DIR, "run-recovery.bat");
+  if (!fs.existsSync(recoveryFile)) {
+    throw new Error(`Windows recovery script is missing: ${recoveryFile}`);
+  }
+  const command = [
+    "$bat = $env:SOCKETAGENT_RECOVERY_BAT",
+    "$delay = [int]$env:SOCKETAGENT_RECOVERY_DELAY_SECONDS",
+    "$action = New-ScheduledTaskAction -Execute $env:ComSpec -Argument ('/d /c ' + [char]34 + $bat + [char]34)",
+    "$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds($delay)",
+    "Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action $action -Trigger $trigger -Force | Out-Null",
+  ].join("; ");
+  execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
+    cwd: SERVER_DIR,
+    env: {
+      ...process.env,
+      SOCKETAGENT_RECOVERY_BAT: recoveryFile,
+      SOCKETAGENT_RECOVERY_DELAY_SECONDS: String(delaySeconds),
+    },
+    stdio: "pipe",
+    timeout: 10000,
+  });
+  console.log(`[Recovery] Armed Windows ${reason} guard via ${recoveryFile}`);
+  return "SocketAgentRecovery";
+}
+
+function armRestartRecoveryGuard(reason: string, delaySeconds = 180): string | null {
+  return process.platform === "win32"
+    ? armWindowsRecoveryGuard(reason, Math.max(delaySeconds, 300))
+    : armUnixRecoveryGuard(reason, delaySeconds);
+}
+
 async function checkForUpdates(): Promise<void> {
   if (autoUpdateInProgress) return;
   autoUpdateInProgress = true;
@@ -5597,6 +5728,13 @@ async function checkForUpdates(): Promise<void> {
         return;
       }
       console.log(`[Auto-update] Update available (${remote.substring(0, 7)}); restarting for Windows wrapper update...`);
+      try {
+        armRestartRecoveryGuard("windows-auto-update", 300);
+      } catch (guardErr: any) {
+        lastAutoUpdateError = `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}`;
+        console.error(`[Auto-update] ${lastAutoUpdateError}`);
+        return;
+      }
       process.exit(1);
     }
 
@@ -5632,6 +5770,13 @@ async function checkForUpdates(): Promise<void> {
     fs.writeFileSync(lastAppliedFile, remote);
 
     console.log(`[Auto-update] Compiled successfully, restarting for ${remote.substring(0, 7)}...`);
+    try {
+      armRestartRecoveryGuard("auto-update", 180);
+    } catch (guardErr: any) {
+      lastAutoUpdateError = `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}`;
+      console.error(`[Auto-update] ${lastAutoUpdateError}`);
+      return;
+    }
 
     // Exit with non-zero so systemd Restart=on-failure triggers a restart.
     // exit(0) is clean and won't restart. Windows batch loops check for any exit.

@@ -826,6 +826,7 @@ if ($existing) {
 # Generate run-service.bat with restart loop
 # This ensures the server auto-restarts after updates (process.exit(1))
 $batFile = Join-Path $SERVER_DIR "run-service.bat"
+$recoveryBatFile = Join-Path $SERVER_DIR "run-recovery.bat"
 $servicePath = $env:PATH -replace '"', ''
 if (-not (Test-PathListContains $servicePath $NPM_BIN_DIR)) {
     $servicePath = "$NPM_BIN_DIR;$servicePath"
@@ -850,12 +851,14 @@ set "REPO_ROOT=$REPO_ROOT"
 set "LOG_FILE=$LOG_FILE"
 set "NODE_EXE=$nodeExe"
 set "SERVER_SCRIPT=$serverScript"
+set "RECOVERY_BAT=$recoveryBatFile"
 set "NPM_CMD=npm.cmd"
 set "NPX_CMD=npx.cmd"
 if exist "%ProgramFiles%\nodejs\npm.cmd" set "NPM_CMD=%ProgramFiles%\nodejs\npm.cmd"
 if exist "%ProgramFiles%\nodejs\npx.cmd" set "NPX_CMD=%ProgramFiles%\nodejs\npx.cmd"
 
 :loop
+call :arm_recovery
 call :preflight >> "%LOG_FILE%" 2>&1
 if errorlevel 1 echo [startup] Preflight update failed; launching existing build. >> "%LOG_FILE%" 2>&1
 cd /d "%SERVER_DIR%"
@@ -863,6 +866,11 @@ cd /d "%SERVER_DIR%"
 echo Server exited (%ERRORLEVEL%), restarting in 5s... >> "%LOG_FILE%" 2>&1
 timeout /t 5 /nobreak >nul
 goto loop
+
+:arm_recovery
+if not exist "%RECOVERY_BAT%" exit /b 0
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "`$a=New-ScheduledTaskAction -Execute `$env:ComSpec -Argument ('/d /c ' + [char]34 + `$env:RECOVERY_BAT + [char]34); `$t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action `$a -Trigger `$t -Force | Out-Null" >nul 2>&1
+exit /b 0
 
 :preflight
 cd /d "%REPO_ROOT%"
@@ -891,6 +899,30 @@ exit /b 0
 "@
 Set-Content -Path $batFile -Value $batContent -Encoding ASCII
 Write-Ok "Generated run-service.bat"
+
+$recoveryContent = @"
+@echo off
+setlocal EnableExtensions
+rem SocketAgent Windows recovery guard
+set "SERVER_DIR=$SERVER_DIR"
+set "LOG_FILE=$LOG_FILE"
+set "PORT=8085"
+for /f "tokens=1,* delims==" %%A in ('findstr /b "PORT=" "%SERVER_DIR%\.env" 2^>nul') do if /i "%%A"=="PORT" set "PORT=%%B"
+set "PORT=%PORT:"=%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "`$p=[int]`$env:PORT; `$c=New-Object Net.Sockets.TcpClient; try { `$iar=`$c.BeginConnect('127.0.0.1',`$p,`$null,`$null); if (-not `$iar.AsyncWaitHandle.WaitOne(1500,`$false)) { exit 1 }; `$c.EndConnect(`$iar); exit 0 } catch { exit 1 } finally { `$c.Close() }"
+if not errorlevel 1 goto done
+echo [recovery] SocketAgent is not listening on port %PORT%; restarting scheduled task. >> "%LOG_FILE%" 2>&1
+set "TASK_NAME=SocketAgent"
+schtasks /Query /TN SocketAgent >nul 2>&1 || set "TASK_NAME=SocketClaude"
+schtasks /End /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1
+timeout /t 2 /nobreak >nul
+schtasks /Run /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1
+:done
+schtasks /Delete /TN SocketAgentRecovery /F >nul 2>&1
+exit /b 0
+"@
+Set-Content -Path $recoveryBatFile -Value $recoveryContent -Encoding ASCII
+Write-Ok "Generated run-recovery.bat"
 
 $action = New-ScheduledTaskAction `
     -Execute "cmd.exe" `

@@ -806,6 +806,7 @@ export interface PushRegistrationStatusServerMessage {
 export interface ServerCapabilitiesMessage {
   type: "server_capabilities";
   binaryEnvelope?: boolean;
+  /** Backends supported by this server build. Health/auth state is in backendHealth. */
   backends: Backend[];
   codexDriver?: CodexDriver;
   codexDriversAvailable?: CodexDriver[];

@@ -932,12 +932,40 @@ function createConnectionHandler(transport: ClientTransport) {
   }
 
   function codexUnavailable(): boolean {
-    return !detectAvailableBackends().includes("codex");
+    return !getCodexAvailability().available;
   }
 
-  function codexUnavailableMessage(prefix = "Codex backend is not available on this server"): string {
+  function isCodexMissingAuthReason(reason: string | undefined): boolean {
+    return /auth\.json|authentication|auth/i.test(reason || "");
+  }
+
+  function sendCodexUnavailable(prefix = "Codex backend is not available on this server", sessionId?: string): void {
     const availability = getCodexAvailability();
-    return `${prefix}: ${availability.reason || "unknown reason"}`;
+    const detail = availability.reason || "unknown reason";
+    if (isCodexMissingAuthReason(detail)) {
+      markBackendAuthRequired("codex", detail);
+      invalidateCodexAvailabilityCache();
+      invalidateCodexDriverAvailabilityCache();
+      sendJson({
+        type: "backend_auth_required",
+        backend: "codex",
+        sessionId,
+        message: "Codex authentication is missing, invalid, or expired. Sign in to Codex to continue.",
+        detail,
+      });
+      sendJson({
+        type: "server_settings",
+        ...getAdvertisedServerSettings(),
+        codexCollaborationMode: pendingCodexCollaborationMode,
+      });
+      broadcastServerCapabilities();
+      return;
+    }
+
+    sendJson({
+      type: "error",
+      message: `${prefix}: ${detail}`,
+    });
   }
 
   function sleep(ms: number): Promise<void> {
@@ -1412,10 +1440,7 @@ function createConnectionHandler(transport: ClientTransport) {
         stopExternalNativeWatcher();
         const cwd = msg.cwd || getDefaultCwd();
         if (msg.backend === "codex" && codexUnavailable()) {
-          sendJson({
-            type: "error",
-            message: codexUnavailableMessage(),
-          });
+          sendCodexUnavailable();
           break;
         }
         // Detach old session so it stops sending to this client
@@ -1512,10 +1537,7 @@ function createConnectionHandler(transport: ClientTransport) {
           break;
         }
         if (sessionInfo.backend === "codex" && codexUnavailable()) {
-          sendJson({
-            type: "error",
-            message: codexUnavailableMessage("This is a Codex session, but Codex is not available on this server"),
-          });
+          sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", msg.sessionId);
           break;
         }
 
@@ -1724,10 +1746,7 @@ function createConnectionHandler(transport: ClientTransport) {
           const savedPromptSession = savedResumeId ? getSession(savedResumeId) : undefined;
           const promptBackend = savedPromptSession?.backend;
           if (promptBackend === "codex" && codexUnavailable()) {
-            sendJson({
-              type: "error",
-              message: codexUnavailableMessage("This is a Codex session, but Codex is not available on this server"),
-            });
+            sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", savedResumeId);
             break;
           }
           activeSession = createSession(promptBackend, transport as any, cwd, plugins, getStoredCodexDriver(savedPromptSession));
@@ -4484,7 +4503,7 @@ let relayMessageQueue = Promise.resolve();
 httpServer.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT} (WebSocket + HTTP)`);
   console.log(`Default working directory: ${getDefaultCwd()}`);
-  console.log(`Available backends: ${detectAvailableBackends().join(", ")}`);
+  console.log(`Supported backends: ${detectAvailableBackends().join(", ")}`);
 
   // Initialize plugins
   const pluginContext: PluginContext = {

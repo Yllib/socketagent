@@ -11,9 +11,9 @@
 .PARAMETER Port
     Server port (default: 8085).
 .PARAMETER Backends
-    Agent backend selection: claude, codex, both, or installed. If omitted, the installer prompts.
+    Managed toolchain selection: claude, codex, both, or installed. If omitted, the installer prompts.
 .PARAMETER NonInteractive
-    Do not prompt for input. Requires -Backends and skips interactive auth login prompts.
+    Do not prompt for input. Defaults to both managed toolchains when -Backends is omitted and skips interactive auth login prompts.
 .PARAMETER SkipClaudeLogin
     Do not run interactive Claude login if credentials are missing.
 .PARAMETER SkipCodexLogin
@@ -336,7 +336,7 @@ function Convert-BackendSelection($value) {
         { $_ -in @("2", "claude", "anthropic") } { return "claude" }
         { $_ -in @("3", "both", "all", "claude,codex", "codex,claude") } { return "claude,codex" }
         { $_ -in @("auto", "installed", "existing") } { return Get-InstalledBackendSelection }
-        default { throw "Invalid backend selection '$value'. Use claude, codex, both, or installed." }
+        default { throw "Invalid managed toolchain selection '$value'. Use claude, codex, both, or installed." }
     }
 }
 
@@ -425,24 +425,24 @@ if ($portInUse) {
     }
 }
 
-Write-Phase "Backend Selection"
+Write-Phase "Backend Toolchain Setup"
 if (-not $Backends) {
     if ($NonInteractive) {
-        Write-Fail "NonInteractive mode requires -Backends claude, -Backends codex, -Backends both, or -Backends installed."
-        exit 1
+        $Backends = "both"
+    } else {
+        Write-Host "  Which managed agent toolchain(s) should SocketAgent install or repair now?"
+        Write-Host "    1) Codex only"
+        Write-Host "    2) Claude only"
+        Write-Host "    3) Both Claude and Codex"
+        Write-Host ""
+        $Backends = Read-Host "  Choose [3]"
+        if (-not $Backends) { $Backends = "3" }
     }
-    Write-Host "  Which agent backend(s) should this server use?"
-    Write-Host "    1) Codex only"
-    Write-Host "    2) Claude only"
-    Write-Host "    3) Both Claude and Codex"
-    Write-Host ""
-    $Backends = Read-Host "  Choose [3]"
-    if (-not $Backends) { $Backends = "3" }
 }
-$enabledBackends = Convert-BackendSelection $Backends
-$installClaude = (",$enabledBackends,").Contains(",claude,")
-$installCodex = (",$enabledBackends,").Contains(",codex,")
-Write-Ok "Selected backends: $enabledBackends"
+$installBackends = Convert-BackendSelection $Backends
+$installClaude = (",$installBackends,").Contains(",claude,")
+$installCodex = (",$installBackends,").Contains(",codex,")
+Write-Ok "Selected managed toolchains: $installBackends"
 
 # ══════════════════════════════════════════════
 #  Phase 1: Node.js & Git
@@ -785,8 +785,7 @@ $setupResult = Invoke-NativeCapture {
         --keysfile $KEYS_FILE `
         --relay-url $RELAY_URL `
         --default-cwd $env:USERPROFILE `
-        --port $Port `
-        --enabled-backends $enabledBackends
+        --port $Port
 }
 $setupOutput = $setupResult.Output
 

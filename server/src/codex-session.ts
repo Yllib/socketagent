@@ -2950,20 +2950,17 @@ export function createSession(
   plugins: SocketAgentPlugin[],
   _codexDriver?: CodexDriver,
 ): Session {
-  const enabled = getEnabledBackendSet();
-  const requestedBackend = backend || (enabled.has("claude") ? "claude" : "codex");
+  const requestedBackend = backend || "claude";
   if (requestedBackend === "codex") {
-    if (!enabled.has("codex")) {
-      throw new Error("Codex backend is disabled on this server");
-    }
     const availability = getCodexAvailability();
     if (!availability.available) {
       throw new Error(`Codex backend is not available on this server: ${availability.reason || "unknown reason"}`);
     }
     return new CodexSession(ws, cwd, plugins);
   }
-  if (!enabled.has("claude")) {
-    throw new Error("Claude backend is disabled on this server");
+  const availability = getClaudeAvailability();
+  if (!availability.available) {
+    throw new Error(`Claude backend is not available on this server: ${availability.reason || "unknown reason"}`);
   }
   // Lazy require keeps the cycle (CodexSession → ClaudeSession via type-only
   // import) from blowing up at runtime.
@@ -3060,19 +3057,6 @@ export function invalidateCodexAvailabilityCache(): void {
   _cachedCodexAvailability = null;
 }
 
-function getEnabledBackendSet(): Set<Backend> {
-  const raw = (process.env.ENABLED_BACKENDS || "claude,codex").toLowerCase().trim();
-  if (raw === "all" || raw === "both") return new Set<Backend>(["claude", "codex"]);
-
-  const enabled = new Set<Backend>();
-  for (const part of raw.split(",")) {
-    const name = part.trim();
-    if (name === "claude" || name === "anthropic") enabled.add("claude");
-    if (name === "codex" || name === "openai") enabled.add("codex");
-  }
-  return enabled.size > 0 ? enabled : new Set<Backend>(["claude", "codex"]);
-}
-
 export function getCodexAvailability(): { available: boolean; reason?: string } {
   const now = Date.now();
   if (_cachedCodexAvailability && now - _cachedCodexAvailability.checkedAt < CODEX_AVAILABILITY_CACHE_MS) {
@@ -3150,25 +3134,9 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
 }
 
 /**
- * Returns the list of agent backends this server can drive. Codex availability
- * is rechecked on a short cache window so install/auth fixes can be picked up
- * without a SocketAgent restart.
- *
- * Both backends are rechecked on short cache windows so install/auth fixes can
- * be picked up without a SocketAgent restart.
+ * Returns the agent backends supported by this server build. Runtime health,
+ * installation, and auth state are reported separately through backendHealth.
  */
 export function detectAvailableBackends(): Backend[] {
-  const enabled = getEnabledBackendSet();
-  const list: Backend[] = [];
-  try {
-    if (enabled.has("claude") && getClaudeAvailability().available) list.push("claude");
-  } catch (e: any) {
-    console.error(`[claude] backend detection failed: ${e?.message || String(e)}`);
-  }
-  try {
-    if (enabled.has("codex") && getCodexAvailability().available) list.push("codex");
-  } catch (e: any) {
-    console.error(`[codex] backend detection failed: ${e?.message || String(e)}`);
-  }
-  return list;
+  return ["claude", "codex"];
 }

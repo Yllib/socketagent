@@ -70,19 +70,6 @@ function normalizeDefaultCwd(value: unknown): string {
   return resolveClientPath(value).resolvedPath || BOOT_DEFAULT_CWD;
 }
 
-function enabledBackends(): Set<Backend> {
-  const raw = (process.env.ENABLED_BACKENDS || "claude,codex").toLowerCase().trim();
-  if (raw === "all" || raw === "both") return new Set<Backend>(["claude", "codex"]);
-
-  const enabled = new Set<Backend>();
-  for (const part of raw.split(",")) {
-    const name = part.trim();
-    if (name === "claude" || name === "anthropic") enabled.add("claude");
-    if (name === "codex" || name === "openai") enabled.add("codex");
-  }
-  return enabled.size > 0 ? enabled : new Set<Backend>(["claude", "codex"]);
-}
-
 function pathStartsWith(candidate: string | undefined, dir: string): boolean {
   if (!candidate) return false;
   try {
@@ -120,17 +107,7 @@ function firstOutputLine(stdout?: string | Buffer, stderr?: string | Buffer): st
   return text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
 }
 
-function codexHealth(enabled: boolean): BackendHealthInfo {
-  if (!enabled) {
-    return {
-      backend: "codex",
-      enabled: false,
-      available: false,
-      severity: "disabled",
-      reason: "Codex is disabled by ENABLED_BACKENDS.",
-    };
-  }
-
+function codexHealth(): BackendHealthInfo {
   const codexVersion = buildCodexSpawn(["--version"]);
   const source = codexCommandSource(codexVersion.command);
   const base: BackendHealthInfo = {
@@ -211,17 +188,7 @@ function codexHealth(enabled: boolean): BackendHealthInfo {
   };
 }
 
-function claudeHealth(enabled: boolean): BackendHealthInfo {
-  if (!enabled) {
-    return {
-      backend: "claude",
-      enabled: false,
-      available: false,
-      severity: "disabled",
-      reason: "Claude is disabled by ENABLED_BACKENDS.",
-    };
-  }
-
+function claudeHealth(): BackendHealthInfo {
   const info = getClaudeExecutableInfo();
   const availability = getClaudeAvailability();
   if (!info.path) {
@@ -351,10 +318,9 @@ export function getBackendHealth(): BackendHealthInfo[] {
     return cachedBackendHealth.value;
   }
 
-  const enabled = enabledBackends();
   const value = [
-    claudeHealth(enabled.has("claude")),
-    codexHealth(enabled.has("codex")),
+    claudeHealth(),
+    codexHealth(),
   ].map((entry) => backendHealthOverrides.get(entry.backend) ?? entry);
   cachedBackendHealth = { checkedAt: Date.now(), value };
   return value;

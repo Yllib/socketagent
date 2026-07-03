@@ -21,7 +21,7 @@ NODE_MIN_VERSION=22
 PORT=8085
 RESET_PAIRING=false
 BACKENDS=""
-ENABLED_BACKENDS=""
+INSTALL_BACKENDS=""
 INSTALL_CLAUDE=false
 INSTALL_CODEX=false
 SERVER_BUILD_DONE=false
@@ -140,40 +140,40 @@ select_backends() {
 
   if [[ -z "$value" ]]; then
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
-      fail "Non-interactive mode requires --backends claude, --backends codex, --backends both, or --backends installed."
-      exit 1
+      value="both"
+    else
+      phase "Backend Toolchain Setup"
+      echo "  Which managed agent toolchain(s) should SocketAgent install or repair now?"
+      echo "    1) Codex only"
+      echo "    2) Claude only"
+      echo "    3) Both Claude and Codex"
+      echo ""
+      prompt_read "  Choose [3]: " value
+      value=$(echo "${value:-3}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
     fi
-    phase "Backend Selection"
-    echo "  Which agent backend(s) should this server use?"
-    echo "    1) Codex only"
-    echo "    2) Claude only"
-    echo "    3) Both Claude and Codex"
-    echo ""
-    prompt_read "  Choose [3]: " value
-    value=$(echo "${value:-3}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
   fi
 
   case "$value" in
     1|codex|openai)
-      ENABLED_BACKENDS="codex"
+      INSTALL_BACKENDS="codex"
       ;;
     2|claude|anthropic)
-      ENABLED_BACKENDS="claude"
+      INSTALL_BACKENDS="claude"
       ;;
     3|both|all|claude,codex|codex,claude)
-      ENABLED_BACKENDS="claude,codex"
+      INSTALL_BACKENDS="claude,codex"
       ;;
     auto|installed|existing)
-      ENABLED_BACKENDS="$(detect_installed_backends)"
+      INSTALL_BACKENDS="$(detect_installed_backends)"
       ;;
     *)
-      fail "Invalid backend selection: ${1:-$value}. Use claude, codex, both, or installed."
+      fail "Invalid managed toolchain selection: ${1:-$value}. Use claude, codex, both, or installed."
       exit 1
       ;;
   esac
 
-  if [[ ",$ENABLED_BACKENDS," == *",claude,"* ]]; then INSTALL_CLAUDE=true; fi
-  if [[ ",$ENABLED_BACKENDS," == *",codex,"* ]]; then INSTALL_CODEX=true; fi
+  if [[ ",$INSTALL_BACKENDS," == *",claude,"* ]]; then INSTALL_CLAUDE=true; fi
+  if [[ ",$INSTALL_BACKENDS," == *",codex,"* ]]; then INSTALL_CODEX=true; fi
 }
 
 detect_installed_backends() {
@@ -251,7 +251,7 @@ if [[ ! -d "$SERVER_DIR" ]] || [[ ! -f "$SERVER_DIR/package.json" ]]; then
 fi
 
 select_backends "$BACKENDS"
-ok "Selected backends: $ENABLED_BACKENDS"
+ok "Selected managed toolchains: $INSTALL_BACKENDS"
 
 # ══════════════════════════════════════════════
 #  Phase 1: Node.js
@@ -503,8 +503,7 @@ SETUP_OUTPUT=$(cd "$SERVER_DIR" && node "$SETUP_SCRIPT" \
   --keysfile "$KEYS_FILE" \
   --relay-url "$RELAY_URL" \
   --default-cwd "$HOME" \
-  --port "$PORT" \
-  --enabled-backends "$ENABLED_BACKENDS")
+  --port "$PORT")
 
 # QR payload is the last line
 QR_PAYLOAD=$(echo "$SETUP_OUTPUT" | tail -1)

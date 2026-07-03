@@ -381,9 +381,8 @@ export class RelayClient {
         peer.binaryEnabled = true;
         console.log(`[Relay] Phone announced binary envelope support — flipping outbound to binary${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
       }
-      // Ack so the phone knows the server is now sending binary, and tell
-      // it which agent backends this server can drive (claude is always
-      // present; codex iff installed + authed).
+      // Ack so the phone knows the server is now sending binary, and tell it
+      // which agent backends this server supports plus current health state.
       const settings = getAdvertisedServerSettings();
       this.sendToPeer(peerId, {
         type: "server_capabilities",
@@ -391,6 +390,7 @@ export class RelayClient {
         backends: detectAvailableBackends(),
         codexDriver: settings.codexDriver,
         codexDriversAvailable: settings.codexDriversAvailable,
+        backendHealth: settings.backendHealth,
       }, peer);
       return;
     }

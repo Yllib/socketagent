@@ -2110,6 +2110,29 @@ export interface HistoryStorageCompactResult {
   warnings: string[];
 }
 
+function historyEntryNeedsStorageCompaction(entry: HistoryEntry): boolean {
+  if (entry.role !== "tool_result") return false;
+
+  if (typeof entry.toolOutput === "string") {
+    return Buffer.byteLength(entry.toolOutput, "utf8") > TOOL_OUTPUT_BLOB_THRESHOLD || !!entry.toolOutputRef;
+  }
+
+  if (!entry.toolOutputRef && typeof entry.content === "string") {
+    return Buffer.byteLength(entry.content, "utf8") > TOOL_OUTPUT_BLOB_THRESHOLD;
+  }
+
+  if (entry.toolOutputRef) {
+    const preview = (entry.toolOutputPreview || entry.content || "").slice(0, TOOL_OUTPUT_PREVIEW_CHARS);
+    return entry.content !== preview || entry.toolOutputPreview !== preview;
+  }
+
+  return false;
+}
+
+function historyNeedsStorageCompaction(entries: HistoryEntry[]): boolean {
+  return entries.some(historyEntryNeedsStorageCompaction);
+}
+
 export function compactHistoryStorage(options: { minBytes?: number } = {}): HistoryStorageCompactResult {
   ensureHistoryDir();
   const result: HistoryStorageCompactResult = {
@@ -2133,6 +2156,10 @@ export function compactHistoryStorage(options: { minBytes?: number } = {}): Hist
       result.scanned++;
       result.beforeBytes += before;
       const entries = readHistoryEntries(sessionId, { backfillUserUuids: false });
+      if (!historyNeedsStorageCompaction(entries)) {
+        result.afterBytes += before;
+        continue;
+      }
       writeHistoryEntries(sessionId, entries);
       const after = fs.statSync(fullPath).size;
       result.afterBytes += after;

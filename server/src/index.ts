@@ -702,6 +702,22 @@ function nativeHistoryFingerprintForSession(sessionInfo: SessionInfo): string | 
   }
 }
 
+function nativeHistoryChangedSince(sessionInfo: SessionInfo, lastTimestamp: string | undefined): boolean {
+  if (!lastTimestamp) return true;
+  const lastMs = Date.parse(lastTimestamp);
+  if (!Number.isFinite(lastMs)) return true;
+
+  const file = nativeHistoryPathForSession(sessionInfo);
+  if (!file) return false;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return false;
+    return stat.mtimeMs > lastMs + 1000;
+  } catch {
+    return false;
+  }
+}
+
 function markExternalNativeSessionActive(sessionId: string): void {
   externalNativeSessionActivity.set(sessionId, Date.now() + EXTERNAL_NATIVE_ACTIVE_TTL_MS);
   broadcastStatusSync();
@@ -900,6 +916,21 @@ function createConnectionHandler(transport: ClientTransport) {
       append: true,
     });
     broadcastSessionList();
+  }
+
+  function scheduleCodexNativeHistorySync(sessionInfo: SessionInfo, lastTimestamp: string | undefined, reason: string): void {
+    if (sessionInfo.backend !== "codex") return;
+    if (!nativeHistoryChangedSince(sessionInfo, lastTimestamp)) return;
+    const timer = setTimeout(() => {
+      syncCodexNativeHistory(sessionInfo).then((added) => {
+        if (added.length > 0) {
+          emitExternalNativeHistory(sessionInfo, added);
+        }
+      }).catch((err) => {
+        console.warn(`[CodexSync] ${reason} native history sync failed for ${sessionInfo.id}: ${err?.message || err}`);
+      });
+    }, 0);
+    timer.unref?.();
   }
 
   function startExternalNativeWatcher(sessionInfo: SessionInfo): void {
@@ -1606,21 +1637,7 @@ function createConnectionHandler(transport: ClientTransport) {
         // Check for missed messages from Claude Code's session file
         const lastTimestamp = getLastHistoryTimestamp(msg.sessionId);
         if (sessionInfo.backend === "codex" && !contextCleared) {
-          syncCodexNativeHistory(sessionInfo).then((added) => {
-            if (added.length === 0) return;
-            const total = getHistoryCount(msg.sessionId);
-            sendJson({
-              type: "session_history",
-              sessionId: msg.sessionId,
-              messages: added,
-              total,
-              offset: Math.max(0, total - added.length),
-              append: true,
-            });
-            broadcastSessionList();
-          }).catch((err) => {
-            console.warn(`[CodexSync] background native history sync failed for ${msg.sessionId}: ${err?.message || err}`);
-          });
+          scheduleCodexNativeHistorySync(sessionInfo, lastTimestamp, "resume");
         } else if (sessionInfo.backend === "codex" && contextCleared) {
           console.log(`[Resume] Skipping Codex native history sync for cleared session ${msg.sessionId}`);
         } else {
@@ -1810,18 +1827,7 @@ function createConnectionHandler(transport: ClientTransport) {
 
         if (resumeId) {
           if (resumeSessionInfo?.backend === "codex") {
-            const added = await syncCodexNativeHistory(resumeSessionInfo);
-            if (added.length > 0) {
-              const total = getHistoryCount(resumeId);
-              sendJson({
-                type: "session_history",
-                sessionId: resumeId,
-                messages: added,
-                total,
-                offset: Math.max(0, total - added.length),
-                append: true,
-              });
-            }
+            scheduleCodexNativeHistorySync(resumeSessionInfo, getLastHistoryTimestamp(resumeId), "prompt");
           }
         }
 
@@ -5142,7 +5148,6 @@ interface UpdateRuntimeTools {
   env: NodeJS.ProcessEnv;
   npm: string;
   npx: string;
-  shell: boolean;
 }
 
 function nodeCommandName(base: string): string {
@@ -5232,7 +5237,6 @@ function resolveUpdateRuntimeTools(): UpdateRuntimeTools {
       env: { ...process.env },
       npm: nodeCommandName("npm"),
       npx: nodeCommandName("npx"),
-      shell: process.platform === "win32",
     };
   }
 
@@ -5254,23 +5258,43 @@ function resolveUpdateRuntimeTools(): UpdateRuntimeTools {
     env,
     npm: env.SOCKETAGENT_NPM,
     npx: env.SOCKETAGENT_NPX,
-    shell: process.platform === "win32",
+  };
+}
+
+function quoteWindowsCmdArg(value: string): string {
+  if (!/[ \t&()^|<>"]/.test(value)) return value;
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function updateToolCommand(command: string, args: string[]): { command: string; args: string[] } {
+  if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(command)) {
+    return { command, args };
+  }
+  const commandLine = [quoteWindowsCmdArg(command), ...args.map(quoteWindowsCmdArg)].join(" ");
+  return {
+    command: process.env.ComSpec || "cmd.exe",
+    args: [
+      "/d",
+      "/s",
+      "/c",
+      `"${commandLine}"`,
+    ],
   };
 }
 
 function runPackageUpdateSync(cwd: string): void {
   const runtime = resolveUpdateRuntimeTools();
-  execFileSync(runtime.npm, ["ci", "--include=optional"], {
+  const npm = updateToolCommand(runtime.npm, ["ci", "--include=optional"]);
+  execFileSync(npm.command, npm.args, {
     cwd,
     env: runtime.env,
-    shell: runtime.shell,
     stdio: "pipe",
     timeout: 120000,
   });
-  execFileSync(runtime.npx, ["tsc"], {
+  const npx = updateToolCommand(runtime.npx, ["tsc"]);
+  execFileSync(npx.command, npx.args, {
     cwd,
     env: runtime.env,
-    shell: runtime.shell,
     stdio: "pipe",
     timeout: 120000,
   });
@@ -5278,11 +5302,11 @@ function runPackageUpdateSync(cwd: string): void {
 
 function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: string[], cwd: string): Promise<string> {
   const { execFile } = require("child_process");
+  const spec = updateToolCommand(command, args);
   return new Promise((resolve, reject) => {
-    execFile(command, args, {
+    execFile(spec.command, spec.args, {
       cwd,
       env: runtime.env,
-      shell: runtime.shell,
       timeout: 120000,
     }, (err: any, stdout: any, stderr: any) => {
       if (err) {

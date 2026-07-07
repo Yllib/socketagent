@@ -10,6 +10,7 @@ import { WebSocket } from "ws";
 import {
   ServerMessage,
   ActiveSubagentsServerMessage,
+  HistoryEntry,
   QuestionItem,
   SessionInfo,
 } from "./protocol";
@@ -1256,6 +1257,9 @@ export class ClaudeSession {
         getCwd: () => this.cwd,
         getBackend: () => "claude",
         send: (msg) => this.send(msg as ServerMessage),
+        appendHistory: (entry) => {
+          if (this.sessionId) appendHistory(this.sessionId, entry as HistoryEntry);
+        },
         getTtsEngine: () => this._ttsEngine,
         getKokoroVoice: () => this._kokoroVoice,
         getKokoroSpeed: () => this._kokoroSpeed,

@@ -93,6 +93,7 @@ function appendVisibleToolHistory(
   toolName: string,
   toolInput: Record<string, unknown>,
   toolOutput: string,
+  extra: Record<string, unknown> = {},
 ): void {
   if (!ctx.appendHistory) return;
   const toolUseId = `mcp_${toolName}_${crypto.randomUUID()}`;
@@ -104,6 +105,7 @@ function appendVisibleToolHistory(
     toolInput,
     toolUseId,
     timestamp,
+    ...extra,
   });
   ctx.appendHistory({
     role: "tool_result",
@@ -111,6 +113,7 @@ function appendVisibleToolHistory(
     toolUseId,
     toolOutput,
     timestamp: new Date().toISOString(),
+    ...extra,
   });
 }
 
@@ -174,9 +177,7 @@ export async function handleSendFileTool(
 
     const now = Date.now();
     if (recentSendFiles.has(fileId) && now - recentSendFiles.get(fileId)! < 10000) {
-      const sizeStr = sizeLabel(stat.size);
-      console.log(`[MCP:SendFile] Dedup: ${fileName} already sent recently, skipping`);
-      return { content: [{ type: "text", text: `File already sent: ${fileName} (${sizeStr})` }] };
+      console.log(`[MCP:SendFile] Dedup: ${fileName} was sent recently; replaying availability`);
     }
     recentSendFiles.set(fileId, now);
 
@@ -192,7 +193,13 @@ export async function handleSendFileTool(
     const sizeStr = sizeLabel(stat.size);
     console.log(`[MCP:SendFile] Returning result for ${fileName} (${sizeStr})`);
     const resultText = `File ready for download: ${fileName} (${sizeStr})`;
-    appendVisibleToolHistory(ctx, "SendFile", { file_path: filePath }, resultText);
+    appendVisibleToolHistory(
+      ctx,
+      "SendFile",
+      { file_path: filePath },
+      resultText,
+      { fileId, fileName, fileSize: stat.size },
+    );
     return { content: [{ type: "text", text: resultText }] };
   } catch (e: any) {
     console.error(`[MCP:SendFile] Error: ${e.message}`, e.stack);

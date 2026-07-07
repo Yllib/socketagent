@@ -84,6 +84,7 @@ export interface BackendInstallMessage {
   backend: Backend;
   reinstall?: boolean;
   authenticate?: boolean;
+  forceAuthenticate?: boolean;
   operation?: "repair" | "auth";
   requestId?: string;
 }
@@ -138,6 +139,7 @@ export interface RequestFileMessage {
   filePath: string;
   fileId?: string;
   offsetBytes?: number;
+  transferToken?: string;
 }
 
 export interface LoadMoreHistoryMessage {
@@ -181,6 +183,7 @@ export interface FileManagerDownloadMessage {
   path: string;
   fileId?: string;
   offsetBytes?: number;
+  transferToken?: string;
 }
 
 export interface FileManagerReadTextMessage {
@@ -334,6 +337,44 @@ export interface TerminalDetachMessage {
 
 export interface TerminalKillMessage {
   type: "terminal_kill";
+}
+
+export interface AdbBridgeSidecarStartMessage {
+  type: "adb_bridge_sidecar_start";
+  requestId?: string;
+  localPort?: number;
+}
+
+export interface AdbBridgeSidecarStopMessage {
+  type: "adb_bridge_sidecar_stop";
+  requestId?: string;
+}
+
+export interface AdbBridgeSidecarStatusMessage {
+  type: "adb_bridge_sidecar_status";
+  requestId?: string;
+}
+
+export interface AdbCommandMessage {
+  type: "adb_command";
+  requestId?: string;
+  command: "pair" | "connect";
+  host: string;
+  port: number;
+  code?: string;
+}
+
+export interface PhoneAdbResultMessage {
+  type: "phone_adb_result";
+  requestId: string;
+  result: Record<string, unknown>;
+}
+
+export interface PhoneAdbStreamChunkMessage {
+  type: "phone_adb_stream_chunk";
+  requestId: string;
+  stream: "stdout" | "stderr" | string;
+  data: string;
 }
 
 export interface RegisterPushTokenMessage {
@@ -584,6 +625,12 @@ export type ClientMessage =
   | TerminalResizeMessage
   | TerminalDetachMessage
   | TerminalKillMessage
+  | AdbBridgeSidecarStartMessage
+  | AdbBridgeSidecarStopMessage
+  | AdbBridgeSidecarStatusMessage
+  | AdbCommandMessage
+  | PhoneAdbResultMessage
+  | PhoneAdbStreamChunkMessage
   | RegisterPushTokenMessage
   | UnregisterPushTokenMessage
   | GetPushRegistrationMessage
@@ -886,6 +933,9 @@ export interface HistoryEntry {
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
   toolOutput?: string;
+  fileId?: string;
+  fileName?: string;
+  fileSize?: number;
   // Server-internal large-output storage. These fields may be present in
   // persisted history; the server hydrates toolOutput before sending to clients.
   toolOutputRef?: string;
@@ -953,6 +1003,7 @@ export interface FileChunkServerMessage {
   fileName: string;
   fileSize: number;
   offsetBytes?: number;
+  transferToken?: string;
   chunkIndex: number;
   totalChunks: number;
   data: string;
@@ -963,6 +1014,7 @@ export interface FileCompleteServerMessage {
   fileId: string;
   fileName: string;
   fileSize?: number;
+  transferToken?: string;
 }
 
 export interface UploadCompleteServerMessage {
@@ -1310,6 +1362,37 @@ export interface TerminalErrorServerMessage {
   message: string;
 }
 
+export interface PhoneAdbRequestServerMessage {
+  type: "phone_adb_request";
+  requestId: string;
+  command: string;
+  shellCommand?: string;
+  args?: string[];
+  timeoutSeconds?: number;
+  maxBytes?: number;
+  fileName?: string;
+  fileSize?: number;
+}
+
+export interface PhoneAdbFileChunkServerMessage {
+  type: "phone_adb_file_chunk";
+  requestId: string;
+  chunkIndex: number;
+  data: string;
+}
+
+export interface PhoneAdbFileEndServerMessage {
+  type: "phone_adb_file_end";
+  requestId: string;
+  ok: boolean;
+  message?: string;
+}
+
+export interface PhoneAdbCancelServerMessage {
+  type: "phone_adb_cancel";
+  requestId: string;
+}
+
 export type ServerMessage =
   | TextServerMessage
   | ToolCallServerMessage
@@ -1372,4 +1455,8 @@ export type ServerMessage =
   | TerminalStatusServerMessage
   | TerminalOutputServerMessage
   | TerminalExitedServerMessage
-  | TerminalErrorServerMessage;
+  | TerminalErrorServerMessage
+  | PhoneAdbRequestServerMessage
+  | PhoneAdbFileChunkServerMessage
+  | PhoneAdbFileEndServerMessage
+  | PhoneAdbCancelServerMessage;

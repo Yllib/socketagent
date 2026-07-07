@@ -30,6 +30,11 @@ server/tools/
 # Uploads (temp file storage)
 .uploads/
 
+# Local handoff / planning artifacts
+FILE_MANAGER_IMPLEMENTATION_PLAN.md
+socketagent-git-checkout-repair.md
+socketagent-git-checkout-repair.pdf
+
 # Auth/credential files
 *.tokens.json
 server/.secrets/

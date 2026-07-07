@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import type { Backend } from "./protocol";
 import { managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 
@@ -21,6 +21,7 @@ export interface BackendInstallOptions {
   backend: Backend;
   reinstall: boolean;
   authenticate: boolean;
+  forceAuthenticate?: boolean;
   signal?: AbortSignal;
   onProgress: (progress: BackendInstallProgress) => void;
 }
@@ -168,12 +169,67 @@ function codexAuthFileSignature(): string | undefined {
   }
 }
 
+function normalizeDeviceCodeCandidate(candidate: string, allowCompact = false): string | undefined {
+  const trimmed = candidate.trim();
+  const grouped = trimmed.match(/^[A-Z0-9]{4}(?:[-\s][A-Z0-9]{4}){1,3}$/i)?.[0];
+  if (grouped && (allowCompact || grouped.includes("-") || /\d/.test(grouped))) {
+    return grouped.replace(/\s+/g, "-").toUpperCase();
+  }
+  const compact = trimmed.match(/^[A-Z0-9]{8}$/i)?.[0];
+  if (compact && /\d/.test(compact)) {
+    return compact.toUpperCase();
+  }
+  return undefined;
+}
+
 function parseDeviceAuth(text: string): { authUrl?: string; authCode?: string } {
   const url = text.match(/https?:\/\/[^\s)]+/g)?.find((candidate) =>
     candidate.includes("/codex/device") || candidate.includes("device")
   );
-  const code = text.match(/\b[A-Z0-9]{4}(?:-[A-Z0-9]{4})+\b|\b[A-Z0-9]{8}\b/)?.[0];
-  return { authUrl: url, authCode: code };
+  const codeText = text.replace(/https?:\/\/[^\s)]+/g, " ");
+  const lines = codeText.split(/\r?\n/);
+  const contextRe = /\b(?:code|device|verification|one[-\s]?time)\b|enter/i;
+  const candidateRe = /\b[A-Z0-9]{4}(?:[-\s][A-Z0-9]{4}){1,3}\b|\b[A-Z0-9]{8}\b/gi;
+
+  let code: string | undefined;
+  for (let i = 0; i < lines.length && !code; i++) {
+    const context = [lines[i - 1], lines[i], lines[i + 1]].filter(Boolean).join("\n");
+    if (!contextRe.test(context)) continue;
+    const lineHasContext = contextRe.test(lines[i]);
+    for (const match of lines[i].matchAll(candidateRe)) {
+      const remainder = lines[i]
+        .replace(match[0], "")
+        .replace(/[^A-Z0-9]+/gi, "");
+      code = normalizeDeviceCodeCandidate(match[0], lineHasContext || remainder.length === 0);
+      if (code) break;
+    }
+  }
+
+  if (!code) {
+    for (const match of codeText.matchAll(candidateRe)) {
+      code = normalizeDeviceCodeCandidate(match[0], false);
+      if (code) break;
+    }
+  }
+
+  return {
+    authUrl: url,
+    authCode: code,
+  };
+}
+
+function isCodexLoginValid(command: string, env: NodeJS.ProcessEnv, shell?: boolean): boolean {
+  if (!codexAuthFileExists()) return false;
+  const result = spawnSync(command, ["login", "status"], {
+    env,
+    shell,
+    encoding: "utf8",
+    timeout: 10000,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status === 0) return true;
+  const text = `${result.stdout || ""}\n${result.stderr || ""}`;
+  return /(?:^|\n)\s*(?:Logged in|Authenticated)\b/im.test(text) || /ChatGPT/i.test(text);
 }
 
 async function runProcess(options: {
@@ -353,12 +409,16 @@ async function runCodexDeviceAuth(options: {
     const handleChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const text = stripTerminalControl(chunk.toString("utf8"));
       tail = (tail + text).slice(-12000);
+      const auth = parseDeviceAuth(text);
+      const message = auth.authUrl || auth.authCode
+        ? "Open the OpenAI Codex device page and enter the one-time code."
+        : text.trim() || `${stream} output`;
       options.onProgress({
         phase: "auth",
         status: "running",
-        message: text.trim() || `${stream} output`,
+        message,
         output: text,
-        ...parseDeviceAuth(text),
+        ...auth,
       });
     };
 
@@ -434,32 +494,40 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
       if (!managedCodex) {
         throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}. Run Install / Repair Codex again.`);
       }
-      options.onProgress({
-        phase: "auth",
-        status: "running",
-        message: "Open the OpenAI Codex device page and enter the one-time code.",
-        authUrl: CODEX_DEVICE_URL,
-      });
+      const codexShell = process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex);
+      if (!options.forceAuthenticate && isCodexLoginValid(managedCodex, env, codexShell)) {
+        options.onProgress({
+          phase: "auth",
+          status: "completed",
+          message: "Codex is already signed in on this server.",
+        });
+      } else {
+        options.onProgress({
+          phase: "auth",
+          status: "running",
+          message: "Open the OpenAI Codex device page and enter the one-time code.",
+          authUrl: CODEX_DEVICE_URL,
+        });
 
-      const codex = { command: managedCodex, args: ["login", "--device-auth"], env, shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex) };
-      await runCodexDeviceAuth({
-        command: codex.command,
-        args: codex.args,
-        env: codex.env,
-        shell: codex.shell,
-        timeoutMs: 15 * 60 * 1000,
-        signal: options.signal,
-        onProgress: options.onProgress,
-      });
+        await runCodexDeviceAuth({
+          command: managedCodex,
+          args: ["login", "--device-auth"],
+          env,
+          shell: codexShell,
+          timeoutMs: 15 * 60 * 1000,
+          signal: options.signal,
+          onProgress: options.onProgress,
+        });
 
-      if (!codexAuthFileExists()) {
-        throw new Error("Codex login finished, but ~/.codex/auth.json was not created");
+        if (!codexAuthFileExists()) {
+          throw new Error("Codex login finished, but ~/.codex/auth.json was not created");
+        }
+        options.onProgress({
+          phase: "auth",
+          status: "completed",
+          message: "Codex authentication is available on this server.",
+        });
       }
-      options.onProgress({
-        phase: "auth",
-        status: "completed",
-        message: "Codex authentication is available on this server.",
-      });
     }
   }
 

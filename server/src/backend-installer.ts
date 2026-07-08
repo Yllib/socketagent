@@ -169,38 +169,92 @@ function codexAuthFileSignature(): string | undefined {
   }
 }
 
+const DEVICE_CODE_STOP_WORDS = new Set([
+  "STARTING",
+  "AUTHORIZ",
+  "AUTHORIZE",
+  "AUTHCODE",
+  "LOGINING",
+  "LOGINCODE",
+  "SIGNININ",
+  "SIGNINCODE",
+  "BROWSER",
+  "OPENAI",
+  "DEVICE",
+  "DEVICECODE",
+  "ENTERCODE",
+  "TIMECODE",
+  "ONETIMECODE",
+  "VERIFICATIONCODE",
+  "RUNNING",
+  "WAITING",
+  "PENDING",
+  "COMPLETE",
+  "CANCELLED",
+]);
+
+function isDeviceCodeStopWord(candidate: string): boolean {
+  return DEVICE_CODE_STOP_WORDS.has(candidate.replace(/[^A-Z0-9]/gi, "").toUpperCase());
+}
+
 function normalizeDeviceCodeCandidate(candidate: string, allowCompact = false): string | undefined {
   const trimmed = candidate.trim();
   const grouped = trimmed.match(/^[A-Z0-9]{4}(?:[-\s][A-Z0-9]{4}){1,3}$/i)?.[0];
-  if (grouped && (allowCompact || grouped.includes("-") || /\d/.test(grouped))) {
-    return grouped.replace(/\s+/g, "-").toUpperCase();
+  if (grouped) {
+    const normalized = grouped.replace(/\s+/g, "-").toUpperCase();
+    if (!isDeviceCodeStopWord(normalized) && (allowCompact || normalized.includes("-") || /\d/.test(normalized))) {
+      return normalized;
+    }
   }
   const compact = trimmed.match(/^[A-Z0-9]{8}$/i)?.[0];
-  if (compact && /\d/.test(compact)) {
-    return compact.toUpperCase();
+  if (compact) {
+    const normalized = compact.toUpperCase();
+    if (!isDeviceCodeStopWord(normalized) && (allowCompact || /\d/.test(normalized))) {
+      return normalized;
+    }
+  }
+  return undefined;
+}
+
+function parseDeviceCodeFromUrl(candidate: string): string | undefined {
+  try {
+    const url = new URL(candidate);
+    for (const key of ["user_code", "userCode", "code", "device_code", "deviceCode"]) {
+      const value = url.searchParams.get(key);
+      if (!value) continue;
+      const code = normalizeDeviceCodeCandidate(value, true);
+      if (code) return code;
+    }
+  } catch {
+    // Ignore non-URL candidates.
   }
   return undefined;
 }
 
 function parseDeviceAuth(text: string): { authUrl?: string; authCode?: string } {
-  const url = text.match(/https?:\/\/[^\s)]+/g)?.find((candidate) =>
-    candidate.includes("/codex/device") || candidate.includes("device")
-  );
+  let url: string | undefined;
+  let code: string | undefined;
+  for (const rawUrl of text.match(/https?:\/\/[^\s)]+/g) ?? []) {
+    const candidate = rawUrl.replace(/[,.]+$/g, "");
+    if (!(candidate.includes("/codex/device") || candidate.includes("device"))) continue;
+    url ??= candidate;
+    code ??= parseDeviceCodeFromUrl(candidate);
+  }
   const codeText = text.replace(/https?:\/\/[^\s)]+/g, " ");
   const lines = codeText.split(/\r?\n/);
   const contextRe = /\b(?:code|device|verification|one[-\s]?time)\b|enter/i;
+  const explicitCodeRe = /\b(?:code|verification|one[-\s]?time)\b|enter/i;
   const candidateRe = /\b[A-Z0-9]{4}(?:[-\s][A-Z0-9]{4}){1,3}\b|\b[A-Z0-9]{8}\b/gi;
 
-  let code: string | undefined;
   for (let i = 0; i < lines.length && !code; i++) {
     const context = [lines[i - 1], lines[i], lines[i + 1]].filter(Boolean).join("\n");
     if (!contextRe.test(context)) continue;
-    const lineHasContext = contextRe.test(lines[i]);
+    const lineHasExplicitCodeContext = explicitCodeRe.test(lines[i]);
     for (const match of lines[i].matchAll(candidateRe)) {
       const remainder = lines[i]
         .replace(match[0], "")
         .replace(/[^A-Z0-9]+/gi, "");
-      code = normalizeDeviceCodeCandidate(match[0], lineHasContext || remainder.length === 0);
+      code = normalizeDeviceCodeCandidate(match[0], lineHasExplicitCodeContext || remainder.length === 0);
       if (code) break;
     }
   }
@@ -289,7 +343,7 @@ async function runProcess(options: {
     const handleChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const text = stripTerminalControl(chunk.toString("utf8"));
       tail = (tail + text).slice(-12000);
-      const auth = options.phase === "auth" ? parseDeviceAuth(text) : {};
+      const auth = options.phase === "auth" ? parseDeviceAuth(tail) : {};
       options.onProgress({
         phase: options.phase,
         status: "running",
@@ -409,7 +463,7 @@ async function runCodexDeviceAuth(options: {
     const handleChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const text = stripTerminalControl(chunk.toString("utf8"));
       tail = (tail + text).slice(-12000);
-      const auth = parseDeviceAuth(text);
+      const auth = parseDeviceAuth(tail);
       const message = auth.authUrl || auth.authCode
         ? "Open the OpenAI Codex device page and enter the one-time code."
         : text.trim() || `${stream} output`;

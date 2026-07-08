@@ -3028,6 +3028,15 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "force_update": {
+        if (autoUpdateInProgress) {
+          sendJson({
+            type: "update_result",
+            success: false,
+            error: "A server update is already in progress. Wait for it to finish, then check status again.",
+          });
+          break;
+        }
+        autoUpdateInProgress = true;
         try {
           if (process.platform === "win32") {
             let hash = "";
@@ -3112,6 +3121,8 @@ function createConnectionHandler(transport: ClientTransport) {
           }, 1000);
         } catch (e: any) {
           sendJson({ type: "update_result", success: false, error: e.message });
+        } finally {
+          autoUpdateInProgress = false;
         }
         break;
       }

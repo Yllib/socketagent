@@ -199,9 +199,9 @@ function isDeviceCodeStopWord(candidate: string): boolean {
 
 function normalizeDeviceCodeCandidate(candidate: string, allowCompact = false): string | undefined {
   const trimmed = candidate.trim();
-  const grouped = trimmed.match(/^[A-Z0-9]{4}(?:[-\s][A-Z0-9]{4,6}){1,3}$/i)?.[0];
+  const grouped = trimmed.match(/^[A-Z0-9]{4}(?:[- \t][A-Z0-9]{4,6}){1,3}$/i)?.[0];
   if (grouped) {
-    const normalized = grouped.replace(/\s+/g, "-").toUpperCase();
+    const normalized = grouped.replace(/[ \t]+/g, "-").toUpperCase();
     if (!isDeviceCodeStopWord(normalized) && (allowCompact || /\d/.test(normalized))) {
       return normalized;
     }
@@ -233,7 +233,7 @@ function parseDeviceCodeFromUrl(candidate: string): string | undefined {
 
 function parseDeviceCodeAfterPrompt(text: string): string | undefined {
   const promptRe = /\b(?:one[-\s]?time\s+code|enter[^\n]{0,120}?\bcode)\b/gi;
-  const candidateRe = /\b[A-Z0-9]{4}(?:[-\s][A-Z0-9]{4,6}){1,3}\b|\b[A-Z0-9]{8,9}\b/gi;
+  const candidateRe = /\b[A-Z0-9]{4}(?:[- \t][A-Z0-9]{4,6}){1,3}\b|\b[A-Z0-9]{8,9}\b/gi;
   for (const prompt of text.matchAll(promptRe)) {
     const tail = text.slice((prompt.index ?? 0) + prompt[0].length, (prompt.index ?? 0) + prompt[0].length + 500);
     for (const match of tail.matchAll(candidateRe)) {
@@ -258,7 +258,7 @@ function parseDeviceAuth(text: string): { authUrl?: string; authCode?: string } 
   const lines = codeText.split(/\r?\n/);
   const contextRe = /\b(?:code|device|verification|one[-\s]?time)\b|enter/i;
   const explicitCodeRe = /\b(?:code|verification|one[-\s]?time)\b|enter/i;
-  const candidateRe = /\b[A-Z0-9]{4}(?:[-\s][A-Z0-9]{4,6}){1,3}\b|\b[A-Z0-9]{8,9}\b/gi;
+  const candidateRe = /\b[A-Z0-9]{4}(?:[- \t][A-Z0-9]{4,6}){1,3}\b|\b[A-Z0-9]{8,9}\b/gi;
 
   for (let i = 0; i < lines.length && !code; i++) {
     const context = [lines[i - 1], lines[i], lines[i + 1]].filter(Boolean).join("\n");

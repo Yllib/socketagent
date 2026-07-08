@@ -231,15 +231,15 @@ function parseDeviceCodeFromUrl(candidate: string): string | undefined {
   return undefined;
 }
 
-function parseDeviceCodeAfterPrompt(text: string): string | undefined {
-  const promptRe = /\b(?:one[-\s]?time\s+code|enter[^\n]{0,120}?\bcode)\b/gi;
-  const candidateRe = /\b[A-Z0-9]{4}(?:[- \t][A-Z0-9]{4,6}){1,3}\b|\b[A-Z0-9]{8,9}\b/gi;
-  for (const prompt of text.matchAll(promptRe)) {
-    const tail = text.slice((prompt.index ?? 0) + prompt[0].length, (prompt.index ?? 0) + prompt[0].length + 500);
-    for (const match of tail.matchAll(candidateRe)) {
-      const code = normalizeDeviceCodeCandidate(match[0], true);
-      if (code) return code;
-    }
+function parseDeviceCodeAfterOneTime(text: string): string | undefined {
+  const oneTimeRe = /\bone-time\b/gi;
+  const hyphenatedRe = /\b[A-Z0-9]{4,6}(?:-[A-Z0-9]{4,6})+\b/gi;
+  for (const marker of text.matchAll(oneTimeRe)) {
+    const tail = text.slice((marker.index ?? 0) + marker[0].length);
+    const match = hyphenatedRe.exec(tail);
+    if (!match) continue;
+    const code = normalizeDeviceCodeCandidate(match[0], true);
+    if (code) return code;
   }
   return undefined;
 }
@@ -254,32 +254,7 @@ function parseDeviceAuth(text: string): { authUrl?: string; authCode?: string } 
     code ??= parseDeviceCodeFromUrl(candidate);
   }
   const codeText = text.replace(/https?:\/\/[^\s)]+/g, " ");
-  code ??= parseDeviceCodeAfterPrompt(codeText);
-  const lines = codeText.split(/\r?\n/);
-  const contextRe = /\b(?:code|device|verification|one[-\s]?time)\b|enter/i;
-  const explicitCodeRe = /\b(?:code|verification|one[-\s]?time)\b|enter/i;
-  const candidateRe = /\b[A-Z0-9]{4}(?:[- \t][A-Z0-9]{4,6}){1,3}\b|\b[A-Z0-9]{8,9}\b/gi;
-
-  for (let i = 0; i < lines.length && !code; i++) {
-    const context = [lines[i - 1], lines[i], lines[i + 1]].filter(Boolean).join("\n");
-    if (!contextRe.test(context)) continue;
-    const lineHasExplicitCodeContext = explicitCodeRe.test(lines[i]);
-    for (const match of lines[i].matchAll(candidateRe)) {
-      const remainder = lines[i]
-        .replace(match[0], "")
-        .replace(/[^A-Z0-9]+/gi, "");
-      if (!lineHasExplicitCodeContext && remainder.length > 0 && !/\d/.test(match[0])) continue;
-      code = normalizeDeviceCodeCandidate(match[0], lineHasExplicitCodeContext || remainder.length === 0);
-      if (code) break;
-    }
-  }
-
-  if (!code) {
-    for (const match of codeText.matchAll(candidateRe)) {
-      code = normalizeDeviceCodeCandidate(match[0], false);
-      if (code) break;
-    }
-  }
+  code ??= parseDeviceCodeAfterOneTime(codeText);
 
   return {
     authUrl: url,

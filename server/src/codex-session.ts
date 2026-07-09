@@ -1244,11 +1244,18 @@ export class CodexSession {
     }
     if (!this.appServer) {
       const codex = buildCodexSpawn(["app-server", "--listen", "stdio://"]);
+      const socketAgentSessionId = this.sessionId || this.threadId || this._resumeSessionId || "";
+      const codexEnv: NodeJS.ProcessEnv = { ...codex.env };
+      codexEnv.SOCKETAGENT_PORT = process.env.PORT || "8085";
+      if (socketAgentSessionId) {
+        codexEnv.SOCKETAGENT_SESSION_ID = socketAgentSessionId;
+        codexEnv.SOCKETAGENT_BACKEND = "codex";
+      }
       this.appServer = new CodexAppServerClient({
         cwd: this.cwd,
         command: codex.command,
         args: codex.args,
-        env: codex.env,
+        env: codexEnv,
         shell: codex.shell,
         requestTimeoutMs: 60_000,
         startupTimeoutMs: 30_000,

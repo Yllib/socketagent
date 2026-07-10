@@ -1421,7 +1421,7 @@ function createConnectionHandler(transport: ClientTransport) {
   let pendingTtsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   let pendingKokoroVoice = "af_heart";
   let pendingKokoroSpeed = 1.0;
-  let pendingEffort: 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh' = 'high';
+  let pendingEffort: 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh' | 'ultra' = 'high';
   let pendingThinking: { type: 'adaptive' } | { type: 'enabled'; budgetTokens: number } | { type: 'disabled' } = { type: 'adaptive' };
   let pendingDisallowedTools: string[] = [];
   let pendingSystemPrompt: string = '';
@@ -3558,7 +3558,7 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "set_effort": {
         const effort = (msg as any).effort as string;
-        if (['minimal', 'low', 'medium', 'high', 'max', 'xhigh'].includes(effort)) {
+        if (['minimal', 'low', 'medium', 'high', 'max', 'xhigh', 'ultra'].includes(effort)) {
           pendingEffort = effort as any;
           if (activeSession) {
             activeSession.setEffort(effort as any);

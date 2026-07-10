@@ -183,7 +183,7 @@ export class CodexSession {
   private _isRunning = false;
   private _runStartedAt: string | null = null;
   private _model: string | null = null;
-  private _effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh" = "high";
+  private _effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh" | "ultra" = "high";
   private _fastMode = false;
   private _sandbox: SandboxMode = "danger-full-access";
   private _approvalPolicy: CodexAppServerApprovalPolicy = "never";
@@ -276,6 +276,7 @@ export class CodexSession {
   /** Mirrors ClaudeSession.setModel — async to match signature. */
   async setModel(model?: string): Promise<void> {
     this._model = model ?? null;
+    this.normalizeEffortForModel(this._model);
     this.updateCachedSupportedModelSelection();
     if (this._lastSupportedModels) this.send(this._lastSupportedModels);
   }
@@ -363,7 +364,7 @@ export class CodexSession {
   // Some are meaningful for Codex, others remain no-ops where Codex has no
   // matching runtime control.
   setEffort(e: string): void {
-    if (e === "minimal" || e === "low" || e === "medium" || e === "high" || e === "max" || e === "xhigh") {
+    if (e === "minimal" || e === "low" || e === "medium" || e === "high" || e === "max" || e === "xhigh" || e === "ultra") {
       this._effort = e;
     }
   }
@@ -945,6 +946,18 @@ export class CodexSession {
             model.description ? String(model.description) : "",
             tiers.length > 0 ? `Tiers: ${tiers.join(", ")}` : "",
           ].filter(Boolean);
+          const supportedReasoningEfforts = Array.isArray(model.supportedReasoningEfforts)
+            ? model.supportedReasoningEfforts
+                .map((entry: any) => {
+                  const reasoningEffort = String(entry?.reasoningEffort || entry?.effort || entry || "").trim();
+                  if (!reasoningEffort) return null;
+                  return {
+                    reasoningEffort,
+                    ...(entry?.description ? { description: String(entry.description) } : {}),
+                  };
+                })
+                .filter(Boolean)
+            : [];
           return {
             id,
             value: id,
@@ -952,6 +965,8 @@ export class CodexSession {
             description: descriptionParts.join(" · "),
             current: id === currentModel,
             ...(tiers.length > 0 ? { tiers } : {}),
+            ...(supportedReasoningEfforts.length > 0 ? { supportedReasoningEfforts } : {}),
+            ...(model.defaultReasoningEffort ? { defaultReasoningEffort: String(model.defaultReasoningEffort) } : {}),
           };
         })
         .filter(Boolean) as Array<Record<string, unknown>>;
@@ -962,6 +977,7 @@ export class CodexSession {
         sessionId: this.sessionId || this._resumeSessionId || "",
       } as any as ServerMessage;
       this._lastSupportedModels = message;
+      this.normalizeEffortForModel(currentModel);
       this.send(message);
     } catch (e: any) {
       console.warn(`[CodexModels] Failed to list models: ${e?.message || e}`);
@@ -970,6 +986,19 @@ export class CodexSession {
 
   private codexModelId(model: any): string {
     return String(model?.id || model?.model || model?.value || "").trim();
+  }
+
+  private normalizeEffortForModel(modelId?: string | null): void {
+    const cached = this._lastSupportedModels as any;
+    if (!modelId || !cached || !Array.isArray(cached.models)) return;
+    const model = cached.models.find((entry: any) => String(entry?.value || entry?.id || "") === modelId);
+    if (!model || !Array.isArray(model.supportedReasoningEfforts)) return;
+    const supported = model.supportedReasoningEfforts
+      .map((entry: any) => String(entry?.reasoningEffort || entry?.effort || entry || "").trim())
+      .filter(Boolean);
+    if (supported.length === 0 || supported.includes(this._effort)) return;
+    const defaultEffort = String(model.defaultReasoningEffort || "").trim();
+    this._effort = (supported.includes(defaultEffort) ? defaultEffort : supported[0]) as typeof this._effort;
   }
 
   private updateCachedSupportedModelSelection(): void {
@@ -2847,7 +2876,7 @@ export class CodexSession {
   }
 
   private codexReasoningEffort(): string {
-    return this._effort === "max" ? "high" : this._effort;
+    return this._effort;
   }
 
   private configuredCodexModel(): string | undefined {

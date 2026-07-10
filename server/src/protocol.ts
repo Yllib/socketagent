@@ -398,7 +398,7 @@ export interface GetPushRegistrationMessage {
 
 export interface SetEffortMessage {
   type: "set_effort";
-  effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh";
+  effort: "minimal" | "low" | "medium" | "high" | "max" | "xhigh" | "ultra";
 }
 
 export interface SetCodexFastModeMessage {

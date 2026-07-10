@@ -4,7 +4,7 @@ import * as crypto from "crypto";
 import * as zlib from "zlib";
 import { execFileSync } from "child_process";
 import { listSessions as sdkListSessions, type SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
-import type { Backend, SessionInfo, HistoryEntry } from "./protocol";
+import type { AgentSessionSettings, Backend, SessionInfo, HistoryEntry } from "./protocol";
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
 import { buildCodexSpawn } from "./codex-env";
@@ -74,6 +74,17 @@ export function saveSession(session: SessionInfo): void {
 
 export function getSession(id: string): SessionInfo | undefined {
   return readStore().find((s) => s.id === id);
+}
+
+export function updateSessionAgentSettings(id: string, patch: Partial<AgentSessionSettings>): void {
+  const sessions = readStore();
+  const session = sessions.find((entry) => entry.id === id);
+  if (!session) return;
+  session.agentSettings = {
+    ...(session.agentSettings || {}),
+    ...patch,
+  };
+  writeStore(sessions);
 }
 
 export function deleteSession(id: string): void {
@@ -2740,6 +2751,7 @@ export interface CodexRolloutContextUsage {
   totalTokens: number;
   maxTokens: number;
   model?: string;
+  effort?: string;
   categories: Array<{ name: string; tokens: number; color: string }>;
   source: "codex_rollout";
   lastTokenUsage: {
@@ -2759,6 +2771,32 @@ export interface CodexRolloutContextUsage {
   rateLimits?: any;
 }
 
+export function readCodexRolloutAgentSettings(sessionId: string): Pick<AgentSessionSettings, "model" | "effort"> {
+  const file = findCodexRolloutFile(sessionId);
+  if (!file) return {};
+  let raw: string;
+  try { raw = fs.readFileSync(file, "utf8"); } catch { return {}; }
+
+  let model: string | undefined;
+  let effort: AgentSessionSettings["effort"];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let obj: any;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (obj?.type !== "turn_context" || !obj.payload) continue;
+    if (typeof obj.payload.model === "string") model = obj.payload.model;
+    const candidate = obj.payload.effort;
+    if (candidate === "minimal" || candidate === "low" || candidate === "medium" || candidate === "high"
+      || candidate === "max" || candidate === "xhigh" || candidate === "ultra") {
+      effort = candidate;
+    }
+  }
+  return {
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+  };
+}
+
 /**
  * Read the latest Codex token_count event for a thread. There is no public
  * `codex status <thread>` CLI surface today, but rollout files include
@@ -2774,6 +2812,7 @@ export function readCodexRolloutContextUsage(sessionId: string): CodexRolloutCon
   let latestInfo: any = null;
   let latestRateLimits: any = null;
   let latestModel: string | undefined;
+  let latestEffort: string | undefined;
 
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -2785,6 +2824,7 @@ export function readCodexRolloutContextUsage(sessionId: string): CodexRolloutCon
 
     if (obj.type === "turn_context" && typeof payload.model === "string") {
       latestModel = payload.model;
+      if (typeof payload.effort === "string") latestEffort = payload.effort;
       continue;
     }
 
@@ -2810,6 +2850,7 @@ export function readCodexRolloutContextUsage(sessionId: string): CodexRolloutCon
     totalTokens: inputTokens,
     maxTokens,
     ...(latestModel ? { model: latestModel } : {}),
+    ...(latestEffort ? { effort: latestEffort } : {}),
     categories,
     source: "codex_rollout",
     lastTokenUsage: {

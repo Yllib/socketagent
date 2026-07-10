@@ -13,8 +13,9 @@ import {
   HistoryEntry,
   QuestionItem,
   SessionInfo,
+  AgentSessionSettings,
 } from "./protocol";
-import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid } from "./session-store";
+import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
@@ -405,6 +406,7 @@ export class ClaudeSession {
   private _thinking: { type: 'adaptive' } | { type: 'enabled'; budgetTokens: number } | { type: 'disabled' } = { type: 'adaptive' };
   private _disallowedTools: string[] = [];
   private _appendSystemPrompt: string = '';
+  private _systemPromptOverride: string | undefined;
   private _autoCompactEnabled = true;
   private _forkFromSessionId?: string;
   private _suppressedToolResultIds: Set<string> = new Set();  // toolUseIds whose results should be hidden from client
@@ -424,6 +426,7 @@ export class ClaudeSession {
   private _authRequest: ClaudeAuthRequest | null = null;
   private _lastContextWindow = 0;  // last known context window size from modelUsage
   private _sessionModel: string | null = null;  // model reported by SessionStart hook
+  private _requestedModel: string | null = null;
   private _streamingText = "";  // accumulated text for the current streaming response
   private _streamingThinking = "";  // accumulated thinking for the current thinking block
   private _lastPreview: string = "";
@@ -479,6 +482,7 @@ export class ClaudeSession {
 
   setEffort(effort: 'low' | 'medium' | 'high' | 'max'): void {
     this._effort = effort;
+    this.persistAgentSettings({ effort });
     console.log(`Effort set to ${effort} for session ${this.sessionId || '(pending)'}`);
   }
 
@@ -488,6 +492,7 @@ export class ClaudeSession {
 
   setThinking(thinking: typeof ClaudeSession.prototype._thinking): void {
     this._thinking = thinking;
+    this.persistAgentSettings({ thinking });
     console.log(`Thinking set to ${JSON.stringify(thinking)} for session ${this.sessionId || '(pending)'}`);
   }
 
@@ -496,17 +501,26 @@ export class ClaudeSession {
   }
 
   setDisallowedTools(tools: string[]): void {
-    this._disallowedTools = tools;
+    this._disallowedTools = [...tools];
+    this.persistAgentSettings({ disallowedTools: this._disallowedTools });
     console.log(`Disallowed tools set to [${tools.join(', ')}] for session ${this.sessionId || '(pending)'}`);
   }
 
-  setAppendSystemPrompt(text: string): void {
+  setAppendSystemPrompt(text: string, options: { inherited?: boolean; clearOverride?: boolean } = {}): void {
     this._appendSystemPrompt = text;
+    if (options.clearOverride) {
+      this._systemPromptOverride = undefined;
+      this.persistAgentSettings({ systemPrompt: undefined });
+    } else if (!options.inherited) {
+      this._systemPromptOverride = text;
+      this.persistAgentSettings({ systemPrompt: text });
+    }
     console.log(`Append system prompt set (${text.length} chars) for session ${this.sessionId || '(pending)'}`);
   }
 
   setClaudeAutoCompact(enabled: boolean): void {
     this._autoCompactEnabled = enabled;
+    this.persistAgentSettings({ claudeAutoCompact: enabled });
     console.log(`Claude auto-compact ${enabled ? 'enabled' : 'disabled'} for session ${this.sessionId || '(pending)'}`);
   }
 
@@ -1057,10 +1071,29 @@ export class ClaudeSession {
 
   /** Switch model mid-session. Pass undefined to reset to default. */
   async setModel(model?: string): Promise<void> {
+    this._requestedModel = model ?? null;
+    this._sessionModel = model ?? null;
     if (this.activeQuery) {
       await this.activeQuery.setModel(model);
       console.log(`[Model] Set to ${model || 'default'} for session ${this.sessionId || '(pending)'}`);
     }
+    this.persistAgentSettings({ model });
+  }
+
+  getAgentSettings(): AgentSessionSettings {
+    return {
+      ...(this._requestedModel || this._sessionModel ? { model: this._requestedModel || this._sessionModel || undefined } : {}),
+      effort: this._effort,
+      thinking: this._thinking,
+      claudeAutoCompact: this._autoCompactEnabled,
+      disallowedTools: [...this._disallowedTools],
+      ...(this._systemPromptOverride !== undefined ? { systemPrompt: this._systemPromptOverride } : {}),
+    };
+  }
+
+  private persistAgentSettings(patch: Partial<AgentSessionSettings>): void {
+    const sid = this.sessionId;
+    if (sid) updateSessionAgentSettings(sid, patch);
   }
 
   /** Switch permission mode mid-session (e.g., 'plan', 'default', 'acceptEdits'). */
@@ -1637,6 +1670,7 @@ export class ClaudeSession {
           abortController: this.abortController,
           effort: this._effort as any,
           thinking: this._thinking as any,
+          ...(this._requestedModel ? { model: this._requestedModel } : {}),
           systemPrompt: { type: "preset", preset: "claude_code", append: this._appendSystemPrompt ? toolContext + '\n\n' + this._appendSystemPrompt : toolContext } as any,
           tools: { type: "preset", preset: "claude_code" },
           ...(this._disallowedTools.length ? { disallowedTools: this._disallowedTools } : {}),
@@ -1761,6 +1795,7 @@ export class ClaudeSession {
                   const agentType = input.agent_type || "";
                   console.log(`[Hook] SessionStart: source=${source} model=${model} agentType=${agentType}`);
                   if (model) this._sessionModel = model;
+                  if (model) this.persistAgentSettings({ model });
                   this.send({
                     type: "session_lifecycle",
                     event: "start",
@@ -2323,9 +2358,17 @@ export class ClaudeSession {
               createdAt: new Date().toISOString(),
               lastActive: new Date().toISOString(),
               messagePreview: "",
+              backend: "claude",
+              agentSettings: this.getAgentSettings(),
             };
             saveSession(sessionInfo);
           }
+
+          this.send({
+            type: "session_settings",
+            sessionId: message.session_id,
+            settings: this.getAgentSettings(),
+          } as any);
 
           // Forward init data to app (available agents, tools, MCP servers, model, etc.)
           const initMsg = message as any;

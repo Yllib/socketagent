@@ -10,7 +10,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { ServerMessage, Backend, SessionInfo, HistoryEntry, CodexDriver } from "./protocol";
+import { AgentSessionSettings, ServerMessage, Backend, SessionInfo, HistoryEntry, CodexDriver } from "./protocol";
 import { SessionContext, SocketAgentPlugin } from "./plugin-api";
 import {
   saveSession,
@@ -19,6 +19,7 @@ import {
   appendSdkEvent,
   updateSessionActivity,
   updateSessionContextUsage,
+  updateSessionAgentSettings,
   remapSession,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
@@ -190,6 +191,8 @@ export class CodexSession {
   private _approvalsReviewer: CodexAppServerApprovalsReviewer = "user";
   private _permissionMode = "bypassPermissions";
   private _appendSystemPrompt = "";
+  private _systemPromptOverride: string | undefined;
+  private _disallowedTools: string[] = [];
   private _collaborationMode = "default";
   private _ttsEnabled = false;
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
@@ -277,6 +280,7 @@ export class CodexSession {
   async setModel(model?: string): Promise<void> {
     this._model = model ?? null;
     this.normalizeEffortForModel(this._model);
+    this.persistAgentSettings({ model: this._model || undefined, effort: this._effort });
     this.updateCachedSupportedModelSelection();
     if (this._lastSupportedModels) this.send(this._lastSupportedModels);
   }
@@ -366,18 +370,53 @@ export class CodexSession {
   setEffort(e: string): void {
     if (e === "minimal" || e === "low" || e === "medium" || e === "high" || e === "max" || e === "xhigh" || e === "ultra") {
       this._effort = e;
+      this.persistAgentSettings({ effort: e });
     }
   }
-  setCodexFastMode(enabled: boolean): void { this._fastMode = enabled; }
+  setCodexFastMode(enabled: boolean): void {
+    this._fastMode = enabled;
+    this.persistAgentSettings({ codexFastMode: enabled });
+  }
   setThinking(_t: unknown): void {}
-  setDisallowedTools(_t: string[]): void {}
-  setAppendSystemPrompt(s: string): void { this._appendSystemPrompt = s; }
+  setDisallowedTools(tools: string[]): void {
+    this._disallowedTools = [...tools];
+    this.persistAgentSettings({ disallowedTools: this._disallowedTools });
+  }
+  setAppendSystemPrompt(s: string, options: { inherited?: boolean; clearOverride?: boolean } = {}): void {
+    this._appendSystemPrompt = s;
+    if (options.clearOverride) {
+      this._systemPromptOverride = undefined;
+      this.persistAgentSettings({ systemPrompt: undefined });
+    } else if (!options.inherited) {
+      this._systemPromptOverride = s;
+      this.persistAgentSettings({ systemPrompt: s });
+    }
+  }
   setCodexCollaborationMode(mode: string): void {
     const trimmed = (mode || "default").trim();
     this._collaborationMode = trimmed || "default";
+    this.persistAgentSettings({ codexCollaborationMode: this._collaborationMode });
   }
   getCodexCollaborationMode(): string {
     return this._collaborationMode;
+  }
+  getCodexFastMode(): boolean {
+    return this._fastMode;
+  }
+  getAgentSettings(): AgentSessionSettings {
+    return {
+      ...(this._model ? { model: this._model } : {}),
+      effort: this._effort,
+      codexFastMode: this._fastMode,
+      codexCollaborationMode: this._collaborationMode,
+      disallowedTools: [...this._disallowedTools],
+      ...(this._systemPromptOverride !== undefined ? { systemPrompt: this._systemPromptOverride } : {}),
+    };
+  }
+
+  private persistAgentSettings(patch: Partial<AgentSessionSettings>): void {
+    const sid = this.sessionId || this._resumeSessionId;
+    if (sid) updateSessionAgentSettings(sid, patch);
   }
   setForkSource(_id: string): void {}
   setResumeSessionAt(_uuid: string): void {}
@@ -935,6 +974,10 @@ export class CodexSession {
         .map((model: any) => ({ model, id: this.codexModelId(model) }))
         .find((entry: { model: any; id: string }) => entry.id && entry.model.isDefault === true)?.id;
       const currentModel = this._model || configuredModel || defaultModel || this.codexModel();
+      if (!this._model && currentModel) {
+        this._model = currentModel;
+        this.persistAgentSettings({ model: currentModel });
+      }
       const models = visible
         .map((model: any) => {
           const id = this.codexModelId(model);
@@ -1530,6 +1573,7 @@ export class CodexSession {
         backend: "codex",
         codexDriver: "app-server",
         permissionMode: this.permissionMode || undefined,
+        agentSettings: this.getAgentSettings(),
       };
       if (this.replacesSessionId) {
         remapSession(this.replacesSessionId, this.sessionId);
@@ -1553,6 +1597,11 @@ export class CodexSession {
         this.send({
           type: "permission_mode_changed",
           permissionMode: this.permissionMode,
+        } as any);
+        this.send({
+          type: "session_settings",
+          sessionId: this.sessionId,
+          settings: this.getAgentSettings(),
         } as any);
       }
     }

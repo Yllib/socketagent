@@ -16,6 +16,8 @@ import {
 export interface ServerSettings {
   codexDriver: CodexDriver;
   defaultCwd: string;
+  systemPrompt: string;
+  systemPromptInitialized: boolean;
 }
 
 const STORE_DIR = socketAgentDataPath();
@@ -28,6 +30,10 @@ const BACKEND_HEALTH_CACHE_MS = 10000;
 let cachedSettings: ServerSettings | null = null;
 let cachedDriversAvailable: { checkedAt: number; value: CodexDriver[] } | null = null;
 let cachedBackendHealth: { checkedAt: number; value: BackendHealthInfo[] } | null = null;
+
+function normalizeSystemPrompt(value: unknown): string {
+  return typeof value === "string" ? value.slice(0, 20_000) : "";
+}
 const backendHealthOverrides = new Map<Backend, BackendHealthInfo>();
 
 export function invalidateCodexDriverAvailabilityCache(): void {
@@ -235,7 +241,7 @@ export function loadServerSettings(): ServerSettings {
   if (cachedSettings) return cachedSettings;
   ensureStoreDir();
   if (!fs.existsSync(SETTINGS_FILE)) {
-    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER, defaultCwd: BOOT_DEFAULT_CWD };
+    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER, defaultCwd: BOOT_DEFAULT_CWD, systemPrompt: "", systemPromptInitialized: false };
     return cachedSettings;
   }
 
@@ -244,10 +250,12 @@ export function loadServerSettings(): ServerSettings {
     cachedSettings = {
       codexDriver: normalizeDriver(raw.codexDriver),
       defaultCwd: normalizeDefaultCwd(raw.defaultCwd),
+      systemPrompt: normalizeSystemPrompt(raw.systemPrompt),
+      systemPromptInitialized: raw.systemPromptInitialized === true,
     };
   } catch (err: any) {
     console.warn(`[settings] Failed to read server settings: ${err?.message || String(err)}`);
-    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER, defaultCwd: BOOT_DEFAULT_CWD };
+    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER, defaultCwd: BOOT_DEFAULT_CWD, systemPrompt: "", systemPromptInitialized: false };
   }
   return cachedSettings;
 }
@@ -258,6 +266,8 @@ export function saveServerSettings(settings: ServerSettings): ServerSettings {
   cachedSettings = {
     codexDriver: normalizeDriver(settings.codexDriver ?? previous.codexDriver),
     defaultCwd: normalizeDefaultCwd(settings.defaultCwd ?? previous.defaultCwd),
+    systemPrompt: normalizeSystemPrompt(settings.systemPrompt ?? previous.systemPrompt),
+    systemPromptInitialized: settings.systemPromptInitialized ?? previous.systemPromptInitialized,
   };
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(cachedSettings, null, 2), "utf-8");
   return cachedSettings;
@@ -269,6 +279,22 @@ export function setDefaultCwd(defaultCwd: string): ServerSettings {
 
 export function getDefaultCwd(): string {
   return loadServerSettings().defaultCwd;
+}
+
+export function setServerSystemPrompt(systemPrompt: string): ServerSettings {
+  return saveServerSettings({
+    ...loadServerSettings(),
+    systemPrompt: normalizeSystemPrompt(systemPrompt),
+    systemPromptInitialized: true,
+  });
+}
+
+export function getServerSystemPrompt(): string {
+  return loadServerSettings().systemPrompt;
+}
+
+export function isServerSystemPromptInitialized(): boolean {
+  return loadServerSettings().systemPromptInitialized;
 }
 
 export function getCodexDriversAvailable(): CodexDriver[] {
@@ -335,6 +361,8 @@ export function getAdvertisedServerSettings(): ServerSettings & {
   return {
     codexDriver: DEFAULT_CODEX_DRIVER,
     defaultCwd: settings.defaultCwd,
+    systemPrompt: settings.systemPrompt,
+    systemPromptInitialized: settings.systemPromptInitialized,
     codexDriversAvailable,
     backendHealth: getBackendHealth(),
   };

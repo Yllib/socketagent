@@ -77,6 +77,9 @@ export interface SetCodexDriverMessage {
 export interface SetServerSettingsMessage {
   type: "set_server_settings";
   defaultCwd?: string;
+  systemPrompt?: string;
+  /** Migration helper: seed the server only when it has no prompt yet. */
+  systemPromptIfUnset?: string;
 }
 
 export interface BackendInstallMessage {
@@ -422,11 +425,35 @@ export interface SetThinkingMessage {
 export interface SetDisallowedToolsMessage {
   type: "set_disallowed_tools";
   tools: string[];
+  sessionId?: string;
 }
 
 export interface SetSystemPromptMessage {
   type: "set_system_prompt";
   prompt: string;
+  sessionId?: string;
+  /** Apply the server default without storing it as a session override. */
+  inherited?: boolean;
+  /** Remove a previously persisted session override. */
+  clearOverride?: boolean;
+}
+
+export type AgentEffort = "minimal" | "low" | "medium" | "high" | "max" | "xhigh" | "ultra";
+
+export type AgentThinkingSetting =
+  | { type: "adaptive" }
+  | { type: "enabled"; budgetTokens: number }
+  | { type: "disabled" };
+
+export interface AgentSessionSettings {
+  model?: string;
+  effort?: AgentEffort;
+  thinking?: AgentThinkingSetting;
+  codexFastMode?: boolean;
+  codexCollaborationMode?: string;
+  claudeAutoCompact?: boolean;
+  disallowedTools?: string[];
+  systemPrompt?: string;
 }
 
 export interface StopTaskMessage {
@@ -825,6 +852,8 @@ export interface SessionInfo {
   codexDriver?: CodexDriver;
   /** Last selected permission mode for this session. */
   permissionMode?: string;
+  /** Agent controls persisted for this session and restored on every resume. */
+  agentSettings?: AgentSessionSettings;
   /** Set after clear-context until the next fresh backend session replaces this id. */
   contextClearedAt?: string;
 }
@@ -893,6 +922,8 @@ export interface ServerSettingsMessage {
   type: "server_settings";
   codexDriver: CodexDriver;
   defaultCwd: string;
+  systemPrompt: string;
+  systemPromptInitialized?: boolean;
   codexDriversAvailable: CodexDriver[];
   backendHealth?: BackendHealthInfo[];
 }
@@ -1259,6 +1290,12 @@ export interface SessionLifecycleServerMessage {
   sessionId: string;
 }
 
+export interface SessionSettingsServerMessage {
+  type: "session_settings";
+  sessionId: string;
+  settings: AgentSessionSettings;
+}
+
 export interface MonitorStartedServerMessage {
   type: "monitor_started";
   taskId: string;
@@ -1444,6 +1481,7 @@ export type ServerMessage =
   | LocalCommandOutputServerMessage
   | PromptSuggestionServerMessage
   | SessionLifecycleServerMessage
+  | SessionSettingsServerMessage
   | TaskCompletedHookServerMessage
   | ElicitationUrlServerMessage
   | UsageUpdateServerMessage

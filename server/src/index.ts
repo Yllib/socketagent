@@ -42,7 +42,7 @@ import { runBackendInstall } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
 import { terminalSessionManager } from "./terminal-session";
 import { cancelSecureInputRequest, completeSecureInputRequest, redactSecretsDeep, saveSecureInput } from "./secure-input-store";
-import { socketAgentDataPath } from "./socket-agent-paths";
+import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 
 process.on("uncaughtException", (err) => {
@@ -3084,6 +3084,8 @@ function createConnectionHandler(transport: ClientTransport) {
             ? path.join(GIT_ROOT, "server")
             : GIT_ROOT;
           runPackageUpdateSync(tscDir);
+          runManagedBackendUpdateSync();
+          markManagedBackendUpdateApplied(afterHash);
           installSocketAgentCliFromRepo(GIT_ROOT);
 
           if (beforeHash === afterHash) {
@@ -6106,6 +6108,7 @@ const GIT_ROOT: string = (() => {
 let lastAutoUpdateError: string | null = null;
 let autoUpdateInProgress = false;
 const AUTO_UPDATE_ALLOWED_SIGNERS_FILE = path.join(GIT_ROOT, ".github", "allowed_signers");
+const MANAGED_BACKENDS_UPDATE_HASH_FILE = path.join(GIT_ROOT, ".last-managed-backends-update-hash");
 
 function gitOutput(args: string[], options: { timeout?: number } = {}): string {
   return execFileSync("git", args, {
@@ -6345,14 +6348,14 @@ function runPackageUpdateSync(cwd: string): void {
   });
 }
 
-function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: string[], cwd: string): Promise<string> {
+function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: string[], cwd: string, timeout = 120000): Promise<string> {
   const { execFile } = require("child_process");
   const spec = updateToolCommand(command, args);
   return new Promise((resolve, reject) => {
     execFile(spec.command, spec.args, {
       cwd,
       env: runtime.env,
-      timeout: 120000,
+      timeout,
     }, (err: any, stdout: any, stderr: any) => {
       if (err) {
         err.message = stderr ? `${err.message}\n${stderr}` : err.message;
@@ -6368,6 +6371,106 @@ async function runPackageUpdate(cwd: string): Promise<void> {
   const runtime = resolveUpdateRuntimeTools();
   await runUpdateToolAsync(runtime, runtime.npm, ["ci", "--include=optional"], cwd);
   await runUpdateToolAsync(runtime, runtime.npx, ["tsc"], cwd);
+}
+
+function managedBackendAutoUpdateEnabled(): boolean {
+  const value = (process.env.SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS || "1").trim().toLowerCase();
+  return value !== "0" && value !== "false" && value !== "off";
+}
+
+function managedBackendUpdateArgs(runtime: UpdateRuntimeTools): string[] {
+  return [
+    "install",
+    "-g",
+    "--prefix",
+    managedNpmPrefix(runtime.env),
+    "--include=optional",
+    "@openai/codex@latest",
+    "@anthropic-ai/claude-code@latest",
+  ];
+}
+
+function refreshBackendRuntimeCaches(): void {
+  refreshClaudeExecutableInfo();
+  invalidateCodexAvailabilityCache();
+  invalidateCodexDriverAvailabilityCache();
+  invalidateBackendHealthCache();
+}
+
+function runManagedBackendUpdateSync(): void {
+  if (!managedBackendAutoUpdateEnabled()) {
+    console.log("[Auto-update] Managed backend updates disabled by SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS");
+    return;
+  }
+  const runtime = resolveUpdateRuntimeTools();
+  const args = managedBackendUpdateArgs(runtime);
+  const npm = updateToolCommand(runtime.npm, args);
+  console.log(`[Auto-update] Updating managed agent backends in ${managedNpmPrefix(runtime.env)}`);
+  execFileSync(npm.command, npm.args, {
+    cwd: SERVER_DIR,
+    env: runtime.env,
+    stdio: "pipe",
+    timeout: 300000,
+  });
+  refreshBackendRuntimeCaches();
+}
+
+async function runManagedBackendUpdate(): Promise<void> {
+  if (!managedBackendAutoUpdateEnabled()) {
+    console.log("[Auto-update] Managed backend updates disabled by SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS");
+    return;
+  }
+  const runtime = resolveUpdateRuntimeTools();
+  console.log(`[Auto-update] Updating managed agent backends in ${managedNpmPrefix(runtime.env)}`);
+  await runUpdateToolAsync(runtime, runtime.npm, managedBackendUpdateArgs(runtime), SERVER_DIR, 300000);
+  refreshBackendRuntimeCaches();
+}
+
+function markManagedBackendUpdateApplied(hash: string): void {
+  fs.writeFileSync(MANAGED_BACKENDS_UPDATE_HASH_FILE, hash);
+}
+
+function readManagedBackendUpdateHash(): string {
+  try {
+    return fs.readFileSync(MANAGED_BACKENDS_UPDATE_HASH_FILE, "utf-8").trim();
+  } catch {
+    return "";
+  }
+}
+
+let managedBackendUpdateInProgress = false;
+
+async function ensureManagedBackendsUpdatedForCurrentHash(reason: string): Promise<void> {
+  if (!autoUpdateEnabled() || !managedBackendAutoUpdateEnabled()) return;
+  if (managedBackendUpdateInProgress) return;
+
+  let currentHash = "";
+  try {
+    currentHash = gitOutput(["rev-parse", "HEAD"]);
+  } catch {
+    return;
+  }
+  if (!currentHash || readManagedBackendUpdateHash() === currentHash) return;
+
+  const blockReason = autoUpdateBlockReason();
+  if (blockReason) {
+    console.log(`[Auto-update] Managed backend update for ${currentHash.substring(0, 7)} deferred because ${blockReason}`);
+    setTimeout(() => void ensureManagedBackendsUpdatedForCurrentHash(`${reason}-retry`), 60000);
+    return;
+  }
+
+  managedBackendUpdateInProgress = true;
+  try {
+    console.log(`[Auto-update] Updating managed backends for current build ${currentHash.substring(0, 7)} (${reason})`);
+    await runManagedBackendUpdate();
+    markManagedBackendUpdateApplied(currentHash);
+  } catch (e: any) {
+    lastAutoUpdateError = `Managed backend update failed: ${e?.message || String(e)}`;
+    console.error(`[Auto-update] ${lastAutoUpdateError}`);
+    setTimeout(() => void ensureManagedBackendsUpdatedForCurrentHash(`${reason}-retry`), 300000);
+  } finally {
+    managedBackendUpdateInProgress = false;
+  }
 }
 
 function pathIncludesDir(pathValue: string | undefined, dir: string): boolean {
@@ -6568,8 +6671,22 @@ function windowsRunServiceBatContent(): string {
     "if errorlevel 1 exit /b 1",
     'call "%NPX_CMD%" tsc',
     "if errorlevel 1 exit /b 1",
+    "call :update_managed_backends",
+    "if errorlevel 1 exit /b 1",
     '> "%REPO_ROOT%\\.last-auto-update-hash" echo %REMOTE_HASH%',
+    '> "%REPO_ROOT%\\.last-managed-backends-update-hash" echo %REMOTE_HASH%',
     "exit /b 0",
+    "",
+    ":update_managed_backends",
+    'if /I "%SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS%"=="0" exit /b 0',
+    'if /I "%SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS%"=="false" exit /b 0',
+    'if /I "%SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS%"=="off" exit /b 0',
+    'set "BACKEND_NPM_PREFIX=%SOCKET_AGENT_NPM_PREFIX%"',
+    'if not defined BACKEND_NPM_PREFIX set "BACKEND_NPM_PREFIX=%SOCKETAGENT_NPM_PREFIX%"',
+    'if not defined BACKEND_NPM_PREFIX set "BACKEND_NPM_PREFIX=%HOME%\\.socket-agent\\toolchains\\npm-global"',
+    'echo [Auto-update] Updating managed agent backends in %BACKEND_NPM_PREFIX%',
+    'call "%NPM_CMD%" install -g --prefix "%BACKEND_NPM_PREFIX%" --include=optional @openai/codex@latest @anthropic-ai/claude-code@latest',
+    "exit /b %ERRORLEVEL%",
     "",
     ":verify_update",
     'set "VERIFY_MODE=%SOCKETAGENT_AUTO_UPDATE_VERIFY%"',
@@ -6797,6 +6914,8 @@ async function checkForUpdates(): Promise<void> {
       : GIT_ROOT;
     // Install/update deps so SDK and other package changes are picked up
     await runPackageUpdate(tscDir);
+    await runManagedBackendUpdate();
+    markManagedBackendUpdateApplied(remote);
     installSocketAgentCliFromRepo(GIT_ROOT);
 
     lastAutoUpdateError = null;
@@ -6828,6 +6947,7 @@ installSocketAgentCliFromRepo(GIT_ROOT);
 ensureStartupPreflightService();
 ensureWindowsServiceWrapper();
 if (autoUpdateEnabled()) {
+  void ensureManagedBackendsUpdatedForCurrentHash("startup");
   console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s, verify=${autoUpdateVerifyMode()})`);
   setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
 } else {

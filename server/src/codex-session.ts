@@ -975,7 +975,7 @@ export class CodexSession {
   private updateCachedSupportedModelSelection(): void {
     const cached = this._lastSupportedModels as any;
     if (!cached || !Array.isArray(cached.models)) return;
-    const currentModel = this._model || this.configuredCodexModel() || cached.currentModel || this.codexModel();
+    const currentModel = this._model || this.configuredCodexModel() || cached.currentModel || this.codexModel() || "";
     cached.currentModel = currentModel;
     cached.models = cached.models.map((model: any) => {
       const id = String(model?.value || model?.id || "");
@@ -2866,11 +2866,11 @@ export class CodexSession {
     return undefined;
   }
 
-  private codexModel(): string {
+  private codexModel(): string | undefined {
     if (this._model) return this._model;
     const configuredModel = this.configuredCodexModel();
     if (configuredModel) return configuredModel;
-    return "gpt-5.5";
+    return undefined;
   }
 
   private codexDeveloperInstructions(): string | null {
@@ -2927,7 +2927,7 @@ export class CodexSession {
     return {
       mode: this._collaborationMode,
       settings: {
-        model,
+        ...(model ? { model } : {}),
         reasoning_effort: this.codexReasoningEffort(),
         developer_instructions: developerInstructions ?? null,
       },

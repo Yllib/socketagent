@@ -541,6 +541,9 @@ export interface ScheduleTaskMessage {
   cwd: string;
   backend?: Backend;
   codexDriver?: CodexDriver;
+  model?: string;
+  effort?: AgentEffort;
+  permissionMode?: string;
   scheduledTime: string;
   recurrence?: {
     type: "once" | "daily" | "weekly" | "monthly" | "custom";
@@ -571,6 +574,9 @@ export interface UpdateScheduledTaskMessage {
   cwd?: string;
   backend?: Backend;
   codexDriver?: CodexDriver | null;
+  model?: string | null;
+  effort?: AgentEffort;
+  permissionMode?: string;
   scheduledTime?: string;
   recurrence?: { type: "once" | "daily" | "weekly" | "monthly" | "custom"; intervalMs?: number } | null;
   reuseSession?: boolean;

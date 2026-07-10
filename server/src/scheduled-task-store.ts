@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import type { Backend, CodexDriver } from "./protocol";
+import type { AgentEffort, Backend, CodexDriver } from "./protocol";
 import { socketAgentDataPath } from "./socket-agent-paths";
 
 const STORE_DIR = socketAgentDataPath();
@@ -28,6 +28,9 @@ export interface ScheduledTask {
   cwd: string;
   backend?: Backend;
   codexDriver?: CodexDriver;
+  model?: string;
+  effort?: AgentEffort;
+  permissionMode?: string;
   scheduledTime: string;
   createdAt: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";

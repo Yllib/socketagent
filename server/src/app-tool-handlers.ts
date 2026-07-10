@@ -46,6 +46,9 @@ export interface ScheduleTaskArgs {
   cwd: string;
   backend?: Backend;
   codexDriver?: CodexDriver;
+  model?: string;
+  effort?: "minimal" | "low" | "medium" | "high" | "max" | "xhigh" | "ultra";
+  permissionMode?: string;
   scheduledTime: string;
   recurrenceType?: "once" | "daily" | "weekly" | "monthly" | "custom";
   customIntervalMs?: number;
@@ -343,6 +346,9 @@ export async function handleScheduleTaskTool(
     ...(backend === "codex"
       ? { codexDriver: "app-server" as CodexDriver }
       : {}),
+    ...(args.model?.trim() ? { model: args.model.trim() } : {}),
+    ...(args.effort ? { effort: args.effort } : {}),
+    ...(args.permissionMode ? { permissionMode: args.permissionMode } : {}),
     scheduledTime: args.scheduledTime,
     createdAt: new Date().toISOString(),
     status: "pending",

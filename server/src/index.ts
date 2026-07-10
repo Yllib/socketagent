@@ -1168,6 +1168,43 @@ function sendSessionStartedPush(session: Session): boolean {
   return true;
 }
 
+async function sendSessionRunningPushRefresh(session: Session): Promise<void> {
+  const sessionId = session.getSessionId?.();
+  if (!sessionId || !sessionIsBusy(session)) return;
+  if (sessionSuppressesOngoingNotification(session)) return;
+  const startedAt = getSessionActiveStartedAt(session);
+  if (!startedAt) return;
+
+  await sendPushNotification({
+    title: sessionNotificationTitle(sessionId, session),
+    body: "Agent is working",
+    sessionId,
+    status: "running",
+    kind: "session_running",
+    data: { startedAt },
+    showNotification: false,
+  });
+}
+
+const RUNNING_PUSH_REFRESH_INTERVAL_MS = 60_000;
+let runningPushRefreshInFlight = false;
+const runningPushRefreshTimer = setInterval(() => {
+  if (runningPushRefreshInFlight) return;
+  runningPushRefreshInFlight = true;
+  const running = [...activeSessions.values()].filter(
+    (session) =>
+      sessionIsBusy(session) && !sessionSuppressesOngoingNotification(session),
+  );
+  Promise.all(running.map((session) => sendSessionRunningPushRefresh(session)))
+    .catch((err) => {
+      console.warn(`[Push] Running-session refresh failed: ${err?.message || err}`);
+    })
+    .finally(() => {
+      runningPushRefreshInFlight = false;
+    });
+}, RUNNING_PUSH_REFRESH_INTERVAL_MS);
+runningPushRefreshTimer.unref?.();
+
 function sendSessionCompletionPush(session: Session, status: "completed" | "failed", fallbackBody?: string): void {
   const sessionId = session.getSessionId?.();
   if (!sessionId) return;
@@ -1411,6 +1448,14 @@ async function restorePersistedPermissionMode(session: Session, sessionInfo?: Se
 }
 
 const AGENT_EFFORTS = new Set<AgentEffort>(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]);
+const SCHEDULED_PERMISSION_MODES = new Set([
+  "plan",
+  "default",
+  "auto",
+  "acceptEdits",
+  "bypassPermissions",
+  "superYolo",
+]);
 
 function persistedAgentSettings(sessionInfo?: SessionInfo): AgentSessionSettings {
   if (!sessionInfo) return {};
@@ -2901,12 +2946,20 @@ function createConnectionHandler(transport: ClientTransport) {
         const recurrence = (msg as any).recurrence;
         const backend = ((msg as any).backend === "codex" ? "codex" : "claude") as Backend;
         const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
+        const model = typeof (msg as any).model === "string" ? (msg as any).model.trim() : "";
+        const effort = AGENT_EFFORTS.has((msg as any).effort) ? (msg as any).effort as AgentEffort : undefined;
+        const permissionMode = SCHEDULED_PERMISSION_MODES.has((msg as any).permissionMode)
+          ? (msg as any).permissionMode as string
+          : undefined;
         const task: ScheduledTask = {
           id: crypto.randomUUID(),
           prompt: (msg as any).prompt,
           cwd: (msg as any).cwd,
           backend,
           ...(codexDriver ? { codexDriver } : {}),
+          ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
+          ...(permissionMode ? { permissionMode } : {}),
           scheduledTime: (msg as any).scheduledTime,
           createdAt: new Date().toISOString(),
           status: "pending",
@@ -2964,12 +3017,23 @@ function createConnectionHandler(transport: ClientTransport) {
             const nextBackend = (msg as any).backend === "codex" ? "codex" : "claude";
             if (task.backend && task.backend !== nextBackend) {
               task.sessionId = undefined;
+              if ((msg as any).model === undefined) task.model = undefined;
             }
             task.backend = nextBackend;
             task.codexDriver = nextBackend === "codex" ? "app-server" : undefined;
           }
           if ((msg as any).codexDriver !== undefined) {
             task.codexDriver = task.backend === "codex" ? "app-server" : undefined;
+          }
+          if ((msg as any).model !== undefined) {
+            const model = (msg as any).model;
+            task.model = typeof model === "string" && model.trim() ? model.trim() : undefined;
+          }
+          if (AGENT_EFFORTS.has((msg as any).effort)) {
+            task.effort = (msg as any).effort as AgentEffort;
+          }
+          if (SCHEDULED_PERMISSION_MODES.has((msg as any).permissionMode)) {
+            task.permissionMode = (msg as any).permissionMode as string;
           }
           if ((msg as any).scheduledTime !== undefined) task.scheduledTime = (msg as any).scheduledTime;
           if ((msg as any).recurrence !== undefined) {
@@ -5654,6 +5718,9 @@ function applyLatestScheduledTaskEditableFields(task: ScheduledTask): void {
   task.cwd = latest.cwd;
   task.backend = latest.backend;
   task.codexDriver = latest.codexDriver;
+  task.model = latest.model;
+  task.effort = latest.effort;
+  task.permissionMode = latest.permissionMode;
   task.recurrence = latest.recurrence;
   task.reuseSession = latest.reuseSession;
   task.notificationMode = latest.notificationMode;
@@ -5714,6 +5781,19 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
     if (shouldResume) (session as any)._resumeSessionId = task.sessionId;
     await restorePersistedAgentSettings(session, reusableSessionInfo || undefined);
+    if (task.permissionMode) {
+      const permissionMode = backend === "claude" && task.permissionMode === "superYolo"
+        ? "bypassPermissions"
+        : task.permissionMode;
+      await (session as any).setPermissionMode(permissionMode, { recordHistory: false });
+    }
+    if (task.model) await session.setModel(task.model);
+    if (task.effort) {
+      const effort = backend === "claude" && !["low", "medium", "high", "max"].includes(task.effort)
+        ? "high"
+        : task.effort;
+      session.setEffort(effort as any);
+    }
     attachSessionLifecycleCallbacks(session);
 
     if (shouldResume) {

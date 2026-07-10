@@ -202,6 +202,10 @@ function createServer(context: AppToolContext): McpServer {
       inputSchema: {
         prompt: z.string().describe("The prompt/instructions to execute at the scheduled time"),
         cwd: z.string().describe("Working directory for the scheduled task (absolute path)"),
+        backend: z.enum(["claude", "codex"]).optional().describe("Agent provider. Defaults to the current provider."),
+        model: z.string().optional().describe("Provider model ID. Omit to use the provider default."),
+        effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Reasoning effort for the scheduled run."),
+        permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Sandbox/permission mode for the scheduled run."),
         scheduledTime: z.string().describe("When to run the task, in ISO 8601 format"),
         recurrenceType: z.enum(["once", "daily", "weekly", "monthly", "custom"]).optional().describe("How often to repeat. Default: once"),
         customIntervalMs: z.number().optional().describe("Custom interval in milliseconds when recurrenceType is custom"),

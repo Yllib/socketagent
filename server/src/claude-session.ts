@@ -14,6 +14,7 @@ import {
   QuestionItem,
   SessionInfo,
   AgentSessionSettings,
+  Backend,
 } from "./protocol";
 import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
@@ -1098,10 +1099,10 @@ export class ClaudeSession {
 
   /** Switch permission mode mid-session (e.g., 'plan', 'default', 'acceptEdits'). */
   async setPermissionMode(mode: string): Promise<void> {
+    this._permissionMode = mode;
+    this.persistPermissionMode(mode);
     if (this.activeQuery) {
       await this.activeQuery.setPermissionMode(mode as any);
-      this._permissionMode = mode;
-      this.persistPermissionMode(mode);
       console.log(`[PermissionMode] Set to ${mode} for session ${this.sessionId || '(pending)'}`);
     }
   }
@@ -1349,10 +1350,14 @@ export class ClaudeSession {
           ),
           tool(
             "ScheduleTask",
-            "Schedule a Claude prompt to run automatically at a future time. Creates a new session in the specified directory and executes the prompt when the scheduled time arrives. The server runs 24/7 so the task will execute even if the app is closed. Use this when the user wants to defer a task to run later. Supports recurring schedules (daily, weekly, monthly, or custom interval) and optionally reusing the same session across recurrences.",
+            "Schedule a Claude or Codex prompt to run automatically at a future time. Creates a new session in the specified directory and executes the prompt when the scheduled time arrives. The server runs 24/7 so the task will execute even if the app is closed. Use this when the user wants to defer a task to run later. Supports provider, model, effort, permission, recurrence, and session-reuse settings.",
             {
               prompt: z.string().describe("The prompt/instructions for Claude to execute at the scheduled time"),
               cwd: z.string().describe("Working directory for the scheduled task (absolute path)"),
+              backend: z.enum(["claude", "codex"]).optional().describe("Agent provider. Defaults to Claude."),
+              model: z.string().optional().describe("Provider model ID. Omit to use the provider default."),
+              effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Reasoning effort for the scheduled run."),
+              permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Sandbox/permission mode for the scheduled run."),
               scheduledTime: z.string().describe("When to run the task, in ISO 8601 format (e.g. 2026-03-13T09:00:00)"),
               recurrenceType: z.enum(["once", "daily", "weekly", "monthly", "custom"]).optional().describe("How often to repeat. Default: once (no recurrence)"),
               customIntervalMs: z.number().optional().describe("Custom interval in milliseconds (only used when recurrenceType is 'custom')"),
@@ -1374,11 +1379,16 @@ export class ClaudeSession {
                 intervalMs: recurrenceType === "custom" ? args.customIntervalMs : undefined,
               } : undefined;
 
+              const backend = (args.backend || "claude") as Backend;
               const task: ScheduledTask = {
                 id: crypto.randomUUID(),
                 prompt: args.prompt,
                 cwd: args.cwd,
-                backend: "claude",
+                backend,
+                ...(backend === "codex" ? { codexDriver: "app-server" as const } : {}),
+                ...(args.model?.trim() ? { model: args.model.trim() } : {}),
+                ...(args.effort ? { effort: args.effort } : {}),
+                ...(args.permissionMode ? { permissionMode: args.permissionMode } : {}),
                 scheduledTime: args.scheduledTime,
                 createdAt: new Date().toISOString(),
                 status: "pending",
@@ -1628,7 +1638,7 @@ export class ClaudeSession {
         }
       }
 
-      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude session that runs automatically at the specified time. Supports recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nUse RequestSecureInput when you need an API key, password, auth token, cookie, or other secret. Do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata.\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
+      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude or Codex session that runs automatically at the specified time. Supports provider, model, effort, permissions, recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nUse RequestSecureInput when you need an API key, password, auth token, cookie, or other secret. Do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata.\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
 
       // Handle fork: use fork source as resume target + set forkSession flag
       const shouldFork = !!this._forkFromSessionId;
@@ -1656,13 +1666,15 @@ export class ClaudeSession {
 
       console.log(`Starting query: resume=${resumeTarget || 'none'}${shouldFork ? ' (FORK)' : ''}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt=${prompt.slice(0, 80)}..., uuid=${userMsgUuid}, cwd=${this.cwd}`);
 
+      const initialPermissionMode = this._permissionMode || "bypassPermissions";
+
       const q = this.activeQuery = query({
         prompt: promptStream as any,
         options: {
           cwd: this.cwd,
           ...claudeExecutableQueryOptions(),
-          permissionMode: "bypassPermissions",
-          allowDangerouslySkipPermissions: true,
+          permissionMode: initialPermissionMode as any,
+          allowDangerouslySkipPermissions: initialPermissionMode === "bypassPermissions",
           includePartialMessages: true,
           resume: resumeTarget,
           forkSession: shouldFork || undefined,

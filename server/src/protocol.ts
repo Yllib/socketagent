@@ -533,6 +533,8 @@ export interface SyncDesktopMessage {
 export interface ListSdkSessionsMessage {
   type: "list_sdk_sessions";
   cwd: string;
+  requestId?: string;
+  limit?: number;
 }
 
 export interface ScheduleTaskMessage {
@@ -836,6 +838,20 @@ export interface SessionListServerMessage {
   sessions: SessionInfo[];
 }
 
+export interface SdkSessionListServerMessage {
+  type: "sdk_session_list";
+  cwd: string;
+  requestId?: string;
+  total: number;
+  hasMore: boolean;
+  sessions: Array<{
+    sessionId: string;
+    firstMessage: string;
+    lastActive: string;
+    backend?: Backend;
+  }>;
+}
+
 export interface SessionInfo {
   id: string;
   title: string;
@@ -950,6 +966,8 @@ export interface BackendInstallProgressServerMessage {
 export interface SessionCreatedServerMessage {
   type: "session_created";
   sessionId: string;
+  /** Previous session ID when clear-context created this replacement. */
+  replacesSessionId?: string;
   cwd: string;
   title?: string;
   /** Echoed back so the client knows which backend the server is using. */
@@ -1445,6 +1463,7 @@ export type ServerMessage =
   | SecureInputSavedServerMessage
   | ResultServerMessage
   | SessionListServerMessage
+  | SdkSessionListServerMessage
   | ErrorServerMessage
   | BackendAuthRequiredServerMessage
   | PushTokenRegisteredServerMessage

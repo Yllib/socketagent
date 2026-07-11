@@ -2869,26 +2869,37 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "list_sdk_sessions": {
         const cwd = (msg as any).cwd as string;
+        const requestId = (msg as any).requestId as string | undefined;
+        const requestedLimit = Math.max(1, Math.min(2000, Math.floor(Number((msg as any).limit ?? 30))));
+        const discoveryLimit = 2000;
         console.log(`[SdkSessions] Request for cwd=${cwd}`);
         if (!cwd) {
           sendJson({ type: "error", message: "No cwd provided for list_sdk_sessions" });
           break;
         }
-        const claudeSessions = await listSdkSessions(cwd);
+        const claudeSessions = await listSdkSessions(cwd, discoveryLimit);
         let codexSessions;
         try {
-          codexSessions = await listCodexNativeSdkSessions(cwd);
+          codexSessions = await listCodexNativeSdkSessions(cwd, discoveryLimit);
         } catch (err: any) {
           console.warn(`[SdkSessions] Codex native thread/list failed for ${cwd}: ${err?.message || err}`);
-          codexSessions = listCodexSessions(cwd);
+          codexSessions = listCodexSessions(cwd, discoveryLimit);
         }
         // Merge and sort by lastActive desc so the most recent is on top
         // regardless of which backend produced it.
-        const sessions = [...claudeSessions, ...codexSessions].sort((a, b) =>
+        const allSessions = [...claudeSessions, ...codexSessions].sort((a, b) =>
           new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime()
         );
-        console.log(`[SdkSessions] Found ${claudeSessions.length} claude + ${codexSessions.length} codex sessions for ${cwd}`);
-        sendJson({ type: "sdk_session_list", cwd, sessions });
+        const sessions = allSessions.slice(0, requestedLimit);
+        console.log(`[SdkSessions] Found ${claudeSessions.length} claude + ${codexSessions.length} codex sessions for ${cwd}; returning ${sessions.length}/${allSessions.length}`);
+        sendJson({
+          type: "sdk_session_list",
+          cwd,
+          requestId,
+          sessions,
+          total: allSessions.length,
+          hasMore: sessions.length < allSessions.length,
+        });
         break;
       }
 
@@ -3237,12 +3248,21 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "clear_context": {
         const sid = msg.sessionId;
+        console.log(`[ClearContext] Request received for ${sid}`);
         const sessionInfo = getSession(sid);
         if (sessionInfo) {
           const running = activeSessions.get(sid);
           if (running) {
             running.abort();
             activeSessions.delete(sid);
+          }
+          sessionClients.delete(sid);
+          const handlerSessionId = activeSession?.getSessionId()
+            || (activeSession as any)?._resumeSessionId
+            || activeSessionId;
+          if (handlerSessionId === sid) {
+            activeSession = null;
+            activeSessionId = null;
           }
           if (sessionInfo.backend === "codex") {
             let archivedByAppServer = false;
@@ -3264,6 +3284,12 @@ function createConnectionHandler(transport: ClientTransport) {
           console.log(`Cleared context for session ${sid}`);
           sendJson({ type: "context_cleared", sessionId: sid });
           broadcastSessionList();
+        } else {
+          console.warn(`[ClearContext] Session not found: ${sid}`);
+          sendJson({
+            type: "error",
+            message: `Could not clear context: session ${sid} was not found`,
+          });
         }
         break;
       }

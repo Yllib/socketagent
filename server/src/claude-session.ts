@@ -2351,15 +2351,17 @@ export class ClaudeSession {
 
         if (message.type === "system" && (message as any).subtype === "init") {
           this.sessionId = message.session_id;
+          const replacesSessionId = this.replacesSessionId;
           this.send({
             type: "session_created",
             sessionId: message.session_id,
+            ...(replacesSessionId ? { replacesSessionId } : {}),
             cwd: this.cwd,
           });
 
-          if (this.replacesSessionId) {
+          if (replacesSessionId) {
             // Context was cleared — remap old session ID to this new one
-            remapSession(this.replacesSessionId, message.session_id);
+            remapSession(replacesSessionId, message.session_id);
             this.replacesSessionId = undefined;
           } else if (!resumeSessionId) {
             const title = prompt.slice(0, 50) + (prompt.length > 50 ? "..." : "");

@@ -1557,6 +1557,7 @@ export class CodexSession {
     if (!threadId) return;
     this.threadId = threadId;
     const isFirstTime = !this.sessionId;
+    const replacesSessionId = this.replacesSessionId;
     this.sessionId = threadId;
 
     if (!this._sessionInfoSaved) {
@@ -1575,9 +1576,19 @@ export class CodexSession {
         permissionMode: this.permissionMode || undefined,
         agentSettings: this.getAgentSettings(),
       };
-      if (this.replacesSessionId) {
-        remapSession(this.replacesSessionId, this.sessionId);
-        saveSession(info);
+      if (replacesSessionId) {
+        remapSession(replacesSessionId, this.sessionId);
+        const remapped = getSession(this.sessionId);
+        saveSession({
+          ...info,
+          ...remapped,
+          id: this.sessionId,
+          backend: "codex",
+          codexDriver: "app-server",
+          messagePreview: "",
+          permissionMode: this.permissionMode || undefined,
+          agentSettings: this.getAgentSettings(),
+        });
         this.replacesSessionId = undefined;
       } else {
         saveSession(info);
@@ -1589,6 +1600,7 @@ export class CodexSession {
         this.send({
           type: "session_created",
           sessionId: this.sessionId,
+          ...(replacesSessionId ? { replacesSessionId } : {}),
           cwd: this.cwd,
           title,
           backend: "codex",

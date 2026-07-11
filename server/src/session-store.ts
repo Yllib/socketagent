@@ -1593,6 +1593,7 @@ export function isCodexNativeArchiveTs(ts: string): boolean {
 const CODEX_THREAD_LIST_SOURCE_KINDS = ["cli", "vscode", "appServer", "unknown"];
 const CODEX_THREAD_LOOKUP_SOURCE_KINDS = ["cli", "exec", "vscode", "appServer", "unknown"];
 const CODEX_THREAD_LIST_LIMIT = 500;
+const SDK_SESSION_DISCOVERY_LIMIT = 2000;
 const CLAUDE_NATIVE_CWD_LIMIT = 20;
 const CLAUDE_NATIVE_SESSIONS_PER_CWD = 75;
 const CODEX_NATIVE_LIST_CACHE_MS = 300_000;
@@ -1709,11 +1710,14 @@ function codexThreadToArchiveEntry(thread: any): ArchiveEntry | null {
   };
 }
 
-async function listAllCodexThreads(params: CodexAppServerThreadListParams): Promise<any[]> {
+async function listAllCodexThreads(
+  params: CodexAppServerThreadListParams,
+  maxRowsLimit = CODEX_THREAD_LIST_LIMIT,
+): Promise<any[]> {
   return withCodexThreadListClient(getDefaultProcessCwd(), async (client) => {
     const maxRows = Math.max(
       1,
-      Math.min(CODEX_THREAD_LIST_LIMIT, Math.floor(Number(params.limit ?? CODEX_THREAD_LIST_LIMIT))),
+      Math.min(maxRowsLimit, Math.floor(Number(params.limit ?? maxRowsLimit))),
     );
     const threads: any[] = [];
     let cursor: string | null | undefined = params.cursor ?? null;
@@ -2048,12 +2052,12 @@ export async function listCodexNativeSdkSessions(cwd: string, limit = 30): Promi
   const threads = await listAllCodexThreads({
     archived: false,
     cwd: [...cwdCandidates],
-    limit: Math.max(1, Math.min(200, Math.floor(limit))),
+    limit: Math.max(1, Math.min(SDK_SESSION_DISCOVERY_LIMIT, Math.floor(limit))),
     sortKey: "updated_at",
     sortDirection: "desc",
     sourceKinds: CODEX_THREAD_LOOKUP_SOURCE_KINDS,
     useStateDbOnly: true,
-  });
+  }, SDK_SESSION_DISCOVERY_LIMIT);
   return threads.flatMap((thread): SdkSessionEntry[] => {
     const id = String(thread?.id || "");
     const info = codexThreadToSessionInfo(thread, trackedMap.get(id));

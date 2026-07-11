@@ -1718,16 +1718,11 @@ function createConnectionHandler(transport: ClientTransport) {
 
   async function sendFileChunks(filePath: string, fileId?: string, offsetBytes = 0, transferToken?: string): Promise<void> {
     if (!filePath || !fs.existsSync(filePath)) {
-      sendJson({
-        type: "error",
-        message: `File not found: ${filePath}`,
-      });
-      return;
+      throw new Error(`File not found: ${filePath}`);
     }
     const stat = fs.statSync(filePath);
     if (!stat.isFile()) {
-      sendJson({ type: "error", message: `Not a file: ${filePath}` });
-      return;
+      throw new Error(`Not a file: ${filePath}`);
     }
     const transferId = fileId || crypto.randomUUID();
     const fileName = path.basename(filePath);
@@ -4682,7 +4677,12 @@ function createConnectionHandler(transport: ClientTransport) {
             transferToken,
           );
         } catch (e: any) {
-          sendJson({ type: "error", message: e.message || String(e) });
+          sendJson({
+            type: "file_error",
+            fileId,
+            message: e.message || String(e),
+            ...(transferToken ? { transferToken } : {}),
+          });
         }
         break;
       }

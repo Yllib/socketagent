@@ -1072,6 +1072,13 @@ export interface FileCompleteServerMessage {
   transferToken?: string;
 }
 
+export interface FileErrorServerMessage {
+  type: "file_error";
+  fileId: string;
+  message: string;
+  transferToken?: string;
+}
+
 export interface UploadCompleteServerMessage {
   type: "upload_complete";
   uploadId: string;
@@ -1479,6 +1486,7 @@ export type ServerMessage =
   | CompactingServerMessage
   | FileChunkServerMessage
   | FileCompleteServerMessage
+  | FileErrorServerMessage
   | UploadCompleteServerMessage
   | FileManagerListResultServerMessage
   | FileManagerProtectedResultServerMessage

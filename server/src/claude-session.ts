@@ -16,7 +16,7 @@ import {
   AgentSessionSettings,
   Backend,
 } from "./protocol";
-import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid } from "./session-store";
+import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid, cacheToolImage } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
@@ -3197,13 +3197,29 @@ export class ClaudeSession {
                 if (Array.isArray(block.content)) {
                   for (const c of block.content as any[]) {
                     if (c.type === "image" && c.source?.type === "base64") {
-                      const filePath = this._readToolPaths.get(toolUseId) || "";
-                      console.log(`[SDK] Image block found in tool result: ${filePath || toolUseId}`);
+                      const sourcePath = this._readToolPaths.get(toolUseId) || "";
+                      const mimeType = c.source.media_type || "image/png";
+                      let filePath = sourcePath;
+                      try {
+                        const bytes = Buffer.from(c.source.data, "base64");
+                        if (this.sessionId) {
+                          filePath = cacheToolImage(
+                            this.sessionId,
+                            toolUseId,
+                            bytes,
+                            mimeType,
+                            sourcePath,
+                          );
+                        }
+                      } catch (err: any) {
+                        console.warn(`[SDK] Failed to cache tool image: ${err?.message || String(err)}`);
+                      }
+                      console.log(`[SDK] Image block found in tool result: ${sourcePath || toolUseId}`);
                       this.send({
                         type: "tool_image",
                         toolUseId,
                         imageData: c.source.data,
-                        mimeType: c.source.media_type || "image/png",
+                        mimeType,
                         filePath,
                         sessionId: this.sessionId || "",
                       });
@@ -3214,7 +3230,7 @@ export class ClaudeSession {
                           content: "",
                           toolUseId,
                           filePath,
-                          mimeType: c.source.media_type || "image/png",
+                          mimeType,
                           timestamp: now(),
                         });
                       }

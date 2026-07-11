@@ -21,6 +21,7 @@ import {
   updateSessionContextUsage,
   updateSessionAgentSettings,
   remapSession,
+  cacheToolImage,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
@@ -2752,6 +2753,11 @@ export class CodexSession {
         filePath = "";
       }
     }
+    try {
+      filePath = cacheToolImage(sessionId, toolUseId, bytes, mimeType, filePath);
+    } catch (err: any) {
+      console.warn(`[codex app-server] failed to cache tool image: ${err?.message || String(err)}`);
+    }
     this.send({
       type: "tool_image",
       toolUseId,
@@ -2784,20 +2790,27 @@ export class CodexSession {
     const mimeType = this.imageMimeType(resolved);
     if (!mimeType) return false;
     try {
-      const imageData = fs.readFileSync(resolved).toString("base64");
+      const bytes = fs.readFileSync(resolved);
+      const imageData = bytes.toString("base64");
+      let persistedPath = resolved;
+      try {
+        persistedPath = cacheToolImage(sessionId, toolUseId, bytes, mimeType, resolved);
+      } catch (err: any) {
+        console.warn(`[codex app-server] failed to cache tool image ${resolved}: ${err?.message || String(err)}`);
+      }
       this.send({
         type: "tool_image",
         toolUseId,
         imageData,
         mimeType,
-        filePath: resolved,
+        filePath: persistedPath,
         sessionId,
       } as any);
       appendHistory(sessionId, {
         role: "tool_image",
         content: "",
         toolUseId,
-        filePath: resolved,
+        filePath: persistedPath,
         mimeType,
         timestamp: now(),
       });

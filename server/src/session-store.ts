@@ -15,6 +15,7 @@ const STORE_DIR = socketAgentDataPath();
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
 const HISTORY_DIR = path.join(STORE_DIR, "history");
 const TOOL_OUTPUT_DIR = path.join(STORE_DIR, "tool-output");
+const TOOL_IMAGE_CACHE_DIR = path.join(STORE_DIR, "tool-images");
 const ARCHIVED_SESSION_IDS_FILE = path.join(STORE_DIR, "archived-session-ids.json");
 const HISTORY_IO_WARN_MS = Number(process.env.SOCKETAGENT_HISTORY_IO_WARN_MS || 500);
 const HISTORY_PAGE_WARN_MS = Number(process.env.SOCKETAGENT_HISTORY_PAGE_WARN_MS || 250);
@@ -22,6 +23,77 @@ const SESSION_LIST_WARN_MS = Number(process.env.SOCKETAGENT_SESSION_LIST_WARN_MS
 const TOOL_OUTPUT_BLOB_THRESHOLD = Number(process.env.SOCKETAGENT_TOOL_OUTPUT_BLOB_THRESHOLD || 8 * 1024);
 const TOOL_OUTPUT_PREVIEW_CHARS = Number(process.env.SOCKETAGENT_TOOL_OUTPUT_PREVIEW_CHARS || 1024);
 const HISTORY_COMPACT_MIN_BYTES = Number(process.env.SOCKETAGENT_HISTORY_COMPACT_MIN_BYTES || 8 * 1024 * 1024);
+const configuredToolImageCacheTtl = Number(process.env.SOCKETAGENT_TOOL_IMAGE_CACHE_TTL_MS);
+const TOOL_IMAGE_CACHE_TTL_MS = Math.max(
+  30 * 60 * 1000,
+  Number.isFinite(configuredToolImageCacheTtl)
+    ? configuredToolImageCacheTtl
+    : 60 * 60 * 1000,
+);
+let lastToolImageCacheCleanupAt = 0;
+
+function toolImageExtension(mimeType: string, sourcePath = ""): string {
+  const sourceExt = path.extname(sourcePath).toLowerCase();
+  if (/^\.(png|jpe?g|gif|webp|bmp|svg)$/.test(sourceExt)) return sourceExt;
+  switch (mimeType.toLowerCase()) {
+    case "image/jpeg": return ".jpg";
+    case "image/gif": return ".gif";
+    case "image/webp": return ".webp";
+    case "image/bmp": return ".bmp";
+    case "image/svg+xml": return ".svg";
+    default: return ".png";
+  }
+}
+
+function cleanupToolImageCache(nowMs = Date.now()): void {
+  if (nowMs - lastToolImageCacheCleanupAt < 5 * 60 * 1000) return;
+  lastToolImageCacheCleanupAt = nowMs;
+  let sessionDirs: fs.Dirent[];
+  try {
+    sessionDirs = fs.readdirSync(TOOL_IMAGE_CACHE_DIR, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const sessionDir of sessionDirs) {
+    if (!sessionDir.isDirectory()) continue;
+    const dirPath = path.join(TOOL_IMAGE_CACHE_DIR, sessionDir.name);
+    let files: fs.Dirent[];
+    try { files = fs.readdirSync(dirPath, { withFileTypes: true }); } catch { continue; }
+    for (const file of files) {
+      if (!file.isFile()) continue;
+      const filePath = path.join(dirPath, file.name);
+      try {
+        if (nowMs - fs.statSync(filePath).mtimeMs >= TOOL_IMAGE_CACHE_TTL_MS) {
+          fs.unlinkSync(filePath);
+        }
+      } catch {}
+    }
+    try {
+      if (fs.readdirSync(dirPath).length === 0) fs.rmdirSync(dirPath);
+    } catch {}
+  }
+}
+
+export function cacheToolImage(
+  sessionId: string,
+  toolUseId: string,
+  bytes: Buffer,
+  mimeType: string,
+  sourcePath = "",
+): string {
+  cleanupToolImageCache();
+  const safeSessionId = sessionId.replace(/[^A-Za-z0-9_-]/g, "_");
+  const safeToolUseId = toolUseId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160)
+    || crypto.createHash("sha256").update(toolUseId).digest("hex").slice(0, 32);
+  const sessionDir = path.join(TOOL_IMAGE_CACHE_DIR, safeSessionId);
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const cachePath = path.join(
+    sessionDir,
+    `${safeToolUseId}${toolImageExtension(mimeType, sourcePath)}`,
+  );
+  fs.writeFileSync(cachePath, bytes, { mode: 0o600 });
+  return cachePath;
+}
 
 function warnIfSlow(label: string, startedAt: number, details: Record<string, unknown> = {}): void {
   const elapsedMs = Date.now() - startedAt;

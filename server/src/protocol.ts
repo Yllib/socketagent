@@ -742,6 +742,7 @@ export interface ToolImageServerMessage {
   mimeType: string;
   filePath: string;
   sessionId: string;
+  parentToolUseId?: string | null;
 }
 
 export interface EmailPreview {
@@ -1232,12 +1233,19 @@ export interface TtsAudioServerMessage {
 export interface ActiveSubagentsServerMessage {
   type: "active_subagents";
   sessionId: string;
+  replace?: boolean;
+  backend?: Backend;
   tasks: {
     agentId: string;
     toolUseId: string;
     description: string;
     subagentType: string;
     startedAt: string;
+    status?: "pending" | "running" | "completed" | "interrupted" | "errored" | "shutdown";
+    prompt?: string;
+    model?: string;
+    reasoningEffort?: string;
+    agentPath?: string;
   }[];
 }
 

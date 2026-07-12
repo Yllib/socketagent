@@ -550,7 +550,13 @@ export function listMarketplaces(): MarketplaceInfo[] {
 
     let url = "";
     try {
-      url = execFileSync("git", ["remote", "get-url", "origin"], { cwd: mpDir, stdio: "pipe", timeout: 5000, encoding: "utf8" }).trim();
+      url = execFileSync("git", ["remote", "get-url", "origin"], {
+        cwd: mpDir,
+        stdio: "pipe",
+        timeout: 5000,
+        encoding: "utf8",
+        windowsHide: true,
+      }).trim();
     } catch {}
 
     let pluginCount = 0;
@@ -591,7 +597,11 @@ export async function addMarketplace(url: string): Promise<MarketplaceInfo> {
   const target = resolveMarketplacePath(dirName);
 
   return new Promise((resolve, reject) => {
-    execFile("git", ["clone", "--", gitUrl, target], { timeout: 120000, encoding: "utf8" }, (err, stdout, stderr) => {
+    execFile("git", ["clone", "--", gitUrl, target], {
+      timeout: 120000,
+      encoding: "utf8",
+      windowsHide: true,
+    }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || stdout || err.message || "git clone failed"));
         return;
@@ -611,7 +621,12 @@ export async function updateMarketplace(name: string): Promise<MarketplaceInfo> 
   if (!fs.existsSync(mpDir)) throw new Error(`Marketplace "${name}" not found`);
 
   return new Promise((resolve, reject) => {
-    execFile("git", ["pull"], { cwd: mpDir, timeout: 60000, encoding: "utf8" }, (err, stdout, stderr) => {
+    execFile("git", ["pull"], {
+      cwd: mpDir,
+      timeout: 60000,
+      encoding: "utf8",
+      windowsHide: true,
+    }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || stdout || err.message || "git pull failed"));
         return;
@@ -641,7 +656,11 @@ function resolveClaudeBinary(): string {
 
   // Try which/where first
   try {
-    const result = execFileSync(isWindows ? "where" : "which", ["claude"], { timeout: 5000, encoding: "utf8" }).trim().split(/\r?\n/)[0];
+    const result = execFileSync(isWindows ? "where" : "which", ["claude"], {
+      timeout: 5000,
+      encoding: "utf8",
+      windowsHide: true,
+    }).trim().split(/\r?\n/)[0];
     if (result) {
       _claudeBinary = result;
       console.log(`[Plugin] Resolved claude binary via ${isWindows ? 'where' : 'which'}: ${result}`);
@@ -683,7 +702,12 @@ export async function runPluginCommand(action: "install" | "uninstall" | "enable
   const args = ["plugin", action, safePluginId, "--scope", "user"];
   console.log(`[Plugin] Running: ${claudeBin} ${args.join(" ")}`);
   return new Promise((resolve, reject) => {
-    execFile(claudeBin, args, { timeout: 60000, env: { ...process.env, HOME: os.homedir() }, encoding: "utf8" }, (err, stdout, stderr) => {
+    execFile(claudeBin, args, {
+      timeout: 60000,
+      env: { ...process.env, HOME: os.homedir() },
+      encoding: "utf8",
+      windowsHide: true,
+    }, (err, stdout, stderr) => {
       const output = (stdout || "") + (stderr || "");
       if (err) {
         console.error(`[Plugin] ${action} failed: ${output}`);

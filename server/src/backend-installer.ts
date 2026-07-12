@@ -270,6 +270,7 @@ function isCodexLoginValid(command: string, env: NodeJS.ProcessEnv, shell?: bool
     encoding: "utf8",
     timeout: 10000,
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
   if (result.status === 0) return true;
   const text = `${result.stdout || ""}\n${result.stderr || ""}`;
@@ -296,6 +297,7 @@ async function runProcess(options: {
       env: options.env,
       shell: options.shell,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
 
     let tail = "";
@@ -390,6 +392,7 @@ async function runCodexDeviceAuth(options: {
       env: options.env,
       shell: options.shell,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
 
     let tail = "";

@@ -132,6 +132,7 @@ function codexHealth(): BackendHealthInfo {
     stdio: ["ignore", "pipe", "pipe"],
     env: codexVersion.env,
     shell: codexVersion.shell,
+    windowsHide: true,
   });
 
   if (versionProbe.error) {
@@ -171,6 +172,7 @@ function codexHealth(): BackendHealthInfo {
     timeout: 3000,
     env: appServerHelp.env,
     shell: appServerHelp.shell,
+    windowsHide: true,
   });
   if (appServerProbe.status !== 0 || appServerProbe.error) {
     const detail = appServerProbe.error?.message || firstOutputLine(appServerProbe.stdout, appServerProbe.stderr);
@@ -314,6 +316,7 @@ export function getCodexDriversAvailable(): CodexDriver[] {
     stdio: ["ignore", "pipe", "pipe"],
     env: codexVersion.env,
     shell: codexVersion.shell,
+    windowsHide: true,
   });
   if (codexProbe.status !== 0) {
     return cache([]);
@@ -331,6 +334,7 @@ export function getCodexDriversAvailable(): CodexDriver[] {
       timeout: 3000,
       env: appServerHelp.env,
       shell: appServerHelp.shell,
+      windowsHide: true,
     });
     return cache(result.status === 0 ? ["app-server"] : []);
   } catch {

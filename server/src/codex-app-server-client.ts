@@ -192,6 +192,7 @@ export class CodexAppServerClient extends EventEmitter {
       detached: process.platform !== "win32",
       shell: this.options.shell,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
 
     this.proc.stdout.setEncoding("utf8");
@@ -361,7 +362,10 @@ export class CodexAppServerClient extends EventEmitter {
 
     const killProcessTree = (nextSignal: NodeJS.Signals) => {
       if (process.platform === "win32" && nextSignal === "SIGKILL" && proc.pid) {
-        const result = spawnSync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { stdio: "ignore" });
+        const result = spawnSync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
         if (result.status === 0) return;
       }
       if (process.platform !== "win32" && proc.pid) {

@@ -238,6 +238,7 @@ function deleteCodexThreadState(sessionId: string, removed: string[], warnings: 
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 256 * 1024,
+      windowsHide: true,
     });
     removed.push(`codex-thread:${sessionId}`);
   } catch (err: any) {
@@ -2594,6 +2595,7 @@ function updateCodexThreadRolloutState(sessionId: string, rolloutPath: string, a
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 256 * 1024,
+      windowsHide: true,
     });
   } catch (err: any) {
     console.warn(`[CodexArchive] failed to update Codex thread state for ${sessionId}: ${err?.message || String(err)}`);
@@ -2610,6 +2612,7 @@ function findCodexRolloutPathFromStateDb(sessionId: string): string | null {
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 256 * 1024,
+      windowsHide: true,
     }).trim();
     if (!raw) return null;
     const rows = JSON.parse(raw) as Array<{ rollout_path?: string }>;
@@ -2630,6 +2633,7 @@ export function isCodexThreadArchived(sessionId: string): boolean {
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 256 * 1024,
+      windowsHide: true,
     }).trim();
     return raw === "1";
   } catch (err: any) {
@@ -2662,6 +2666,7 @@ export function getCodexThreadSessionInfo(sessionId: string): SessionInfo | null
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 256 * 1024,
+      windowsHide: true,
     }).trim();
     if (!raw) return null;
     const row = JSON.parse(raw)[0];
@@ -2714,6 +2719,7 @@ function listCodexNativeArchives(limit = 200): ArchiveEntry[] {
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 1024 * 1024,
+      windowsHide: true,
     }).trim();
     if (!raw) return [];
     const rows = JSON.parse(raw) as any[];
@@ -3010,6 +3016,7 @@ function listCodexSessionsFromStateDb(cwdCandidates: Set<string>, limit: number,
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 1024 * 1024,
+      windowsHide: true,
     }).trim();
     if (!raw) return [];
     const rows = JSON.parse(raw) as any[];

@@ -116,6 +116,7 @@ function resolveInstalledClaudeCli(): string | undefined {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 5000,
+      windowsHide: true,
     });
     const first = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
     if (first) return first;
@@ -258,6 +259,7 @@ export function getClaudeAvailability(): ClaudeAvailability {
     timeout: 3000,
     stdio: ["ignore", "pipe", "pipe"],
     shell: probe.shell,
+    windowsHide: true,
   });
 
   if (result.error) {
@@ -1526,6 +1528,7 @@ export class ClaudeSession {
                   detached: true,
                   stdio: ["ignore", fd, fd],
                   cwd: this.cwd,
+                  windowsHide: true,
                 });
                 child.unref();
                 fs.closeSync(fd);

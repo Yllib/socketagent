@@ -540,6 +540,7 @@ export async function handleMonitorTool(
       detached: true,
       stdio: ["ignore", fd, fd],
       cwd: ctx.getCwd?.() || process.cwd(),
+      windowsHide: true,
     });
     child.unref();
     fs.closeSync(fd);

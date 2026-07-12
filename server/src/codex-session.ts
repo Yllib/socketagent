@@ -3485,6 +3485,7 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
       stdio: ["ignore", "pipe", "pipe"],
       env: codex.env,
       shell: codex.shell,
+      windowsHide: true,
     });
 
     if (result.error) {
@@ -3522,6 +3523,7 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
       stdio: ["ignore", "pipe", "pipe"],
       env: appServerHelp.env,
       shell: appServerHelp.shell,
+      windowsHide: true,
     });
     if (appServerResult.error || appServerResult.status !== 0) {
       const detail = appServerResult.error?.message || (appServerResult.stderr || appServerResult.stdout || "").trim();

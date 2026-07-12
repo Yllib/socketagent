@@ -529,6 +529,7 @@ function readRemoteAppVersionInfo(branch: string): AppVersionInfo | null {
       cwd: GIT_ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
     return parseAppVersionInfo(raw);
   } catch {
@@ -5324,7 +5325,7 @@ const httpServer = http.createServer((req, res) => {
         "Transfer-Encoding": "chunked",
       });
       const { spawn } = require("child_process");
-      const tar = spawn("tar", ["czf", "-", "-C", modelDir, fileName]);
+      const tar = spawn("tar", ["czf", "-", "-C", modelDir, fileName], { windowsHide: true });
       tar.stdout.pipe(res);
       tar.stderr.on("data", (d: Buffer) => console.error("[TTS Model tar]", d.toString()));
       tar.on("close", (code: number) => {
@@ -5533,6 +5534,7 @@ let relayMessageQueue = Promise.resolve();
 
 httpServer.listen(PORT, BIND_HOST, async () => {
   console.log(`Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)`);
+  cancelWindowsRecoveryGuard();
   if (!["127.0.0.1", "::1", "localhost"].includes(BIND_HOST)) {
     console.warn(`[Security] Direct HTTP/WebSocket server is bound to ${BIND_HOST}. Use relay mode or TLS for untrusted networks.`);
   }
@@ -5612,7 +5614,11 @@ let SERVER_GIT_HASH = "";
 try {
   const { execSync } = require("child_process");
   const gitRoot = findGitRoot(path.resolve(__dirname, ".."));
-  if (gitRoot) SERVER_GIT_HASH = execSync("git rev-parse --short HEAD", { cwd: gitRoot, stdio: "pipe" }).toString().trim();
+  if (gitRoot) SERVER_GIT_HASH = execSync("git rev-parse --short HEAD", {
+    cwd: gitRoot,
+    stdio: "pipe",
+    windowsHide: true,
+  }).toString().trim();
 } catch {}
 const STATUS_SYNC_IDLE_INTERVAL = 10000; // 10s when idle
 const STATUS_SYNC_RUNNING_INTERVAL = 3000; // 3s when running
@@ -6257,6 +6263,7 @@ function gitOutput(args: string[], options: { timeout?: number } = {}): string {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: options.timeout,
+    windowsHide: true,
   }).trim();
 }
 
@@ -6265,6 +6272,7 @@ function gitRun(args: string[], options: { timeout?: number } = {}): void {
     cwd: GIT_ROOT,
     stdio: ["ignore", "pipe", "pipe"],
     timeout: options.timeout,
+    windowsHide: true,
   });
 }
 
@@ -6275,6 +6283,7 @@ function gitOutputAsync(args: string[], options: { timeout?: number } = {}): Pro
       cwd: GIT_ROOT,
       encoding: "utf-8",
       timeout: options.timeout,
+      windowsHide: true,
     }, (err: any, stdout: string, stderr: string) => {
       if (err) {
         err.message = stderr ? `${err.message}\n${stderr}` : err.message;
@@ -6356,7 +6365,11 @@ function defaultManagedNodePath(): string {
 
 function nodeMajorVersion(nodePath: string): number | null {
   try {
-    const raw = execFileSync(nodePath, ["--version"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const raw = execFileSync(nodePath, ["--version"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    }).trim();
     const major = parseInt(raw.replace(/^v/, "").split(".")[0] || "", 10);
     return Number.isFinite(major) ? major : null;
   } catch {
@@ -6442,7 +6455,10 @@ function resolveUpdateRuntimeTools(): UpdateRuntimeTools {
     ? path.join(nodeDir, "npx.cmd")
     : path.join(nodeDir, "npx");
 
-  console.log(`[UpdateRuntime] Using Node.js ${execFileSync(nodePath, ["--version"], { encoding: "utf-8" }).trim()} at ${nodePath}`);
+  console.log(`[UpdateRuntime] Using Node.js ${execFileSync(nodePath, ["--version"], {
+    encoding: "utf-8",
+    windowsHide: true,
+  }).trim()} at ${nodePath}`);
   return {
     env,
     npm: env.SOCKETAGENT_NPM,
@@ -6479,6 +6495,7 @@ function runPackageUpdateSync(cwd: string): void {
     env: runtime.env,
     stdio: "pipe",
     timeout: 120000,
+    windowsHide: true,
   });
   const npx = updateToolCommand(runtime.npx, ["tsc"]);
   execFileSync(npx.command, npx.args, {
@@ -6486,6 +6503,7 @@ function runPackageUpdateSync(cwd: string): void {
     env: runtime.env,
     stdio: "pipe",
     timeout: 120000,
+    windowsHide: true,
   });
 }
 
@@ -6497,6 +6515,7 @@ function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: 
       cwd,
       env: runtime.env,
       timeout,
+      windowsHide: true,
     }, (err: any, stdout: any, stderr: any) => {
       if (err) {
         err.message = stderr ? `${err.message}\n${stderr}` : err.message;
@@ -6552,6 +6571,7 @@ function runManagedBackendUpdateSync(): void {
     env: runtime.env,
     stdio: "pipe",
     timeout: 300000,
+    windowsHide: true,
   });
   refreshBackendRuntimeCaches();
 }
@@ -6700,7 +6720,10 @@ function installSocketAgentCliWindows(gitRoot: string): void {
     "  [Environment]::SetEnvironmentVariable('PATH', $newPath, 'User')",
     "}",
   ].join("; ");
-  execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", pathCommand], { stdio: "pipe" });
+  execFileSync("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", pathCommand], {
+    stdio: "pipe",
+    windowsHide: true,
+  });
   console.log(`[CLI] Installed socketagent command in ${binDir}`);
 }
 
@@ -6782,7 +6805,7 @@ function windowsRunServiceBatContent(): string {
     "",
     ":arm_recovery",
     'if not exist "%RECOVERY_BAT%" exit /b 0',
-    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$a=New-ScheduledTaskAction -Execute $env:ComSpec -Argument (\'/d /c \' + [char]34 + $env:RECOVERY_BAT + [char]34); $t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); Register-ScheduledTask -TaskName \'SocketAgentRecovery\' -Action $a -Trigger $t -Force | Out-Null" >nul 2>&1',
+    'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "$a=New-ScheduledTaskAction -Execute $env:ComSpec -Argument (\'/d /c \' + [char]34 + $env:RECOVERY_BAT + [char]34); $t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); $p=New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited; $s=New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable; Register-ScheduledTask -TaskName \'SocketAgentRecovery\' -Action $a -Trigger $t -Principal $p -Settings $s -Force | Out-Null" >nul 2>&1',
     "exit /b 0",
     "",
     ":preflight",
@@ -6969,7 +6992,9 @@ function armWindowsRecoveryGuard(reason: string, delaySeconds = 300): string | n
     "$delay = [int]$env:SOCKETAGENT_RECOVERY_DELAY_SECONDS",
     "$action = New-ScheduledTaskAction -Execute $env:ComSpec -Argument ('/d /c ' + [char]34 + $bat + [char]34)",
     "$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds($delay)",
-    "Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action $action -Trigger $trigger -Force | Out-Null",
+    "$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited",
+    "$settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable",
+    "Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null",
   ].join("; ");
   execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
     cwd: SERVER_DIR,
@@ -6980,9 +7005,24 @@ function armWindowsRecoveryGuard(reason: string, delaySeconds = 300): string | n
     },
     stdio: "pipe",
     timeout: 10000,
+    windowsHide: true,
   });
   console.log(`[Recovery] Armed Windows ${reason} guard via ${recoveryFile}`);
   return "SocketAgentRecovery";
+}
+
+function cancelWindowsRecoveryGuard(): void {
+  if (process.platform !== "win32") return;
+  try {
+    execFileSync("schtasks.exe", ["/Delete", "/TN", "SocketAgentRecovery", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: 10000,
+    });
+    console.log("[Recovery] Cleared Windows startup recovery guard after successful listen");
+  } catch {
+    // No guard is the normal state outside a wrapper restart/update.
+  }
 }
 
 function armRestartRecoveryGuard(reason: string, delaySeconds = 180): string | null {

@@ -423,12 +423,15 @@ export class CodexSession {
   private sendSubagentSnapshot(ws?: WebSocket): void {
     const sessionId = this.sessionId;
     if (!sessionId) return;
+    const activeAgents = [...this.codexSubagents.values()].filter(
+      (agent) => agent.status === "pending" || agent.status === "running",
+    );
     const message = {
       type: "active_subagents",
       sessionId,
       backend: "codex",
       replace: true,
-      tasks: [...this.codexSubagents.values()].map((agent) => ({
+      tasks: activeAgents.map((agent) => ({
         agentId: agent.agentId,
         toolUseId: agent.toolUseId,
         description: agent.description,
@@ -2794,10 +2797,15 @@ export class CodexSession {
         ? item.agentsStates
         : {};
       for (const [agentId, state] of Object.entries(agentStates) as [string, any][]) {
+        const rawStatus = String(state?.status || "");
+        const isActive = rawStatus === "active"
+          || rawStatus === "running"
+          || rawStatus === "pendingInit";
+        if (!this.codexSubagents.has(agentId) && !isActive) continue;
         this.registerCodexSubagent(agentId);
         this.updateCodexSubagentStatus(
           agentId,
-          String(state?.status || ""),
+          rawStatus,
           typeof state?.message === "string" ? state.message : undefined,
         );
       }

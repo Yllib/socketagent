@@ -109,7 +109,7 @@ configure_service() {
 
   if launchctl print "$GUI_DOMAIN/$SERVICE_LABEL" >/dev/null 2>&1; then
     local reload_label="com.socketagent.helper-migration.$$"
-    local command="sleep 2; launchctl bootout '$GUI_DOMAIN/$SERVICE_LABEL' >/dev/null 2>&1 || true; launchctl bootstrap '$GUI_DOMAIN' '$SERVICE_PLIST'"
+    local command="sleep 2; launchctl bootout '$GUI_DOMAIN/$SERVICE_LABEL' >/dev/null 2>&1 || true; launchctl bootstrap '$GUI_DOMAIN' '$SERVICE_PLIST'; launchctl remove '$reload_label' >/dev/null 2>&1 || true"
     launchctl submit -l "$reload_label" -- /bin/bash -c "$command"
     echo "Scheduled launchd migration to SocketAgent Server.app"
   fi

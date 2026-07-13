@@ -52,6 +52,7 @@ test("macOS helper has a stable app identity and privacy descriptions", () => {
   assert.match(helperInstaller, /NSDocumentsFolderUsageDescription/);
   assert.match(helperInstaller, /codesign --force --deep --sign -/);
   assert.match(helperInstaller, /ProgramArguments:0/);
+  assert.match(helperInstaller, /launchctl remove '\$reload_label'/);
   assert.match(launcher, /SOCKETAGENT_START_SCRIPT/);
   assert.match(read("bin/socketagent"), /macos-permissions\|permissions/);
 });

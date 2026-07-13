@@ -36,7 +36,7 @@ import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, r
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
 import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, unregisterPushToken } from "./push-notifications";
-import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, resolveFileManagerPath } from "./file-manager";
+import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath } from "./file-manager";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 import { runBackendInstall } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
@@ -4565,7 +4565,7 @@ function createConnectionHandler(transport: ClientTransport) {
         const listPath = (msg as any).path as string || getDefaultCwd();
         try {
           const resolvedPath = path.resolve(listPath);
-          const entries = fs.readdirSync(resolvedPath, { withFileTypes: true });
+          const entries = await readDirectoryEntries(resolvedPath);
           const dirs: string[] = [];
           for (const entry of entries) {
             if (entry.isDirectory() && !entry.name.startsWith('.')) {
@@ -4592,7 +4592,7 @@ function createConnectionHandler(transport: ClientTransport) {
       case "file_manager_list" as any: {
         const requestId = (msg as any).requestId as string | undefined;
         try {
-          const listing = listFileManagerDirectory({
+          const listing = await listFileManagerDirectory({
             dirPath: (msg as any).path as string | undefined,
             includeHidden: (msg as any).includeHidden === true,
             defaultCwd: getDefaultCwd(),

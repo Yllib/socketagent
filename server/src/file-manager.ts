@@ -52,6 +52,34 @@ const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bm
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".mkv", ".webm", ".avi"]);
 const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".m4a", ".ogg", ".flac"]);
 const ARCHIVE_EXTENSIONS = new Set([".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"]);
+const DIRECTORY_READ_TIMEOUT_MS = 8_000;
+
+function withFilesystemTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${operation} timed out after ${DIRECTORY_READ_TIMEOUT_MS / 1000} seconds`));
+    }, DIRECTORY_READ_TIMEOUT_MS);
+    timer.unref?.();
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+export function readDirectoryEntries(dirPath: string): Promise<fs.Dirent[]> {
+  return withFilesystemTimeout(
+    fs.promises.readdir(dirPath, { withFileTypes: true }),
+    `Listing ${dirPath}`,
+  );
+}
 
 function uniqueRoots(roots: FileManagerRoot[]): FileManagerRoot[] {
   const seen = new Set<string>();
@@ -159,28 +187,32 @@ function entryKind(dirent: fs.Dirent): FileManagerEntryKind {
   return "other";
 }
 
-export function listFileManagerDirectory(args: {
+export async function listFileManagerDirectory(args: {
   dirPath?: string;
   includeHidden?: boolean;
   defaultCwd: string;
-}): FileManagerListing {
+}): Promise<FileManagerListing> {
   const roots = getFileManagerRoots(args.defaultCwd);
   const resolvedPath = resolveFileManagerPath(args.dirPath, args.defaultCwd);
   assertFileManagerPathAllowed(resolvedPath, roots);
 
-  const stat = fs.statSync(resolvedPath);
+  const stat = await withFilesystemTimeout(
+    fs.promises.stat(resolvedPath),
+    `Reading ${resolvedPath}`,
+  );
   if (!stat.isDirectory()) {
     throw new Error(`Not a directory: ${resolvedPath}`);
   }
 
-  const entries = fs.readdirSync(resolvedPath, { withFileTypes: true })
-    .filter((entry) => args.includeHidden || !entry.name.startsWith("."))
-    .map((entry): FileManagerEntry => {
+  const dirEntries = (await readDirectoryEntries(resolvedPath))
+    .filter((entry) => args.includeHidden || !entry.name.startsWith("."));
+  const entries = (await withFilesystemTimeout(
+    Promise.all(dirEntries.map(async (entry): Promise<FileManagerEntry> => {
       const fullPath = path.join(resolvedPath, entry.name);
       const kind = entryKind(entry);
       let itemStat: fs.Stats | null = null;
       try {
-        itemStat = fs.lstatSync(fullPath);
+        itemStat = await fs.promises.lstat(fullPath);
       } catch {
         itemStat = null;
       }
@@ -197,8 +229,9 @@ export function listFileManagerDirectory(args: {
         protected: protectedMatch !== null,
         ...(protectedMatch?.entry.label ? { protectedLabel: protectedMatch.entry.label } : {}),
       };
-    })
-    .sort((a, b) => {
+    })),
+    `Reading entries in ${resolvedPath}`,
+  )).sort((a, b) => {
       if (a.kind === "directory" && b.kind !== "directory") return -1;
       if (a.kind !== "directory" && b.kind === "directory") return 1;
       return a.name.toLowerCase().localeCompare(b.name.toLowerCase());

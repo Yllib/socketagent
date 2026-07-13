@@ -63,4 +63,5 @@ test("server-side managed Node repair distinguishes macOS from Linux", () => {
   assert.match(index, /process\.platform === "darwin" \? "darwin" : "linux"/);
   assert.match(index, /process\.platform === "darwin" \? "tar\.gz" : "tar\.xz"/);
   assert.match(index, /if \(process\.platform !== "linux"\) return;/);
+  assert.match(index, /if \(remote === local\)/);
 });

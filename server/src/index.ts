@@ -7087,6 +7087,13 @@ async function checkForUpdates(): Promise<void> {
     let lastApplied = "";
     try { lastApplied = fs.readFileSync(lastAppliedFile, "utf-8").trim(); } catch {}
 
+    if (remote === local) {
+      if (lastApplied !== remote) {
+        fs.writeFileSync(lastAppliedFile, remote);
+      }
+      return;
+    }
+
     if (remote === lastApplied) return; // Already applied this remote version
 
     const blockReason = autoUpdateBlockReason();

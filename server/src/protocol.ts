@@ -760,6 +760,7 @@ export interface QuestionServerMessage {
   questions: QuestionItem[];
   sessionId: string;
   emailPreview?: EmailPreview;
+  mcpServerName?: string;
 }
 
 export interface SecureInputRequestServerMessage {

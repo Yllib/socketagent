@@ -22,6 +22,7 @@ import {
   updateSessionAgentSettings,
   remapSession,
   cacheToolImage,
+  markQuestionAnswered,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
@@ -39,6 +40,10 @@ import {
 import { buildCodexSpawn } from "./codex-env";
 import { listSkills, SkillEntry } from "./skills-manager";
 import { getClaudeAvailability } from "./claude-session";
+import {
+  prepareCodexMcpElicitation,
+  resolveCodexMcpElicitation,
+} from "./codex-elicitation";
 
 const now = (): string => new Date().toISOString();
 
@@ -66,6 +71,12 @@ type PendingAppServerSteer = QueuedPrompt & {
   uuid: string;
   steerSent?: boolean;
 };
+
+interface PendingQuestion {
+  questionId: string;
+  resolve: (answers: Record<string, string>) => void;
+  questionData?: ServerMessage;
+}
 
 export type CodexSlashCommand = {
   name: string;
@@ -238,6 +249,8 @@ export class CodexSession {
   private _lastSupportedModels: ServerMessage | null = null;
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
+  private pendingQuestions = new Map<string, PendingQuestion>();
+  private questionCounter = 0;
   private clientSockets = new Set<WebSocket>();
 
   public onActivity?: () => void;
@@ -275,6 +288,7 @@ export class CodexSession {
       || this._pendingUserPrompt !== null
       || this._queuedPrompts.length > 0
       || this._pendingAppServerSteers.length > 0
+      || this.pendingQuestions.size > 0
       || this.hasRunningSubagents;
   }
   get activeStartedAt(): string | null {
@@ -406,6 +420,9 @@ export class CodexSession {
     }
     for (const pendingSecureInput of pendingSecureInputMessagesForSession(sid)) {
       this.sendTo(ws, pendingSecureInput as ServerMessage);
+    }
+    for (const pending of this.pendingQuestions.values()) {
+      if (pending.questionData) this.sendTo(ws, pending.questionData);
     }
     this.sendSubagentSnapshot(ws);
   }
@@ -650,7 +667,15 @@ export class CodexSession {
   }
   setKokoroVoice(v: string): void { this._kokoroVoice = v; }
   setKokoroSpeed(s: number): void { this._kokoroSpeed = s; }
-  resolveQuestion(_qid: string, _answers: Record<string, string>): boolean { return false; }
+  resolveQuestion(questionId: string, answers: Record<string, string>): boolean {
+    const pending = this.pendingQuestions.get(questionId);
+    if (!pending) return false;
+    this.pendingQuestions.delete(questionId);
+    pending.resolve(answers);
+    const sid = this.sessionId || this._resumeSessionId;
+    if (sid) markQuestionAnswered(sid, questionId);
+    return true;
+  }
   submitAuthCode(_code: string): void {}
   interrupt(): void { this.abort(); }
   stopMonitoring(taskId: string): void {
@@ -1335,8 +1360,8 @@ export class CodexSession {
       appendHistory: (entry: HistoryEntry) => {
         if (this.sessionId) appendHistory(this.sessionId, this.withCodexProtectedHistory(entry));
       },
-      pendingQuestions: new Map(),
-      questionCounter: { next: () => crypto.randomUUID() },
+      pendingQuestions: this.pendingQuestions,
+      questionCounter: { next: () => `q${++this.questionCounter}` },
     };
   }
 
@@ -2056,6 +2081,11 @@ export class CodexSession {
           return;
         }
 
+        case "item/tool/requestUserInput": {
+          await this.handleAppServerUserInput(params, respond);
+          return;
+        }
+
         case "applyPatchApproval": {
           const allowed = await this.canApproveLegacyApplyPatch(params.fileChanges);
           respond({ result: { decision: allowed ? "approved" : "denied" } });
@@ -2105,30 +2135,181 @@ export class CodexSession {
     params: Record<string, any>,
     respond: CodexAppServerRequestResponder,
   ): Promise<void> {
-    const serverName = String(params.serverName || params.server_name || params.name || "");
+    const prepared = prepareCodexMcpElicitation(params);
+    const serverName = prepared.serverName;
     const normalizedServerName = serverName.toLowerCase().replace(/-/g, "_");
-    const request = params.request && typeof params.request === "object" ? params.request : {};
-    const requestMethod = String((request as any).method || "");
-    const requestParams = (request as any).params && typeof (request as any).params === "object"
-      ? (request as any).params
-      : {};
-    const message = String((requestParams as any).message || "");
     const isSocketAgentAppServer = normalizedServerName === "socketagent_app"
       || normalizedServerName === "socketagent"
       || serverName === "SocketAgent";
 
     if (isSocketAgentAppServer) {
       console.log(
-        `[codex app-server] accepted MCP elicitation server=${serverName || "unknown"} method=${requestMethod || "unknown"} message=${message.slice(0, 160)}`,
+        `[codex app-server] accepted internal MCP elicitation server=${serverName || "unknown"} mode=${prepared.mode} message=${prepared.message.slice(0, 160)}`,
       );
-      respond({ result: { action: "accept", content: {} } });
+      respond({ result: { action: "accept", content: {}, _meta: null } });
       return;
     }
 
-    console.warn(
-      `[codex app-server] declined MCP elicitation server=${serverName || "unknown"} method=${requestMethod || "unknown"} message=${message.slice(0, 160)}`,
+    const sessionId = this.sessionId || this._resumeSessionId || String(params.threadId || "");
+    const questionId = `codex_elicit_${++this.questionCounter}`;
+
+    if (prepared.mode === "url" && prepared.url) {
+      const message: ServerMessage = {
+        type: "elicitation_url",
+        questionId,
+        mcpServerName: serverName,
+        message: prepared.message,
+        url: prepared.url,
+        elicitationId: prepared.elicitationId,
+        sessionId,
+      } as ServerMessage;
+      this.send(message);
+      if (sessionId) {
+        appendHistory(sessionId, {
+          role: "elicitation_url",
+          content: prepared.message,
+          questionId,
+          mcpServerName: serverName,
+          url: prepared.url,
+          timestamp: now(),
+        });
+      }
+      const answers = await new Promise<Record<string, string>>((resolve) => {
+        this.pendingQuestions.set(questionId, { questionId, resolve, questionData: message });
+      });
+      const answer = String(Object.values(answers)[0] || "");
+      const accepted = !/\b(?:cancel|decline|reject)\b/i.test(answer);
+      respond({
+        result: {
+          action: accepted ? "accept" : "decline",
+          content: null,
+          _meta: null,
+        },
+      });
+      return;
+    }
+
+    const questionMessage: ServerMessage = {
+      type: "question",
+      questionId,
+      questions: prepared.questions,
+      sessionId,
+      mcpServerName: serverName,
+    } as ServerMessage;
+    this.send(questionMessage);
+    if (sessionId) {
+      appendHistory(sessionId, {
+        role: "question",
+        content: prepared.message,
+        questionId,
+        questions: prepared.questions,
+        timestamp: now(),
+      });
+    }
+    console.log(
+      `[codex app-server] awaiting MCP elicitation server=${serverName || "unknown"} mode=${prepared.mode} questionId=${questionId} message=${prepared.message.slice(0, 160)}`,
     );
-    respond({ result: { action: "cancel" } });
+    const answers = await new Promise<Record<string, string>>((resolve) => {
+      this.pendingQuestions.set(questionId, { questionId, resolve, questionData: questionMessage });
+    });
+    const result = resolveCodexMcpElicitation(prepared, answers);
+    console.log(
+      `[codex app-server] answered MCP elicitation server=${serverName || "unknown"} action=${result.action} questionId=${questionId}`,
+    );
+    respond({ result });
+  }
+
+  private async handleAppServerUserInput(
+    params: Record<string, any>,
+    respond: CodexAppServerRequestResponder,
+  ): Promise<void> {
+    const rawQuestions = Array.isArray(params.questions) ? params.questions : [];
+    const secretQuestion = rawQuestions.find((question: any) => question?.isSecret === true);
+    if (secretQuestion) {
+      throw new Error(
+        "Codex requested secret text through request_user_input. Use SocketAgent RequestSecureInput so the value is not stored in chat history.",
+      );
+    }
+    if (rawQuestions.length === 0) {
+      respond({ result: { answers: {} } });
+      return;
+    }
+
+    const sessionId = this.sessionId || this._resumeSessionId || String(params.threadId || "");
+    const questionId = `codex_input_${++this.questionCounter}`;
+    const questionIds = new Map<string, string>();
+    const usedText = new Set<string>();
+    const questions = rawQuestions.map((rawQuestion: any, index: number) => {
+      const baseText = String(rawQuestion?.question || `Question ${index + 1}`).trim();
+      let question = baseText || `Question ${index + 1}`;
+      let suffix = 2;
+      while (usedText.has(question)) question = `${baseText} (${suffix++})`;
+      usedText.add(question);
+      questionIds.set(question, String(rawQuestion?.id || `question_${index + 1}`));
+      return {
+        question,
+        header: String(rawQuestion?.header || "Input"),
+        options: Array.isArray(rawQuestion?.options)
+          ? rawQuestion.options.map((option: any) => ({
+              label: String(option?.label || ""),
+              ...(option?.description ? { description: String(option.description) } : {}),
+            })).filter((option: any) => option.label)
+          : [],
+        multiSelect: false,
+      };
+    });
+    const questionMessage: ServerMessage = {
+      type: "question",
+      questionId,
+      questions,
+      sessionId,
+    } as ServerMessage;
+    this.send(questionMessage);
+    if (sessionId) {
+      appendHistory(sessionId, {
+        role: "question",
+        content: "",
+        questionId,
+        questions,
+        timestamp: now(),
+      });
+    }
+
+    const autoResolutionMs = Number(params.autoResolutionMs);
+    const answers = await new Promise<Record<string, string>>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (value: Record<string, string>) => {
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      };
+      this.pendingQuestions.set(questionId, {
+        questionId,
+        resolve: finish,
+        questionData: questionMessage,
+      });
+      if (Number.isFinite(autoResolutionMs) && autoResolutionMs > 0) {
+        timer = setTimeout(() => {
+          if (!this.pendingQuestions.delete(questionId)) return;
+          if (sessionId) markQuestionAnswered(sessionId, questionId);
+          this.send({ type: "question_answered", questionId, sessionId } as any);
+          resolve({});
+        }, autoResolutionMs);
+        timer.unref?.();
+      }
+    });
+
+    const responseAnswers: Record<string, { answers: string[] }> = {};
+    for (const [question, answer] of Object.entries(answers)) {
+      const id = questionIds.get(question);
+      if (!id || !answer.trim()) continue;
+      responseAnswers[id] = {
+        answers: answer
+          .split(/\s*\u2014\s*/)
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      };
+    }
+    respond({ result: { answers: responseAnswers } });
   }
 
   private async canApproveAppServerTool(

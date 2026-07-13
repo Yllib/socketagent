@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # ══════════════════════════════════════════════
-#  SocketAgent Linux Server Installer
+#  SocketAgent Linux/macOS Server Installer
 # ══════════════════════════════════════════════
 #
-# Installs everything needed to run SocketAgent server on Linux:
+# Installs everything needed to run SocketAgent server on Linux or macOS:
 # Node.js, Claude Code CLI, OpenAI Codex CLI, server dependencies,
-# configuration, and systemd user service.
+# configuration, and an OS-native background service.
 #
 # Usage:
 #   bash install-server.sh [--reset-pairing] [--port PORT] [--backends claude|codex|both|installed] [--non-interactive]
@@ -18,6 +18,7 @@ RELAY_URL="wss://relay.jarofdirt.info"
 CODEX_DEVICE_URL="https://chatgpt.com/codex/device"
 SERVICE_NAME="socketagent"
 NODE_MIN_VERSION=22
+NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"
 PORT=8085
 RESET_PAIRING=false
 BACKENDS=""
@@ -54,6 +55,16 @@ SETUP_SCRIPT="$SERVER_DIR/scripts/setup.js"
 USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
 NPM_GLOBAL_DIR="${SOCKETAGENT_NPM_GLOBAL_DIR:-$SOCKET_AGENT_HOME/toolchains/npm-global}"
 NPM_BIN_DIR="$NPM_GLOBAL_DIR/bin"
+OS_NAME="$(uname -s)"
+
+case "$OS_NAME" in
+  Linux|Darwin) ;;
+  *)
+    echo "Unsupported operating system: $OS_NAME" >&2
+    echo "Use install.ps1 on Windows." >&2
+    exit 1
+    ;;
+esac
 
 if [[ -x "$USER_NODE_DIR/bin/node" ]]; then
   export PATH="$USER_NODE_DIR/bin:$PATH"
@@ -118,9 +129,10 @@ ensure_shell_path() {
   esac
 
   local shell_rc="$HOME/.profile"
-  if [[ -n "${SHELL:-}" && "$(basename "$SHELL")" == "bash" ]]; then
-    shell_rc="$HOME/.bashrc"
-  fi
+  case "$(basename "${SHELL:-}")" in
+    bash) shell_rc="$HOME/.bashrc" ;;
+    zsh) shell_rc="$HOME/.zshrc" ;;
+  esac
 
   if [[ -f "$shell_rc" ]] && ! grep -q "$path_entry" "$shell_rc"; then
     printf '\n# %s\nexport PATH="%s:$PATH"\n' "$label" "$path_entry" >> "$shell_rc"
@@ -204,9 +216,10 @@ install_cli() {
     *)
       warn "$bin_dir is not currently on PATH."
       local shell_rc="$HOME/.profile"
-      if [[ -n "${SHELL:-}" && "$(basename "$SHELL")" == "bash" ]]; then
-        shell_rc="$HOME/.bashrc"
-      fi
+      case "$(basename "${SHELL:-}")" in
+        bash) shell_rc="$HOME/.bashrc" ;;
+        zsh) shell_rc="$HOME/.zshrc" ;;
+      esac
       if [[ -f "$shell_rc" ]] && ! grep -q 'HOME/.local/bin' "$shell_rc"; then
         printf '\n# SocketAgent CLI\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$shell_rc"
         ok "Added ~/.local/bin to PATH in $shell_rc"
@@ -274,28 +287,43 @@ else
 fi
 
 if [[ "$NEED_NODE_INSTALL" == "true" ]]; then
-  # Install Node.js from official binary tarball — works on any Linux distro
-  # regardless of broken apt repos, pinning, or package manager quirks
+  # Install a private Node.js runtime so service startup does not depend on a
+  # package manager or the user's interactive shell configuration.
   ARCH=$(uname -m)
   case "$ARCH" in
     x86_64)  NODE_ARCH="x64" ;;
-    aarch64) NODE_ARCH="arm64" ;;
-    armv7l)  NODE_ARCH="armv7l" ;;
+    aarch64|arm64) NODE_ARCH="arm64" ;;
+    armv7l)
+      if [[ "$OS_NAME" == "Darwin" ]]; then
+        fail "Unsupported macOS architecture: $ARCH"
+        exit 1
+      fi
+      NODE_ARCH="armv7l"
+      ;;
     *) fail "Unsupported architecture: $ARCH"; exit 1 ;;
   esac
 
   NODE_INSTALL_DIR="$USER_NODE_DIR"
-  NODE_TARBALL="node-v22.22.1-linux-${NODE_ARCH}.tar.xz"
-  NODE_URL="https://nodejs.org/dist/v22.22.1/${NODE_TARBALL}"
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    NODE_TARBALL="node-v${NODE_RUNTIME_VERSION}-darwin-${NODE_ARCH}.tar.gz"
+  else
+    NODE_TARBALL="node-v${NODE_RUNTIME_VERSION}-linux-${NODE_ARCH}.tar.xz"
+  fi
+  NODE_URL="https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}/${NODE_TARBALL}"
 
-  echo "  Downloading Node.js v22.22.1 for ${NODE_ARCH}..."
-  curl -fSL --progress-bar -o "/tmp/${NODE_TARBALL}" "$NODE_URL"
+  NODE_TMP="${TMPDIR:-/tmp}/${NODE_TARBALL}.$$"
+  echo "  Downloading Node.js v${NODE_RUNTIME_VERSION} for ${NODE_ARCH}..."
+  curl -fSL --retry 3 --connect-timeout 15 --progress-bar -o "$NODE_TMP" "$NODE_URL"
 
   echo "  Installing to ${NODE_INSTALL_DIR}..."
   rm -rf "$NODE_INSTALL_DIR"
   mkdir -p "$NODE_INSTALL_DIR"
-  tar -xJf "/tmp/${NODE_TARBALL}" -C "$NODE_INSTALL_DIR" --strip-components=1
-  rm -f "/tmp/${NODE_TARBALL}"
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    tar -xzf "$NODE_TMP" -C "$NODE_INSTALL_DIR" --strip-components=1
+  else
+    tar -xJf "$NODE_TMP" -C "$NODE_INSTALL_DIR" --strip-components=1
+  fi
+  rm -f "$NODE_TMP"
 
   # Refresh PATH
   hash -r 2>/dev/null
@@ -475,7 +503,8 @@ if [[ "$RESET_PAIRING" == "true" ]]; then
   warn "Resetting pairing data..."
   rm -f "$KEYS_FILE"
   if [[ -f "$ENV_FILE" ]]; then
-    sed -i '/^PAIRING_TOKEN=/d' "$ENV_FILE"
+    sed '/^PAIRING_TOKEN=/d' "$ENV_FILE" > "$ENV_FILE.tmp"
+    mv "$ENV_FILE.tmp" "$ENV_FILE"
   fi
 fi
 
@@ -483,15 +512,19 @@ IS_UPGRADE=false
 [[ -f "$ENV_FILE" ]] && IS_UPGRADE=true
 
 # Ensure data directory exists for keys file
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P)
+}
+
 if [[ -d "$LEGACY_DATA_DIR" && "$DATA_DIR" != "$LEGACY_DATA_DIR" ]]; then
-  if [[ -e "$DATA_DIR" && "$(realpath "$DATA_DIR" 2>/dev/null)" == "$(realpath "$LEGACY_DATA_DIR" 2>/dev/null)" ]]; then
+  if [[ -e "$DATA_DIR" && "$(canonical_dir "$DATA_DIR")" == "$(canonical_dir "$LEGACY_DATA_DIR")" ]]; then
     :
   elif [[ ! -e "$DATA_DIR" ]]; then
     mv "$LEGACY_DATA_DIR" "$DATA_DIR"
     ln -s "$DATA_DIR" "$LEGACY_DATA_DIR" 2>/dev/null || true
     ok "Migrated SocketAgent data to $DATA_DIR"
   else
-    cp -an "$LEGACY_DATA_DIR"/. "$DATA_DIR"/ 2>/dev/null || true
+    cp -R -n "$LEGACY_DATA_DIR"/. "$DATA_DIR"/ 2>/dev/null || true
     ok "Merged legacy SocketAgent data into $DATA_DIR"
   fi
 fi
@@ -509,7 +542,7 @@ SETUP_OUTPUT=$(cd "$SERVER_DIR" && node "$SETUP_SCRIPT" \
 QR_PAYLOAD=$(echo "$SETUP_OUTPUT" | tail -1)
 
 # Print non-QR output
-echo "$SETUP_OUTPUT" | head -n -1 | while read -r line; do echo "    $line"; done
+printf '%s\n' "$SETUP_OUTPUT" | sed '$d' | while IFS= read -r line; do echo "    $line"; done
 
 if [[ "$IS_UPGRADE" == "true" ]]; then
   ok "Configuration updated (existing tokens preserved)"
@@ -518,25 +551,99 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 8: Register systemd Service
+#  Phase 8: Register Service
 # ══════════════════════════════════════════════
 
-phase "Phase 8: Register systemd Service"
+phase "Phase 8: Register Service"
 
-SERVICE_DIR="$HOME/.config/systemd/user"
-SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
 NODE_PATH=$(command -v node)
 NPM_PATH=$(command -v npm)
 NPX_PATH=$(command -v npx)
-
-mkdir -p "$SERVICE_DIR"
-chmod +x "$SERVER_DIR/scripts/start-server.sh"
+SERVICE_CONTROL="$SERVER_DIR/scripts/service-control.sh"
+chmod +x "$SERVER_DIR/scripts/start-server.sh" "$SERVER_DIR/scripts/restart-server.sh" \
+  "$SERVER_DIR/scripts/recovery-guard.sh" "$SERVICE_CONTROL"
 
 NODE_DIR=$(dirname "$NODE_PATH")
 SERVICE_PATH="$NODE_DIR"
 SERVICE_PATH="$SERVICE_PATH:$NPM_BIN_DIR"
-SERVICE_PATH="$SERVICE_PATH:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-cat > "$SERVICE_FILE" << EOF
+SERVICE_PATH="$SERVICE_PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+if [[ "$OS_NAME" == "Darwin" ]]; then
+  SERVICE_LABEL="com.socketagent.server"
+  SERVICE_DIR="$HOME/Library/LaunchAgents"
+  SERVICE_FILE="$SERVICE_DIR/$SERVICE_LABEL.plist"
+  SERVICE_LOG="$SERVER_DIR/socketagent.log"
+  GUI_DOMAIN="gui/$(id -u)"
+
+  xml_escape() {
+    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&apos;/g'
+  }
+
+  mkdir -p "$SERVICE_DIR"
+  touch "$SERVICE_LOG"
+  chmod 600 "$SERVICE_LOG"
+  SERVER_DIR_XML="$(xml_escape "$SERVER_DIR")"
+  START_SCRIPT_XML="$(xml_escape "$SERVER_DIR/scripts/start-server.sh")"
+  HOME_XML="$(xml_escape "$HOME")"
+  PATH_XML="$(xml_escape "$SERVICE_PATH")"
+  NODE_XML="$(xml_escape "$NODE_PATH")"
+  NPM_XML="$(xml_escape "$NPM_PATH")"
+  NPX_XML="$(xml_escape "$NPX_PATH")"
+  LOG_XML="$(xml_escape "$SERVICE_LOG")"
+
+  cat > "$SERVICE_FILE" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$SERVICE_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$START_SCRIPT_XML</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$SERVER_DIR_XML</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$HOME_XML</string>
+    <key>PATH</key>
+    <string>$PATH_XML</string>
+    <key>SOCKETAGENT_NODE</key>
+    <string>$NODE_XML</string>
+    <key>SOCKETAGENT_NPM</key>
+    <string>$NPM_XML</string>
+    <key>SOCKETAGENT_NPX</key>
+    <string>$NPX_XML</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$LOG_XML</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG_XML</string>
+</dict>
+</plist>
+EOF
+
+  plutil -lint "$SERVICE_FILE" >/dev/null
+  ok "Created $SERVICE_FILE"
+  launchctl bootout "$GUI_DOMAIN/$SERVICE_LABEL" >/dev/null 2>&1 || true
+  launchctl bootstrap "$GUI_DOMAIN" "$SERVICE_FILE"
+  launchctl enable "$GUI_DOMAIN/$SERVICE_LABEL" >/dev/null 2>&1 || true
+  launchctl kickstart -k "$GUI_DOMAIN/$SERVICE_LABEL"
+else
+  SERVICE_DIR="$HOME/.config/systemd/user"
+  SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
+  mkdir -p "$SERVICE_DIR"
+  cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=SocketAgent WebSocket Server
 After=network-online.target
@@ -559,26 +666,25 @@ UnsetEnvironment=CLAUDECODE
 WantedBy=default.target
 EOF
 
-ok "Created $SERVICE_FILE"
+  ok "Created $SERVICE_FILE"
 
-# Enable linger so service runs without active login
-if command -v loginctl &>/dev/null; then
-  loginctl enable-linger "$(whoami)" 2>/dev/null || true
+  # Enable linger so service runs without active login
+  if command -v loginctl &>/dev/null; then
+    loginctl enable-linger "$(whoami)" 2>/dev/null || true
+  fi
+
+  systemctl --user daemon-reload
+  systemctl --user enable "$SERVICE_NAME"
+  systemctl --user restart "$SERVICE_NAME"
 fi
 
-# Reload, enable, and start
-systemctl --user daemon-reload
-systemctl --user enable "$SERVICE_NAME"
-
-# Stop if already running, then start fresh
-systemctl --user restart "$SERVICE_NAME"
 sleep 3
 
-if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+if "$SERVICE_CONTROL" is-active; then
   ok "Server is running on port $PORT"
 else
-  warn "Server may not have started. Check: systemctl --user status $SERVICE_NAME"
-  warn "Logs: journalctl --user -u $SERVICE_NAME -f"
+  warn "Server may not have started. Check: socketagent status"
+  warn "Logs: socketagent logs"
 fi
 
 # ══════════════════════════════════════════════
@@ -613,15 +719,19 @@ echo -e "  ${GREEN}===========================================${NC}"
 echo -e "  ${GREEN} Installation complete!${NC}"
 echo -e "  ${GREEN}===========================================${NC}"
 echo ""
-echo "  The server starts automatically on boot."
+if [[ "$OS_NAME" == "Darwin" ]]; then
+  echo "  The server starts automatically when this macOS user logs in."
+else
+  echo "  The server starts automatically on boot."
+fi
 echo ""
 echo -e "  ${CYAN}Management commands:${NC}"
 echo "    CLI:       socketagent help"
-echo "    Status:    systemctl --user status $SERVICE_NAME"
-echo "    Start:     systemctl --user start $SERVICE_NAME"
-echo "    Stop:      systemctl --user stop $SERVICE_NAME"
-echo "    Logs:      journalctl --user -u $SERVICE_NAME -f"
-echo "    Restart:   systemctl --user restart $SERVICE_NAME"
+echo "    Status:    socketagent status"
+echo "    Start:     socketagent start"
+echo "    Stop:      socketagent stop"
+echo "    Logs:      socketagent logs"
+echo "    Restart:   socketagent restart"
 echo ""
 echo "  To update, run: git pull && bash install-server.sh"
 echo "  Existing pairings are preserved."

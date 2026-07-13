@@ -20,7 +20,7 @@ Open PowerShell and paste this command:
 powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Yllib/socketagent/master/install-windows.ps1 | iex"
 ```
 
-### Linux or WSL
+### macOS, Linux, or WSL
 
 Open a terminal and paste this command:
 
@@ -72,7 +72,7 @@ socketagent restart   # restart the server safely
 ## Requirements
 
 - Android phone
-- Windows, Linux, or WSL computer
+- Windows, macOS, Linux, or WSL computer
 - Claude Code account if you want Claude sessions
 - ChatGPT/Codex account if you want Codex sessions
 

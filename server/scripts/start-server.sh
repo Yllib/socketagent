@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# start-server.sh — systemd entrypoint with startup self-repair
+# start-server.sh — service entrypoint with startup self-repair
 #
 # This runs before dist/index.js so dependency/build corruption can be fixed
 # even when the Node server itself cannot start.
@@ -58,7 +58,11 @@ recent_failure() {
 
 lock_age_seconds() {
   local mtime now
-  mtime="$(stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0)"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    mtime="$(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)"
+  else
+    mtime="$(stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0)"
+  fi
   [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
   now="$(date +%s)"
   echo $((now - mtime))
@@ -200,7 +204,7 @@ install_managed_node() {
   local node_arch
   case "$(uname -m)" in
     x86_64) node_arch="x64" ;;
-    aarch64) node_arch="arm64" ;;
+    aarch64|arm64) node_arch="arm64" ;;
     armv7l) node_arch="armv7l" ;;
     *)
       log "Unsupported architecture for managed Node.js: $(uname -m)"
@@ -209,7 +213,11 @@ install_managed_node() {
   esac
 
   local tarball url tmp
-  tarball="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.xz"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    tarball="node-v${NODE_RUNTIME_VERSION}-darwin-${node_arch}.tar.gz"
+  else
+    tarball="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.xz"
+  fi
   url="https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}/${tarball}"
   tmp="${TMPDIR:-/tmp}/${tarball}.$$"
 
@@ -218,7 +226,11 @@ install_managed_node() {
 
   rm -rf "$USER_NODE_DIR"
   mkdir -p "$USER_NODE_DIR"
-  tar -xJf "$tmp" -C "$USER_NODE_DIR" --strip-components=1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    tar -xzf "$tmp" -C "$USER_NODE_DIR" --strip-components=1
+  else
+    tar -xJf "$tmp" -C "$USER_NODE_DIR" --strip-components=1
+  fi
   rm -f "$tmp"
 
   node_is_usable "$USER_NODE_DIR/bin/node"

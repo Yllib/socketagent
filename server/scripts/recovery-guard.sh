@@ -4,12 +4,14 @@
 #
 # Arm this before an update/restart operation that may stop the server. If the
 # server does not come back before the delay expires, the guard runs outside the
-# SocketAgent service cgroup and tries to recover the user service.
+# SocketAgent service job and tries to recover the user service.
 
 set -euo pipefail
 
-SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 SERVER_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+SERVICE_CONTROL="$SERVER_DIR/scripts/service-control.sh"
+OS_NAME="$(uname -s)"
 STORE_DIR="${SOCKETAGENT_DATA_DIR:-$HOME/.socket-agent}"
 if [[ ! -d "$STORE_DIR" && -d "$HOME/.claude-assistant" ]]; then
   STORE_DIR="$HOME/.claude-assistant"
@@ -19,15 +21,11 @@ LOG_FILE="$RECOVERY_DIR/recovery.log"
 
 log() {
   mkdir -p "$RECOVERY_DIR"
-  printf '[%s] %s\n' "$(date -Is)" "$*" >> "$LOG_FILE"
+  printf '[%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*" >> "$LOG_FILE"
 }
 
 detect_service_name() {
-  if systemctl --user list-unit-files socketagent.service >/dev/null 2>&1; then
-    echo "socketagent"
-  else
-    echo "socketclaude"
-  fi
+  "$SERVICE_CONTROL" name
 }
 
 read_port() {
@@ -47,7 +45,13 @@ marker_file() {
 
 port_is_open() {
   local port="$1"
-  timeout 2 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout 2 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1
+  else
+    bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1
+  fi
 }
 
 cleanup_startup_lock() {
@@ -90,13 +94,24 @@ arm_guard() {
 
   mkdir -p "$RECOVERY_DIR"
   printf 'reason=%q\nservice=%q\nport=%q\nserver_dir=%q\narmed_at=%q\n' \
-    "$reason" "$service" "$port" "$SERVER_DIR" "$(date -Is)" > "$marker"
+    "$reason" "$service" "$port" "$SERVER_DIR" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$marker"
 
-  if ! systemd-run --user \
+  local armed=false
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    local label="com.socketagent.recovery.$(unit_safe_id "$id")"
+    if launchctl submit -l "$label" -o "$LOG_FILE" -e "$LOG_FILE" -- \
+      /bin/bash "$SCRIPT_PATH" wait-run "$delay" "$id" "$service" "$port" "$SERVER_DIR" >/dev/null 2>&1; then
+      armed=true
+    fi
+  elif systemd-run --user \
     --unit="$unit" \
     --collect \
     --on-active="${delay}s" \
     "$SCRIPT_PATH" run "$id" "$service" "$port" "$SERVER_DIR" >/dev/null 2>&1; then
+    armed=true
+  fi
+
+  if [[ "$armed" != "true" ]]; then
     rm -f "$marker"
     log "Failed to arm recovery guard reason=$reason delay=${delay}s"
     return 1
@@ -111,7 +126,14 @@ cancel_guard() {
   [[ -n "$id" ]] || return 0
   local unit="socketagent-recovery-$(unit_safe_id "$id")"
   rm -f "$(marker_file "$id")"
-  systemctl --user stop "${unit}.timer" "${unit}.service" >/dev/null 2>&1 || true
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    local label="com.socketagent.recovery.$(unit_safe_id "$id")"
+    launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+    launchctl bootout "user/$(id -u)/$label" >/dev/null 2>&1 || true
+    launchctl remove "$label" >/dev/null 2>&1 || true
+  else
+    systemctl --user stop "${unit}.timer" "${unit}.service" >/dev/null 2>&1 || true
+  fi
   log "Cancelled recovery guard id=$id"
 }
 
@@ -135,8 +157,10 @@ run_guard() {
 
   log "Recovery guard id=$id firing; service=$service port=$port is not listening"
   cleanup_startup_lock force
-  systemctl --user reset-failed "${service}.service" >/dev/null 2>&1 || true
-  systemctl --user restart "${service}.service" || systemctl --user start "${service}.service"
+  if [[ "$OS_NAME" == "Linux" ]]; then
+    systemctl --user reset-failed "${service}.service" >/dev/null 2>&1 || true
+  fi
+  "$SERVICE_CONTROL" restart || "$SERVICE_CONTROL" start
 
   for _ in $(seq 1 60); do
     if port_is_open "$port"; then
@@ -151,6 +175,19 @@ run_guard() {
   return 1
 }
 
+wait_and_run_guard() {
+  local delay="$1"
+  shift
+  sleep "$delay"
+  local status=0
+  run_guard "$@" || status=$?
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    local id="$1"
+    launchctl remove "com.socketagent.recovery.$(unit_safe_id "$id")" >/dev/null 2>&1 || true
+  fi
+  return "$status"
+}
+
 case "${1:-}" in
   arm)
     arm_guard "${2:-restart}" "${3:-180}"
@@ -160,6 +197,9 @@ case "${1:-}" in
     ;;
   run)
     run_guard "${2:?missing recovery id}" "${3:-}" "${4:-}" "${5:-}"
+    ;;
+  wait-run)
+    wait_and_run_guard "${2:?missing delay}" "${3:?missing recovery id}" "${4:-}" "${5:-}" "${6:-}"
     ;;
   *)
     echo "Usage: $0 arm [reason] [delay_seconds] | cancel <id> | run <id> [service] [port] [server_dir]" >&2

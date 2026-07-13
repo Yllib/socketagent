@@ -14,12 +14,12 @@
 # 1. Queries GET /running-sessions to find all actively running sessions
 # 2. Appends "Server restart initiated" to all their histories
 # 3. Optionally compiles TypeScript
-# 4. Restarts the systemd service
+# 4. Restarts the OS service
 # 5. Waits for the server to come back up
 # 6. Appends "Server restart complete" and continues ALL sessions
 #
-# NOTE: This script escapes the socketagent service's cgroup on first run
-# (via systemd-run) so it survives the service restart.
+# NOTE: This script detaches a worker from the SocketAgent service on first run
+# so it survives the service restart.
 
 set -euo pipefail
 
@@ -28,20 +28,34 @@ set -euo pipefail
 # the script before it can write the success message to history.
 trap '' PIPE
 
-# -- Escape the service cgroup so we survive the restart --
-# When called from within the socketagent service (e.g., via Claude/Codex),
-# systemd kills everything in the service cgroup on restart. Re-launch the real
-# restart worker as a transient user service, not a scope, so it has an
-# independent cgroup and can continue after socketagent/socketclaude restarts.
+cleanup_detached_launchd_job() {
+  if [[ "$(uname -s)" == "Darwin" && -n "${_RESTART_LAUNCHD_LABEL:-}" ]]; then
+    launchctl remove "$_RESTART_LAUNCHD_LABEL" >/dev/null 2>&1 || true
+  fi
+}
+
+if [[ -n "${_RESTART_DETACHED:-}" ]]; then
+  trap cleanup_detached_launchd_job EXIT
+fi
+
+# -- Escape the service job so we survive the restart --
 if [[ -z "${_RESTART_DETACHED:-}" ]]; then
-  SCRIPT_PATH="$(readlink -f "$0")"
-  UNIT_NAME="socketagent-restart-$$"
-  systemd-run --user \
-    --unit="$UNIT_NAME" \
-    --collect \
-    --setenv="_RESTART_DETACHED=1" \
-    "$SCRIPT_PATH" "$@"
-  echo "Restart job scheduled as ${UNIT_NAME}.service"
+  SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    JOB_LABEL="com.socketagent.restart.$$"
+    DETACH_LOG="${TMPDIR:-/tmp}/socketagent-restart-$$.log"
+    launchctl submit -l "$JOB_LABEL" -o "$DETACH_LOG" -e "$DETACH_LOG" -- \
+      /usr/bin/env _RESTART_DETACHED=1 _RESTART_LAUNCHD_LABEL="$JOB_LABEL" /bin/bash "$SCRIPT_PATH" "$@"
+    echo "Restart job scheduled as $JOB_LABEL"
+  else
+    UNIT_NAME="socketagent-restart-$$"
+    systemd-run --user \
+      --unit="$UNIT_NAME" \
+      --collect \
+      --setenv="_RESTART_DETACHED=1" \
+      "$SCRIPT_PATH" "$@"
+    echo "Restart job scheduled as ${UNIT_NAME}.service"
+  fi
   exit 0
 fi
 
@@ -52,11 +66,8 @@ fi
 SESSIONS_FILE="$STORE_DIR/sessions.json"
 HISTORY_DIR="$STORE_DIR/history"
 SERVER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if systemctl --user list-unit-files socketagent.service >/dev/null 2>&1; then
-  SERVICE_NAME="socketagent"
-else
-  SERVICE_NAME="socketclaude"
-fi
+SERVICE_CONTROL="$SERVER_DIR/scripts/service-control.sh"
+SERVICE_NAME="$("$SERVICE_CONTROL" name)"
 NODE_MIN_VERSION="${SOCKETAGENT_NODE_MIN_VERSION:-22}"
 NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"
 USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
@@ -143,7 +154,7 @@ install_managed_node() {
   local node_arch
   case "$(uname -m)" in
     x86_64) node_arch="x64" ;;
-    aarch64) node_arch="arm64" ;;
+    aarch64|arm64) node_arch="arm64" ;;
     armv7l) node_arch="armv7l" ;;
     *)
       echo "Unsupported architecture for managed Node.js: $(uname -m)"
@@ -152,7 +163,11 @@ install_managed_node() {
   esac
 
   local tarball url tmp
-  tarball="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.xz"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    tarball="node-v${NODE_RUNTIME_VERSION}-darwin-${node_arch}.tar.gz"
+  else
+    tarball="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.xz"
+  fi
   url="https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}/${tarball}"
   tmp="${TMPDIR:-/tmp}/${tarball}.$$"
 
@@ -161,7 +176,11 @@ install_managed_node() {
 
   rm -rf "$USER_NODE_DIR"
   mkdir -p "$USER_NODE_DIR"
-  tar -xJf "$tmp" -C "$USER_NODE_DIR" --strip-components=1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    tar -xzf "$tmp" -C "$USER_NODE_DIR" --strip-components=1
+  else
+    tar -xJf "$tmp" -C "$USER_NODE_DIR" --strip-components=1
+  fi
   rm -f "$tmp"
 
   node_is_usable "$USER_NODE_DIR/bin/node"
@@ -250,8 +269,13 @@ get_running_sessions() {
 # Check if server is responding
 check_server() {
   local port
-  port=$(grep -oP 'PORT=\K\d+' "$SERVER_DIR/.env" 2>/dev/null || echo "8085")
-  (echo > /dev/tcp/localhost/"$port") 2>/dev/null
+  port="$(grep -E '^PORT=' "$SERVER_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  port="${port:-8085}"
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1
+  else
+    (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null
+  fi
 }
 
 echo "=== SocketAgent Server Restart ==="
@@ -334,7 +358,7 @@ else
   echo "[2/5] Skipping compilation (--no-compile)"
 fi
 
-# Step 3: Restart the systemd service
+# Step 3: Restart the service
 echo ""
 echo "[3/5] Restarting $SERVICE_NAME service..."
 if [[ -x "$RECOVERY_SCRIPT" ]]; then
@@ -350,11 +374,11 @@ if [[ -x "$RECOVERY_SCRIPT" ]]; then
   fi
 fi
 # After restart, the parent process (Claude/Codex session) is dead, so stdout is
-# a broken pipe. Redirect before invoking systemctl; otherwise systemctl/echo can
+# a broken pipe. Redirect before invoking the service manager; otherwise output can
 # hit EPIPE and set -e exits before we write completion/continue messages.
 RESTART_LOG="/tmp/socketagent-restart-$$.log"
 exec > "$RESTART_LOG" 2>&1
-systemctl --user restart "$SERVICE_NAME"
+"$SERVICE_CONTROL" restart
 echo "  Restart command sent"
 
 # Write success to history immediately after systemctl returns.
@@ -381,7 +405,7 @@ while ! check_server 2>/dev/null; do
       inject_history "$sid" "assistant" "[Server restart FAILED — service did not come back up within ${MAX_WAIT} seconds.]"
     done
     echo ""
-    echo "Check logs: journalctl --user -u $SERVICE_NAME -n 50"
+    echo "Check logs: socketagent logs"
     exit 1
   fi
   printf "  Waiting... (%ds)\n" "$WAITED"

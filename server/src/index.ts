@@ -6390,7 +6390,10 @@ function nodeIsUsable(nodePath: string | undefined): nodePath is string {
 
 function installManagedNodeRuntime(): void {
   if (process.platform === "win32") {
-    throw new Error("Managed Node auto-install is only supported on Linux; install Node.js 22+ manually on Windows");
+    throw new Error("Managed Node auto-install is only supported on Linux and macOS; install Node.js 22+ manually on Windows");
+  }
+  if (process.platform !== "linux" && process.platform !== "darwin") {
+    throw new Error(`Managed Node auto-install is unsupported on ${process.platform}`);
   }
 
   const arch = os.arch();
@@ -6398,13 +6401,15 @@ function installManagedNodeRuntime(): void {
     ? "x64"
     : arch === "arm64"
       ? "arm64"
-      : arch === "arm"
+      : arch === "arm" && process.platform === "linux"
         ? "armv7l"
         : "";
   if (!nodeArch) throw new Error(`Unsupported architecture for managed Node.js: ${arch}`);
 
   const nodeDir = defaultManagedNodeDir();
-  const tarball = `node-v${NODE_RUNTIME_VERSION}-linux-${nodeArch}.tar.xz`;
+  const platformName = process.platform === "darwin" ? "darwin" : "linux";
+  const archiveExtension = process.platform === "darwin" ? "tar.gz" : "tar.xz";
+  const tarball = `node-v${NODE_RUNTIME_VERSION}-${platformName}-${nodeArch}.${archiveExtension}`;
   const url = `https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}/${tarball}`;
   const tmp = path.join(os.tmpdir(), `${tarball}.${process.pid}`);
 
@@ -6412,7 +6417,10 @@ function installManagedNodeRuntime(): void {
   execFileSync("curl", ["-fSL", "--retry", "3", "--connect-timeout", "15", "-o", tmp, url], { stdio: "pipe", timeout: 120000 });
   fs.rmSync(nodeDir, { recursive: true, force: true });
   fs.mkdirSync(nodeDir, { recursive: true });
-  execFileSync("tar", ["-xJf", tmp, "-C", nodeDir, "--strip-components=1"], { stdio: "pipe", timeout: 120000 });
+  const tarArgs = process.platform === "darwin"
+    ? ["-xzf", tmp, "-C", nodeDir, "--strip-components=1"]
+    : ["-xJf", tmp, "-C", nodeDir, "--strip-components=1"];
+  execFileSync("tar", tarArgs, { stdio: "pipe", timeout: 120000 });
   fs.rmSync(tmp, { force: true });
 
   if (!nodeIsUsable(defaultManagedNodePath())) {
@@ -6653,7 +6661,9 @@ function appendUnixPathHint(home: string, binDir: string): void {
   });
   if (alreadyConfigured) return;
 
-  const profilePath = path.join(home, ".profile");
+  const shellName = path.basename(process.env.SHELL || "");
+  const profileName = shellName === "zsh" ? ".zshrc" : shellName === "bash" ? ".bashrc" : ".profile";
+  const profilePath = path.join(home, profileName);
   fs.appendFileSync(
     profilePath,
     `\n# SocketAgent CLI\nexport PATH="$HOME/.local/bin:$PATH"\n`
@@ -6916,7 +6926,7 @@ function unquoteSystemdValue(value: string): string {
 }
 
 function ensureStartupPreflightService(): void {
-  if (process.platform === "win32") return;
+  if (process.platform !== "linux") return;
 
   try {
     const home = process.env.HOME || os.homedir();
@@ -7113,8 +7123,7 @@ async function checkForUpdates(): Promise<void> {
       return;
     }
 
-    // Exit with non-zero so systemd Restart=on-failure triggers a restart.
-    // exit(0) is clean and won't restart. Windows batch loops check for any exit.
+    // Exit with non-zero so systemd/launchd or the Windows wrapper restarts us.
     process.exit(1);
   } catch (e: any) {
     lastAutoUpdateError = e.message;

@@ -35,12 +35,25 @@ run_as_root() {
 }
 
 install_git_if_missing() {
-  if command -v git >/dev/null 2>&1; then
+  if command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1; then
     return
   fi
 
   echo "Git not found. Installing git..."
-  if command -v apt-get >/dev/null 2>&1; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "macOS will open the Command Line Tools installer. Complete that dialog to continue."
+    xcode-select --install >/dev/null 2>&1 || true
+    local waited=0
+    while ! git --version >/dev/null 2>&1; do
+      if (( waited >= 1800 )); then
+        echo "Timed out waiting for the macOS Command Line Tools installation." >&2
+        echo "Complete the installation, then rerun this command." >&2
+        exit 1
+      fi
+      sleep 10
+      waited=$((waited + 10))
+    done
+  elif command -v apt-get >/dev/null 2>&1; then
     run_as_root apt-get update
     run_as_root apt-get install -y git ca-certificates
   elif command -v dnf >/dev/null 2>&1; then
@@ -61,7 +74,7 @@ install_git_if_missing() {
     exit 1
   fi
 
-  if ! command -v git >/dev/null 2>&1; then
+  if ! command -v git >/dev/null 2>&1 || ! git --version >/dev/null 2>&1; then
     echo "Git installation finished, but git is still not on PATH." >&2
     echo "Open a new terminal and rerun the install command." >&2
     exit 1

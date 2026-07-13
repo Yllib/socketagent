@@ -3,6 +3,8 @@ server/node_modules/
 server/dist/
 server/.env
 .last-auto-update-hash
+.last-managed-backends-update-hash
+server/socketagent.log
 server/src/**/*.js
 server/src/**/*.js.map
 server/src/**/*.d.ts

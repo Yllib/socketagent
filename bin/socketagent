@@ -8,19 +8,19 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 SERVER_DIR="$REPO_ROOT/server"
-SERVICE_NAME="socketagent"
+SERVICE_CONTROL="$SERVER_DIR/scripts/service-control.sh"
 
-detect_service() {
-  if systemctl --user list-unit-files "$SERVICE_NAME.service" >/dev/null 2>&1; then
-    echo "$SERVICE_NAME"
-    return
+if ! command -v node >/dev/null 2>&1; then
+  MANAGED_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}/bin"
+  if [[ -x "$MANAGED_NODE_DIR/node" ]]; then
+    export PATH="$MANAGED_NODE_DIR:$PATH"
   fi
-  if systemctl --user status socketclaude.service >/dev/null 2>&1; then
-    echo "socketclaude"
-    return
-  fi
-  echo "$SERVICE_NAME"
-}
+fi
+
+MANAGED_BACKEND_BIN="${SOCKET_AGENT_NPM_PREFIX:-${SOCKETAGENT_NPM_PREFIX:-$HOME/.socket-agent/toolchains/npm-global}}/bin"
+if [[ -d "$MANAGED_BACKEND_BIN" ]]; then
+  export PATH="$MANAGED_BACKEND_BIN:$PATH"
+fi
 
 usage() {
   cat <<EOF
@@ -32,6 +32,8 @@ Usage:
   socketagent token               Show direct/manual auth token only
   socketagent install [args...]   Re-run server installer, e.g. --backends both
   socketagent status              Show server service status
+  socketagent start               Start the server service
+  socketagent stop                Stop the server service
   socketagent logs                Follow server logs
   socketagent restart             Restart server using the safe restart script
   socketagent adb-bridge [args...] Start ADB bridge sidecar
@@ -65,10 +67,16 @@ case "$cmd" in
     exec "$REPO_ROOT/install-server.sh" "$@"
     ;;
   status)
-    exec systemctl --user status "$(detect_service)" "$@"
+    exec "$SERVICE_CONTROL" status "$@"
+    ;;
+  start)
+    exec "$SERVICE_CONTROL" start "$@"
+    ;;
+  stop)
+    exec "$SERVICE_CONTROL" stop "$@"
     ;;
   logs)
-    exec journalctl --user -u "$(detect_service)" -f "$@"
+    exec "$SERVICE_CONTROL" logs "$@"
     ;;
   restart)
     exec "$SERVER_DIR/scripts/restart-server.sh" "$@"
@@ -90,9 +98,9 @@ case "$cmd" in
     if command -v node >/dev/null 2>&1; then echo "Node version: $(node --version)"; fi
     echo "Claude CLI: $(command -v claude || echo 'not found')"
     echo "Codex CLI: $(command -v codex || echo 'not found')"
-    active_service="$(detect_service)"
-    echo "Service: $active_service"
-    systemctl --user is-active "$active_service" >/dev/null 2>&1 \
+    echo "Platform: $(uname -s)"
+    echo "Service: $("$SERVICE_CONTROL" name)"
+    "$SERVICE_CONTROL" is-active >/dev/null 2>&1 \
       && echo "Service status: active" \
       || echo "Service status: not active"
     ;;

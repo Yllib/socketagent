@@ -10,6 +10,14 @@ set -euo pipefail
 SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SERVER_DIR"
 
+if [[ "$(uname -s)" == "Darwin" && "${SOCKETAGENT_MACOS_HELPER:-}" != "1" ]]; then
+  MACOS_HELPER_INSTALLER="$SERVER_DIR/scripts/install-macos-helper.sh"
+  if [[ -x "$MACOS_HELPER_INSTALLER" ]]; then
+    "$MACOS_HELPER_INSTALLER" --configure-service || \
+      echo "[startup] Warning: could not install SocketAgent Server.app" >&2
+  fi
+fi
+
 RECOVERY_SCRIPT="$SERVER_DIR/scripts/recovery-guard.sh"
 NODE_MIN_VERSION="${SOCKETAGENT_NODE_MIN_VERSION:-22}"
 NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"

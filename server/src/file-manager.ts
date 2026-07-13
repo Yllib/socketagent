@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { matchProtectedPath } from "./protected-files";
+import { checkMacosFileAccess, isMacosProtectedUserPath } from "./macos-permissions";
 
 export type FileManagerEntryKind = "directory" | "file" | "symlink" | "other";
 export type FileManagerMediaKind =
@@ -195,6 +196,15 @@ export async function listFileManagerDirectory(args: {
   const roots = getFileManagerRoots(args.defaultCwd);
   const resolvedPath = resolveFileManagerPath(args.dirPath, args.defaultCwd);
   assertFileManagerPathAllowed(resolvedPath, roots);
+
+  if (isMacosProtectedUserPath(resolvedPath)) {
+    const access = await checkMacosFileAccess(resolvedPath);
+    if (access.access !== "granted") {
+      const denied = new Error(access.error || `macOS denied access to ${resolvedPath}`) as NodeJS.ErrnoException;
+      denied.code = "EPERM";
+      throw denied;
+    }
+  }
 
   const stat = await withFilesystemTimeout(
     fs.promises.stat(resolvedPath),

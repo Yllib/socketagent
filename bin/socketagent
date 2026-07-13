@@ -36,6 +36,7 @@ Usage:
   socketagent stop                Stop the server service
   socketagent logs                Follow server logs
   socketagent restart             Restart server using the safe restart script
+  socketagent macos-permissions   Open macOS file-access settings and reveal helper
   socketagent adb-bridge [args...] Start ADB bridge sidecar
   socketagent phone-adb devices    Ask the connected phone app to run adb devices
   socketagent phone-adb pair <port> <code> Pair phone-local adb
@@ -80,6 +81,18 @@ case "$cmd" in
     ;;
   restart)
     exec "$SERVER_DIR/scripts/restart-server.sh" "$@"
+    ;;
+  macos-permissions|permissions)
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+      echo "This command is only available on macOS." >&2
+      exit 1
+    fi
+    "$SERVER_DIR/scripts/install-macos-helper.sh"
+    HELPER_APP="${SOCKETAGENT_MACOS_HELPER_APP:-$HOME/Applications/SocketAgent Server.app}"
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+    open -R "$HELPER_APP"
+    echo "Opened Full Disk Access settings and revealed:"
+    echo "  $HELPER_APP"
     ;;
   adb-bridge|adb)
     if [[ ! -f "$SERVER_DIR/dist/adb-bridge.js" ]]; then

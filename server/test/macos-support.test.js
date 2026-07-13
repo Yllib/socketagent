@@ -18,6 +18,7 @@ test("server shell entrypoints pass bash syntax validation", () => {
     "server/scripts/start-server.sh",
     "server/scripts/restart-server.sh",
     "server/scripts/recovery-guard.sh",
+    "server/scripts/install-macos-helper.sh",
     "server/scripts/service-control.sh",
   ];
   const result = spawnSync("bash", ["-n", ...scripts], {
@@ -36,11 +37,23 @@ test("installer provides an Apple Silicon launchd service path", () => {
   assert.match(installer, /Linux\|Darwin/);
   assert.match(installer, /node-v\$\{NODE_RUNTIME_VERSION\}-darwin-\$\{NODE_ARCH\}\.tar\.gz/);
   assert.match(installer, /Library\/LaunchAgents/);
+  assert.match(installer, /SocketAgent Server\.app/);
   assert.match(installer, /com\.socketagent\.server/);
   assert.match(installer, /"\$SERVICE_CONTROL" start/);
   assert.match(serviceControl, /launchctl bootstrap/);
   assert.match(serviceControl, /for attempt in \$\(seq 1 10\)/);
   assert.match(installer, /<key>KeepAlive<\/key>/);
+});
+
+test("macOS helper has a stable app identity and privacy descriptions", () => {
+  const helperInstaller = read("server/scripts/install-macos-helper.sh");
+  const launcher = read("server/macos-helper/main.c");
+  assert.match(helperInstaller, /com\.socketagent\.server\.helper/);
+  assert.match(helperInstaller, /NSDocumentsFolderUsageDescription/);
+  assert.match(helperInstaller, /codesign --force --deep --sign -/);
+  assert.match(helperInstaller, /ProgramArguments:0/);
+  assert.match(launcher, /SOCKETAGENT_START_SCRIPT/);
+  assert.match(read("bin/socketagent"), /macos-permissions\|permissions/);
 });
 
 test("service lifecycle and recovery have explicit launchd implementations", () => {

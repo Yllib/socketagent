@@ -561,7 +561,7 @@ NPM_PATH=$(command -v npm)
 NPX_PATH=$(command -v npx)
 SERVICE_CONTROL="$SERVER_DIR/scripts/service-control.sh"
 chmod +x "$SERVER_DIR/scripts/start-server.sh" "$SERVER_DIR/scripts/restart-server.sh" \
-  "$SERVER_DIR/scripts/recovery-guard.sh" "$SERVICE_CONTROL"
+  "$SERVER_DIR/scripts/recovery-guard.sh" "$SERVER_DIR/scripts/install-macos-helper.sh" "$SERVICE_CONTROL"
 
 NODE_DIR=$(dirname "$NODE_PATH")
 SERVICE_PATH="$NODE_DIR"
@@ -574,6 +574,9 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
   SERVICE_FILE="$SERVICE_DIR/$SERVICE_LABEL.plist"
   SERVICE_LOG="$SERVER_DIR/socketagent.log"
   GUI_DOMAIN="gui/$(id -u)"
+  MACOS_HELPER_APP="$HOME/Applications/SocketAgent Server.app"
+  "$SERVER_DIR/scripts/install-macos-helper.sh"
+  MACOS_HELPER_EXECUTABLE="$MACOS_HELPER_APP/Contents/MacOS/socketagent-server"
 
   xml_escape() {
     printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&apos;/g'
@@ -584,6 +587,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
   chmod 600 "$SERVICE_LOG"
   SERVER_DIR_XML="$(xml_escape "$SERVER_DIR")"
   START_SCRIPT_XML="$(xml_escape "$SERVER_DIR/scripts/start-server.sh")"
+  MACOS_HELPER_EXECUTABLE_XML="$(xml_escape "$MACOS_HELPER_EXECUTABLE")"
   HOME_XML="$(xml_escape "$HOME")"
   PATH_XML="$(xml_escape "$SERVICE_PATH")"
   NODE_XML="$(xml_escape "$NODE_PATH")"
@@ -600,7 +604,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
   <string>$SERVICE_LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$START_SCRIPT_XML</string>
+    <string>$MACOS_HELPER_EXECUTABLE_XML</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$SERVER_DIR_XML</string>
@@ -616,6 +620,8 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
     <string>$NPM_XML</string>
     <key>SOCKETAGENT_NPX</key>
     <string>$NPX_XML</string>
+    <key>SOCKETAGENT_START_SCRIPT</key>
+    <string>$START_SCRIPT_XML</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

@@ -171,6 +171,18 @@ export interface FileManagerListMessage {
   includeHidden?: boolean;
 }
 
+export interface MacosPermissionStatusMessage {
+  type: "macos_permission_status";
+  requestId?: string;
+  path?: string;
+}
+
+export interface MacosPermissionActionMessage {
+  type: "macos_permission_action";
+  requestId?: string;
+  action: "open_settings" | "reveal_helper" | "restart";
+}
+
 export interface FileManagerSetProtectedMessage {
   type: "file_manager_set_protected";
   requestId?: string;
@@ -643,6 +655,8 @@ export type ClientMessage =
   | CheckCwdMessage
   | CreateCwdMessage
   | FileManagerListMessage
+  | MacosPermissionStatusMessage
+  | MacosPermissionActionMessage
   | FileManagerSetProtectedMessage
   | FileManagerDownloadMessage
   | FileManagerReadTextMessage
@@ -1110,6 +1124,33 @@ export interface FileManagerListResultServerMessage {
   entries: FileManagerEntry[];
   roots: Array<{ label: string; path: string }>;
   error?: string;
+  errorCode?: string;
+  permission?: Record<string, unknown>;
+}
+
+export interface MacosPermissionStatusServerMessage {
+  type: "macos_permission_status_result";
+  requestId?: string;
+  supported: boolean;
+  platform: NodeJS.Platform;
+  access: "granted" | "denied" | "unknown" | "not_applicable";
+  path: string;
+  helperInstalled: boolean;
+  helperActive: boolean;
+  helperPath: string;
+  settingsPane: string;
+  error?: string;
+  errorCode?: string;
+}
+
+export interface MacosPermissionActionServerMessage {
+  type: "macos_permission_action_result";
+  requestId?: string;
+  ok: boolean;
+  action: string;
+  helperPath: string;
+  restarting?: boolean;
+  error?: string;
 }
 
 export interface FileManagerProtectedResultServerMessage {
@@ -1498,6 +1539,8 @@ export type ServerMessage =
   | FileErrorServerMessage
   | UploadCompleteServerMessage
   | FileManagerListResultServerMessage
+  | MacosPermissionStatusServerMessage
+  | MacosPermissionActionServerMessage
   | FileManagerProtectedResultServerMessage
   | FileManagerOperationResultServerMessage
   | FileManagerTextResultServerMessage

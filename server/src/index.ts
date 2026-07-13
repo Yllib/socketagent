@@ -37,6 +37,7 @@ import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp"
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
 import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, unregisterPushToken } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath } from "./file-manager";
+import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 import { runBackendInstall } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
@@ -1077,6 +1078,8 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
       directFcm: true,
       configured: isPushConfigured(),
     },
+    platform: process.platform,
+    macosFileAccess: process.platform === "darwin" ? { supported: true } : { supported: false },
   };
 }
 
@@ -4565,6 +4568,14 @@ function createConnectionHandler(transport: ClientTransport) {
         const listPath = (msg as any).path as string || getDefaultCwd();
         try {
           const resolvedPath = path.resolve(listPath);
+          if (isMacosProtectedUserPath(resolvedPath)) {
+            const access = await checkMacosFileAccess(resolvedPath);
+            if (access.access !== "granted") {
+              const denied = new Error(access.error || `macOS denied access to ${resolvedPath}`) as NodeJS.ErrnoException;
+              denied.code = "EPERM";
+              throw denied;
+            }
+          }
           const entries = await readDirectoryEntries(resolvedPath);
           const dirs: string[] = [];
           for (const entry of entries) {
@@ -4579,11 +4590,13 @@ function createConnectionHandler(transport: ClientTransport) {
             directories: dirs,
           });
         } catch (e: any) {
+          const permission = macosPrivacyErrorDetails(listPath, e);
           sendJson({
             type: "directory_listing",
             path: listPath,
             directories: [],
             error: e.message,
+            ...(permission ? { errorCode: "macos_privacy_denied", permission } : {}),
           });
         }
         break;
@@ -4604,16 +4617,65 @@ function createConnectionHandler(transport: ClientTransport) {
             ...listing,
           });
         } catch (e: any) {
+          const requestedPath = (msg as any).path as string | undefined;
+          const resolvedPath = resolveFileManagerPath(requestedPath, getDefaultCwd());
+          const permission = macosPrivacyErrorDetails(resolvedPath, e);
           sendJson({
             type: "file_manager_list_result",
             requestId,
             ok: false,
-            path: (msg as any).path || getDefaultCwd(),
+            path: requestedPath || getDefaultCwd(),
             entries: [],
             roots: [],
             error: e.message || String(e),
+            ...(permission ? { errorCode: "macos_privacy_denied", permission } : {}),
           });
         }
+        break;
+      }
+
+      case "macos_permission_status" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const status = await checkMacosFileAccess((msg as any).path as string | undefined);
+        sendJson({ type: "macos_permission_status_result", requestId, ...status });
+        break;
+      }
+
+      case "macos_permission_action" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const action = (msg as any).action as string;
+        if (action === "restart") {
+          sendJson({
+            type: "macos_permission_action_result",
+            requestId,
+            ok: process.platform === "darwin",
+            action,
+            helperPath: process.env.SOCKETAGENT_MACOS_HELPER_APP || path.join(os.homedir(), "Applications", "SocketAgent Server.app"),
+            restarting: process.platform === "darwin",
+            ...(process.platform === "darwin" ? {} : { error: "This action is only available on macOS" }),
+          });
+          if (process.platform === "darwin") {
+            setTimeout(() => {
+              const script = path.join(SERVER_DIR, "scripts", "restart-server.sh");
+              const child = spawn(script, ["--no-compile"], { detached: true, stdio: "ignore" });
+              child.unref();
+            }, 250);
+          }
+          break;
+        }
+        if (action !== "open_settings" && action !== "reveal_helper") {
+          sendJson({
+            type: "macos_permission_action_result",
+            requestId,
+            ok: false,
+            action,
+            helperPath: "",
+            error: "Unknown macOS permission action",
+          });
+          break;
+        }
+        const result = await performMacosPermissionAction(action);
+        sendJson({ type: "macos_permission_action_result", requestId, ...result });
         break;
       }
 

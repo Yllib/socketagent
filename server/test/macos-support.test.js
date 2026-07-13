@@ -30,13 +30,16 @@ test("server shell entrypoints pass bash syntax validation", () => {
 test("installer provides an Apple Silicon launchd service path", () => {
   const entrypoint = read("install.sh");
   const installer = read("install-server.sh");
+  const serviceControl = read("server/scripts/service-control.sh");
   assert.match(entrypoint, /git --version/);
   assert.match(entrypoint, /xcode-select --install/);
   assert.match(installer, /Linux\|Darwin/);
   assert.match(installer, /node-v\$\{NODE_RUNTIME_VERSION\}-darwin-\$\{NODE_ARCH\}\.tar\.gz/);
   assert.match(installer, /Library\/LaunchAgents/);
   assert.match(installer, /com\.socketagent\.server/);
-  assert.match(installer, /launchctl bootstrap/);
+  assert.match(installer, /"\$SERVICE_CONTROL" start/);
+  assert.match(serviceControl, /launchctl bootstrap/);
+  assert.match(serviceControl, /for attempt in \$\(seq 1 10\)/);
   assert.match(installer, /<key>KeepAlive<\/key>/);
 });
 

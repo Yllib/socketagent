@@ -35,7 +35,16 @@ mac_is_loaded() {
 mac_bootstrap() {
   mac_require_plist
   if ! mac_is_loaded; then
-    launchctl bootstrap "$MAC_DOMAIN" "$MAC_PLIST"
+    local attempt
+    for attempt in $(seq 1 10); do
+      if launchctl bootstrap "$MAC_DOMAIN" "$MAC_PLIST" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    if ! mac_is_loaded; then
+      launchctl bootstrap "$MAC_DOMAIN" "$MAC_PLIST"
+    fi
   fi
   launchctl enable "$MAC_TARGET" >/dev/null 2>&1 || true
 }

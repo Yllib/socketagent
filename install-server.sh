@@ -636,9 +636,13 @@ EOF
   plutil -lint "$SERVICE_FILE" >/dev/null
   ok "Created $SERVICE_FILE"
   launchctl bootout "$GUI_DOMAIN/$SERVICE_LABEL" >/dev/null 2>&1 || true
-  launchctl bootstrap "$GUI_DOMAIN" "$SERVICE_FILE"
-  launchctl enable "$GUI_DOMAIN/$SERVICE_LABEL" >/dev/null 2>&1 || true
-  launchctl kickstart -k "$GUI_DOMAIN/$SERVICE_LABEL"
+  for _ in $(seq 1 10); do
+    if ! launchctl print "$GUI_DOMAIN/$SERVICE_LABEL" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  "$SERVICE_CONTROL" start
 else
   SERVICE_DIR="$HOME/.config/systemd/user"
   SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"

@@ -161,7 +161,7 @@ if [[ -z "$APKSIGNER" ]]; then
   APKSIGNER="$(find "${ANDROID_HOME:-/home/rdp/Android/Sdk}/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -1 || true)"
 fi
 if [[ -n "$APKSIGNER" && -x "$APKSIGNER" ]]; then
-  APK_CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK_PATH" 2>/dev/null | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2; exit}' | tr -d ':')"
+  APK_CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK_PATH" 2>/dev/null | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2; exit}' | tr -d ':\r')"
 fi
 echo "APK SHA-256: $APK_SHA256"
 if [[ -n "$APK_CERT_SHA256" ]]; then

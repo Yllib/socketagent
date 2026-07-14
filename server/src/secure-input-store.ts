@@ -47,6 +47,21 @@ interface PendingSecureInput {
   resolve: (value: SavedSecureInput) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
+  onStateChange?: (message: Record<string, unknown>, status: SecureInputRequestStatus) => void;
+}
+
+export type SecureInputRequestStatus = "pending" | "saved" | "cancelled" | "expired";
+
+function emitSecureInputState(
+  callback: PendingSecureInput["onStateChange"],
+  message: Record<string, unknown>,
+  status: SecureInputRequestStatus,
+): void {
+  try {
+    callback?.(message, status);
+  } catch (err: any) {
+    console.warn(`[secure-input] Failed to persist ${status} request state: ${err?.message || err}`);
+  }
 }
 
 const STORE_DIR = socketAgentDataPath("secrets");
@@ -274,18 +289,11 @@ export function requestSecureInput(
   args: SecureInputRequestArgs,
   sessionId?: string,
   cwd?: string,
+  onStateChange?: (message: Record<string, unknown>, status: SecureInputRequestStatus) => void,
 ): Promise<SavedSecureInput> {
   const requestId = `secure_${crypto.randomBytes(8).toString("hex")}`;
   const timeoutMs = Math.max(30, Math.min(args.timeoutSeconds ?? 600, 3600)) * 1000;
-  const promise = new Promise<SavedSecureInput>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pendingRequests.delete(requestId);
-      reject(new Error("Timed out waiting for secure input"));
-    }, timeoutMs);
-    pendingRequests.set(requestId, { requestId, args, sessionId, cwd, resolve, reject, timer });
-  });
-
-  send({
+  const requestMessage: Record<string, unknown> = {
     type: "secure_input_request",
     requestId,
     sessionId: sessionId || "",
@@ -294,7 +302,27 @@ export function requestSecureInput(
     envHint: normalizeEnvHint(args.label || "Secret", args.envHint),
     scope: normalizeScope(args.scope),
     multiline: args.multiline === true,
+  };
+  const promise = new Promise<SavedSecureInput>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequests.delete(requestId);
+      emitSecureInputState(onStateChange, requestMessage, "expired");
+      reject(new Error("Timed out waiting for secure input"));
+    }, timeoutMs);
+    pendingRequests.set(requestId, {
+      requestId,
+      args,
+      sessionId,
+      cwd,
+      resolve,
+      reject,
+      timer,
+      onStateChange,
+    });
   });
+
+  emitSecureInputState(onStateChange, requestMessage, "pending");
+  send(requestMessage);
 
   return promise;
 }
@@ -310,6 +338,16 @@ export function completeSecureInputRequest(requestId: string, value: string): Sa
     sessionId: pending.sessionId,
     cwd: pending.cwd,
   });
+  emitSecureInputState(pending.onStateChange, {
+    type: "secure_input_request",
+    requestId,
+    sessionId: pending.sessionId || "",
+    label: pending.args.label || "Secret",
+    reason: pending.args.reason || "",
+    envHint: normalizeEnvHint(pending.args.label || "Secret", pending.args.envHint),
+    scope: normalizeScope(pending.args.scope),
+    multiline: pending.args.multiline === true,
+  }, "saved");
   pending.resolve(saved);
   return saved;
 }
@@ -319,7 +357,21 @@ export function cancelSecureInputRequest(requestId: string): void {
   if (!pending) return;
   clearTimeout(pending.timer);
   pendingRequests.delete(requestId);
+  emitSecureInputState(pending.onStateChange, {
+    type: "secure_input_request",
+    requestId,
+    sessionId: pending.sessionId || "",
+    label: pending.args.label || "Secret",
+    reason: pending.args.reason || "",
+    envHint: normalizeEnvHint(pending.args.label || "Secret", pending.args.envHint),
+    scope: normalizeScope(pending.args.scope),
+    multiline: pending.args.multiline === true,
+  }, "cancelled");
   pending.reject(new Error("User cancelled secure input"));
+}
+
+export function isSecureInputPending(requestId: string | undefined): boolean {
+  return !!requestId && pendingRequests.has(requestId);
 }
 
 export function pendingSecureInputMessagesForSession(sessionId: string): Array<ServerMessage | Record<string, unknown>> {

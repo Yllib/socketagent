@@ -6,7 +6,7 @@ import type { Backend, CodexDriver, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
-import { requestSecureInput, SecureInputRequestArgs } from "./secure-input-store";
+import { requestSecureInput, SecureInputRequestArgs, SecureInputRequestStatus } from "./secure-input-store";
 import { sendPushNotification } from "./push-notifications";
 
 export interface AppToolContext {
@@ -227,6 +227,27 @@ export async function handleRequestSecureInputTool(
       },
       ctx.getSessionId(),
       ctx.getCwd?.(),
+      (request, status: SecureInputRequestStatus) => {
+        if (!ctx.appendHistory) return;
+        const requestId = String(request.requestId || "");
+        const reason = String(request.reason || "");
+        ctx.appendHistory({
+          role: "secure_input",
+          content: reason,
+          questionId: requestId,
+          answered: status !== "pending",
+          status,
+          toolInput: {
+            label: String(request.label || label),
+            reason,
+            envHint: String(request.envHint || ""),
+            scope: String(request.scope || "session"),
+            multiline: request.multiline === true,
+            status,
+          },
+          timestamp: new Date().toISOString(),
+        });
+      },
     );
     const resultText = [
       "Secure input saved.",

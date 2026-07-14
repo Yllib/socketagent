@@ -8,7 +8,7 @@ import type { AgentSessionSettings, Backend, SessionInfo, HistoryEntry } from ".
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
 import { buildCodexSpawn } from "./codex-env";
-import { redactSecretsDeep } from "./secure-input-store";
+import { isSecureInputPending, redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
 
 const STORE_DIR = socketAgentDataPath();
@@ -502,11 +502,20 @@ function compactHistoryEntryForStorage(sessionId: string, entry: HistoryEntry, i
 }
 
 function hydrateHistoryEntry(entry: HistoryEntry): HistoryEntry {
-  if (entry.role !== "tool_result" || typeof entry.toolOutput === "string" || !entry.toolOutputRef) {
-    return cloneHistoryEntry(entry);
-  }
   const hydrated = cloneHistoryEntry(entry);
-  hydrated.toolOutput = readToolOutputBlob(entry) ?? entry.toolOutputPreview ?? entry.content ?? "";
+  if (hydrated.role === "secure_input"
+    && hydrated.status === "pending"
+    && !isSecureInputPending(hydrated.questionId)) {
+    hydrated.status = "interrupted";
+    hydrated.answered = true;
+    hydrated.toolInput = {
+      ...(hydrated.toolInput || {}),
+      status: "interrupted",
+    };
+  }
+  if (entry.role === "tool_result" && typeof entry.toolOutput !== "string" && entry.toolOutputRef) {
+    hydrated.toolOutput = readToolOutputBlob(entry) ?? entry.toolOutputPreview ?? entry.content ?? "";
+  }
   return hydrated;
 }
 

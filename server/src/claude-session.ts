@@ -416,12 +416,13 @@ export class ClaudeSession {
   private _taskIdToToolUseId: Map<string, string> = new Map();  // agentId → toolUseId mapping
   private _monitoredTasks: Map<string, MonitorState> = new Map();
   private _taskOutputFiles: Map<string, string> = new Map();  // taskId → outputFile path
-  private _activeSubagents: Map<string, { toolUseId: string; description: string; subagentType: string; startedAt: string }> = new Map();
+  private _activeSubagents: Map<string, { agentId?: string; toolUseId: string; description: string; subagentType: string; startedAt: string; parentToolUseId?: string }> = new Map();
   private _activeBashStream: { interval: NodeJS.Timeout; filePath: string; lastSize: number } | null = null;
   private _bgBashWatchers: Map<string, { interval: NodeJS.Timeout; filePath: string; lastSize: number }> = new Map();
   private _activeToolUseId: string | null = null;  // currently-executing tool call
   private _activeToolName: string | null = null;
   private _readToolPaths: Map<string, string> = new Map();  // toolUseId → file_path for Read tool calls
+  private _toolParentIds: Map<string, string> = new Map();  // toolUseId → owning subagent toolUseId
   private _isCompacting = false;  // whether context compaction is in progress
   private _compactStartedAt: string | null = null;
   private _permissionMode: string | null = null;  // current permission mode (e.g., "plan")
@@ -430,8 +431,8 @@ export class ClaudeSession {
   private _lastContextWindow = 0;  // last known context window size from modelUsage
   private _sessionModel: string | null = null;  // model reported by SessionStart hook
   private _requestedModel: string | null = null;
-  private _streamingText = "";  // accumulated text for the current streaming response
-  private _streamingThinking = "";  // accumulated thinking for the current thinking block
+  private _streamingText = new Map<string, { content: string; parentToolUseId?: string; uuid?: string }>();
+  private _streamingThinking = new Map<string, { content: string; parentToolUseId?: string; uuid?: string }>();
   private _lastPreview: string = "";
   private _lastSessionInit: ServerMessage | null = null;
   private _lastSupportedModels: ServerMessage | null = null;
@@ -887,14 +888,44 @@ export class ClaudeSession {
   }
 
   /** Active subagent tasks with metadata */
-  getActiveSubagents(): Array<{ agentId: string; toolUseId: string; description: string; subagentType: string; startedAt: string }> {
+  getActiveSubagents(): Array<{ agentId: string; toolUseId: string; description: string; subagentType: string; startedAt: string; parentToolUseId?: string }> {
     return Array.from(this._activeSubagents.entries()).map(([toolUseId, info]) => ({
-      agentId: toolUseId,  // toolUseId is the key the app knows
+      agentId: info.agentId || toolUseId,
       toolUseId: info.toolUseId,
       description: info.description,
       subagentType: info.subagentType,
       startedAt: info.startedAt,
+      ...(info.parentToolUseId ? { parentToolUseId: info.parentToolUseId } : {}),
     }));
+  }
+
+  private _streamKey(message: any): string {
+    const parentToolUseId = String(message?.parent_tool_use_id || "");
+    const uuid = String(message?.uuid || "");
+    return `${parentToolUseId || "main"}:${uuid || "current"}`;
+  }
+
+  private _appendLiveStream(
+    streams: Map<string, { content: string; parentToolUseId?: string; uuid?: string }>,
+    message: any,
+    content: string,
+  ): string {
+    const key = this._streamKey(message);
+    const parentToolUseId = String(message?.parent_tool_use_id || "") || undefined;
+    const uuid = String(message?.uuid || "") || undefined;
+    const existing = streams.get(key);
+    streams.set(key, {
+      content: (existing?.content || "") + content,
+      ...(parentToolUseId ? { parentToolUseId } : {}),
+      ...(uuid ? { uuid } : {}),
+    });
+    return key;
+  }
+
+  private _clearLiveStreamsForMessage(message: any): void {
+    const key = this._streamKey(message);
+    this._streamingText.delete(key);
+    this._streamingThinking.delete(key);
   }
 
   /** Currently-executing tool call info (null if no tool is running) */
@@ -937,21 +968,25 @@ export class ClaudeSession {
   }
 
   replayLiveState(ws: WebSocket = this.ws): void {
-    // Send any thinking accumulated during the current thinking block
-    if (this._streamingThinking.length > 0) {
+    for (const [streamId, stream] of this._streamingThinking) {
       this.sendTo(ws, {
         type: "thinking",
-        content: this._streamingThinking,
+        content: stream.content,
         sessionId: this.sessionId || "",
+        streamId,
+        ...(stream.parentToolUseId ? { parentToolUseId: stream.parentToolUseId } : {}),
+        ...(stream.uuid ? { uuid: stream.uuid } : {}),
         replay: true,
       });
     }
-    // Send any text accumulated during the current streaming response
-    if (this._streamingText.length > 0) {
+    for (const [streamId, stream] of this._streamingText) {
       this.sendTo(ws, {
         type: "text",
-        content: this._streamingText,
+        content: stream.content,
         sessionId: this.sessionId || "",
+        streamId,
+        ...(stream.parentToolUseId ? { parentToolUseId: stream.parentToolUseId } : {}),
+        ...(stream.uuid ? { uuid: stream.uuid } : {}),
         replay: true,
       });
     }
@@ -971,12 +1006,14 @@ export class ClaudeSession {
     const activeSubagents = this.getActiveSubagents();
     if (activeSubagents.length > 0) {
       console.log(`[Resume] Sending ${activeSubagents.length} active subagents`);
-      this.sendTo(ws, {
-        type: "active_subagents",
-        tasks: activeSubagents,
-        sessionId: this.sessionId || "",
-      } as ActiveSubagentsServerMessage);
     }
+    this.sendTo(ws, {
+      type: "active_subagents",
+      tasks: activeSubagents,
+      sessionId: this.sessionId || "",
+      backend: "claude",
+      replace: true,
+    } as ActiveSubagentsServerMessage);
   }
 
   /** Detach the WebSocket so this session stops sending to the client.
@@ -1213,8 +1250,8 @@ export class ClaudeSession {
     this._isRunning = true;
     this._runStartedAt = new Date().toISOString();
     this._authErrorSent = false;
-    this._streamingText = "";
-    this._streamingThinking = "";
+    this._streamingText.clear();
+    this._streamingThinking.clear();
     this._lastPreview = "";
     this.onActivity?.();
 
@@ -1252,8 +1289,8 @@ export class ClaudeSession {
     this._isWarmIdle = false;
     this._clearWarmIdleTimer();
     this._authErrorSent = false;
-    this._streamingText = "";
-    this._streamingThinking = "";
+    this._streamingText.clear();
+    this._streamingThinking.clear();
     this._lastPreview = "";
     this.onActivity?.();
 
@@ -2190,13 +2227,16 @@ export class ClaudeSession {
       let lastResultContent = "";
       const now = () => new Date().toISOString();
 
-      // SDK event persistence: coalesce content block deltas
-      let sdkBlockText = "";
-      let sdkBlockIndex: number | null = null;
-      let sdkBlockType: string | null = null;
-      let sdkBlockToolName: string | null = null;
-      let sdkBlockToolUseId: string | null = null;
-      let sdkBlockDeltaCount = 0;
+      // SDK event persistence: coalesce content block deltas independently for
+      // the main agent and every concurrently streaming subagent.
+      const sdkBlocks = new Map<string, {
+        text: string;
+        index: number | null;
+        type: string | null;
+        toolName: string | null;
+        toolUseId: string | null;
+        deltaCount: number;
+      }>();
 
       // Track per-turn usage from stream events to get current context size
       let lastTurnInputTokens = 0;
@@ -2255,44 +2295,59 @@ export class ClaudeSession {
             const sid = this.sessionId;
             if (sid && evt) {
               const evtType = evt.type;
+              const blockKey = `${this._streamKey(message)}:${evt.index ?? "current"}`;
               if (evtType === "content_block_start") {
-                sdkBlockText = "";
-                sdkBlockDeltaCount = 0;
-                sdkBlockIndex = evt.index ?? null;
                 const cb = evt.content_block || {};
-                sdkBlockType = cb.type || null;
-                sdkBlockToolName = cb.name || null;
-                sdkBlockToolUseId = cb.id || null;
-              } else if (evtType === "content_block_delta") {
-                const delta = evt.delta || {};
-                if (delta.type === "text_delta") sdkBlockText += delta.text || "";
-                else if (delta.type === "input_json_delta") sdkBlockText += delta.partial_json || "";
-                else if (delta.type === "thinking_delta") sdkBlockText += delta.thinking || "";
-                sdkBlockDeltaCount++;
-              } else if (evtType === "content_block_stop") {
-                // Write coalesced content block entry
-                appendSdkEvent(sid, {
-                  ts: now(),
-                  sdkType: "content_block",
-                  blockIndex: sdkBlockIndex,
-                  blockType: sdkBlockType,
-                  toolName: sdkBlockToolName,
-                  toolUseId: sdkBlockToolUseId,
-                  text: sdkBlockText,
-                  deltaCount: sdkBlockDeltaCount,
+                sdkBlocks.set(blockKey, {
+                  text: "",
+                  index: evt.index ?? null,
+                  type: cb.type || null,
+                  toolName: cb.name || null,
+                  toolUseId: cb.id || null,
+                  deltaCount: 0,
                 });
-                // Persist thinking blocks to chat history
-                if (sdkBlockType === "thinking" && sdkBlockText.length > 0) {
-                  appendHistory(sid, {
-                    role: "assistant",
-                    content: sdkBlockText,
-                    thinking: true,
-                    uuid: (message as any).uuid || undefined,
-                    timestamp: now(),
+              } else if (evtType === "content_block_delta") {
+                const block = sdkBlocks.get(blockKey) || {
+                  text: "",
+                  index: evt.index ?? null,
+                  type: null,
+                  toolName: null,
+                  toolUseId: null,
+                  deltaCount: 0,
+                };
+                const delta = evt.delta || {};
+                if (delta.type === "text_delta") block.text += delta.text || "";
+                else if (delta.type === "input_json_delta") block.text += delta.partial_json || "";
+                else if (delta.type === "thinking_delta") block.text += delta.thinking || "";
+                block.deltaCount++;
+                sdkBlocks.set(blockKey, block);
+              } else if (evtType === "content_block_stop") {
+                const block = sdkBlocks.get(blockKey);
+                if (block) {
+                  // Write coalesced content block entry
+                  appendSdkEvent(sid, {
+                    ts: now(),
+                    sdkType: "content_block",
+                    blockIndex: block.index,
+                    blockType: block.type,
+                    toolName: block.toolName,
+                    toolUseId: block.toolUseId,
+                    text: block.text,
+                    deltaCount: block.deltaCount,
                   });
+                  // Persist thinking blocks to chat history
+                  if (block.type === "thinking" && block.text.length > 0) {
+                    appendHistory(sid, {
+                      role: "assistant",
+                      content: block.text,
+                      thinking: true,
+                      parentToolUseId: (message as any).parent_tool_use_id || null,
+                      uuid: (message as any).uuid || undefined,
+                      timestamp: now(),
+                    });
+                  }
+                  sdkBlocks.delete(blockKey);
                 }
-                sdkBlockText = "";
-                sdkBlockDeltaCount = 0;
               } else if (evtType === "message_start") {
                 const msg2 = evt.message || {};
                 appendSdkEvent(sid, {
@@ -2600,6 +2655,9 @@ export class ClaudeSession {
           const sdkTaskId = tn.task_id || "";
           // Prefer SDK's direct tool_use_id, fall back to our mapping
           const originToolUseId = tn.tool_use_id || this._taskIdToToolUseId.get(sdkTaskId) || undefined;
+          const parentToolUseId = originToolUseId
+            ? this._toolParentIds.get(originToolUseId)
+            : undefined;
           console.log(`[SDK] Task notification: id=${sdkTaskId} status=${tn.status} originToolUseId=${originToolUseId} summary=${tn.summary?.slice(0, 80)}`);
           // If this task was being monitored, flush output and send final notification
           if (sdkTaskId && this._monitoredTasks.has(sdkTaskId)) {
@@ -2653,6 +2711,7 @@ export class ClaudeSession {
               content: "",
               toolUseId: originToolUseId,
               toolOutput: bgOutputContent,
+              parentToolUseId: parentToolUseId || null,
               timestamp: new Date().toISOString(),
             });
           }
@@ -2664,6 +2723,7 @@ export class ClaudeSession {
             outputFile: bgOutputFile || undefined,
             summary: tn.summary || "",
             originToolUseId,
+            parentToolUseId: parentToolUseId || null,
             sessionId: this.sessionId || "",
           } as any);
           if (this.sessionId) {
@@ -2672,9 +2732,11 @@ export class ClaudeSession {
               content: tn.summary || `Task ${tn.status}`,
               status: tn.status || "completed",
               originToolUseId,
+              parentToolUseId: parentToolUseId || null,
               timestamp: new Date().toISOString(),
             });
           }
+          if (originToolUseId) this._toolParentIds.delete(originToolUseId);
         }
 
         // Handle tool use summaries — clean human-readable summaries of tool groups
@@ -2695,6 +2757,7 @@ export class ClaudeSession {
               content: summary.summary || "",
               toolSummary: true,
               precedingToolUseIds: summary.preceding_tool_use_ids || [],
+              parentToolUseId: summary.parent_tool_use_id || null,
               uuid: summary.uuid || undefined,
               timestamp: now(),
             });
@@ -2722,6 +2785,8 @@ export class ClaudeSession {
           // Build task_id ↔ tool_use_id mapping (replaces regex agentId extraction)
           if (ts.task_id && ts.tool_use_id) {
             this._taskIdToToolUseId.set(ts.task_id, ts.tool_use_id);
+            const subagent = this._activeSubagents.get(ts.tool_use_id);
+            if (subagent) subagent.agentId = ts.task_id;
           }
           this.send({
             type: "task_started",
@@ -2736,10 +2801,12 @@ export class ClaudeSession {
 
         if (message.type === "system" && (message as any).subtype === "task_progress") {
           const tp = message as any;
-          console.log(`[SDK] Task progress: id=${tp.task_id} tool=${tp.last_tool_name} summary=${tp.summary?.slice(0, 60)}`);
+          const toolUseId = tp.tool_use_id || this._taskIdToToolUseId.get(tp.task_id) || undefined;
+          console.log(`[SDK] Task progress: id=${tp.task_id} toolUseId=${toolUseId} tool=${tp.last_tool_name} summary=${tp.summary?.slice(0, 60)}`);
           this.send({
             type: "bg_task_progress",
             taskId: tp.task_id || "",
+            toolUseId,
             description: tp.description || "",
             usage: tp.usage || undefined,
             lastToolName: tp.last_tool_name || undefined,
@@ -2885,14 +2952,20 @@ export class ClaudeSession {
             event?.type === "content_block_delta" &&
             event.delta?.type === "text_delta"
           ) {
-            currentText += event.delta.text;
-            this._streamingText += event.delta.text;
-            this._streamingThinking = "";  // thinking block ended
+            const parentToolUseId = (message as any).parent_tool_use_id || null;
+            if (!parentToolUseId) currentText += event.delta.text;
+            const streamId = this._appendLiveStream(
+              this._streamingText,
+              message,
+              event.delta.text,
+            );
+            this._streamingThinking.delete(streamId);
             this.send({
               type: "text",
               content: event.delta.text,
               sessionId: this.sessionId || "",
-              parentToolUseId: (message as any).parent_tool_use_id || null,
+              streamId,
+              parentToolUseId,
               uuid: (message as any).uuid || undefined,
             });
           }
@@ -2902,18 +2975,27 @@ export class ClaudeSession {
             event?.type === "content_block_delta" &&
             event.delta?.type === "thinking_delta"
           ) {
-            this._streamingThinking += event.delta.thinking || "";
+            const streamId = this._appendLiveStream(
+              this._streamingThinking,
+              message,
+              event.delta.thinking || "",
+            );
             this.send({
               type: "thinking",
               content: event.delta.thinking || "",
               sessionId: this.sessionId || "",
+              streamId,
               parentToolUseId: (message as any).parent_tool_use_id || null,
               uuid: (message as any).uuid || undefined,
             });
           }
 
           // Track per-turn usage from message_start (input tokens for this turn)
-          if (event?.type === "message_start" && event.message?.usage) {
+          if (
+            !(message as any).parent_tool_use_id &&
+            event?.type === "message_start" &&
+            event.message?.usage
+          ) {
             const u = event.message.usage;
             lastTurnInputTokens = u.input_tokens || 0;
             lastTurnCacheReadTokens = u.cache_read_input_tokens || 0;
@@ -2933,7 +3015,11 @@ export class ClaudeSession {
           }
 
           // Track output tokens from message_delta (end of turn)
-          if (event?.type === "message_delta" && event.usage) {
+          if (
+            !(message as any).parent_tool_use_id &&
+            event?.type === "message_delta" &&
+            event.usage
+          ) {
             lastTurnOutputTokens = event.usage.output_tokens || 0;
             console.log(`[Usage] message_delta: output=${lastTurnOutputTokens}`);
             // Send updated usage with output tokens so the app can display them in real-time
@@ -2996,9 +3082,9 @@ export class ClaudeSession {
             }
           }
 
-          // Reset streaming text/thinking — this assistant turn is complete
-          this._streamingText = "";
-          this._streamingThinking = "";
+          // Only close the stream that produced this assistant message. Other
+          // subagents can still be streaming concurrently.
+          this._clearLiveStreamsForMessage(message);
           // Log the full assistant text once the message is complete
           // Skip persisting the raw error text when auth login is being handled
           const apiMessage = (message as any).message;
@@ -3009,7 +3095,9 @@ export class ClaudeSession {
               .filter((b: any) => b.type === "text")
               .map((b: any) => b.text);
             if (textParts.length > 0) {
-              this._lastPreview = textParts.join("").slice(0, 200);
+              if (!(message as any).parent_tool_use_id) {
+                this._lastPreview = textParts.join("").slice(0, 200);
+              }
               this.onActivity?.();
               if (this.sessionId && !this._authErrorSent) {
                 appendHistory(this.sessionId, {
@@ -3024,6 +3112,9 @@ export class ClaudeSession {
 
             for (const block of apiMessage.content) {
               if (block.type === "tool_use") {
+                if ((message as any).parent_tool_use_id) {
+                  this._toolParentIds.set(block.id, (message as any).parent_tool_use_id);
+                }
                 // Don't send AskUserQuestion as a tool_call — it's handled
                 // via canUseTool and rendered as a proper question card
                 if (block.name === "AskUserQuestion") {
@@ -3120,11 +3211,17 @@ export class ClaudeSession {
                 if (block.name === "Agent" || block.name === "Task") {
                   const desc = (block.input as any)?.description || "Agent";
                   const subagentType = (block.input as any)?.subagent_type || "";
+                  const mappedAgentId = Array.from(this._taskIdToToolUseId.entries())
+                    .find(([, mappedToolUseId]) => mappedToolUseId === block.id)?.[0];
                   this._activeSubagents.set(block.id, {
+                    ...(mappedAgentId ? { agentId: mappedAgentId } : {}),
                     toolUseId: block.id,
                     description: desc,
                     subagentType,
                     startedAt: now(),
+                    ...((message as any).parent_tool_use_id
+                      ? { parentToolUseId: (message as any).parent_tool_use_id }
+                      : {}),
                   });
                   console.log(`[SDK] Subagent started: ${desc} (toolUseId=${block.id}, type=${subagentType})`);
 
@@ -3136,6 +3233,8 @@ export class ClaudeSession {
                       taskId: block.id,
                       status: "started",
                       summary: desc,
+                      originToolUseId: block.id,
+                      parentToolUseId: (message as any).parent_tool_use_id || null,
                       sessionId: this.sessionId || "",
                     } as any);
                   }
@@ -3277,8 +3376,11 @@ export class ClaudeSession {
                   this._stopBashWatcher();
                 }
 
-                // Remove completed subagent from active tracking
+                // Remove completed subagent from active tracking. Keep its
+                // parent mapping until the SDK task notification arrives.
+                let completedSubagent = false;
                 if (this._activeSubagents.has(toolUseId)) {
+                  completedSubagent = true;
                   const info = this._activeSubagents.get(toolUseId)!;
                   console.log(`[SDK] Subagent completed: ${info.description} (toolUseId=${toolUseId})`);
                   this._activeSubagents.delete(toolUseId);
@@ -3329,6 +3431,9 @@ export class ClaudeSession {
                     uuid: msgUuid,
                     timestamp: now(),
                   });
+                }
+                if (!bgMatch && !completedSubagent) {
+                  this._toolParentIds.delete(toolUseId);
                 }
               }
             }

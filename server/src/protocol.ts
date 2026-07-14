@@ -810,6 +810,7 @@ export interface ThinkingServerMessage {
   type: "thinking";
   content: string;
   sessionId: string;
+  streamId?: string;
   parentToolUseId?: string | null;
   uuid?: string;
   replay?: boolean;
@@ -1207,10 +1208,11 @@ export interface CompactBoundaryServerMessage {
 export interface TaskNotificationServerMessage {
   type: "task_notification";
   taskId: string;
-  status: "completed" | "failed" | "stopped";
+  status: "started" | "completed" | "failed" | "stopped";
   outputFile?: string;
   summary: string;
   sessionId: string;
+  originToolUseId?: string;
   parentToolUseId?: string | null;
   uuid?: string;
 }
@@ -1288,6 +1290,7 @@ export interface ActiveSubagentsServerMessage {
     model?: string;
     reasoningEffort?: string;
     agentPath?: string;
+    parentToolUseId?: string | null;
   }[];
 }
 
@@ -1333,6 +1336,7 @@ export interface TaskStartedServerMessage {
 export interface BgTaskProgressServerMessage {
   type: "bg_task_progress";
   taskId: string;
+  toolUseId?: string;
   description?: string;
   usage?: Record<string, unknown>;
   lastToolName?: string;

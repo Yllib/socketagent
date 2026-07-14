@@ -184,6 +184,7 @@ type CodexSubagentState = {
   model?: string;
   reasoningEffort?: string;
   agentPath?: string;
+  parentToolUseId?: string;
   everActive: boolean;
   resultSent: boolean;
 };
@@ -399,6 +400,7 @@ export class CodexSession {
           type: "thinking",
           content,
           sessionId: sid,
+          streamId: itemId,
           replay: true,
           ...(parentToolUseId ? { parentToolUseId } : {}),
         } as any);
@@ -459,6 +461,7 @@ export class CodexSession {
         ...(agent.model ? { model: agent.model } : {}),
         ...(agent.reasoningEffort ? { reasoningEffort: agent.reasoningEffort } : {}),
         ...(agent.agentPath ? { agentPath: agent.agentPath } : {}),
+        ...(agent.parentToolUseId ? { parentToolUseId: agent.parentToolUseId } : {}),
       })),
     } as any;
     if (ws) this.sendTo(ws, message);
@@ -473,25 +476,40 @@ export class CodexSession {
       model?: string;
       reasoningEffort?: string;
       startedAt?: string;
+      parentToolUseId?: string;
     } = {},
   ): CodexSubagentState | null {
     const sessionId = this.sessionId;
     if (!sessionId || !agentId || agentId === this.threadId) return null;
     const existing = this.codexSubagents.get(agentId);
     if (existing) {
+      let changed = false;
       if (options.agentPath) {
         existing.agentPath = options.agentPath;
         existing.subagentType = options.agentPath.split(/[\\/]/).filter(Boolean).pop() || existing.subagentType;
         if (!existing.prompt) {
           existing.description = this.subagentDescription(options.agentPath, agentId);
         }
+        changed = true;
       }
       if (options.prompt) {
         existing.prompt = options.prompt;
         existing.description = options.prompt.trim().slice(0, 160);
+        changed = true;
       }
-      if (options.model) existing.model = options.model;
-      if (options.reasoningEffort) existing.reasoningEffort = options.reasoningEffort;
+      if (options.model) {
+        existing.model = options.model;
+        changed = true;
+      }
+      if (options.reasoningEffort) {
+        existing.reasoningEffort = options.reasoningEffort;
+        changed = true;
+      }
+      if (options.parentToolUseId) {
+        existing.parentToolUseId = options.parentToolUseId;
+        changed = true;
+      }
+      if (changed) this.sendSubagentSnapshot();
       return existing;
     }
 
@@ -509,6 +527,7 @@ export class CodexSession {
       model: options.model || this.codexModel(),
       reasoningEffort: options.reasoningEffort || this.codexReasoningEffort(),
       ...(agentPath ? { agentPath } : {}),
+      ...(options.parentToolUseId ? { parentToolUseId: options.parentToolUseId } : {}),
       everActive: false,
       resultSent: false,
     };
@@ -530,6 +549,7 @@ export class CodexSession {
       input,
       toolUseId: state.toolUseId,
       sessionId,
+      ...(state.parentToolUseId ? { parentToolUseId: state.parentToolUseId } : {}),
     } as any);
     appendHistory(sessionId, {
       role: "tool_call",
@@ -537,6 +557,7 @@ export class CodexSession {
       toolName: "Agent",
       toolInput: input,
       toolUseId: state.toolUseId,
+      ...(state.parentToolUseId ? { parentToolUseId: state.parentToolUseId } : {}),
       timestamp: state.startedAt,
     });
     this.sendSubagentSnapshot();
@@ -596,7 +617,9 @@ export class CodexSession {
 
   private parentToolUseIdForThread(threadId: unknown): string | undefined {
     const id = String(threadId || "");
-    return this.codexSubagents.get(id)?.toolUseId;
+    if (!id || id === this.threadId) return undefined;
+    return this.codexSubagents.get(id)?.toolUseId
+      || this.registerCodexSubagent(id)?.toolUseId;
   }
   detachWebSocket(): void {
     // Keep attached sockets until they close so a second resume cannot steal
@@ -2374,12 +2397,24 @@ export class CodexSession {
     this.emitAppServerRawEvent(method, p);
     switch (method) {
       case "thread/started":
-        this.adoptAppServerThread(p?.thread?.id || p?.threadId || null);
+        {
+          const startedThreadId = String(p?.thread?.id || p?.threadId || "");
+          if (!startedThreadId) return;
+          if (!this.threadId || startedThreadId === this.threadId) {
+            this.adoptAppServerThread(startedThreadId);
+          } else {
+            const agent = this.registerCodexSubagent(startedThreadId, {
+              agentPath: String(p?.agentPath || p?.thread?.agentPath || ""),
+            });
+            if (agent) this.updateCodexSubagentStatus(agent.agentId, "running");
+          }
+        }
         return;
 
       case "turn/started":
         if (p?.threadId && p.threadId !== this.threadId) {
-          this.updateCodexSubagentStatus(String(p.threadId), "active");
+          const agent = this.registerCodexSubagent(String(p.threadId));
+          if (agent) this.updateCodexSubagentStatus(agent.agentId, "active");
           return;
         }
         this.activeAppServerTurnId = p?.turn?.id || p?.turnId || this.activeAppServerTurnId;
@@ -2392,6 +2427,9 @@ export class CodexSession {
         const statusType = p?.status?.type;
         const statusThreadId = String(p?.threadId || "");
         if (statusThreadId && statusThreadId !== this.threadId) {
+          if (statusType === "active" || statusType === "running" || statusType === "pendingInit") {
+            this.registerCodexSubagent(statusThreadId);
+          }
           this.updateCodexSubagentStatus(
             statusThreadId,
             String(statusType || ""),
@@ -2475,6 +2513,7 @@ export class CodexSession {
           type: "thinking",
           content: delta,
           sessionId: sid,
+          streamId: String(itemId),
           ...(parentToolUseId ? { parentToolUseId } : {}),
         } as ServerMessage);
         return;
@@ -2794,7 +2833,12 @@ export class CodexSession {
         ...(Array.isArray(item.content) ? item.content : []),
       ].join("\n");
       const streamed = this.appServerReasoningText.get(item.id) || "";
-      if (text && !streamed) sendItem({ type: "thinking", content: text, sessionId: sid });
+      if (text && !streamed) sendItem({
+        type: "thinking",
+        content: text,
+        sessionId: sid,
+        streamId: String(item.id),
+      });
       if (item.id) this.appServerReasoningText.delete(item.id);
       if (item.id) this.appServerReasoningParents.delete(item.id);
       return;
@@ -2971,6 +3015,7 @@ export class CodexSession {
             reasoningEffort: typeof item.reasoningEffort === "string"
               ? item.reasoningEffort
               : undefined,
+            parentToolUseId,
           });
         }
       }

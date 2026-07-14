@@ -651,7 +651,7 @@ function nativeSyncTextKey(entry: HistoryEntry): string | null {
   if (entry.role !== "user" && entry.role !== "assistant") return null;
   const content = String(entry.content ?? "").trim().replace(/\s+/g, " ");
   if (!content) return null;
-  return `${entry.role}\u0001${content}`;
+  return `${entry.role}\u0001${entry.parentToolUseId || ""}\u0001${content}`;
 }
 
 function nativeSyncEntryKey(entry: HistoryEntry): string {
@@ -661,6 +661,7 @@ function nativeSyncEntryKey(entry: HistoryEntry): string {
       entry.toolName || "",
       entry.toolUseId,
       entry.filePath || "",
+      entry.parentToolUseId || "",
     ].join("\u0001");
   }
   const content = String(entry.content ?? "").trim().replace(/\s+/g, " ");
@@ -669,6 +670,7 @@ function nativeSyncEntryKey(entry: HistoryEntry): string {
     entry.toolName || "",
     entry.toolUseId || "",
     entry.filePath || "",
+    entry.parentToolUseId || "",
     content,
   ].join("\u0001");
 }
@@ -1081,6 +1083,7 @@ export function getMissedMessages(
           entries.push({
             role: "assistant",
             content: textParts,
+            parentToolUseId: msg.parent_tool_use_id || null,
             timestamp: msg.timestamp,
           });
         }
@@ -1094,6 +1097,7 @@ export function getMissedMessages(
                 toolName: block.name,
                 toolInput: block.input,
                 toolUseId: block.id,
+                parentToolUseId: msg.parent_tool_use_id || null,
                 timestamp: msg.timestamp,
               });
             }
@@ -1114,6 +1118,7 @@ export function getMissedMessages(
                 content: "",
                 toolUseId: block.tool_use_id || "",
                 toolOutput: output.slice(0, 2000), // Truncate large outputs
+                parentToolUseId: msg.parent_tool_use_id || null,
                 timestamp: msg.timestamp,
               });
             } else if (block.type === "text") {

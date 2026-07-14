@@ -1,0 +1,114 @@
+const assert = require("node:assert/strict");
+const test = require("node:test");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const { CodexSession } = require("../dist/codex-session");
+const { ClaudeSession } = require("../dist/claude-session");
+
+function testSocket(sent) {
+  return {
+    readyState: 1,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+}
+
+test("keeps Codex subagent threads attached to the root session", () => {
+  const sent = [];
+  const rootId = `test-root-${crypto.randomUUID()}`;
+  const childId = `test-child-${crypto.randomUUID()}`;
+  const grandchildId = `test-grandchild-${crypto.randomUUID()}`;
+  const childToolUseId = `codex-subagent:${childId}`;
+  const grandchildToolUseId = `codex-subagent:${grandchildId}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+
+  // Seed the already-adopted root thread, then simulate notifications from a
+  // concurrently running child thread.
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("thread/started", {
+      thread: { id: childId },
+      agentPath: "/root/reviewer",
+    });
+
+    assert.equal(session.getSessionId(), rootId);
+    assert.ok(sent.some((message) =>
+      message.type === "tool_call"
+      && message.toolUseId === childToolUseId
+      && message.sessionId === rootId));
+
+    session.handleAppServerNotification("item/agentMessage/delta", {
+      threadId: childId,
+      itemId: "child-message-1",
+      delta: "child output",
+    });
+
+    const childText = sent.find((message) =>
+      message.type === "text" && message.content === "child output");
+    assert.equal(childText.parentToolUseId, childToolUseId);
+    assert.equal(childText.streamId, "child-message-1");
+
+    session.handleAppServerNotification("item/completed", {
+      threadId: childId,
+      item: {
+        id: "spawn-grandchild",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        receiverThreadIds: [grandchildId],
+        prompt: "Inspect nested behavior",
+      },
+    });
+
+    const grandchildCall = sent.find((message) =>
+      message.type === "tool_call" && message.toolUseId === grandchildToolUseId);
+    assert.equal(grandchildCall.parentToolUseId, childToolUseId);
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
+});
+
+test("replays concurrent Claude streams with their original parents", () => {
+  const sent = [];
+  const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = "claude-root";
+
+  session._appendLiveStream(
+    session._streamingText,
+    { parent_tool_use_id: null, uuid: "main-message" },
+    "main output",
+  );
+  session._appendLiveStream(
+    session._streamingText,
+    { parent_tool_use_id: "agent-tool-1", uuid: "child-message" },
+    "child output",
+  );
+  session._appendLiveStream(
+    session._streamingThinking,
+    { parent_tool_use_id: "agent-tool-2", uuid: "thinking-message" },
+    "child thinking",
+  );
+
+  session.replayLiveState();
+
+  const mainText = sent.find((message) =>
+    message.type === "text" && message.content === "main output");
+  const childText = sent.find((message) =>
+    message.type === "text" && message.content === "child output");
+  const childThinking = sent.find((message) =>
+    message.type === "thinking" && message.content === "child thinking");
+
+  assert.equal(mainText.parentToolUseId, undefined);
+  assert.equal(childText.parentToolUseId, "agent-tool-1");
+  assert.equal(childText.uuid, "child-message");
+  assert.equal(childThinking.parentToolUseId, "agent-tool-2");
+  assert.equal(childThinking.uuid, "thinking-message");
+});

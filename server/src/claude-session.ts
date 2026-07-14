@@ -28,7 +28,7 @@ import {
   handleSpeakTool,
 } from "./app-tool-handlers";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
-import { pendingSecureInputMessagesForSession, redactSecretsDeep } from "./secure-input-store";
+import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 
@@ -1678,7 +1678,8 @@ export class ClaudeSession {
         }
       }
 
-      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude or Codex session that runs automatically at the specified time. Supports provider, model, effort, permissions, recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nUse RequestSecureInput when you need an API key, password, auth token, cookie, or other secret. Do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata.\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
+      const secureInputInventory = secureInputInventoryForAgent(this.sessionId || undefined, this.cwd);
+      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude or Codex session that runs automatically at the specified time. Supports provider, model, effort, permissions, recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nUse RequestSecureInput when you need an API key, password, auth token, cookie, or other secret. Do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata.\n\n${secureInputInventory}\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
 
       // Handle fork: use fork source as resume target + set forkSession flag
       const shouldFork = !!this._forkFromSessionId;

@@ -162,6 +162,10 @@ if [[ -z "$APKSIGNER" ]]; then
 fi
 if [[ -n "$APKSIGNER" && -x "$APKSIGNER" ]]; then
   APK_CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK_PATH" 2>/dev/null | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2; exit}' | tr -d ':\r')"
+else
+  # The Linux server intentionally delegates Android builds to the Windows
+  # desktop, so apksigner may only exist alongside that remote Android SDK.
+  APK_CERT_SHA256="$(ssh "$REMOTE_HOST" "powershell -Command \"\$apksigner = Get-ChildItem '$REMOTE_ANDROID_HOME/build-tools' -Recurse -Filter apksigner.bat | Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName; & \$apksigner verify --print-certs '$REMOTE_DIR/build/app/outputs/flutter-apk/app-release.apk'\"" 2>/dev/null | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2; exit}' | tr -d ':\r')"
 fi
 echo "APK SHA-256: $APK_SHA256"
 if [[ -n "$APK_CERT_SHA256" ]]; then

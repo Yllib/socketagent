@@ -42,6 +42,8 @@ test("installer provides an Apple Silicon launchd service path", () => {
   assert.match(installer, /"\$SERVICE_CONTROL" start/);
   assert.match(serviceControl, /launchctl bootstrap/);
   assert.match(serviceControl, /for attempt in \$\(seq 1 10\)/);
+  assert.match(serviceControl, /Print :WorkingDirectory/);
+  assert.match(serviceControl, /--property=WorkingDirectory/);
   assert.match(installer, /<key>KeepAlive<\/key>/);
 });
 
@@ -69,6 +71,8 @@ test("service lifecycle and recovery have explicit launchd implementations", () 
   assert.match(recovery, /wait-run/);
   assert.match(restart, /com\.socketagent\.restart/);
   assert.match(restart, /SERVICE_CONTROL.*restart/);
+  assert.match(restart, /SERVICE_CONTROL.*directory/);
+  assert.match(restart, /SOCKETAGENT_ENV_PATH/);
 });
 
 test("server-side managed Node repair distinguishes macOS from Linux", () => {

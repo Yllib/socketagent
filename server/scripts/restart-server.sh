@@ -68,6 +68,7 @@ HISTORY_DIR="$STORE_DIR/history"
 SERVER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SERVICE_CONTROL="$SERVER_DIR/scripts/service-control.sh"
 SERVICE_NAME="$("$SERVICE_CONTROL" name)"
+SERVICE_DIR="$("$SERVICE_CONTROL" directory 2>/dev/null || true)"
 NODE_MIN_VERSION="${SOCKETAGENT_NODE_MIN_VERSION:-22}"
 NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"
 USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
@@ -93,12 +94,19 @@ fi
 RECOVERY_SCRIPT="$SERVER_DIR/scripts/recovery-guard.sh"
 RECOVERY_ID=""
 
-# Load .env for PORT and AUTH_TOKEN
-if [[ -f "$SERVER_DIR/.env" ]]; then
+# Load the active service's .env for PORT and AUTH_TOKEN. The restart script may
+# be invoked from a development checkout while the installed service runs from
+# another checkout, so the file beside this script is only a fallback.
+ENV_PATH="$SERVER_DIR/.env"
+if [[ -n "$SERVICE_DIR" && -f "$SERVICE_DIR/.env" ]]; then
+  ENV_PATH="$SERVICE_DIR/.env"
+fi
+if [[ -f "$ENV_PATH" ]]; then
   set -a
-  source "$SERVER_DIR/.env"
+  source "$ENV_PATH"
   set +a
 fi
+export SOCKETAGENT_ENV_PATH="$ENV_PATH"
 PORT="${PORT:-8085}"
 AUTH_TOKEN="${AUTH_TOKEN:-}"
 
@@ -268,13 +276,10 @@ get_running_sessions() {
 
 # Check if server is responding
 check_server() {
-  local port
-  port="$(grep -E '^PORT=' "$SERVER_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
-  port="${port:-8085}"
   if command -v nc >/dev/null 2>&1; then
-    nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1
+    nc -z -w 2 127.0.0.1 "$PORT" >/dev/null 2>&1
   else
-    (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null
+    (echo > /dev/tcp/127.0.0.1/"$PORT") 2>/dev/null
   fi
 }
 

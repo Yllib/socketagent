@@ -9,8 +9,9 @@ const path = require("path");
 const fs = require("fs");
 const http = require("http");
 
-// Load .env from server dir
-const envPath = path.join(__dirname, "..", ".env");
+// Prefer the active service's config selected by restart-server.sh. The helper
+// can live in a different checkout from the installed service.
+const envPath = process.env.SOCKETAGENT_ENV_PATH || path.join(__dirname, "..", ".env");
 if (fs.existsSync(envPath)) {
   const lines = fs.readFileSync(envPath, "utf-8").split("\n");
   for (const line of lines) {

@@ -121,6 +121,19 @@ status_service() {
   esac
 }
 
+service_directory() {
+  case "$OS_NAME" in
+    Darwin)
+      mac_require_plist
+      /usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' "$MAC_PLIST"
+      ;;
+    Linux)
+      systemctl --user show "$(linux_service_name)" --property=WorkingDirectory --value
+      ;;
+    *) echo "Unsupported service platform: $OS_NAME" >&2; exit 1 ;;
+  esac
+}
+
 logs_service() {
   case "$OS_NAME" in
     Darwin)
@@ -157,12 +170,15 @@ case "${1:-}" in
     shift
     status_service "$@"
     ;;
+  directory)
+    service_directory
+    ;;
   logs)
     shift
     logs_service "$@"
     ;;
   *)
-    echo "Usage: $0 name|target|is-active|start|stop|restart|status|logs" >&2
+    echo "Usage: $0 name|target|directory|is-active|start|stop|restart|status|logs" >&2
     exit 2
     ;;
 esac

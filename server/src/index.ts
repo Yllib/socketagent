@@ -1537,6 +1537,7 @@ function createConnectionHandler(transport: ClientTransport) {
   let externalNativeWatchTimer: ReturnType<typeof setInterval> | null = null;
   let externalNativeWatchSessionId: string | null = null;
   let externalNativeWatchFingerprint: string | null = null;
+  let scheduledCodexNativeSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Throttle interval for upload_progress emissions.
   const UPLOAD_PROGRESS_INTERVAL_MS = 250;
@@ -1585,8 +1586,16 @@ function createConnectionHandler(transport: ClientTransport) {
     externalNativeWatchFingerprint = null;
   }
 
+  function cancelScheduledCodexNativeHistorySync(): void {
+    if (scheduledCodexNativeSyncTimer) {
+      clearTimeout(scheduledCodexNativeSyncTimer);
+      scheduledCodexNativeSyncTimer = null;
+    }
+  }
+
   function closeConnection(): void {
     stopExternalNativeWatcher();
+    cancelScheduledCodexNativeHistorySync();
     terminalSessionManager.detach(transport);
   }
 
@@ -1629,7 +1638,9 @@ function createConnectionHandler(transport: ClientTransport) {
   function scheduleCodexNativeHistorySync(sessionInfo: SessionInfo, lastTimestamp: string | undefined, reason: string): void {
     if (sessionInfo.backend !== "codex") return;
     if (!nativeHistoryChangedSince(sessionInfo, lastTimestamp)) return;
-    const timer = setTimeout(() => {
+    cancelScheduledCodexNativeHistorySync();
+    scheduledCodexNativeSyncTimer = setTimeout(() => {
+      scheduledCodexNativeSyncTimer = null;
       syncCodexNativeHistory(sessionInfo).then((added) => {
         if (added.length > 0) {
           emitExternalNativeHistory(sessionInfo, added);
@@ -1638,7 +1649,7 @@ function createConnectionHandler(transport: ClientTransport) {
         console.warn(`[CodexSync] ${reason} native history sync failed for ${sessionInfo.id}: ${err?.message || err}`);
       });
     }, 0);
-    timer.unref?.();
+    scheduledCodexNativeSyncTimer.unref?.();
   }
 
   function startExternalNativeWatcher(sessionInfo: SessionInfo): void {
@@ -2551,6 +2562,13 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "prompt": {
+        // A resumed idle session may be watched for changes made by an
+        // external Codex process. Once SocketAgent starts a live turn, its
+        // app-server event handler must be the sole history writer. Otherwise
+        // the native watcher races the live handler, duplicating assistant
+        // messages and replacing tailored tool events with rollout entries.
+        stopExternalNativeWatcher();
+        cancelScheduledCodexNativeHistorySync();
         const promptCodexFastMode = typeof (msg as any).codexFastMode === "boolean"
           ? Boolean((msg as any).codexFastMode)
           : undefined;
@@ -2642,7 +2660,17 @@ function createConnectionHandler(transport: ClientTransport) {
 
         if (resumeId) {
           if (resumeSessionInfo?.backend === "codex") {
-            scheduleCodexNativeHistorySync(resumeSessionInfo, getLastHistoryTimestamp(resumeId), "prompt");
+            // Merge changes made before this prompt synchronously. Starting
+            // the turn only after this finishes prevents concurrent full-file
+            // history rewrites from the native and live paths.
+            try {
+              const added = await syncCodexNativeHistory(resumeSessionInfo);
+              if (added.length > 0) {
+                emitExternalNativeHistory(resumeSessionInfo, added);
+              }
+            } catch (err: any) {
+              console.warn(`[CodexSync] pre-prompt native history sync failed for ${resumeId}: ${err?.message || err}`);
+            }
           }
         }
 

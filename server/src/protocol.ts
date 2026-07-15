@@ -358,6 +358,13 @@ export interface UploadChunkBinMessage {
 export interface ClientCapabilitiesMessage {
   type: "client_capabilities";
   binaryEnvelope?: boolean;
+  /**
+   * Version 1 means the client acknowledges only after its live reducer has
+   * applied a tracked session event. Do not infer this from the legacy boolean:
+   * app v1.0.114 advertised that flag before it implemented acknowledgements.
+   */
+  sessionEventAckVersion?: number;
+  /** @deprecated Ambiguous compatibility flag; never enables tracked delivery. */
   sessionEventAck?: boolean;
 }
 
@@ -366,7 +373,19 @@ export interface DirectAuthMessage {
   type: "direct_auth";
   token: string;
   binaryEnvelope?: boolean;
+  sessionEventAckVersion?: number;
+  /** @deprecated Ambiguous compatibility flag; never enables tracked delivery. */
   sessionEventAck?: boolean;
+}
+
+export const SESSION_EVENT_ACK_VERSION = 1;
+
+export function supportsSessionEventAcknowledgement(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const version = (message as Record<string, unknown>).sessionEventAckVersion;
+  return typeof version === "number"
+    && Number.isInteger(version)
+    && version >= SESSION_EVENT_ACK_VERSION;
 }
 
 export interface TerminalAttachMessage {

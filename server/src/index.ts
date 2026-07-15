@@ -28,7 +28,7 @@ import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
-import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
+import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
@@ -1830,7 +1830,7 @@ function createConnectionHandler(transport: ClientTransport) {
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
     if ((msg as any).type === "client_capabilities") {
-      (transport as any).supportsSessionEventAck = (msg as any).sessionEventAck === true;
+      (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       sendJson({
         ...serverCapabilitiesPayload(true),
         codexCollaborationMode: "default",
@@ -6403,7 +6403,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         return;
       }
       transport.authenticate((msg as any).binaryEnvelope === true);
-      (transport as any).supportsSessionEventAck = (msg as any).sessionEventAck === true;
+      (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       console.log(`[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope})`);
       connectedClients.add(transport);
       sendStatusSyncTo(transport);

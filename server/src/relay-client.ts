@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
-import { ClientMessage } from "./protocol";
+import { ClientMessage, supportsSessionEventAcknowledgement } from "./protocol";
 import { detectAvailableBackends } from "./codex-session";
 import { getAdvertisedServerSettings } from "./server-settings";
 
@@ -12,7 +12,7 @@ const LEGACY_PEER_ID = "legacy";
 interface RelayPeer {
   publicKey: Uint8Array | null;
   binaryEnabled: boolean;
-  sessionEventAck: boolean;
+  supportsSessionEventAck: boolean;
 }
 
 export interface RelayOutboxDrain {
@@ -220,7 +220,7 @@ export class RelayClient {
   private getPeer(peerId = LEGACY_PEER_ID): RelayPeer {
     let peer = this.peers.get(peerId);
     if (!peer) {
-      peer = { publicKey: null, binaryEnabled: false, sessionEventAck: false };
+      peer = { publicKey: null, binaryEnabled: false, supportsSessionEventAck: false };
       this.peers.set(peerId, peer);
     }
     return peer;
@@ -298,7 +298,7 @@ export class RelayClient {
       }
       const stillPaired = this.hasPairedPeer();
       this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
-        .some((connectedPeer) => connectedPeer.sessionEventAck);
+        .some((connectedPeer) => connectedPeer.supportsSessionEventAck);
       if (!stillPaired) this.virtualWs._noteTransportReset();
       if (!stillPaired) this.setStatus("waiting_for_peer");
       return;
@@ -433,9 +433,9 @@ export class RelayClient {
     if ((msg as any).type === "client_capabilities") {
       const wantsBinary = !!(msg as any).binaryEnvelope;
       const peer = this.getPeer(peerId);
-      peer.sessionEventAck = (msg as any).sessionEventAck === true;
+      peer.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
-        .some((connectedPeer) => connectedPeer.sessionEventAck);
+        .some((connectedPeer) => connectedPeer.supportsSessionEventAck);
       if (wantsBinary && !peer.binaryEnabled) {
         peer.binaryEnabled = true;
         console.log(`[Relay] Phone announced binary envelope support — flipping outbound to binary${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);

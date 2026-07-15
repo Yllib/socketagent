@@ -176,7 +176,14 @@ export async function handleSendFileTool(
     }
     const stat = fs.statSync(filePath);
     const fileName = path.basename(filePath);
-    const fileId = crypto.createHash("md5").update(`${filePath}:${stat.mtimeMs}:${stat.size}`).digest("hex").slice(0, 12);
+    // File availability is session-owned. Including the session in the ID
+    // prevents an identically-named/path file advertised by another running
+    // session from taking over the active card's download route in the app.
+    const sessionId = ctx.getSessionId();
+    const fileId = crypto.createHash("md5")
+      .update(`${sessionId}:${filePath}:${stat.mtimeMs}:${stat.size}`)
+      .digest("hex")
+      .slice(0, 12);
 
     const now = Date.now();
     if (recentSendFiles.has(fileId) && now - recentSendFiles.get(fileId)! < 10000) {
@@ -190,19 +197,15 @@ export async function handleSendFileTool(
       fileName,
       filePath,
       fileSize: stat.size,
-      sessionId: ctx.getSessionId(),
-    } as any);
+      sessionId,
+    });
 
     const sizeStr = sizeLabel(stat.size);
     console.log(`[MCP:SendFile] Returning result for ${fileName} (${sizeStr})`);
     const resultText = `File ready for download: ${fileName} (${sizeStr})`;
-    appendVisibleToolHistory(
-      ctx,
-      "SendFile",
-      { file_path: filePath },
-      resultText,
-      { fileId, fileName, fileSize: stat.size },
-    );
+    // The Claude SDK and Codex app-server both persist their own canonical
+    // tool_call/tool_result pair. Writing another synthetic pair here made
+    // the same card occupy two history offsets and move across page loads.
     return { content: [{ type: "text", text: resultText }] };
   } catch (e: any) {
     console.error(`[MCP:SendFile] Error: ${e.message}`, e.stack);

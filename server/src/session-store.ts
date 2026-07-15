@@ -522,6 +522,68 @@ type HistoryCacheEntry = {
 
 const historyCache = new Map<string, HistoryCacheEntry>();
 
+function isSendFileCall(entry: HistoryEntry): boolean {
+  if (entry.role !== "tool_call") return false;
+  const name = String(entry.toolName || "");
+  return name === "SendFile" || name.endsWith("__SendFile");
+}
+
+function sendFilePath(entry: HistoryEntry): string {
+  return String(entry.toolInput?.file_path || "");
+}
+
+function sendFileTimestampsMatch(first: HistoryEntry, second: HistoryEntry): boolean {
+  const firstMs = Date.parse(first.timestamp || "");
+  const secondMs = Date.parse(second.timestamp || "");
+  if (!Number.isFinite(firstMs) || !Number.isFinite(secondMs)) return true;
+  return Math.abs(firstMs - secondMs) <= 2_500;
+}
+
+/**
+ * Older app-tool handlers wrote a synthetic SendFile pair in addition to the
+ * backend's canonical pair. Filter that exact adjacent duplicate before any
+ * history paging so the visible copy cannot jump when an offset crosses it.
+ */
+export function normalizeSendFileHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
+  const normalized = entries.map(cloneHistoryEntry);
+  const removedIndexes = new Set<number>();
+  const removedToolUseIds = new Set<string>();
+
+  for (let canonicalIndex = 0; canonicalIndex < normalized.length; canonicalIndex++) {
+    const canonical = normalized[canonicalIndex];
+    const canonicalId = String(canonical.toolUseId || "");
+    const filePath = sendFilePath(canonical);
+    if (!isSendFileCall(canonical)
+      || !canonicalId
+      || canonicalId.startsWith("mcp_SendFile_")
+      || !filePath) continue;
+
+    const start = Math.max(0, canonicalIndex - 4);
+    const end = Math.min(normalized.length - 1, canonicalIndex + 4);
+    for (let syntheticIndex = start; syntheticIndex <= end; syntheticIndex++) {
+      if (syntheticIndex === canonicalIndex) continue;
+      const synthetic = normalized[syntheticIndex];
+      const syntheticId = String(synthetic.toolUseId || "");
+      if (!isSendFileCall(synthetic)
+        || !syntheticId.startsWith("mcp_SendFile_")
+        || sendFilePath(synthetic) !== filePath
+        || !sendFileTimestampsMatch(canonical, synthetic)) continue;
+
+      canonical.fileId ??= synthetic.fileId;
+      canonical.fileName ??= synthetic.fileName;
+      canonical.fileSize ??= synthetic.fileSize;
+      removedIndexes.add(syntheticIndex);
+      removedToolUseIds.add(syntheticId);
+    }
+  }
+
+  return normalized.filter((entry, index) =>
+    !removedIndexes.has(index)
+    && !(entry.role === "tool_result"
+      && removedToolUseIds.has(String(entry.toolUseId || ""))),
+  );
+}
+
 function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: boolean } = {}): HistoryEntry[] {
   const startedAt = Date.now();
   ensureHistoryDir();
@@ -541,7 +603,9 @@ function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: bo
     return cached.entries;
   }
 
-  const entries = JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[];
+  const entries = normalizeSendFileHistoryEntries(
+    JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[],
+  );
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
   warnIfSlow("history_read", startedAt, {
     sessionId,

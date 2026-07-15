@@ -2556,8 +2556,21 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "session_event_ack": {
-        const session = activeSessions.get(msg.sessionId);
-        session?.acknowledgeSessionEvent?.(msg.deliveryId);
+        // A session is absent from activeSessions briefly while its backend
+        // assigns the first real session ID, and is removed as soon as a turn
+        // completes. The connection-local activeSession still owns pending
+        // deliveries across both edges, so accept acknowledgements there too.
+        // Otherwise the server retries cards the phone already applied.
+        const localSessionId = activeSession?.getSessionId()
+          || (activeSession as any)?._resumeSessionId
+          || activeSessionId
+          || undefined;
+        const session = activeSessions.get(msg.sessionId)
+          || (localSessionId === msg.sessionId ? activeSession : undefined);
+        const acknowledged = session?.acknowledgeSessionEvent?.(msg.deliveryId) === true;
+        if (!acknowledged) {
+          console.warn(`[SessionDelivery] Unmatched acknowledgement session=${msg.sessionId} delivery=${msg.deliveryId}`);
+        }
         break;
       }
 

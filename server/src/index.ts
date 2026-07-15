@@ -2536,6 +2536,12 @@ function createConnectionHandler(transport: ClientTransport) {
         break;
       }
 
+      case "session_event_ack": {
+        const session = activeSessions.get(msg.sessionId);
+        session?.acknowledgeSessionEvent?.(msg.deliveryId);
+        break;
+      }
+
       case "prompt": {
         const promptCodexFastMode = typeof (msg as any).codexFastMode === "boolean"
           ? Boolean((msg as any).codexFastMode)

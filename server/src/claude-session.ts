@@ -29,6 +29,7 @@ import {
 } from "./app-tool-handlers";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
+import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 
@@ -439,6 +440,9 @@ export class ClaudeSession {
   private _lastSupportedCommands: ServerMessage | null = null;
   private _lastSupportedAgents: ServerMessage | null = null;
   private clientSockets = new Set<WebSocket>();
+  private sessionEventDelivery = new SessionEventDelivery((message) => {
+    this.dispatchToClients(message as ServerMessage);
+  });
   public onActivity?: () => void;
   public onClose?: () => void;
   public onMonitorOutput?: (text: string) => void;
@@ -965,6 +969,13 @@ export class ClaudeSession {
     if (this._lastSupportedCommands) this.sendTo(ws, this._lastSupportedCommands);
     if (this._lastSupportedAgents) this.sendTo(ws, this._lastSupportedAgents);
     this.replayPendingInteractions(ws);
+    this.sessionEventDelivery.replayTo((message) => {
+      this.sendTo(ws, message as ServerMessage);
+    });
+  }
+
+  acknowledgeSessionEvent(deliveryId: string): boolean {
+    return this.sessionEventDelivery.acknowledge(deliveryId);
   }
 
   replayLiveState(ws: WebSocket = this.ws): void {
@@ -1050,6 +1061,10 @@ export class ClaudeSession {
   }
 
   public send(msg: ServerMessage): void {
+    this.dispatchToClients(this.sessionEventDelivery.prepare(msg as any) as ServerMessage);
+  }
+
+  private dispatchToClients(msg: ServerMessage): void {
     const payload = JSON.stringify(redactSecretsDeep(msg));
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN) {

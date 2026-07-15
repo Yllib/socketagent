@@ -29,6 +29,7 @@ import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
+import { SessionEventDelivery } from "./session-event-delivery";
 import {
   CodexAppServerApprovalPolicy,
   CodexAppServerApprovalsReviewer,
@@ -258,6 +259,9 @@ export class CodexSession {
   private pendingQuestions = new Map<string, PendingQuestion>();
   private questionCounter = 0;
   private clientSockets = new Set<WebSocket>();
+  private sessionEventDelivery = new SessionEventDelivery((message) => {
+    this.dispatchToClients(message as ServerMessage);
+  });
 
   public onActivity?: () => void;
   public onClose?: () => void;
@@ -399,6 +403,13 @@ export class CodexSession {
   setWebSocket(ws: WebSocket): void {
     this.attachWebSocket(ws);
     if (this._lastSupportedModels) this.sendTo(ws, this._lastSupportedModels);
+    this.sessionEventDelivery.replayTo((message) => {
+      this.sendTo(ws, message as ServerMessage);
+    });
+  }
+
+  acknowledgeSessionEvent(deliveryId: string): boolean {
+    return this.sessionEventDelivery.acknowledge(deliveryId);
   }
   replayLiveState(ws: WebSocket = this.ws): void {
     const sid = this.sessionId || "";
@@ -1455,6 +1466,10 @@ export class CodexSession {
   }
 
   public send(msg: ServerMessage): void {
+    this.dispatchToClients(this.sessionEventDelivery.prepare(msg as any) as ServerMessage);
+  }
+
+  private dispatchToClients(msg: ServerMessage): void {
     const payload = JSON.stringify(redactSecretsDeep(msg));
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN) {

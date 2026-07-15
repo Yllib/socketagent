@@ -90,6 +90,12 @@ export interface ResumeSessionMessage {
   sessionId: string;
 }
 
+export interface SessionEventAckMessage {
+  type: "session_event_ack";
+  sessionId: string;
+  deliveryId: string;
+}
+
 export interface ListSessionsMessage {
   type: "list_sessions";
 }
@@ -642,6 +648,7 @@ export type ClientMessage =
   | SecretDeleteMessage
   | NewSessionMessage
   | ResumeSessionMessage
+  | SessionEventAckMessage
   | ListSessionsMessage
   | GetServerSettingsMessage
   | SetCodexDriverMessage

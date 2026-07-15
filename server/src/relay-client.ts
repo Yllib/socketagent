@@ -14,6 +14,57 @@ interface RelayPeer {
   binaryEnabled: boolean;
 }
 
+export interface RelayOutboxDrain {
+  messages: Record<string, unknown>[];
+  droppedMessages: number;
+}
+
+/**
+ * Bounded FIFO for server events emitted while no encrypted phone peer exists.
+ * Short-lived tool cards must survive the relay peer's reconnect/key exchange
+ * window; otherwise only their persisted history copy is visible later.
+ */
+export class RelayMessageOutbox {
+  private messages: Array<{ message: Record<string, unknown>; bytes: number }> = [];
+  private totalBytes = 0;
+  private droppedMessages = 0;
+
+  constructor(
+    private readonly maxMessages = 4_000,
+    private readonly maxBytes = 16 * 1024 * 1024,
+  ) {}
+
+  enqueue(message: Record<string, unknown>): void {
+    const bytes = Buffer.byteLength(JSON.stringify(message));
+    this.messages.push({ message, bytes });
+    this.totalBytes += bytes;
+    while (
+      this.messages.length > this.maxMessages ||
+      this.totalBytes > this.maxBytes
+    ) {
+      const removed = this.messages.shift();
+      if (!removed) break;
+      this.totalBytes -= removed.bytes;
+      this.droppedMessages++;
+    }
+  }
+
+  drain(): RelayOutboxDrain {
+    const result = {
+      messages: this.messages.map((entry) => entry.message),
+      droppedMessages: this.droppedMessages,
+    };
+    this.messages = [];
+    this.totalBytes = 0;
+    this.droppedMessages = 0;
+    return result;
+  }
+
+  get length(): number {
+    return this.messages.length;
+  }
+}
+
 export type RelayStatus = "disconnected" | "connecting" | "waiting_for_peer" | "paired" | "error";
 
 export interface RelayClientOptions {
@@ -39,6 +90,7 @@ export class RelayClient {
   private closed = false;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private pongReceived = true;
+  private outbox = new RelayMessageOutbox();
   private static PING_INTERVAL = 30_000;  // send ping every 30s
   private static PING_TIMEOUT = 10_000;   // if no pong within 10s, connection is dead
 
@@ -74,6 +126,7 @@ export class RelayClient {
       console.log(`[Relay] Connected, waiting for phone...`);
       this.reconnectDelay = 1000; // reset backoff
       this.setStatus("waiting_for_peer");
+      this.virtualWs._setOpen(true);
 
       // Enable TCP keepalive on the underlying socket to detect dead connections
       const socket = (this.ws as any)?._socket;
@@ -109,7 +162,7 @@ export class RelayClient {
       this.ws = null;
       this.peers.clear();
       this.relaySupportsMultiDevice = false;
-      this.virtualWs._setOpen(false);
+      this.virtualWs._noteTransportReset();
       this.setStatus("disconnected");
       if (!this.closed) this.scheduleReconnect();
     });
@@ -122,15 +175,11 @@ export class RelayClient {
 
   /** Send a server→client message through the relay (encrypted if paired) */
   send(msg: Record<string, unknown>): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
     const pairedPeers = Array.from(this.peers.entries())
       .filter(([, peer]) => peer.publicKey !== null);
 
-    if (pairedPeers.length === 0) {
-      // Pre-key-exchange legacy fallback. The multi-device path uses
-      // sendPlainToPeer for targeted handshake messages.
-      this.ws.send(JSON.stringify(msg));
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || pairedPeers.length === 0) {
+      this.outbox.enqueue(msg);
       return;
     }
 
@@ -161,6 +210,7 @@ export class RelayClient {
     this.ws = null;
     this.peers.clear();
     this.relaySupportsMultiDevice = false;
+    this.virtualWs._setOpen(false);
     this.setStatus("disconnected");
   }
 
@@ -244,7 +294,7 @@ export class RelayClient {
         console.log(`[Relay] Phone disconnected from relay`);
       }
       const stillPaired = this.hasPairedPeer();
-      this.virtualWs._setOpen(stillPaired);
+      if (!stillPaired) this.virtualWs._noteTransportReset();
       if (!stillPaired) this.setStatus("waiting_for_peer");
       return;
     }
@@ -284,6 +334,7 @@ export class RelayClient {
       // encrypted mode begins. Contains no sensitive data.
       this.sendPlainToPeer(peerId, { type: "key_exchange_ack" });
       console.log(`[Relay] Key exchange complete — encrypted channel established`);
+      this.flushOutboxToPeer(peerId, peer);
       return;
     }
 
@@ -387,6 +438,7 @@ export class RelayClient {
       this.sendToPeer(peerId, {
         type: "server_capabilities",
         binaryEnvelope: peer.binaryEnabled,
+        secretManagement: { version: 1 },
         backends: detectAvailableBackends(),
         codexDriver: settings.codexDriver,
         codexDriversAvailable: settings.codexDriversAvailable,
@@ -401,6 +453,28 @@ export class RelayClient {
     if (this.status === status) return;
     this.status = status;
     this.opts.onStatusChange(status);
+  }
+
+  private flushOutboxToPeer(peerId: string, peer: RelayPeer): void {
+    const pending = this.outbox.drain();
+    if (pending.droppedMessages > 0) {
+      this.sendToPeer(peerId, {
+        type: "history_resync_required",
+        reason: "relay_outbox_overflow",
+        droppedMessages: pending.droppedMessages,
+      }, peer);
+    }
+    for (const message of pending.messages) {
+      this.sendToPeer(peerId, message, peer);
+    }
+    if (pending.messages.length > 0 || pending.droppedMessages > 0) {
+      console.log(
+        `[Relay] Replayed ${pending.messages.length} queued message(s)` +
+        (pending.droppedMessages > 0
+          ? ` after dropping ${pending.droppedMessages} oldest message(s)`
+          : ""),
+      );
+    }
   }
 
   /** Start periodic WebSocket ping/pong to detect dead connections */
@@ -444,7 +518,10 @@ export class RelayClient {
  * with ClaudeSession's existing ws interface (readyState + send).
  */
 export class VirtualRelaySocket {
-  readyState: number = WebSocket.CLOSED;
+  // This is a logical, buffered transport. It remains writable while the
+  // relay or phone peer reconnects so running sessions do not detach and lose
+  // transient events before the app can issue resume_session.
+  readyState: number = WebSocket.OPEN;
   connectionGeneration = 0;
   private _onMessageCallbacks: ((data: Buffer) => void)[] = [];
   private _onCloseCallbacks: (() => void)[] = [];
@@ -476,6 +553,10 @@ export class VirtualRelaySocket {
     if (wasOpen && !open) {
       for (const cb of this._onCloseCallbacks) cb();
     }
+  }
+
+  _noteTransportReset(): void {
+    this.connectionGeneration++;
   }
 
   /** Deliver an incoming message (from relay) to anyone listening */

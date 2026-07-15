@@ -98,6 +98,15 @@ export interface SessionEventAckMessage {
   deliveryId: string;
 }
 
+export interface ClientEventErrorMessage {
+  type: "client_event_error";
+  sessionId?: string;
+  eventType?: string;
+  deliveryId?: string;
+  toolUseId?: string;
+  message: string;
+}
+
 export interface ListSessionsMessage {
   type: "list_sessions";
 }
@@ -674,6 +683,7 @@ export type ClientMessage =
   | NewSessionMessage
   | ResumeSessionMessage
   | SessionEventAckMessage
+  | ClientEventErrorMessage
   | ListSessionsMessage
   | GetServerSettingsMessage
   | SetCodexDriverMessage

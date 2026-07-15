@@ -2574,6 +2574,17 @@ function createConnectionHandler(transport: ClientTransport) {
         break;
       }
 
+      case "client_event_error": {
+        console.error(
+          `[ClientEventError] session=${msg.sessionId || ""}`
+          + ` type=${msg.eventType || "unknown"}`
+          + ` delivery=${msg.deliveryId || ""}`
+          + (msg.toolUseId ? ` toolUseId=${msg.toolUseId}` : "")
+          + ` error=${msg.message}`,
+        );
+        break;
+      }
+
       case "prompt": {
         // A resumed idle session may be watched for changes made by an
         // external Codex process. Once SocketAgent starts a live turn, its

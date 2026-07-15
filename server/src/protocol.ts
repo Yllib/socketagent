@@ -54,6 +54,7 @@ export interface SecureInputStoreMessage {
 
 export interface SecretInventoryRequestMessage {
   type: "secret_inventory_request";
+  requestId?: string;
   sessionId?: string;
   cwd?: string;
 }
@@ -843,6 +844,7 @@ export interface SecretInventoryEntry {
 
 export interface SecretInventoryServerMessage {
   type: "secret_inventory";
+  requestId?: string;
   sessionId?: string;
   secrets: SecretInventoryEntry[];
 }
@@ -986,6 +988,9 @@ export interface PushRegistrationStatusServerMessage {
 export interface ServerCapabilitiesMessage {
   type: "server_capabilities";
   binaryEnvelope?: boolean;
+  secretManagement?: {
+    version: number;
+  };
   /** Backends supported by this server build. Health/auth state is in backendHealth. */
   backends: Backend[];
   codexDriver?: CodexDriver;

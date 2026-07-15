@@ -40,6 +40,19 @@ export type AvailableSecureInput = Pick<
   "secretId" | "label" | "scope" | "filePath" | "envHint" | "createdAt" | "updatedAt"
 >;
 
+export function createSecureInputInventoryMessage(
+  requestId: string | undefined,
+  sessionId: string | undefined,
+  cwd: string | undefined,
+): Extract<ServerMessage, { type: "secret_inventory" }> {
+  return {
+    type: "secret_inventory",
+    requestId,
+    sessionId: sessionId || "",
+    secrets: listAvailableSecureInputs(sessionId, cwd),
+  };
+}
+
 export interface ReplaceSecureInputArgs {
   secretId: string;
   value: string;

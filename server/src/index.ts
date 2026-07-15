@@ -42,7 +42,7 @@ import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writePr
 import { runBackendInstall } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
 import { terminalSessionManager } from "./terminal-session";
-import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInputRequestWithSavedSecret, deleteSecureInput, getAccessibleSecureInput, isSecureInputPending, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
+import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInputRequestWithSavedSecret, createSecureInputInventoryMessage, deleteSecureInput, getAccessibleSecureInput, isSecureInputPending, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
 import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 
@@ -1066,6 +1066,7 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
     type: "server_capabilities",
     binaryEnvelope,
     terminal: true,
+    secretManagement: { version: 1 },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
     codexDriversAvailable: settings.codexDriversAvailable,
@@ -3774,6 +3775,7 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "secret_inventory_request": {
+        const requestId = ((msg as any).requestId as string | undefined)?.trim() || undefined;
         const sessionId = ((msg as any).sessionId as string | undefined)?.trim()
           || activeSession?.getSessionId?.()
           || activeSessionId
@@ -3782,11 +3784,7 @@ function createConnectionHandler(transport: ClientTransport) {
           || activeSession?.getCwd?.()
           || (sessionId ? getSession(sessionId)?.cwd : undefined)
           || getDefaultCwd();
-        sendJson({
-          type: "secret_inventory",
-          sessionId: sessionId || "",
-          secrets: listAvailableSecureInputs(sessionId, cwd),
-        });
+        sendJson({ ...createSecureInputInventoryMessage(requestId, sessionId, cwd) });
         break;
       }
 

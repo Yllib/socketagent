@@ -9,6 +9,7 @@ process.env.SOCKET_AGENT_DATA_DIR = dataDir;
 
 const {
   listAvailableSecureInputs,
+  createSecureInputInventoryMessage,
   requestSecureInput,
   saveSecureInput,
   secureInputInventoryForAgent,
@@ -80,6 +81,28 @@ test("lists only metadata for secrets available to the current context", () => {
   assert.doesNotMatch(inventory, /OTHER_PROJECT_PASSWORD/);
   assert.doesNotMatch(inventory, /OTHER_SESSION_KEY/);
   assert.doesNotMatch(inventory, /must-not-leak/);
+});
+
+test("correlates inventory replies without exposing secret values", () => {
+  const cwd = path.join(dataDir, "correlated-project");
+  saveSecureInput({
+    label: "CORRELATED_TOKEN",
+    value: "correlated-value-must-not-leak",
+    scope: "project",
+    cwd,
+  });
+
+  const message = createSecureInputInventoryMessage(
+    "inventory-request-1",
+    "correlated-session",
+    cwd,
+  );
+
+  assert.equal(message.type, "secret_inventory");
+  assert.equal(message.requestId, "inventory-request-1");
+  assert.equal(message.sessionId, "correlated-session");
+  assert.ok(message.secrets.some((secret) => secret.label === "CORRELATED_TOKEN"));
+  assert.doesNotMatch(JSON.stringify(message), /correlated-value-must-not-leak/);
 });
 
 test("emits metadata-only lifecycle states for a secure input card", async () => {

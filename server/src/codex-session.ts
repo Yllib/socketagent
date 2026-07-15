@@ -1466,7 +1466,13 @@ export class CodexSession {
   }
 
   public send(msg: ServerMessage): void {
-    this.dispatchToClients(this.sessionEventDelivery.prepare(msg as any) as ServerMessage);
+    const deliveryAware = [...this.clientSockets].some(
+      (socket) => (socket as any).supportsSessionEventAck === true,
+    );
+    const outgoing = deliveryAware
+      ? this.sessionEventDelivery.prepare(msg as any)
+      : msg;
+    this.dispatchToClients(outgoing as ServerMessage);
   }
 
   private dispatchToClients(msg: ServerMessage): void {
@@ -2524,15 +2530,17 @@ export class CodexSession {
         if (!sid) return;
         const itemId = String(p?.itemId || p?.item?.id || "agent");
         const delta = String(p?.delta ?? "");
-        this.appServerAgentText.set(itemId, (this.appServerAgentText.get(itemId) || "") + delta);
+        const accumulated = (this.appServerAgentText.get(itemId) || "") + delta;
+        this.appServerAgentText.set(itemId, accumulated);
         const parentToolUseId = this.parentToolUseIdForThread(p?.threadId);
         if (parentToolUseId) this.appServerStreamParents.set(itemId, parentToolUseId);
         if (delta) {
           this.send({
             type: "text",
-            content: delta,
+            content: accumulated,
             sessionId: sid,
             streamId: itemId,
+            snapshot: true,
             ...(parentToolUseId ? { parentToolUseId } : {}),
           } as ServerMessage);
         }
@@ -2544,14 +2552,16 @@ export class CodexSession {
         const sid = this.sessionId;
         const itemId = p?.itemId || p?.item?.id || "reasoning";
         const delta = String(p?.delta ?? "");
-        if (delta) this.appServerReasoningText.set(itemId, (this.appServerReasoningText.get(itemId) || "") + delta);
+        const accumulated = (this.appServerReasoningText.get(itemId) || "") + delta;
+        if (delta) this.appServerReasoningText.set(itemId, accumulated);
         const parentToolUseId = this.parentToolUseIdForThread(p?.threadId);
         if (parentToolUseId) this.appServerReasoningParents.set(String(itemId), parentToolUseId);
         if (sid && delta) this.send({
           type: "thinking",
-          content: delta,
+          content: accumulated,
           sessionId: sid,
           streamId: String(itemId),
+          snapshot: true,
           ...(parentToolUseId ? { parentToolUseId } : {}),
         } as ServerMessage);
         return;
@@ -2866,6 +2876,15 @@ export class CodexSession {
     if (item.type === "agentMessage" && method === "item/completed") {
       const text = item.text || this.appServerAgentText.get(item.id) || "";
       if (text) {
+        this.send({
+          type: "text",
+          content: text,
+          sessionId: sid,
+          streamId: String(item.id),
+          snapshot: true,
+          finalSnapshot: true,
+          ...(parentToolUseId ? { parentToolUseId } : {}),
+        } as any);
         if (!parentToolUseId) this._lastAssistantText = text;
         appendItem({
           role: "assistant",

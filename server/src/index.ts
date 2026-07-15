@@ -1829,6 +1829,7 @@ function createConnectionHandler(transport: ClientTransport) {
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
     if ((msg as any).type === "client_capabilities") {
+      (transport as any).supportsSessionEventAck = (msg as any).sessionEventAck === true;
       sendJson({
         ...serverCapabilitiesPayload(true),
         codexCollaborationMode: "default",
@@ -6390,6 +6391,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         return;
       }
       transport.authenticate((msg as any).binaryEnvelope === true);
+      (transport as any).supportsSessionEventAck = (msg as any).sessionEventAck === true;
       console.log(`[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope})`);
       connectedClients.add(transport);
       sendStatusSyncTo(transport);

@@ -8,10 +8,12 @@ interface PendingDelivery {
   createdAt: number;
 }
 
-const ACKED_EVENT_TYPES = new Set([
-  "tool_call",
-  "tool_result",
-]);
+function requiresAcknowledgement(message: SessionEvent): boolean {
+  const type = String(message.type || "");
+  return type === "tool_call"
+    || type === "tool_result"
+    || ((type === "text" || type === "thinking") && message.finalSnapshot === true);
+}
 
 /**
  * Retains card-defining session events until the app confirms that its live
@@ -30,7 +32,7 @@ export class SessionEventDelivery {
   ) {}
 
   prepare(message: SessionEvent): SessionEvent {
-    if (!ACKED_EVENT_TYPES.has(String(message.type || ""))) return message;
+    if (!requiresAcknowledgement(message)) return message;
     if (typeof message.deliveryId === "string" && message.deliveryId) {
       return message;
     }

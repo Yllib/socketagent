@@ -12,6 +12,7 @@ const LEGACY_PEER_ID = "legacy";
 interface RelayPeer {
   publicKey: Uint8Array | null;
   binaryEnabled: boolean;
+  sessionEventAck: boolean;
 }
 
 export interface RelayOutboxDrain {
@@ -161,6 +162,7 @@ export class RelayClient {
       this.stopPingPong();
       this.ws = null;
       this.peers.clear();
+      this.virtualWs.supportsSessionEventAck = false;
       this.relaySupportsMultiDevice = false;
       this.virtualWs._noteTransportReset();
       this.setStatus("disconnected");
@@ -209,6 +211,7 @@ export class RelayClient {
     if (this.ws) this.ws.close();
     this.ws = null;
     this.peers.clear();
+    this.virtualWs.supportsSessionEventAck = false;
     this.relaySupportsMultiDevice = false;
     this.virtualWs._setOpen(false);
     this.setStatus("disconnected");
@@ -217,7 +220,7 @@ export class RelayClient {
   private getPeer(peerId = LEGACY_PEER_ID): RelayPeer {
     let peer = this.peers.get(peerId);
     if (!peer) {
-      peer = { publicKey: null, binaryEnabled: false };
+      peer = { publicKey: null, binaryEnabled: false, sessionEventAck: false };
       this.peers.set(peerId, peer);
     }
     return peer;
@@ -294,6 +297,8 @@ export class RelayClient {
         console.log(`[Relay] Phone disconnected from relay`);
       }
       const stillPaired = this.hasPairedPeer();
+      this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
+        .some((connectedPeer) => connectedPeer.sessionEventAck);
       if (!stillPaired) this.virtualWs._noteTransportReset();
       if (!stillPaired) this.setStatus("waiting_for_peer");
       return;
@@ -428,6 +433,9 @@ export class RelayClient {
     if ((msg as any).type === "client_capabilities") {
       const wantsBinary = !!(msg as any).binaryEnvelope;
       const peer = this.getPeer(peerId);
+      peer.sessionEventAck = (msg as any).sessionEventAck === true;
+      this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
+        .some((connectedPeer) => connectedPeer.sessionEventAck);
       if (wantsBinary && !peer.binaryEnabled) {
         peer.binaryEnabled = true;
         console.log(`[Relay] Phone announced binary envelope support — flipping outbound to binary${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
@@ -523,6 +531,7 @@ export class VirtualRelaySocket {
   // transient events before the app can issue resume_session.
   readyState: number = WebSocket.OPEN;
   connectionGeneration = 0;
+  supportsSessionEventAck = false;
   private _onMessageCallbacks: ((data: Buffer) => void)[] = [];
   private _onCloseCallbacks: (() => void)[] = [];
 

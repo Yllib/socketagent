@@ -1061,7 +1061,13 @@ export class ClaudeSession {
   }
 
   public send(msg: ServerMessage): void {
-    this.dispatchToClients(this.sessionEventDelivery.prepare(msg as any) as ServerMessage);
+    const deliveryAware = [...this.clientSockets].some(
+      (socket) => (socket as any).supportsSessionEventAck === true,
+    );
+    const outgoing = deliveryAware
+      ? this.sessionEventDelivery.prepare(msg as any)
+      : msg;
+    this.dispatchToClients(outgoing as ServerMessage);
   }
 
   private dispatchToClients(msg: ServerMessage): void {
@@ -2989,12 +2995,14 @@ export class ClaudeSession {
               message,
               event.delta.text,
             );
+            const accumulated = this._streamingText.get(streamId)?.content || event.delta.text;
             this._streamingThinking.delete(streamId);
             this.send({
               type: "text",
-              content: event.delta.text,
+              content: accumulated,
               sessionId: this.sessionId || "",
               streamId,
+              snapshot: true,
               parentToolUseId,
               uuid: (message as any).uuid || undefined,
             });
@@ -3010,11 +3018,15 @@ export class ClaudeSession {
               message,
               event.delta.thinking || "",
             );
+            const accumulated = this._streamingThinking.get(streamId)?.content
+              || event.delta.thinking
+              || "";
             this.send({
               type: "thinking",
-              content: event.delta.thinking || "",
+              content: accumulated,
               sessionId: this.sessionId || "",
               streamId,
+              snapshot: true,
               parentToolUseId: (message as any).parent_tool_use_id || null,
               uuid: (message as any).uuid || undefined,
             });
@@ -3112,18 +3124,33 @@ export class ClaudeSession {
             }
           }
 
+          const apiMessage = (message as any).message;
+          const completedTextParts = apiMessage?.content && Array.isArray(apiMessage.content)
+            ? apiMessage.content
+              .filter((b: any) => b.type === "text")
+              .map((b: any) => b.text)
+            : [];
+          if (completedTextParts.length > 0) {
+            this.send({
+              type: "text",
+              content: completedTextParts.join(""),
+              sessionId: this.sessionId || "",
+              streamId: this._streamKey(message),
+              snapshot: true,
+              finalSnapshot: true,
+              parentToolUseId: (message as any).parent_tool_use_id || null,
+              uuid: (message as any).uuid || undefined,
+            } as any);
+          }
           // Only close the stream that produced this assistant message. Other
           // subagents can still be streaming concurrently.
           this._clearLiveStreamsForMessage(message);
           // Log the full assistant text once the message is complete
           // Skip persisting the raw error text when auth login is being handled
-          const apiMessage = (message as any).message;
           console.log(`[SDK] Assistant message: content_blocks=${apiMessage?.content?.length || 0} types=${apiMessage?.content?.map((b: any) => b.type).join(',') || 'none'}`);
           if (apiMessage?.content && Array.isArray(apiMessage.content)) {
             // Extract full text from assistant message
-            const textParts = apiMessage.content
-              .filter((b: any) => b.type === "text")
-              .map((b: any) => b.text);
+            const textParts = completedTextParts;
             if (textParts.length > 0) {
               if (!(message as any).parent_tool_use_id) {
                 this._lastPreview = textParts.join("").slice(0, 200);

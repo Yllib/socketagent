@@ -34,6 +34,23 @@ test("non-card stream deltas are not retried as duplicate deltas", () => {
   delivery.dispose();
 });
 
+test("only final cumulative assistant snapshots require acknowledgement", () => {
+  const delivery = new SessionEventDelivery(() => {});
+  const inProgress = { type: "text", content: "hello", snapshot: true };
+  const final = {
+    type: "text",
+    content: "hello world",
+    snapshot: true,
+    finalSnapshot: true,
+  };
+
+  assert.equal(delivery.prepare(inProgress), inProgress);
+  const preparedFinal = delivery.prepare(final);
+  assert.ok(preparedFinal.deliveryId);
+  assert.equal(delivery.pendingCount, 1);
+  delivery.dispose();
+});
+
 test("pending cards replay immediately to a reattached client", () => {
   const delivery = new SessionEventDelivery(() => {});
   const prepared = delivery.prepare({ type: "tool_result", toolUseId: "tool-1" });

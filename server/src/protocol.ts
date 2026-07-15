@@ -354,6 +354,7 @@ export interface UploadChunkBinMessage {
 export interface ClientCapabilitiesMessage {
   type: "client_capabilities";
   binaryEnvelope?: boolean;
+  sessionEventAck?: boolean;
 }
 
 /** Direct E2E auth token proof, sent only after the NaCl key exchange. */
@@ -361,6 +362,7 @@ export interface DirectAuthMessage {
   type: "direct_auth";
   token: string;
   binaryEnvelope?: boolean;
+  sessionEventAck?: boolean;
 }
 
 export interface TerminalAttachMessage {
@@ -767,6 +769,9 @@ export interface TextServerMessage {
   parentToolUseId?: string | null;
   uuid?: string;
   replay?: boolean;
+  snapshot?: boolean;
+  finalSnapshot?: boolean;
+  deliveryId?: string;
 }
 
 export interface ToolCallServerMessage {
@@ -880,6 +885,9 @@ export interface ThinkingServerMessage {
   parentToolUseId?: string | null;
   uuid?: string;
   replay?: boolean;
+  snapshot?: boolean;
+  finalSnapshot?: boolean;
+  deliveryId?: string;
 }
 
 export interface UsageInfo {

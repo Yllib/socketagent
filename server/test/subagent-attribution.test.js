@@ -212,3 +212,40 @@ test("late-joining Codex clients receive the complete cached prefix before new d
   assert.equal(snapshot.replay, true);
   assert.equal(snapshot.sessionId, rootId);
 });
+
+test("Codex live text frames are cumulative snapshots with a durable final frame", () => {
+  const sent = [];
+  const rootId = `test-text-snapshot-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  session.handleAppServerNotification("item/agentMessage/delta", {
+    threadId: rootId,
+    itemId: "message-1",
+    delta: "first ",
+  });
+  session.handleAppServerNotification("item/agentMessage/delta", {
+    threadId: rootId,
+    itemId: "message-1",
+    delta: "second",
+  });
+  session.handleAppServerNotification("item/completed", {
+    threadId: rootId,
+    item: {
+      type: "agentMessage",
+      id: "message-1",
+      text: "first second",
+    },
+  });
+
+  const frames = sent.filter((message) => message.type === "text");
+  assert.deepEqual(frames.map((message) => message.content), [
+    "first ",
+    "first second",
+    "first second",
+  ]);
+  assert.ok(frames.every((message) => message.streamId === "message-1"));
+  assert.ok(frames.every((message) => message.snapshot === true));
+  assert.equal(frames.at(-1).finalSnapshot, true);
+});

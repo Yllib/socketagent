@@ -88,6 +88,8 @@ export interface NewSessionMessage {
 export interface ResumeSessionMessage {
   type: "resume_session";
   sessionId: string;
+  /** Correlates the initial history snapshot with the view that requested it. */
+  historyRequestId?: string;
 }
 
 export interface SessionEventAckMessage {
@@ -185,6 +187,8 @@ export interface LoadMoreHistoryMessage {
   sessionId: string;
   offset: number;
   limit: number;
+  /** Correlates an older-history page with the pagination request. */
+  requestId?: string;
 }
 
 export interface CheckCwdMessage {
@@ -1128,6 +1132,10 @@ export interface SessionHistoryServerMessage {
   type: "session_history";
   sessionId: string;
   messages: HistoryEntry[];
+  /** Echoed from resume_session.historyRequestId or load_more_history.requestId. */
+  requestId?: string;
+  /** Explicit merge behavior; clients must not infer this from local state. */
+  historyKind?: "initial" | "older" | "append";
 }
 
 export interface StatusServerMessage {

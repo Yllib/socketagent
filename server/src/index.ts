@@ -1621,6 +1621,7 @@ function createConnectionHandler(transport: ClientTransport) {
       total,
       offset: Math.max(0, total - added.length),
       append: true,
+      historyKind: "append",
     });
     broadcastSessionList();
   }
@@ -2314,6 +2315,9 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "resume_session": {
+        const historyRequestId = typeof (msg as any).historyRequestId === "string"
+          ? (msg as any).historyRequestId as string
+          : undefined;
         // Detach old session so it stops sending to this client
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
@@ -2435,6 +2439,8 @@ function createConnectionHandler(transport: ClientTransport) {
           messages: page.entries,
           total: page.total,
           offset: page.offset,
+          historyKind: "initial",
+          ...(historyRequestId ? { requestId: historyRequestId } : {}),
           ...(todos.length > 0 ? { todos } : {}),
           ...(lastSuggestion ? { promptSuggestion: lastSuggestion } : {}),
         });
@@ -2459,6 +2465,7 @@ function createConnectionHandler(transport: ClientTransport) {
               total: (page.total || 0) + missed.length,
               offset: page.total || 0,
               append: true,
+              historyKind: "append",
             });
           }
         }
@@ -4759,6 +4766,9 @@ function createConnectionHandler(transport: ClientTransport) {
         const sessionId = (msg as any).sessionId as string;
         const offset = (msg as any).offset as number;
         const limit = (msg as any).limit as number || 50;
+        const requestId = typeof (msg as any).requestId === "string"
+          ? (msg as any).requestId as string
+          : undefined;
         if (!sessionId) break;
         const page = getHistoryPage(sessionId, limit, offset);
         sendJson({
@@ -4767,6 +4777,8 @@ function createConnectionHandler(transport: ClientTransport) {
           messages: page.entries,
           total: page.total,
           offset: page.offset,
+          historyKind: "older",
+          ...(requestId ? { requestId } : {}),
         });
         break;
       }

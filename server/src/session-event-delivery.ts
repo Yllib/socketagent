@@ -44,13 +44,30 @@ export class SessionEventDelivery {
       attempts: 0,
       createdAt: Date.now(),
     });
+    console.log(
+      `[SessionDelivery] track type=${String(message.type || "unknown")}`
+      + ` session=${String(message.sessionId || "")}`
+      + ` delivery=${deliveryId}`
+      + (message.toolUseId ? ` toolUseId=${String(message.toolUseId)}` : "")
+      + (message.streamId ? ` streamId=${String(message.streamId)}` : ""),
+    );
     this.trim();
     this.scheduleRetry();
     return tracked;
   }
 
   acknowledge(deliveryId: string): boolean {
+    const entry = this.pending.get(deliveryId);
     const removed = this.pending.delete(deliveryId);
+    if (entry) {
+      console.log(
+        `[SessionDelivery] ack type=${String(entry.message.type || "unknown")}`
+        + ` session=${String(entry.message.sessionId || "")}`
+        + ` delivery=${deliveryId}`
+        + (entry.message.toolUseId ? ` toolUseId=${String(entry.message.toolUseId)}` : "")
+        + (entry.message.streamId ? ` streamId=${String(entry.message.streamId)}` : ""),
+      );
+    }
     if (this.pending.size === 0 && this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -91,6 +108,14 @@ export class SessionEventDelivery {
         continue;
       }
       entry.attempts++;
+      console.warn(
+        `[SessionDelivery] retry type=${String(entry.message.type || "unknown")}`
+        + ` session=${String(entry.message.sessionId || "")}`
+        + ` delivery=${deliveryId}`
+        + ` attempt=${entry.attempts + 1}`
+        + (entry.message.toolUseId ? ` toolUseId=${String(entry.message.toolUseId)}` : "")
+        + (entry.message.streamId ? ` streamId=${String(entry.message.streamId)}` : ""),
+      );
       this.dispatch({
         ...entry.message,
         replay: true,

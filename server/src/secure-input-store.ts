@@ -176,7 +176,7 @@ function isMetadataInContext(
     || (metadata.scope === "project" && sameContextPath(metadata.cwd, cwd));
 }
 
-function readAccessibleSecretMetadata(
+export function getAccessibleSecureInput(
   secretId: string,
   sessionId?: string,
   cwd?: string,
@@ -349,7 +349,7 @@ export function saveSecureInput(args: SecureInputSaveArgs): SavedSecureInput {
 /** Replaces a stored value without ever returning the old value. */
 export function replaceSecureInput(args: ReplaceSecureInputArgs): SavedSecureInput {
   if (!args.value) throw new Error("Secret value is empty");
-  const existing = readAccessibleSecretMetadata(args.secretId, args.sessionId, args.cwd);
+  const existing = getAccessibleSecureInput(args.secretId, args.sessionId, args.cwd);
   if (!existing) throw new Error("Secret not found in this session/project context");
 
   const label = args.label?.trim() || existing.label;
@@ -385,7 +385,7 @@ export function replaceSecureInput(args: ReplaceSecureInputArgs): SavedSecureInp
 
 /** Deletes a secret in the caller's available context without reading it. */
 export function deleteSecureInput(secretId: string, sessionId?: string, cwd?: string): boolean {
-  const existing = readAccessibleSecretMetadata(secretId, sessionId, cwd);
+  const existing = getAccessibleSecureInput(secretId, sessionId, cwd);
   if (!existing) return false;
   fs.rmSync(existing.filePath, { force: true });
   fs.rmSync(existing.metadataPath, { force: true });
@@ -455,6 +455,34 @@ export function completeSecureInputRequest(requestId: string, value: string): Sa
     reason: pending.args.reason || "",
     envHint: normalizeEnvHint(pending.args.label || "Secret", pending.args.envHint),
     scope: normalizeScope(pending.args.scope),
+    multiline: pending.args.multiline === true,
+  }, "saved");
+  pending.resolve(saved);
+  return saved;
+}
+
+/** Completes a live request using existing metadata only. The stored value is
+ * never read into memory or sent through the app/WebSocket. */
+export function completeSecureInputRequestWithSavedSecret(
+  requestId: string,
+  secretId: string,
+): SavedSecureInput {
+  const pending = pendingRequests.get(requestId);
+  if (!pending) throw new Error("Secure input request is no longer pending");
+  const saved = getAccessibleSecureInput(secretId, pending.sessionId, pending.cwd);
+  if (!saved) {
+    throw new Error("Stored secret is not available in this session/project context");
+  }
+  clearTimeout(pending.timer);
+  pendingRequests.delete(requestId);
+  emitSecureInputState(pending.onStateChange, {
+    type: "secure_input_request",
+    requestId,
+    sessionId: pending.sessionId || "",
+    label: pending.args.label || saved.label,
+    reason: pending.args.reason || "",
+    envHint: pending.args.envHint || saved.envHint,
+    scope: pending.args.scope || saved.scope,
     multiline: pending.args.multiline === true,
   }, "saved");
   pending.resolve(saved);

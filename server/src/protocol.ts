@@ -35,6 +35,8 @@ export interface SecureInputResponseMessage {
   type: "secure_input_response";
   requestId: string;
   value?: string;
+  secretId?: string;
+  sessionId?: string;
   cancelled?: boolean;
 }
 

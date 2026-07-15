@@ -8,7 +8,7 @@ import type { AgentSessionSettings, Backend, SessionInfo, HistoryEntry } from ".
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
 import { buildCodexSpawn } from "./codex-env";
-import { isSecureInputPending, redactSecretsDeep } from "./secure-input-store";
+import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
 
 const STORE_DIR = socketAgentDataPath();
@@ -503,16 +503,6 @@ function compactHistoryEntryForStorage(sessionId: string, entry: HistoryEntry, i
 
 function hydrateHistoryEntry(entry: HistoryEntry): HistoryEntry {
   const hydrated = cloneHistoryEntry(entry);
-  if (hydrated.role === "secure_input"
-    && hydrated.status === "pending"
-    && !isSecureInputPending(hydrated.questionId)) {
-    hydrated.status = "interrupted";
-    hydrated.answered = true;
-    hydrated.toolInput = {
-      ...(hydrated.toolInput || {}),
-      status: "interrupted",
-    };
-  }
   if (entry.role === "tool_result" && typeof entry.toolOutput !== "string" && entry.toolOutputRef) {
     hydrated.toolOutput = readToolOutputBlob(entry) ?? entry.toolOutputPreview ?? entry.content ?? "";
   }
@@ -875,6 +865,60 @@ export function markQuestionAnswered(sessionId: string, questionId: string): voi
     }
   } catch (e) {
     console.error(`[History] Error marking question answered: ${e}`);
+  }
+}
+
+export interface PersistedSecureInputRequest {
+  requestId: string;
+  label: string;
+  reason: string;
+  envHint?: string;
+  scope: "session" | "project" | "global";
+}
+
+/** Returns the latest unresolved request state from durable history. */
+export function getPersistedSecureInputRequest(
+  sessionId: string,
+  requestId: string,
+): PersistedSecureInputRequest | undefined {
+  const entries = readHistoryEntries(sessionId);
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.role !== "secure_input" || entry.questionId !== requestId) continue;
+    if (entry.answered || ["saved", "cancelled", "expired"].includes(String(entry.status))) {
+      return undefined;
+    }
+    const input = entry.toolInput || {};
+    const rawScope = String(input.scope || "session");
+    return {
+      requestId,
+      label: String(input.label || "Secret"),
+      reason: String(input.reason || entry.content || ""),
+      envHint: String(input.envHint || "") || undefined,
+      scope: rawScope === "project" || rawScope === "global" ? rawScope : "session",
+    };
+  }
+  return undefined;
+}
+
+export function markSecureInputRequestResolved(
+  sessionId: string,
+  requestId: string,
+  status: "saved" | "cancelled" | "expired",
+): void {
+  try {
+    const entries = readHistoryEntries(sessionId);
+    let changed = false;
+    for (const entry of entries) {
+      if (entry.role !== "secure_input" || entry.questionId !== requestId) continue;
+      entry.status = status;
+      entry.answered = true;
+      entry.toolInput = { ...(entry.toolInput || {}), status };
+      changed = true;
+    }
+    if (changed) writeHistoryEntries(sessionId, entries);
+  } catch (error) {
+    console.error(`[History] Error resolving secure input ${requestId}: ${error}`);
   }
 }
 

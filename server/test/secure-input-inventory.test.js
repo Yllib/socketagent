@@ -13,10 +13,16 @@ const {
   saveSecureInput,
   secureInputInventoryForAgent,
   completeSecureInputRequest,
+  completeSecureInputRequestWithSavedSecret,
   deleteSecureInput,
   replaceSecureInput,
 } = require("../dist/secure-input-store");
-const { appendHistory, getHistory } = require("../dist/session-store");
+const {
+  appendHistory,
+  getHistory,
+  getPersistedSecureInputRequest,
+  markSecureInputRequestResolved,
+} = require("../dist/session-store");
 
 test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
@@ -101,7 +107,7 @@ test("emits metadata-only lifecycle states for a secure input card", async () =>
   assert.ok(states.every((entry) => !JSON.stringify(entry).includes("must-not-leak")));
 });
 
-test("closes a history card whose in-memory request was interrupted", () => {
+test("keeps a persisted secure-input card actionable without a live promise", () => {
   appendHistory("interrupted-session", {
     role: "secure_input",
     content: "Enter a credential",
@@ -119,9 +125,51 @@ test("closes a history card whose in-memory request was interrupted", () => {
 
   const [card] = getHistory("interrupted-session");
   assert.equal(card.role, "secure_input");
-  assert.equal(card.status, "interrupted");
-  assert.equal(card.answered, true);
-  assert.equal(card.toolInput.status, "interrupted");
+  assert.equal(card.status, "pending");
+  assert.equal(card.answered, false);
+  assert.equal(card.toolInput.status, "pending");
+
+  const recovered = getPersistedSecureInputRequest(
+    "interrupted-session",
+    "secure_no_longer_pending",
+  );
+  assert.equal(recovered.label, "INTERRUPTED_PASSWORD");
+  markSecureInputRequestResolved(
+    "interrupted-session",
+    "secure_no_longer_pending",
+    "saved",
+  );
+  const [resolved] = getHistory("interrupted-session");
+  assert.equal(resolved.status, "saved");
+  assert.equal(resolved.answered, true);
+});
+
+test("completes a live request with stored metadata without reading its value", async () => {
+  const cwd = path.join(dataDir, "stored-request-project");
+  const stored = saveSecureInput({
+    label: "EXISTING_PASSWORD",
+    value: "stored-value-must-not-cross-the-wire",
+    scope: "project",
+    cwd,
+  });
+  const sent = [];
+  const pending = requestSecureInput(
+    (message) => sent.push(message),
+    { label: "EXISTING_PASSWORD", scope: "project" },
+    "stored-request-session",
+    cwd,
+  );
+  const requestId = sent[0].requestId;
+
+  const completed = completeSecureInputRequestWithSavedSecret(
+    requestId,
+    stored.secretId,
+  );
+  const resolved = await pending;
+
+  assert.equal(completed.secretId, stored.secretId);
+  assert.equal(resolved.filePath, stored.filePath);
+  assert.doesNotMatch(JSON.stringify(sent), /stored-value-must-not-cross-the-wire/);
 });
 
 test("replaces a value without exposing the previous value in metadata", () => {

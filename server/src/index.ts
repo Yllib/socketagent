@@ -26,7 +26,7 @@ import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
+import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
 import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -42,7 +42,7 @@ import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writePr
 import { runBackendInstall } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
 import { terminalSessionManager } from "./terminal-session";
-import { cancelSecureInputRequest, completeSecureInputRequest, deleteSecureInput, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
+import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInputRequestWithSavedSecret, deleteSecureInput, getAccessibleSecureInput, isSecureInputPending, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
 import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 
@@ -3569,18 +3569,69 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({ type: "error", message: "Missing secure input requestId" });
           break;
         }
+        const requestedSessionId = typeof (msg as any).sessionId === "string"
+          ? String((msg as any).sessionId).trim()
+          : "";
+        const localSessionId = activeSession?.getSessionId?.()
+          || (activeSession as any)?._resumeSessionId
+          || activeSessionId
+          || "";
+        const targetSessionId = requestedSessionId || localSessionId;
+        let targetSession = targetSessionId
+          ? activeSessions.get(targetSessionId)
+            || (localSessionId === targetSessionId ? activeSession : null)
+          : activeSession;
+        const sessionInfo = targetSessionId ? getSession(targetSessionId) : undefined;
+        const cwd = targetSession?.getCwd?.() || sessionInfo?.cwd || getDefaultCwd();
+
         if ((msg as any).cancelled) {
-          cancelSecureInputRequest(requestId);
+          if (isSecureInputPending(requestId)) {
+            cancelSecureInputRequest(requestId);
+          } else if (targetSessionId && getPersistedSecureInputRequest(targetSessionId, requestId)) {
+            markSecureInputRequestResolved(targetSessionId, requestId, "cancelled");
+          }
           sendJson({ type: "secure_input_cancelled", requestId });
           break;
         }
+        const secretId = typeof (msg as any).secretId === "string"
+          ? String((msg as any).secretId).trim()
+          : "";
         const value = (msg as any).value;
-        if (typeof value !== "string" || value.length === 0) {
+        if (!secretId && (typeof value !== "string" || value.length === 0)) {
           sendJson({ type: "error", message: "Secure input value is empty" });
           break;
         }
         try {
-          const saved = completeSecureInputRequest(requestId, value);
+          let saved;
+          let recoveredFromHistory = false;
+          if (isSecureInputPending(requestId)) {
+            saved = secretId
+              ? completeSecureInputRequestWithSavedSecret(requestId, secretId)
+              : completeSecureInputRequest(requestId, value);
+          } else {
+            const persisted = targetSessionId
+              ? getPersistedSecureInputRequest(targetSessionId, requestId)
+              : undefined;
+            if (!persisted) {
+              throw new Error("Secure input request is not pending or recoverable");
+            }
+            saved = secretId
+              ? getAccessibleSecureInput(secretId, targetSessionId, cwd)
+              : saveSecureInput({
+                  label: persisted.label,
+                  reason: persisted.reason,
+                  envHint: persisted.envHint,
+                  scope: persisted.scope,
+                  value,
+                  sessionId: targetSessionId,
+                  cwd,
+                });
+            if (!saved) {
+              throw new Error("Stored secret is not available in this session/project context");
+            }
+            markSecureInputRequestResolved(targetSessionId, requestId, "saved");
+            recoveredFromHistory = true;
+          }
           sendJson({
             type: "secure_input_saved",
             requestId,
@@ -3591,6 +3642,51 @@ function createConnectionHandler(transport: ClientTransport) {
             filePath: saved.filePath,
             envHint: saved.envHint,
           });
+
+          if (recoveredFromHistory && targetSessionId && sessionInfo) {
+            if (!targetSession) {
+              targetSession = createSession(
+                sessionInfo.backend,
+                transport as any,
+                sessionInfo.cwd,
+                plugins,
+                getStoredCodexDriver(sessionInfo),
+              );
+              await restorePersistedPermissionMode(targetSession, sessionInfo);
+              (targetSession as any)._resumeSessionId = targetSessionId;
+              await restorePersistedAgentSettings(targetSession, sessionInfo);
+              activeSession = targetSession;
+              activeSessionId = targetSessionId;
+            }
+            activeSessions.set(targetSessionId, targetSession);
+            sessionClients.set(targetSessionId, {
+              ws: transport as WebSocket,
+              setActiveSession: (session: Session) => { activeSession = session; },
+            });
+            const recoveryPrompt = [
+              "[System: A secure-input card from the previous agent turn has now been completed.]",
+              `Secret label: ${saved.label}`,
+              `Scope: ${saved.scope}`,
+              `Suggested env var: ${saved.envHint}`,
+              `Secret file path: ${saved.filePath}`,
+              "Continue the interrupted task using this file path. Never print the secret value.",
+            ].join("\n");
+            if (targetSession.isRunning) {
+              targetSession.injectMessage(recoveryPrompt);
+            } else {
+              attachSessionLifecycleCallbacks(targetSession);
+              const resumedSession = targetSession;
+              resumedSession.runQuery(recoveryPrompt, targetSessionId).then(() => {
+                const sid = resumedSession.getSessionId();
+                if (sid && activeSessions.get(sid) === resumedSession && !sessionShouldRemainPooled(resumedSession)) {
+                  activeSessions.delete(sid);
+                }
+                broadcastSessionList();
+              }).catch((error: any) => {
+                sendJson({ type: "error", message: error.message || "Failed to resume secure input request" });
+              });
+            }
+          }
         } catch (e: any) {
           sendJson({ type: "error", message: `Secure input failed: ${e.message || String(e)}` });
         }

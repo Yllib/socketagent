@@ -47,6 +47,32 @@ export interface SecureInputStoreMessage {
   scope?: "session" | "project" | "global";
   sessionId?: string;
   cwd?: string;
+  clientRequestId?: string;
+}
+
+export interface SecretInventoryRequestMessage {
+  type: "secret_inventory_request";
+  sessionId?: string;
+  cwd?: string;
+}
+
+export interface SecretReplaceMessage {
+  type: "secret_replace";
+  requestId: string;
+  secretId: string;
+  value: string;
+  label?: string;
+  envHint?: string;
+  sessionId?: string;
+  cwd?: string;
+}
+
+export interface SecretDeleteMessage {
+  type: "secret_delete";
+  requestId: string;
+  secretId: string;
+  sessionId?: string;
+  cwd?: string;
 }
 
 export interface NewSessionMessage {
@@ -608,6 +634,9 @@ export type ClientMessage =
   | AnswerMessage
   | SecureInputResponseMessage
   | SecureInputStoreMessage
+  | SecretInventoryRequestMessage
+  | SecretReplaceMessage
+  | SecretDeleteMessage
   | NewSessionMessage
   | ResumeSessionMessage
   | ListSessionsMessage
@@ -797,6 +826,32 @@ export interface SecureInputSavedServerMessage {
   scope: "session" | "project" | "global";
   filePath: string;
   envHint: string;
+  clientRequestId?: string;
+}
+
+export interface SecretInventoryEntry {
+  secretId: string;
+  label: string;
+  scope: "session" | "project" | "global";
+  filePath: string;
+  envHint: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface SecretInventoryServerMessage {
+  type: "secret_inventory";
+  sessionId?: string;
+  secrets: SecretInventoryEntry[];
+}
+
+export interface SecretOperationResultServerMessage {
+  type: "secret_operation_result";
+  requestId: string;
+  operation: "create" | "replace" | "delete";
+  ok: boolean;
+  error?: string;
+  secret?: SecretInventoryEntry;
 }
 
 export interface QuestionItem {
@@ -1522,6 +1577,8 @@ export type ServerMessage =
   | QuestionServerMessage
   | SecureInputRequestServerMessage
   | SecureInputSavedServerMessage
+  | SecretInventoryServerMessage
+  | SecretOperationResultServerMessage
   | ResultServerMessage
   | SessionListServerMessage
   | SdkSessionListServerMessage

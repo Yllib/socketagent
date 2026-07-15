@@ -13,6 +13,8 @@ const {
   saveSecureInput,
   secureInputInventoryForAgent,
   completeSecureInputRequest,
+  deleteSecureInput,
+  replaceSecureInput,
 } = require("../dist/secure-input-store");
 const { appendHistory, getHistory } = require("../dist/session-store");
 
@@ -120,4 +122,53 @@ test("closes a history card whose in-memory request was interrupted", () => {
   assert.equal(card.status, "interrupted");
   assert.equal(card.answered, true);
   assert.equal(card.toolInput.status, "interrupted");
+});
+
+test("replaces a value without exposing the previous value in metadata", () => {
+  const cwd = path.join(dataDir, "managed-project");
+  const saved = saveSecureInput({
+    label: "MANAGED_PASSWORD",
+    value: "old-managed-value",
+    scope: "project",
+    cwd,
+  });
+
+  const replaced = replaceSecureInput({
+    secretId: saved.secretId,
+    value: "new-managed-value",
+    label: "RENAMED_PASSWORD",
+    envHint: "RENAMED_PASSWORD",
+    cwd,
+  });
+
+  assert.equal(replaced.secretId, saved.secretId);
+  assert.equal(replaced.label, "RENAMED_PASSWORD");
+  assert.equal(fs.readFileSync(saved.filePath, "utf8"), "new-managed-value");
+  const inventory = listAvailableSecureInputs(undefined, cwd);
+  const metadata = inventory.find((entry) => entry.secretId === saved.secretId);
+  assert.equal(metadata.label, "RENAMED_PASSWORD");
+  assert.ok(metadata.updatedAt);
+  assert.doesNotMatch(JSON.stringify(metadata), /managed-value/);
+});
+
+test("deletes only secrets available in the supplied context", () => {
+  const cwd = path.join(dataDir, "delete-project");
+  const otherCwd = path.join(dataDir, "other-delete-project");
+  const saved = saveSecureInput({
+    label: "DELETE_ME",
+    value: "delete-value",
+    scope: "project",
+    cwd,
+  });
+
+  assert.equal(deleteSecureInput(saved.secretId, undefined, otherCwd), false);
+  assert.equal(fs.existsSync(saved.filePath), true);
+  assert.equal(deleteSecureInput(saved.secretId, undefined, cwd), true);
+  assert.equal(fs.existsSync(saved.filePath), false);
+  assert.equal(
+    listAvailableSecureInputs(undefined, cwd).some(
+      (entry) => entry.secretId === saved.secretId,
+    ),
+    false,
+  );
 });

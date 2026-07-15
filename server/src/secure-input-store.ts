@@ -32,12 +32,22 @@ export interface SavedSecureInput {
   sessionId?: string;
   cwd?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export type AvailableSecureInput = Pick<
   SavedSecureInput,
-  "secretId" | "label" | "scope" | "filePath" | "envHint" | "createdAt"
+  "secretId" | "label" | "scope" | "filePath" | "envHint" | "createdAt" | "updatedAt"
 >;
+
+export interface ReplaceSecureInputArgs {
+  secretId: string;
+  value: string;
+  label?: string;
+  envHint?: string;
+  sessionId?: string;
+  cwd?: string;
+}
 
 interface PendingSecureInput {
   requestId: string;
@@ -129,6 +139,12 @@ function loadExistingSecretsForRedaction(): void {
   }
 }
 
+function rebuildSecretRedactionValues(): void {
+  secretValues.clear();
+  loadedExistingSecrets = false;
+  loadExistingSecretsForRedaction();
+}
+
 function walkMetadataFiles(dir: string, output: string[]): void {
   for (const name of fs.readdirSync(dir)) {
     const filePath = path.join(dir, name);
@@ -148,6 +164,52 @@ function sameContextPath(left: unknown, right: string | undefined): boolean {
   } catch {
     return left === right;
   }
+}
+
+function isMetadataInContext(
+  metadata: Partial<SavedSecureInput>,
+  sessionId?: string,
+  cwd?: string,
+): boolean {
+  return metadata.scope === "global"
+    || (metadata.scope === "session" && !!sessionId && metadata.sessionId === sessionId)
+    || (metadata.scope === "project" && sameContextPath(metadata.cwd, cwd));
+}
+
+function readAccessibleSecretMetadata(
+  secretId: string,
+  sessionId?: string,
+  cwd?: string,
+): SavedSecureInput | undefined {
+  if (!secretId || !fs.existsSync(STORE_DIR)) return undefined;
+  const metadataFiles: string[] = [];
+  walkMetadataFiles(STORE_DIR, metadataFiles);
+  const storeRoot = path.resolve(STORE_DIR) + path.sep;
+  for (const metadataPath of metadataFiles) {
+    try {
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Partial<SavedSecureInput>;
+      if (metadata.secretId !== secretId
+        || typeof metadata.filePath !== "string"
+        || !isMetadataInContext(metadata, sessionId, cwd)) {
+        continue;
+      }
+      const resolvedSecretPath = path.resolve(metadata.filePath);
+      const resolvedMetadataPath = path.resolve(metadataPath);
+      if (!resolvedSecretPath.startsWith(storeRoot)
+        || !resolvedMetadataPath.startsWith(storeRoot)
+        || !fs.existsSync(resolvedSecretPath)) {
+        continue;
+      }
+      return {
+        ...(metadata as SavedSecureInput),
+        filePath: resolvedSecretPath,
+        metadataPath: resolvedMetadataPath,
+      };
+    } catch {
+      // Ignore malformed or concurrently-written metadata records.
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -183,9 +245,7 @@ export function listAvailableSecureInputs(sessionId?: string, cwd?: string): Ava
       const resolvedSecretPath = path.resolve(metadata.filePath);
       if (!resolvedSecretPath.startsWith(storeRoot) || !fs.existsSync(resolvedSecretPath)) continue;
 
-      const inScope = metadata.scope === "global"
-        || (metadata.scope === "session" && !!sessionId && metadata.sessionId === sessionId)
-        || (metadata.scope === "project" && sameContextPath(metadata.cwd, cwd));
+      const inScope = isMetadataInContext(metadata, sessionId, cwd);
       if (!inScope) continue;
 
       available.push({
@@ -195,6 +255,7 @@ export function listAvailableSecureInputs(sessionId?: string, cwd?: string): Ava
         filePath: resolvedSecretPath,
         envHint: metadata.envHint,
         createdAt: metadata.createdAt,
+        ...(typeof metadata.updatedAt === "string" ? { updatedAt: metadata.updatedAt } : {}),
       });
     } catch {
       // Ignore malformed or concurrently-written metadata records.
@@ -217,6 +278,7 @@ export function secureInputInventoryForAgent(sessionId?: string, cwd?: string): 
     envHint: entry.envHint,
     filePath: entry.filePath,
     createdAt: entry.createdAt,
+    ...(entry.updatedAt ? { updatedAt: entry.updatedAt } : {}),
   }));
   return [
     "Secure storage inventory (metadata only; secret values are not included):",
@@ -282,6 +344,53 @@ export function saveSecureInput(args: SecureInputSaveArgs): SavedSecureInput {
   try { fs.chmodSync(metadataPath, 0o600); } catch {}
   registerSecretValue(args.value);
   return saved;
+}
+
+/** Replaces a stored value without ever returning the old value. */
+export function replaceSecureInput(args: ReplaceSecureInputArgs): SavedSecureInput {
+  if (!args.value) throw new Error("Secret value is empty");
+  const existing = readAccessibleSecretMetadata(args.secretId, args.sessionId, args.cwd);
+  if (!existing) throw new Error("Secret not found in this session/project context");
+
+  const label = args.label?.trim() || existing.label;
+  const envHint = normalizeEnvHint(label, args.envHint?.trim() || existing.envHint);
+  const updatedAt = new Date().toISOString();
+  const valueTempPath = `${existing.filePath}.tmp-${crypto.randomBytes(4).toString("hex")}`;
+  const metadataTempPath = `${existing.metadataPath}.tmp-${crypto.randomBytes(4).toString("hex")}`;
+  const updated: SavedSecureInput = {
+    ...existing,
+    label,
+    envHint,
+    updatedAt,
+  };
+
+  try {
+    fs.writeFileSync(valueTempPath, args.value, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(valueTempPath, existing.filePath);
+    try { fs.chmodSync(existing.filePath, 0o600); } catch {}
+    fs.writeFileSync(
+      metadataTempPath,
+      JSON.stringify({ ...updated, valueRedacted: true }, null, 2),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    fs.renameSync(metadataTempPath, existing.metadataPath);
+    try { fs.chmodSync(existing.metadataPath, 0o600); } catch {}
+  } finally {
+    try { fs.rmSync(valueTempPath, { force: true }); } catch {}
+    try { fs.rmSync(metadataTempPath, { force: true }); } catch {}
+  }
+  rebuildSecretRedactionValues();
+  return updated;
+}
+
+/** Deletes a secret in the caller's available context without reading it. */
+export function deleteSecureInput(secretId: string, sessionId?: string, cwd?: string): boolean {
+  const existing = readAccessibleSecretMetadata(secretId, sessionId, cwd);
+  if (!existing) return false;
+  fs.rmSync(existing.filePath, { force: true });
+  fs.rmSync(existing.metadataPath, { force: true });
+  rebuildSecretRedactionValues();
+  return true;
 }
 
 export function requestSecureInput(

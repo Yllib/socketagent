@@ -205,6 +205,11 @@ export class CodexSession {
   private appServerReasoningText = new Map<string, string>();
   private appServerReasoningParents = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
+  private appServerActiveToolCalls = new Map<string, {
+    tool: string;
+    input: Record<string, unknown>;
+    parentToolUseId?: string;
+  }>();
   private appServerFileChangeDiff = new Map<string, string>();
   private appServerFileChangePaths = new Map<string, string[]>();
   private appServerSeenUserMessageItems = new Set<string>();
@@ -314,7 +319,13 @@ export class CodexSession {
   get lastPreview(): string { return ""; }
   getSessionId(): string | null { return this.sessionId; }
   getCwd(): string { return this.cwd; }
-  getActiveToolCall(): { toolUseId: string; name: string } | null { return null; }
+  getActiveToolCall(): { toolUseId: string; name: string } | null {
+    const activeCalls = [...this.appServerActiveToolCalls.entries()];
+    const active = activeCalls.length > 0
+      ? activeCalls[activeCalls.length - 1]
+      : undefined;
+    return active ? { toolUseId: active[0], name: active[1].tool } : null;
+  }
   getAccumulatedBashOutput(): string | null { return null; }
   setSandbox(mode: SandboxMode): void {
     this._sandbox = mode;
@@ -392,6 +403,17 @@ export class CodexSession {
   replayLiveState(ws: WebSocket = this.ws): void {
     const sid = this.sessionId || "";
     if (!sid) return;
+
+    for (const [toolUseId, call] of this.appServerActiveToolCalls.entries()) {
+      this.sendTo(ws, {
+        type: "tool_call",
+        tool: call.tool,
+        input: call.input,
+        toolUseId,
+        sessionId: sid,
+        ...(call.parentToolUseId ? { parentToolUseId: call.parentToolUseId } : {}),
+      } as any);
+    }
 
     for (const [itemId, content] of this.appServerReasoningText.entries()) {
       if (content) {
@@ -2793,10 +2815,23 @@ export class CodexSession {
     if (!sid || !item?.id || !item?.type) return;
     const parentToolUseId = this.parentToolUseIdForThread(event?.threadId);
     const sendItem = (message: Record<string, unknown>): void => {
-      this.send({
+      const routedMessage = {
         ...message,
         ...(parentToolUseId ? { parentToolUseId } : {}),
-      } as any);
+      } as Record<string, any>;
+      const toolUseId = String(routedMessage.toolUseId || "");
+      if (routedMessage.type === "tool_call" && toolUseId) {
+        this.appServerActiveToolCalls.set(toolUseId, {
+          tool: String(routedMessage.tool || "Tool"),
+          input: routedMessage.input && typeof routedMessage.input === "object"
+            ? routedMessage.input as Record<string, unknown>
+            : {},
+          ...(parentToolUseId ? { parentToolUseId } : {}),
+        });
+      } else if (routedMessage.type === "tool_result" && toolUseId) {
+        this.appServerActiveToolCalls.delete(toolUseId);
+      }
+      this.send(routedMessage as any);
     };
     const appendItem = (entry: HistoryEntry): void => {
       appendHistory(sid, {

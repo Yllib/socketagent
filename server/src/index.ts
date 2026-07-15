@@ -42,7 +42,7 @@ import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writePr
 import { runBackendInstall } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
 import { terminalSessionManager } from "./terminal-session";
-import { cancelSecureInputRequest, completeSecureInputRequest, redactSecretsDeep, saveSecureInput } from "./secure-input-store";
+import { cancelSecureInputRequest, completeSecureInputRequest, deleteSecureInput, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
 import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 
@@ -3598,8 +3598,19 @@ function createConnectionHandler(transport: ClientTransport) {
       case "secure_input_store": {
         const value = (msg as any).value;
         const label = ((msg as any).label as string | undefined)?.trim() || "Secret";
+        const clientRequestId = ((msg as any).clientRequestId as string | undefined)?.trim();
         if (typeof value !== "string" || value.length === 0) {
-          sendJson({ type: "error", message: "Secure input value is empty" });
+          if (clientRequestId) {
+            sendJson({
+              type: "secret_operation_result",
+              requestId: clientRequestId,
+              operation: "create",
+              ok: false,
+              error: "Secret value is empty",
+            });
+          } else {
+            sendJson({ type: "error", message: "Secure input value is empty" });
+          }
           break;
         }
         try {
@@ -3620,17 +3631,140 @@ function createConnectionHandler(transport: ClientTransport) {
             sessionId,
             cwd,
           });
-          sendJson({
-            type: "secure_input_saved",
-            sessionId: saved.sessionId || "",
+          const secret = {
             secretId: saved.secretId,
             label: saved.label,
             scope: saved.scope,
             filePath: saved.filePath,
             envHint: saved.envHint,
+            createdAt: saved.createdAt,
+            ...(saved.updatedAt ? { updatedAt: saved.updatedAt } : {}),
+          };
+          if (clientRequestId) {
+            sendJson({
+              type: "secret_operation_result",
+              requestId: clientRequestId,
+              operation: "create",
+              ok: true,
+              secret,
+            });
+          } else {
+            sendJson({
+              type: "secure_input_saved",
+              sessionId: saved.sessionId || "",
+              secretId: saved.secretId,
+              label: saved.label,
+              scope: saved.scope,
+              filePath: saved.filePath,
+              envHint: saved.envHint,
+            });
+          }
+        } catch (e: any) {
+          if (clientRequestId) {
+            sendJson({
+              type: "secret_operation_result",
+              requestId: clientRequestId,
+              operation: "create",
+              ok: false,
+              error: e.message || String(e),
+            });
+          } else {
+            sendJson({ type: "error", message: `Secure input failed: ${e.message || String(e)}` });
+          }
+        }
+        break;
+      }
+
+      case "secret_inventory_request": {
+        const sessionId = ((msg as any).sessionId as string | undefined)?.trim()
+          || activeSession?.getSessionId?.()
+          || activeSessionId
+          || undefined;
+        const cwd = ((msg as any).cwd as string | undefined)?.trim()
+          || activeSession?.getCwd?.()
+          || (sessionId ? getSession(sessionId)?.cwd : undefined)
+          || getDefaultCwd();
+        sendJson({
+          type: "secret_inventory",
+          sessionId: sessionId || "",
+          secrets: listAvailableSecureInputs(sessionId, cwd),
+        });
+        break;
+      }
+
+      case "secret_replace": {
+        const requestId = ((msg as any).requestId as string | undefined)?.trim() || "";
+        const sessionId = ((msg as any).sessionId as string | undefined)?.trim()
+          || activeSession?.getSessionId?.()
+          || activeSessionId
+          || undefined;
+        const cwd = ((msg as any).cwd as string | undefined)?.trim()
+          || activeSession?.getCwd?.()
+          || (sessionId ? getSession(sessionId)?.cwd : undefined)
+          || getDefaultCwd();
+        try {
+          const saved = replaceSecureInput({
+            secretId: String((msg as any).secretId || ""),
+            value: String((msg as any).value || ""),
+            label: (msg as any).label as string | undefined,
+            envHint: (msg as any).envHint as string | undefined,
+            sessionId,
+            cwd,
+          });
+          sendJson({
+            type: "secret_operation_result",
+            requestId,
+            operation: "replace",
+            ok: true,
+            secret: {
+              secretId: saved.secretId,
+              label: saved.label,
+              scope: saved.scope,
+              filePath: saved.filePath,
+              envHint: saved.envHint,
+              createdAt: saved.createdAt,
+              ...(saved.updatedAt ? { updatedAt: saved.updatedAt } : {}),
+            },
           });
         } catch (e: any) {
-          sendJson({ type: "error", message: `Secure input failed: ${e.message || String(e)}` });
+          sendJson({
+            type: "secret_operation_result",
+            requestId,
+            operation: "replace",
+            ok: false,
+            error: e.message || String(e),
+          });
+        }
+        break;
+      }
+
+      case "secret_delete": {
+        const requestId = ((msg as any).requestId as string | undefined)?.trim() || "";
+        const sessionId = ((msg as any).sessionId as string | undefined)?.trim()
+          || activeSession?.getSessionId?.()
+          || activeSessionId
+          || undefined;
+        const cwd = ((msg as any).cwd as string | undefined)?.trim()
+          || activeSession?.getCwd?.()
+          || (sessionId ? getSession(sessionId)?.cwd : undefined)
+          || getDefaultCwd();
+        try {
+          const deleted = deleteSecureInput(String((msg as any).secretId || ""), sessionId, cwd);
+          sendJson({
+            type: "secret_operation_result",
+            requestId,
+            operation: "delete",
+            ok: deleted,
+            ...(deleted ? {} : { error: "Secret not found in this session/project context" }),
+          });
+        } catch (e: any) {
+          sendJson({
+            type: "secret_operation_result",
+            requestId,
+            operation: "delete",
+            ok: false,
+            error: e.message || String(e),
+          });
         }
         break;
       }

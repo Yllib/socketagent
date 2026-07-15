@@ -112,3 +112,59 @@ test("replays concurrent Claude streams with their original parents", () => {
   assert.equal(childThinking.parentToolUseId, "agent-tool-2");
   assert.equal(childThinking.uuid, "thinking-message");
 });
+
+test("replays an active Codex tool call after reconnect and retires it on completion", () => {
+  const sent = [];
+  const replayed = [];
+  const rootId = `test-tool-replay-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      item: {
+        id: "command-1",
+        type: "commandExecution",
+        command: "npm test",
+      },
+    });
+
+    assert.deepEqual(session.getActiveToolCall(), {
+      toolUseId: "command-1",
+      name: "Bash",
+    });
+
+    session.replayLiveState(testSocket(replayed));
+    assert.ok(replayed.some((message) =>
+      message.type === "tool_call"
+      && message.toolUseId === "command-1"
+      && message.tool === "Bash"
+      && message.sessionId === rootId));
+
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: {
+        id: "command-1",
+        type: "commandExecution",
+        command: "npm test",
+        aggregatedOutput: "passed",
+        exitCode: 0,
+      },
+    });
+
+    assert.equal(session.getActiveToolCall(), null);
+    replayed.length = 0;
+    session.replayLiveState(testSocket(replayed));
+    assert.equal(
+      replayed.some((message) => message.toolUseId === "command-1"),
+      false,
+    );
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
+});

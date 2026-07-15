@@ -2417,7 +2417,8 @@ function createConnectionHandler(transport: ClientTransport) {
 
         // Send message history — if session is running, load back to last user prompt
         const historyStartMs = Date.now();
-        const isRunning = activeSessions.has(msg.sessionId) && activeSessions.get(msg.sessionId)!.isRunning;
+        const runningSession = activeSessions.get(msg.sessionId);
+        const isRunning = !!runningSession && sessionIsBusy(runningSession);
         if (sessionInfo.backend === "codex" && !contextCleared && getHistoryCount(msg.sessionId) === 0) {
           syncCodexRolloutHistory(sessionInfo);
         }
@@ -2485,7 +2486,7 @@ function createConnectionHandler(transport: ClientTransport) {
         }
 
         // Always send status so the app resets its processing state on resume
-        const resumeRunning = !!(existing && existing.isRunning);
+        const resumeRunning = !!(existing && sessionIsBusy(existing));
         const resumeCompacting = !!(existing && existing.isCompacting);
         const resumePermMode = activeSession.permissionMode || null;
         const activeToolInfo = existing?.getActiveToolCall?.() || null;
@@ -2510,10 +2511,11 @@ function createConnectionHandler(transport: ClientTransport) {
           }).catch(() => {});
         }
 
-        // Re-send live assistant/thinking text after session_history. The app
-        // replaces visible chat state on history load, so replaying earlier
-        // can make the already-streamed prefix disappear for late joiners.
-        if (resumeRunning && existing) {
+        // Re-send cached live state after session_history. Pooled Codex
+        // sessions may still have subagents or pending interactions after the
+        // root turn's isRunning flag clears, so replay any existing session;
+        // idle sessions have empty caches and this is a no-op.
+        if (existing) {
           existing.replayLiveState?.(transport as any);
         }
 

@@ -968,6 +968,17 @@ export class ClaudeSession {
   }
 
   replayLiveState(ws: WebSocket = this.ws): void {
+    const activeTool = this.getActiveToolCall();
+    if (activeTool) {
+      this.sendTo(ws, {
+        type: "tool_call",
+        tool: activeTool.name,
+        input: {},
+        toolUseId: activeTool.toolUseId,
+        sessionId: this.sessionId || "",
+        replay: true,
+      } as any);
+    }
     for (const [streamId, stream] of this._streamingThinking) {
       this.sendTo(ws, {
         type: "thinking",
@@ -990,6 +1001,9 @@ export class ClaudeSession {
         replay: true,
       });
     }
+    // setWebSocket may run before session_history is delivered. Replay these
+    // again afterward so a history replacement cannot hide an open card.
+    this.replayPendingInteractions(ws);
   }
 
   private replayPendingInteractions(ws: WebSocket = this.ws): void {

@@ -411,6 +411,7 @@ export class CodexSession {
         input: call.input,
         toolUseId,
         sessionId: sid,
+        replay: true,
         ...(call.parentToolUseId ? { parentToolUseId: call.parentToolUseId } : {}),
       } as any);
     }

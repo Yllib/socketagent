@@ -113,6 +113,22 @@ test("replays concurrent Claude streams with their original parents", () => {
   assert.equal(childThinking.uuid, "thinking-message");
 });
 
+test("replays the active Claude tool card for a late-joining client", () => {
+  const sent = [];
+  const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = "claude-tool-root";
+  session._activeToolUseId = "claude-tool-1";
+  session._activeToolName = "Bash";
+
+  session.replayLiveState();
+
+  assert.ok(sent.some((message) =>
+    message.type === "tool_call"
+    && message.toolUseId === "claude-tool-1"
+    && message.tool === "Bash"
+    && message.replay === true));
+});
+
 test("replays an active Codex tool call after reconnect and retires it on completion", () => {
   const sent = [];
   const replayed = [];
@@ -167,4 +183,32 @@ test("replays an active Codex tool call after reconnect and retires it on comple
       { force: true },
     );
   }
+});
+
+test("late-joining Codex clients receive the complete cached prefix before new deltas", () => {
+  const initial = [];
+  const replayed = [];
+  const rootId = `test-text-replay-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(initial), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  session.handleAppServerNotification("item/agentMessage/delta", {
+    threadId: rootId,
+    itemId: "message-1",
+    delta: "first half, ",
+  });
+  session.handleAppServerNotification("item/agentMessage/delta", {
+    threadId: rootId,
+    itemId: "message-1",
+    delta: "second half",
+  });
+
+  session.replayLiveState(testSocket(replayed));
+
+  const snapshot = replayed.find((message) =>
+    message.type === "text" && message.streamId === "message-1");
+  assert.equal(snapshot.content, "first half, second half");
+  assert.equal(snapshot.replay, true);
+  assert.equal(snapshot.sessionId, rootId);
 });

@@ -17,6 +17,31 @@ function testSocket(sent) {
   };
 }
 
+test("raw Codex SDK events are sent only to subscribed sockets", () => {
+  const sent = [];
+  const socket = testSocket(sent);
+  const session = new CodexSession(socket, process.cwd(), []);
+  session.sessionId = "raw-subscription-test";
+  session.threadId = "raw-subscription-test";
+
+  session.handleAppServerNotification("item/agentMessage/delta", {
+    threadId: session.threadId,
+    itemId: "message-1",
+    delta: "first",
+  });
+  assert.equal(sent.some((message) => message.type === "sdk_event"), false);
+
+  socket.supportsRawSdkEvents = true;
+  session.handleAppServerNotification("item/agentMessage/delta", {
+    threadId: session.threadId,
+    itemId: "message-1",
+    delta: " second",
+  });
+  assert.equal(sent.some((message) =>
+    message.type === "sdk_event"
+    && message.method === "item/agentMessage/delta"), true);
+});
+
 test("keeps Codex subagent threads attached to the root session", () => {
   const sent = [];
   const rootId = `test-root-${crypto.randomUUID()}`;
@@ -310,7 +335,6 @@ test("Codex live text frames are cumulative snapshots with a durable final frame
   const frames = sent.filter((message) => message.type === "text");
   assert.deepEqual(frames.map((message) => message.content), [
     "first ",
-    "first second",
     "first second",
   ]);
   assert.ok(frames.every((message) => message.streamId === "message-1"));

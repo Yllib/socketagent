@@ -26,7 +26,16 @@ export interface RelayOutboxDrain {
  * window; otherwise only their persisted history copy is visible later.
  */
 export class RelayMessageOutbox {
-  private messages: Array<{ message: Record<string, unknown>; bytes: number }> = [];
+  private messages: Array<{
+    message: Record<string, unknown>;
+    bytes: number;
+    coalesceKey?: string;
+  }> = [];
+  private coalesced = new Map<string, {
+    message: Record<string, unknown>;
+    bytes: number;
+    coalesceKey?: string;
+  }>();
   private totalBytes = 0;
   private droppedMessages = 0;
 
@@ -36,9 +45,38 @@ export class RelayMessageOutbox {
   ) {}
 
   enqueue(message: Record<string, unknown>): void {
+    // Raw SDK events are diagnostic and recoverable through the bounded raw
+    // history endpoint. Never let them crowd durable chat cards out of the
+    // reconnect queue while no phone is attached.
+    if (message.type === "sdk_event") return;
+
     const bytes = Buffer.byteLength(JSON.stringify(message));
-    this.messages.push({ message, bytes });
+    const coalesceKey = this.coalesceKey(message);
+    const existing = coalesceKey ? this.coalesced.get(coalesceKey) : undefined;
+    if (existing) {
+      this.totalBytes += bytes - existing.bytes;
+      existing.message = message;
+      existing.bytes = bytes;
+      this.trim();
+      return;
+    }
+
+    const queued = { message, bytes, ...(coalesceKey ? { coalesceKey } : {}) };
+    this.messages.push(queued);
+    if (coalesceKey) this.coalesced.set(coalesceKey, queued);
     this.totalBytes += bytes;
+    this.trim();
+  }
+
+  private coalesceKey(message: Record<string, unknown>): string | null {
+    const type = String(message.type || "");
+    if (type !== "text" && type !== "thinking") return null;
+    const sessionId = String(message.sessionId || "");
+    const identity = String(message.entryId || message.streamId || "");
+    return sessionId && identity ? `stream:${sessionId}:${type}:${identity}` : null;
+  }
+
+  private trim(): void {
     while (
       this.messages.length > this.maxMessages ||
       this.totalBytes > this.maxBytes
@@ -46,6 +84,9 @@ export class RelayMessageOutbox {
       const removed = this.messages.shift();
       if (!removed) break;
       this.totalBytes -= removed.bytes;
+      if (removed.coalesceKey && this.coalesced.get(removed.coalesceKey) === removed) {
+        this.coalesced.delete(removed.coalesceKey);
+      }
       this.droppedMessages++;
     }
   }
@@ -56,6 +97,7 @@ export class RelayMessageOutbox {
       droppedMessages: this.droppedMessages,
     };
     this.messages = [];
+    this.coalesced.clear();
     this.totalBytes = 0;
     this.droppedMessages = 0;
     return result;
@@ -163,6 +205,7 @@ export class RelayClient {
       this.ws = null;
       this.peers.clear();
       this.virtualWs.supportsSessionEventAck = false;
+      this.virtualWs.supportsRawSdkEvents = false;
       this.relaySupportsMultiDevice = false;
       this.virtualWs._noteTransportReset();
       this.setStatus("disconnected");
@@ -212,6 +255,7 @@ export class RelayClient {
     this.ws = null;
     this.peers.clear();
     this.virtualWs.supportsSessionEventAck = false;
+    this.virtualWs.supportsRawSdkEvents = false;
     this.relaySupportsMultiDevice = false;
     this.virtualWs._setOpen(false);
     this.setStatus("disconnected");
@@ -299,7 +343,10 @@ export class RelayClient {
       const stillPaired = this.hasPairedPeer();
       this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
         .some((connectedPeer) => connectedPeer.supportsSessionEventAck);
-      if (!stillPaired) this.virtualWs._noteTransportReset();
+      if (!stillPaired) {
+        this.virtualWs.supportsRawSdkEvents = false;
+        this.virtualWs._noteTransportReset();
+      }
       if (!stillPaired) this.setStatus("waiting_for_peer");
       return;
     }
@@ -532,6 +579,7 @@ export class VirtualRelaySocket {
   readyState: number = WebSocket.OPEN;
   connectionGeneration = 0;
   supportsSessionEventAck = false;
+  supportsRawSdkEvents = false;
   private _onMessageCallbacks: ((data: Buffer) => void)[] = [];
   private _onCloseCallbacks: (() => void)[] = [];
 

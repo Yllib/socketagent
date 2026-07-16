@@ -257,6 +257,7 @@ export function deleteSessionArtifacts(sessionId: string, sessionInfo?: SessionI
   transcriptPositionStates.delete(sessionId);
   rmDirIfExists(toolOutputSessionDir(sessionId), removed, "tool-output");
   unlinkIfExists(todosFile(sessionId), removed, "todos");
+  discardPendingSdkEvents(sessionId);
   unlinkIfExists(sdkEventsFile(sessionId), removed, "sdk-events");
 
   if (backend === "codex" || (!backend && !!getCodexThreadSessionInfo(sessionId))) {
@@ -872,7 +873,11 @@ function withCachedTurnCount(session: SessionInfo): SessionInfo {
   };
 }
 
-function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
+function writeHistoryEntries(
+  sessionId: string,
+  entries: HistoryEntry[],
+  options: { dirtyEntries?: Set<HistoryEntry> } = {},
+): void {
   const startedAt = Date.now();
   ensureHistoryDir();
   const file = historyFile(sessionId);
@@ -886,8 +891,12 @@ function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
       || (left.originalIndex - right.originalIndex),
     )
     .map(({ entry }) => entry);
-  const redacted = redactSecretsDeep(positioned) as HistoryEntry[];
-  const safeEntries = redacted.map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
+  const safeEntries = options.dirtyEntries
+    ? positioned.map((entry, index) => options.dirtyEntries!.has(entry)
+      ? compactHistoryEntryForStorage(sessionId, redactSecretsDeep(entry), index)
+      : entry)
+    : (redactSecretsDeep(positioned) as HistoryEntry[])
+      .map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
   fs.writeFileSync(file, JSON.stringify(safeEntries, null, 2), "utf-8");
   const stat = fs.statSync(file);
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries: safeEntries });
@@ -903,15 +912,16 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
   const entries = readHistoryEntries(sessionId);
   const positioned = positionHistoryEntry(sessionId, entry);
   entries.push(positioned);
-  writeHistoryEntries(sessionId, entries);
+  writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set([positioned]) });
   return positioned;
 }
 
 export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[]): void {
   if (newEntries.length === 0) return;
   const entries = readHistoryEntries(sessionId);
-  entries.push(...newEntries.map((entry) => positionHistoryEntry(sessionId, entry)));
-  writeHistoryEntries(sessionId, entries);
+  const positioned = newEntries.map((entry) => positionHistoryEntry(sessionId, entry));
+  entries.push(...positioned);
+  writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set(positioned) });
 }
 
 function nativeSyncTextKey(entry: HistoryEntry): string | null {
@@ -1469,6 +1479,11 @@ export function getMissedMessages(
 // ── SDK event history (separate JSONL files per session) ──
 
 const SDK_EVENTS_DIR = path.join(STORE_DIR, "sdk-events");
+const SDK_EVENTS_FLUSH_MS = 100;
+const SDK_EVENTS_MAX_BYTES = 32 * 1024 * 1024;
+const SDK_EVENTS_KEEP_BYTES = 16 * 1024 * 1024;
+const pendingSdkEventLines = new Map<string, string[]>();
+let sdkEventFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 function ensureSdkEventsDir(): void {
   if (!fs.existsSync(SDK_EVENTS_DIR)) {
@@ -1480,15 +1495,69 @@ function sdkEventsFile(sessionId: string): string {
   return path.join(SDK_EVENTS_DIR, `${sessionId}.jsonl`);
 }
 
-/** Append a single SDK event to the session's JSONL file */
-export function appendSdkEvent(sessionId: string, event: Record<string, any>): void {
+function compactSdkEventsFile(file: string): void {
+  let stat: fs.Stats;
+  try { stat = fs.statSync(file); } catch { return; }
+  if (stat.size <= SDK_EVENTS_MAX_BYTES) return;
+
+  const keepBytes = Math.min(SDK_EVENTS_KEEP_BYTES, stat.size);
+  const fd = fs.openSync(file, "r");
+  try {
+    const tail = Buffer.allocUnsafe(keepBytes);
+    fs.readSync(fd, tail, 0, keepBytes, stat.size - keepBytes);
+    const newline = tail.indexOf(10);
+    const retained = newline >= 0 ? tail.subarray(newline + 1) : tail;
+    const temp = `${file}.compact-${process.pid}`;
+    fs.writeFileSync(temp, retained, { mode: 0o600 });
+    fs.renameSync(temp, file);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function flushSdkEventQueue(sessionId?: string): void {
   ensureSdkEventsDir();
+  const sessionIds = sessionId ? [sessionId] : [...pendingSdkEventLines.keys()];
+  for (const sid of sessionIds) {
+    const lines = pendingSdkEventLines.get(sid);
+    if (!lines || lines.length === 0) continue;
+    pendingSdkEventLines.delete(sid);
+    const file = sdkEventsFile(sid);
+    fs.appendFileSync(file, lines.join(""), { encoding: "utf-8", mode: 0o600 });
+    compactSdkEventsFile(file);
+  }
+  if (pendingSdkEventLines.size === 0 && sdkEventFlushTimer) {
+    clearTimeout(sdkEventFlushTimer);
+    sdkEventFlushTimer = null;
+  }
+}
+
+function discardPendingSdkEvents(sessionId: string): void {
+  pendingSdkEventLines.delete(sessionId);
+  if (pendingSdkEventLines.size === 0 && sdkEventFlushTimer) {
+    clearTimeout(sdkEventFlushTimer);
+    sdkEventFlushTimer = null;
+  }
+}
+
+/** Queue SDK debug events and write them in batches instead of blocking once per delta. */
+export function appendSdkEvent(sessionId: string, event: Record<string, any>): void {
   const line = JSON.stringify(event) + "\n";
-  fs.appendFileSync(sdkEventsFile(sessionId), line, "utf-8");
+  const pending = pendingSdkEventLines.get(sessionId) || [];
+  pending.push(line);
+  pendingSdkEventLines.set(sessionId, pending);
+  if (!sdkEventFlushTimer) {
+    sdkEventFlushTimer = setTimeout(() => {
+      sdkEventFlushTimer = null;
+      flushSdkEventQueue();
+    }, SDK_EVENTS_FLUSH_MS);
+    sdkEventFlushTimer.unref?.();
+  }
 }
 
 /** Read recent SDK events for a session. Raw history can be huge, so cap it. */
 export function getSdkEvents(sessionId: string, limit = 300): Record<string, any>[] {
+  flushSdkEventQueue(sessionId);
   ensureSdkEventsDir();
   const file = sdkEventsFile(sessionId);
   if (!fs.existsSync(file)) return [];
@@ -1542,6 +1611,7 @@ function readJsonlTailLines(
 
 /** Get SDK event count for a session (for deciding whether to send) */
 export function getSdkEventCount(sessionId: string): number {
+  flushSdkEventQueue(sessionId);
   const file = sdkEventsFile(sessionId);
   if (!fs.existsSync(file)) return 0;
   try {
@@ -1566,6 +1636,7 @@ function ensureArchiveDir(): void {
  * Archived files get a timestamp suffix so multiple clears don't overwrite.
  */
 export function clearSessionContext(sessionId: string, cwd: string): void {
+  flushSdkEventQueue(sessionId);
   ensureArchiveDir();
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const sessions = readStore();

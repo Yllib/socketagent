@@ -43,6 +43,17 @@ import {
 import { buildCodexSpawn } from "./codex-env";
 import { listSkills, SkillEntry } from "./skills-manager";
 import { getClaudeAvailability } from "./claude-session";
+import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
+
+const TRANSIENT_CODEX_RAW_EVENT_METHODS = new Set([
+  "item/agentMessage/delta",
+  "item/reasoning/summaryTextDelta",
+  "item/reasoning/textDelta",
+  "item/commandExecution/outputDelta",
+  "turn/diff/updated",
+  "thread/tokenUsage/updated",
+  "account/rateLimits/updated",
+]);
 import {
   prepareCodexMcpElicitation,
   resolveCodexMcpElicitation,
@@ -264,6 +275,9 @@ export class CodexSession {
   private sessionEventDelivery = new SessionEventDelivery((message) => {
     this.dispatchToClients(message as ServerMessage);
   });
+  private streamSnapshots = new LatestSnapshotDispatcher<ServerMessage>((message) => {
+    this.sendImmediately(message);
+  });
 
   public onActivity?: () => void;
   public onClose?: () => void;
@@ -403,12 +417,14 @@ export class CodexSession {
     });
   }
 
-  setWebSocket(ws: WebSocket): void {
+  setWebSocket(ws: WebSocket, deferLiveReplay = false): void {
     this.attachWebSocket(ws);
     if (this._lastSupportedModels) this.sendTo(ws, this._lastSupportedModels);
-    this.sessionEventDelivery.replayTo((message) => {
-      this.sendTo(ws, message as ServerMessage);
-    });
+    if (!deferLiveReplay) {
+      this.sessionEventDelivery.replayTo((message) => {
+        this.sendTo(ws, message as ServerMessage);
+      });
+    }
   }
 
   acknowledgeSessionEvent(deliveryId: string): boolean {
@@ -418,7 +434,12 @@ export class CodexSession {
     const sid = this.sessionId || "";
     if (!sid) return;
 
+    this.sessionEventDelivery.replayTo((message) => {
+      this.sendTo(ws, message as ServerMessage);
+    });
+
     for (const [toolUseId, call] of this.appServerActiveToolCalls.entries()) {
+      if (this.sessionEventDelivery.hasPending("tool_call", toolUseId)) continue;
       this.sendTo(ws, {
         type: "tool_call",
         tool: call.tool,
@@ -1506,6 +1527,27 @@ export class CodexSession {
 
   public send(msg: ServerMessage): void {
     positionSessionMessage(String((msg as any).sessionId || this.sessionId || ""), msg as any);
+    const streamKey = this.coalescedStreamKey(msg);
+    if (streamKey && (msg as any).snapshot === true && (msg as any).finalSnapshot !== true) {
+      this.streamSnapshots.push(streamKey, msg);
+      return;
+    }
+    if (streamKey && (msg as any).finalSnapshot === true) {
+      this.streamSnapshots.discard(streamKey);
+    } else if ((msg as any).type === "tool_call") {
+      this.streamSnapshots.flushAll();
+    }
+    this.sendImmediately(msg);
+  }
+
+  private coalescedStreamKey(msg: ServerMessage): string | null {
+    const type = String((msg as any).type || "");
+    if (type !== "text" && type !== "thinking") return null;
+    const identity = String((msg as any).entryId || (msg as any).streamId || "");
+    return identity ? `${type}:${identity}` : null;
+  }
+
+  private sendImmediately(msg: ServerMessage): void {
     const deliveryAware = [...this.clientSockets].some(
       (socket) => (socket as any).supportsSessionEventAck === true,
     );
@@ -1513,6 +1555,20 @@ export class CodexSession {
       ? this.sessionEventDelivery.prepare(msg as any)
       : msg;
     this.dispatchToClients(outgoing as ServerMessage);
+  }
+
+  private sendSdkEvent(msg: ServerMessage): void {
+    const recipients: WebSocket[] = [];
+    for (const socket of [...this.clientSockets]) {
+      if (socket.readyState === WebSocket.OPEN && (socket as any).supportsRawSdkEvents === true) {
+        recipients.push(socket);
+      } else if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        this.clientSockets.delete(socket);
+      }
+    }
+    if (recipients.length === 0) return;
+    const payload = JSON.stringify(redactSecretsDeep(msg));
+    for (const socket of recipients) socket.send(payload);
   }
 
   private dispatchToClients(msg: ServerMessage): void {
@@ -1823,6 +1879,7 @@ export class CodexSession {
   }
 
   async dispose(): Promise<void> {
+    this.streamSnapshots.dispose(true);
     await this.stopAppServerClient();
   }
 
@@ -2050,6 +2107,7 @@ export class CodexSession {
 
   /** Mirrors the abort path. Interrupt the active app-server turn if possible. */
   abort(): void {
+    this.streamSnapshots.flushAll();
     this._abortRequested = true;
     this.clearQueuedPrompts("Codex turn interrupted");
     this.clearPendingAppServerSteers("Codex turn interrupted");
@@ -3618,10 +3676,14 @@ export class CodexSession {
       sessionId: sid,
       ts: now(),
     };
-    if (sid) {
+    // High-frequency deltas remain available to a client actively subscribed
+    // to Raw mode. Persist completed/state events only; completed items already
+    // contain the useful final payload, while retaining every token, command
+    // output chunk, and full diff caused unbounded debug logs and disk churn.
+    if (sid && !TRANSIENT_CODEX_RAW_EVENT_METHODS.has(method)) {
       appendSdkEvent(sid, event);
     }
-    this.send(event as any);
+    this.sendSdkEvent(event as any);
   }
 
   private buildCodexMcpUrl(token: string): string {

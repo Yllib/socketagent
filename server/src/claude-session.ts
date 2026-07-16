@@ -33,6 +33,7 @@ import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
+import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
@@ -497,6 +498,9 @@ export class ClaudeSession {
   private clientSockets = new Set<WebSocket>();
   private sessionEventDelivery = new SessionEventDelivery((message) => {
     this.dispatchToClients(message as ServerMessage);
+  });
+  private streamSnapshots = new LatestSnapshotDispatcher<ServerMessage>((message) => {
+    this.sendImmediately(message);
   });
   public onActivity?: () => void;
   public onClose?: () => void;
@@ -1040,17 +1044,19 @@ export class ClaudeSession {
   }
 
   /** Swap the WebSocket so a reconnecting client receives future messages */
-  setWebSocket(ws: WebSocket): void {
+  setWebSocket(ws: WebSocket, deferLiveReplay = false): void {
     this.attachWebSocket(ws);
     // Re-send cached session init and models so app UI populates immediately
     if (this._lastSessionInit) this.sendTo(ws, this._lastSessionInit);
     if (this._lastSupportedModels) this.sendTo(ws, this._lastSupportedModels);
     if (this._lastSupportedCommands) this.sendTo(ws, this._lastSupportedCommands);
     if (this._lastSupportedAgents) this.sendTo(ws, this._lastSupportedAgents);
-    this.replayPendingInteractions(ws);
-    this.sessionEventDelivery.replayTo((message) => {
-      this.sendTo(ws, message as ServerMessage);
-    });
+    if (!deferLiveReplay) {
+      this.replayPendingInteractions(ws);
+      this.sessionEventDelivery.replayTo((message) => {
+        this.sendTo(ws, message as ServerMessage);
+      });
+    }
   }
 
   acknowledgeSessionEvent(deliveryId: string): boolean {
@@ -1058,8 +1064,11 @@ export class ClaudeSession {
   }
 
   replayLiveState(ws: WebSocket = this.ws): void {
+    this.sessionEventDelivery.replayTo((message) => {
+      this.sendTo(ws, message as ServerMessage);
+    });
     const activeTool = this.getActiveToolCall();
-    if (activeTool) {
+    if (activeTool && !this.sessionEventDelivery.hasPending("tool_call", activeTool.toolUseId)) {
       this.sendTo(ws, {
         type: "tool_call",
         tool: activeTool.name,
@@ -1141,6 +1150,27 @@ export class ClaudeSession {
 
   public send(msg: ServerMessage): void {
     positionSessionMessage(String((msg as any).sessionId || this.sessionId || ""), msg as any);
+    const streamKey = this.coalescedStreamKey(msg);
+    if (streamKey && (msg as any).snapshot === true && (msg as any).finalSnapshot !== true) {
+      this.streamSnapshots.push(streamKey, msg);
+      return;
+    }
+    if (streamKey && (msg as any).finalSnapshot === true) {
+      this.streamSnapshots.discard(streamKey);
+    } else if ((msg as any).type === "tool_call") {
+      this.streamSnapshots.flushAll();
+    }
+    this.sendImmediately(msg);
+  }
+
+  private coalescedStreamKey(msg: ServerMessage): string | null {
+    const type = String((msg as any).type || "");
+    if (type !== "text" && type !== "thinking") return null;
+    const identity = String((msg as any).entryId || (msg as any).streamId || "");
+    return identity ? `${type}:${identity}` : null;
+  }
+
+  private sendImmediately(msg: ServerMessage): void {
     const deliveryAware = [...this.clientSockets].some(
       (socket) => (socket as any).supportsSessionEventAck === true,
     );
@@ -1148,6 +1178,20 @@ export class ClaudeSession {
       ? this.sessionEventDelivery.prepare(msg as any)
       : msg;
     this.dispatchToClients(outgoing as ServerMessage);
+  }
+
+  private sendSdkEvent(msg: ServerMessage): void {
+    const recipients: WebSocket[] = [];
+    for (const socket of [...this.clientSockets]) {
+      if (socket.readyState === WebSocket.OPEN && (socket as any).supportsRawSdkEvents === true) {
+        recipients.push(socket);
+      } else if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        this.clientSockets.delete(socket);
+      }
+    }
+    if (recipients.length === 0) return;
+    const payload = JSON.stringify(redactSecretsDeep(msg));
+    for (const socket of recipients) socket.send(payload);
   }
 
   private dispatchToClients(msg: ServerMessage): void {
@@ -1188,6 +1232,7 @@ export class ClaudeSession {
   }
 
   abort(): void {
+    this.streamSnapshots.flushAll();
     this._leaveWarmIdle();
     this.abortController?.abort();
     this.activeInputQueue?.close();
@@ -1212,6 +1257,7 @@ export class ClaudeSession {
 
   closeWarmIdle(): void {
     if (!this._isWarmIdle) return;
+    this.streamSnapshots.flushAll();
     this._leaveWarmIdle();
     this.activeInputQueue?.close();
     try { this.activeQuery?.close(); } catch {}
@@ -2567,7 +2613,7 @@ export class ClaudeSession {
               appendSdkEvent(sid, { ts: now(), ...sdkPayload, type: undefined });
             }
           }
-          this.send(sdkPayload as any);
+          this.sendSdkEvent(sdkPayload as any);
         } catch (_) {}
 
         if (message.type === "system" && (message as any).subtype === "init") {

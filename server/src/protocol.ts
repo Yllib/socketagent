@@ -377,6 +377,12 @@ export interface ClientCapabilitiesMessage {
   sessionEventAck?: boolean;
 }
 
+export interface SetRawModeMessage {
+  type: "set_raw_mode";
+  enabled: boolean;
+  sessionId?: string;
+}
+
 /** Direct E2E auth token proof, sent only after the NaCl key exchange. */
 export interface DirectAuthMessage {
   type: "direct_auth";
@@ -742,6 +748,7 @@ export type ClientMessage =
   | UploadChunkMessage
   | UploadChunkBinMessage
   | ClientCapabilitiesMessage
+  | SetRawModeMessage
   | DirectAuthMessage
   | TerminalAttachMessage
   | TerminalInputMessage

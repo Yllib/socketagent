@@ -91,6 +91,15 @@ export class SessionEventDelivery {
     return this.pending.size;
   }
 
+  hasPending(type: string, identity?: string): boolean {
+    for (const entry of this.pending.values()) {
+      if (String(entry.message.type || "") !== type) continue;
+      if (!identity) return true;
+      if (String(entry.message.toolUseId || entry.message.entryId || "") === identity) return true;
+    }
+    return false;
+  }
+
   dispose(): void {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;

@@ -700,6 +700,7 @@ interface ClientTransport {
   readonly readyState: number;
   readonly bufferedAmount?: number;
   readonly connectionGeneration?: number;
+  supportsRawSdkEvents?: boolean;
   send(data: string): void;
 }
 
@@ -708,6 +709,7 @@ class DirectClientTransport implements ClientTransport {
   private binaryEnabled = false;
   private authenticated: boolean;
   private authTimer: ReturnType<typeof setTimeout> | null = null;
+  supportsRawSdkEvents = false;
 
   constructor(
     private readonly ws: WebSocket,
@@ -1863,6 +1865,11 @@ function createConnectionHandler(transport: ClientTransport) {
     }
 
     switch (msg.type) {
+      case "set_raw_mode": {
+        transport.supportsRawSdkEvents = (msg as any).enabled === true;
+        break;
+      }
+
       case "terminal_attach": {
         terminalSessionManager.attach(transport, {
           cwd: resolveTerminalCwd((msg as any).cwd),
@@ -2416,7 +2423,7 @@ function createConnectionHandler(transport: ClientTransport) {
         const existing = activeSessions.get(msg.sessionId);
         if (existing) {
           // Reattach the transport to the running session
-          existing.setWebSocket(transport as any);
+          existing.setWebSocket(transport as any, true);
           activeSession = existing;
           console.log(`Reconnected to running session ${msg.sessionId}`);
         } else {
@@ -2445,7 +2452,7 @@ function createConnectionHandler(transport: ClientTransport) {
           ...(activeSession.permissionMode ? { permissionMode: activeSession.permissionMode } : {}),
         });
         sendJson(sessionSettingsPayload(activeSession, msg.sessionId));
-        void activeSession.refreshSupportedModels();
+        if (!existing) void activeSession.refreshSupportedModels();
 
         // Send message history — if session is running, load back to last user prompt
         const historyStartMs = Date.now();
@@ -4468,6 +4475,9 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "get_sdk_event_history": {
+        // Requesting raw history is also the backwards-compatible live
+        // subscription signal for clients that predate set_raw_mode.
+        transport.supportsRawSdkEvents = true;
         const targetSid = (msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId;
         if (!targetSid) {
           sendJson({ type: "sdk_event_history", sessionId: "", events: [], total: 0, limit: 0 } as any);
@@ -5049,12 +5059,19 @@ function createConnectionHandler(transport: ClientTransport) {
             : undefined;
         try {
           const { resolvedPath } = resolveAllowedDownloadFile(filePath);
-          await sendFileChunks(
+          void sendFileChunks(
             resolvedPath,
             fileId,
             Number.isFinite(offsetBytes) ? offsetBytes : 0,
             transferToken,
-          );
+          ).catch((e: any) => {
+            sendJson({
+              type: "file_error",
+              fileId,
+              message: e.message || String(e),
+              ...(transferToken ? { transferToken } : {}),
+            });
+          });
         } catch (e: any) {
           sendJson({
             type: "file_error",
@@ -5085,12 +5102,19 @@ function createConnectionHandler(transport: ClientTransport) {
             typeof (msg as any).transferToken === "string"
               ? (msg as any).transferToken
               : undefined;
-          await sendFileChunks(
+          void sendFileChunks(
             resolvedPath,
             fileId,
             Number.isFinite(offsetBytes) ? offsetBytes : 0,
             transferToken,
-          );
+          ).catch((e: any) => {
+            sendJson({
+              type: "file_error",
+              fileId,
+              message: e.message || String(e),
+              ...(transferToken ? { transferToken } : {}),
+            });
+          });
         } catch (e: any) {
           sendJson({
             type: "file_manager_operation_result",

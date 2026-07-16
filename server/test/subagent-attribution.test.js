@@ -278,6 +278,66 @@ test("replays an active Codex tool call after reconnect and retires it on comple
   }
 });
 
+test("renders dynamic exec results as readable output instead of content-item JSON", () => {
+  const sent = [];
+  const rootId = `test-dynamic-exec-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      item: {
+        id: "dynamic-exec-1",
+        type: "dynamicToolCall",
+        tool: "exec",
+        arguments: { task: "inspect changes" },
+      },
+    });
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: {
+        id: "dynamic-exec-1",
+        type: "dynamicToolCall",
+        tool: "exec",
+        success: true,
+        contentItems: [
+          {
+            type: "input_text",
+            text: "Script completed\nWall time 0.4 seconds\nOutput:\n",
+          },
+          {
+            type: "input_text",
+            text: JSON.stringify({
+              chunk_id: "77b278",
+              wall_time_seconds: 0.4,
+              exit_code: 0,
+              output: "15 files changed, 291 insertions(+), 75 deletions(-)",
+            }),
+          },
+        ],
+      },
+    });
+
+    const call = sent.find((message) =>
+      message.type === "tool_call" && message.toolUseId === "dynamic-exec-1");
+    const result = sent.find((message) =>
+      message.type === "tool_result" && message.toolUseId === "dynamic-exec-1");
+    assert.equal(call.tool, "Exec");
+    assert.equal(
+      result.output,
+      "Script completed\nWall time 0.4 seconds\nOutput:\n15 files changed, 291 insertions(+), 75 deletions(-)",
+    );
+    assert.equal(result.output.includes('"type": "input_text"'), false);
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
+});
+
 test("late-joining Codex clients receive the complete cached prefix before new deltas", () => {
   const initial = [];
   const replayed = [];

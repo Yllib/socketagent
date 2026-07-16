@@ -54,6 +54,84 @@ const TRANSIENT_CODEX_RAW_EVENT_METHODS = new Set([
   "thread/tokenUsage/updated",
   "account/rateLimits/updated",
 ]);
+
+function unwrapExecResultEnvelope(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const isExecEnvelope = "output" in record && [
+    "chunk_id",
+    "session_id",
+    "exit_code",
+    "wall_time_seconds",
+    "original_token_count",
+  ].some((key) => key in record);
+  if (!isExecEnvelope) return null;
+  if (typeof record.output === "string") return record.output;
+  return record.output == null ? "" : JSON.stringify(record.output, null, 2);
+}
+
+function dynamicToolContentText(value: unknown, depth = 0): string[] {
+  if (value == null || depth > 4) return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => dynamicToolContentText(item, depth + 1));
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}"))
+      || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        const execOutput = unwrapExecResultEnvelope(parsed);
+        if (execOutput !== null) return execOutput ? [execOutput] : [];
+        if (Array.isArray(parsed)
+          || (parsed && typeof parsed === "object"
+            && ["input_text", "output_text", "text"].includes(String(parsed.type || "")))) {
+          return dynamicToolContentText(parsed, depth + 1);
+        }
+      } catch {
+        // This is ordinary text that happens to begin with a JSON delimiter.
+      }
+    }
+    return value ? [value] : [];
+  }
+  if (typeof value !== "object") return [String(value)];
+
+  const record = value as Record<string, unknown>;
+  const execOutput = unwrapExecResultEnvelope(record);
+  if (execOutput !== null) return execOutput ? [execOutput] : [];
+  if (typeof record.text === "string") {
+    return dynamicToolContentText(record.text, depth + 1);
+  }
+  if (record.content != null) {
+    const content = dynamicToolContentText(record.content, depth + 1);
+    if (content.length > 0) return content;
+  }
+  const type = String(record.type || "").toLowerCase();
+  if (type.includes("image")) return ["[image]"];
+  if (typeof record.url === "string") return [record.url];
+  return [JSON.stringify(record, null, 2)];
+}
+
+function formatDynamicToolOutput(item: any): string {
+  const blocks = dynamicToolContentText(item?.contentItems)
+    .map((block) => block.trimEnd())
+    .filter((block) => block.trim().length > 0);
+  if (blocks.length > 0) return blocks.join("\n");
+  if (item?.success === false) {
+    const errorBlocks = dynamicToolContentText(item?.error);
+    return errorBlocks.length > 0 ? `Tool failed: ${errorBlocks.join("\n")}` : "Tool failed";
+  }
+  return "Tool completed";
+}
+
+function dynamicToolDisplayName(item: any): string {
+  const tool = String(item?.tool || "tool");
+  const namespace = String(item?.namespace || "");
+  if (tool.toLowerCase() === "exec" && (!namespace || namespace === "functions")) {
+    return "Exec";
+  }
+  return namespace ? `${namespace}/${tool}` : tool;
+}
 import {
   prepareCodexMcpElicitation,
   resolveCodexMcpElicitation,
@@ -3247,7 +3325,7 @@ export class CodexSession {
     }
 
     if (item.type === "dynamicToolCall") {
-      const toolName = item.namespace ? `${item.namespace}/${item.tool || "tool"}` : (item.tool || "tool");
+      const toolName = dynamicToolDisplayName(item);
       if (method === "item/started") {
         const input = (item.arguments && typeof item.arguments === "object") ? item.arguments : {};
         sendItem({
@@ -3266,11 +3344,7 @@ export class CodexSession {
           timestamp: now(),
         });
       } else {
-        const output = item.contentItems
-          ? JSON.stringify(item.contentItems, null, 2)
-          : item.success === false
-            ? "Tool failed"
-            : "Tool completed";
+        const output = formatDynamicToolOutput(item);
         sendItem({
           type: "tool_result",
           toolUseId: item.id,

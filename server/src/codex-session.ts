@@ -30,6 +30,7 @@ import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
 import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
+import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
 import {
   CodexAppServerApprovalPolicy,
   CodexAppServerApprovalsReviewer,
@@ -1260,6 +1261,14 @@ export class CodexSession {
   }
 
   async refreshSupportedModels(): Promise<void> {
+    const cachedCatalog = getCachedModelCatalog("codex");
+    if (cachedCatalog) {
+      this.publishSupportedModels(cachedCatalog.models, {
+        cached: true,
+        updatedAt: cachedCatalog.updatedAt,
+      });
+      if (modelCatalogIsFresh(cachedCatalog)) return;
+    }
     try {
       await this.ensureAppServer();
       const result = await this.appServer!.listModels();
@@ -1317,18 +1326,34 @@ export class CodexSession {
           };
         })
         .filter(Boolean) as Array<Record<string, unknown>>;
-      const message = {
-        type: "supported_models",
-        models,
-        currentModel,
-        sessionId: this.sessionId || this._resumeSessionId || "",
-      } as any as ServerMessage;
-      this._lastSupportedModels = message;
       this.normalizeEffortForModel(currentModel);
-      this.send(message);
+      const saved = saveCachedModelCatalog("codex", models);
+      this.publishSupportedModels(saved.models, { updatedAt: saved.updatedAt });
     } catch (e: any) {
       console.warn(`[CodexModels] Failed to list models: ${e?.message || e}`);
     }
+  }
+
+  private publishSupportedModels(
+    models: Array<Record<string, unknown>>,
+    options: { cached?: boolean; updatedAt?: string } = {},
+  ): void {
+    if (models.length === 0) return;
+    const currentModel = this._model || this.configuredCodexModel() || this.codexModel() || "";
+    const selectedModels = models.map((model) => {
+      const id = String(model.value || model.id || "");
+      return { ...model, current: id === currentModel };
+    });
+    const message = {
+      type: "supported_models",
+      models: selectedModels,
+      ...(currentModel ? { currentModel } : {}),
+      sessionId: this.sessionId || this._resumeSessionId || "",
+      backend: "codex",
+      ...options,
+    } as ServerMessage;
+    this._lastSupportedModels = message;
+    this.send(message);
   }
 
   private codexModelId(model: any): string {

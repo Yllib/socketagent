@@ -2322,6 +2322,7 @@ function createConnectionHandler(transport: ClientTransport) {
           cwd,
           title: "Untitled",
         });
+        void activeSession.refreshSupportedModels();
         break;
       }
 
@@ -2431,6 +2432,7 @@ function createConnectionHandler(transport: ClientTransport) {
           ...(activeSession.permissionMode ? { permissionMode: activeSession.permissionMode } : {}),
         });
         sendJson(sessionSettingsPayload(activeSession, msg.sessionId));
+        void activeSession.refreshSupportedModels();
 
         // Send message history — if session is running, load back to last user prompt
         const historyStartMs = Date.now();

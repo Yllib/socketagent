@@ -32,6 +32,7 @@ import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInv
 import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
+import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
 
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
@@ -315,6 +316,43 @@ function claudeExecutableQueryOptions(): Record<string, unknown> {
   };
 }
 
+let claudeModelDiscoveryPromise: Promise<Array<Record<string, unknown>>> | null = null;
+
+async function discoverClaudeSupportedModels(cwd: string): Promise<Array<Record<string, unknown>>> {
+  if (claudeModelDiscoveryPromise) return claudeModelDiscoveryPromise;
+  claudeModelDiscoveryPromise = (async () => {
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), 15_000);
+    const probe = query({
+      // /usage is handled locally by Claude Code. It initializes the control
+      // channel without consuming an inference turn, after which the SDK can
+      // answer supportedModels().
+      prompt: "/usage",
+      options: {
+        cwd,
+        ...claudeExecutableQueryOptions(),
+        tools: [],
+        settingSources: ["user", "project"],
+        abortController,
+      },
+    });
+    try {
+      for await (const message of probe) {
+        if (message.type !== "system" || (message as any).subtype !== "init") continue;
+        const models = await probe.supportedModels();
+        return (Array.isArray(models) ? models : []) as Array<Record<string, unknown>>;
+      }
+      return [];
+    } finally {
+      clearTimeout(timeout);
+      try { probe.close(); } catch {}
+    }
+  })().finally(() => {
+    claudeModelDiscoveryPromise = null;
+  });
+  return claudeModelDiscoveryPromise;
+}
+
 export function refreshClaudeExecutableInfo(): ClaudeExecutableInfo {
   CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
   CLAUDE_BINARY_OVERRIDE = CLAUDE_EXECUTABLE_INFO.path;
@@ -465,6 +503,7 @@ export class ClaudeSession {
   public onMonitorOutput?: (text: string) => void;
   // When set, this fresh session replaces an old cleared session — remap the ID in the store
   public replacesSessionId?: string;
+  public _resumeSessionId?: string;
   // Queue for injecting user messages mid-conversation
   private _pendingInjections: Array<{
     text: string;
@@ -1193,6 +1232,43 @@ export class ClaudeSession {
       console.log(`[Model] Set to ${model || 'default'} for session ${this.sessionId || '(pending)'}`);
     }
     this.persistAgentSettings({ model });
+  }
+
+  private publishSupportedModels(
+    models: Array<Record<string, unknown>>,
+    options: { cached?: boolean; updatedAt?: string } = {},
+  ): void {
+    if (models.length === 0) return;
+    const currentModel = this._requestedModel || this._sessionModel || undefined;
+    const message = {
+      type: "supported_models",
+      models,
+      ...(currentModel ? { currentModel } : {}),
+      sessionId: this.sessionId || this._resumeSessionId || "",
+      backend: "claude",
+      ...options,
+    } as ServerMessage;
+    this._lastSupportedModels = message;
+    this.send(message);
+  }
+
+  async refreshSupportedModels(force = false): Promise<void> {
+    const cached = getCachedModelCatalog("claude");
+    if (cached) {
+      this.publishSupportedModels(cached.models, {
+        cached: true,
+        updatedAt: cached.updatedAt,
+      });
+      if (!force && modelCatalogIsFresh(cached)) return;
+    }
+    try {
+      const models = await discoverClaudeSupportedModels(this.cwd);
+      if (models.length === 0) return;
+      const saved = saveCachedModelCatalog("claude", models);
+      this.publishSupportedModels(saved.models, { updatedAt: saved.updatedAt });
+    } catch (err: any) {
+      console.warn(`[ClaudeModels] Failed to discover models before a turn: ${err?.message || err}`);
+    }
   }
 
   getAgentSettings(): AgentSessionSettings {
@@ -2553,13 +2629,9 @@ export class ClaudeSession {
           // Query available models and forward to app for model picker
           if (this.activeQuery) {
             this.activeQuery.supportedModels().then((models: any) => {
-              if (models) {
-                this._lastSupportedModels = {
-                  type: "supported_models",
-                  models,
-                  sessionId: this.sessionId || "",
-                } as any;
-                this.send(this._lastSupportedModels!);
+              if (Array.isArray(models) && models.length > 0) {
+                const saved = saveCachedModelCatalog("claude", models);
+                this.publishSupportedModels(saved.models, { updatedAt: saved.updatedAt });
               }
             }).catch((e: any) => {
               console.error(`[Init] Failed to get supported models: ${e}`);

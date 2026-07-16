@@ -1495,6 +1495,16 @@ export interface SessionSettingsServerMessage {
   settings: AgentSessionSettings;
 }
 
+export interface SupportedModelsServerMessage {
+  type: "supported_models";
+  models: Array<Record<string, unknown>>;
+  currentModel?: string;
+  sessionId: string;
+  backend: Backend;
+  cached?: boolean;
+  updatedAt?: string;
+}
+
 export interface MonitorStartedServerMessage {
   type: "monitor_started";
   taskId: string;
@@ -1687,6 +1697,7 @@ export type ServerMessage =
   | PromptSuggestionServerMessage
   | SessionLifecycleServerMessage
   | SessionSettingsServerMessage
+  | SupportedModelsServerMessage
   | TaskCompletedHookServerMessage
   | ElicitationUrlServerMessage
   | UsageUpdateServerMessage

@@ -1282,6 +1282,19 @@ function notifySessionActivity(): void {
 
 function attachSessionLifecycleCallbacks(session: Session): void {
   session.onActivity = () => notifySessionActivity();
+  (session as any).onSessionIdChanged = (previousSessionId: string, nextSessionId: string) => {
+    if (activeSessions.get(previousSessionId) === session) {
+      activeSessions.delete(previousSessionId);
+      activeSessions.set(nextSessionId, session);
+    }
+    const client = sessionClients.get(previousSessionId);
+    if (client) {
+      sessionClients.delete(previousSessionId);
+      sessionClients.set(nextSessionId, client);
+    }
+    console.log(`[SessionPool] Rekeyed session ${previousSessionId} -> ${nextSessionId}`);
+    notifySessionActivity();
+  };
   (session as any).onClose = () => {
     let removed = false;
     if (!sessionShouldRemainPooled(session) && !sessionIsBusy(session)) {
@@ -2787,7 +2800,7 @@ function createConnectionHandler(transport: ClientTransport) {
             });
             broadcastServerCapabilities();
             sendSessionCompletionPush(sessionForRun, "failed", "Codex sign-in required");
-          } else {
+          } else if (!(err && typeof err === "object" && err.socketAgentSurfaced === true)) {
             sendJson({
               type: "error",
               message: err.message || "Query failed",

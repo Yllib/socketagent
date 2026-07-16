@@ -266,6 +266,7 @@ export class CodexSession {
 
   public onActivity?: () => void;
   public onClose?: () => void;
+  public onSessionIdChanged?: (previousSessionId: string, nextSessionId: string) => void;
   public onMonitorOutput?: (text: string) => void;
   public replacesSessionId?: string;
   // Mirrors the cast-accessed private on ClaudeSession; used by index.ts to
@@ -1339,7 +1340,19 @@ export class CodexSession {
     options: { cached?: boolean; updatedAt?: string } = {},
   ): void {
     if (models.length === 0) return;
-    const currentModel = this._model || this.configuredCodexModel() || this.codexModel() || "";
+    if (!this._model) {
+      const configuredModel = this.configuredCodexModel();
+      const catalogDefault = models.find((model) => model.current === true)
+        || models.find((model) => model.isDefault === true)
+        || models[0];
+      const catalogDefaultId = String(catalogDefault?.value || catalogDefault?.id || "").trim();
+      this._model = configuredModel || catalogDefaultId || null;
+      if (this._model) {
+        this.normalizeEffortForModel(this._model);
+        this.persistAgentSettings({ model: this._model, effort: this._effort });
+      }
+    }
+    const currentModel = this._model || "";
     const selectedModels = models.map((model) => {
       const id = String(model.value || model.id || "");
       return { ...model, current: id === currentModel };
@@ -1563,13 +1576,22 @@ export class CodexSession {
       ...(this._currentClientMessageId ? { messageId: this._currentClientMessageId } : {}),
     };
 
-    await this.ensureAppServer();
-
-    const completion = new Promise<void>((resolve, reject) => {
-      this.appServerTurnSettler = { resolve, reject };
-    });
-
     try {
+      await this.ensureAppServer();
+
+      // Current app-server versions require model on turn/start. A new session
+      // can reach this path before the app explicitly selects a model, so adopt
+      // the account-aware catalog default before creating any thread state.
+      if (!this.codexModel()) await this.refreshSupportedModels();
+      const turnModel = this.codexModel();
+      if (!turnModel) {
+        throw new Error("Codex did not provide an available model for this session");
+      }
+
+      const completion = new Promise<void>((resolve, reject) => {
+        this.appServerTurnSettler = { resolve, reject };
+      });
+
       const threadConfig = this.buildAppServerThreadParams();
       if (this.threadId) {
         let resumed: unknown;
@@ -1579,14 +1601,29 @@ export class CodexSession {
             threadId: this.threadId,
           });
         } catch (err: any) {
-          if (!this.isArchivedAppServerError(err)) throw err;
-          await this.appServer!.unarchiveThread(this.threadId);
-          resumed = await this.appServer!.resumeThread({
-            ...threadConfig,
-            threadId: this.threadId,
-          });
+          if (this.isMissingRolloutAppServerError(err)) {
+            const orphanedThreadId = this.threadId;
+            console.warn(`[codex app-server] Replacing rollout-less thread ${orphanedThreadId}`);
+            this.replacesSessionId = orphanedThreadId;
+            this.sessionId = null;
+            this.threadId = null;
+            this._resumeSessionId = undefined;
+            this._sessionInfoSaved = false;
+            const started = await this.appServer!.startThread(threadConfig);
+            this.adoptAppServerThread(this.extractThreadId(started));
+            resumed = started;
+          } else {
+            if (!this.isArchivedAppServerError(err)) throw err;
+            await this.appServer!.unarchiveThread(this.threadId);
+            resumed = await this.appServer!.resumeThread({
+              ...threadConfig,
+              threadId: this.threadId,
+            });
+          }
         }
-        this.adoptAppServerThread(this.extractThreadId(resumed) || this.threadId);
+        if (this.threadId) {
+          this.adoptAppServerThread(this.extractThreadId(resumed) || this.threadId);
+        }
       } else {
         const started = await this.appServer!.startThread(threadConfig);
         this.adoptAppServerThread(this.extractThreadId(started));
@@ -1596,12 +1633,11 @@ export class CodexSession {
       void this.refreshSupportedModels();
 
       const collaborationMode = this.codexCollaborationMode();
-      const turnModel = collaborationMode ? this.codexModel() : undefined;
       const turn = await this.appServer!.startTurn({
         threadId: this.threadId,
         cwd: this.cwd,
         input: this.buildAppServerTurnInput(prompt),
-        ...(turnModel ? { model: turnModel } : {}),
+        model: turnModel,
         ...(collaborationMode ? { collaborationMode } : {}),
       });
       this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
@@ -1628,12 +1664,14 @@ export class CodexSession {
         }
       }
     } catch (err: any) {
+      this._pendingUserPrompt = null;
       this.clearPendingAppServerSteers(`codex app-server error: ${err?.message || String(err)}`);
       if (!isCodexAuthError(err)) {
         this.send({
           type: "error",
           message: `codex app-server error: ${err?.message || String(err)}`,
         } as ServerMessage);
+        if (err && typeof err === "object") err.socketAgentSurfaced = true;
       }
       throw err;
     } finally {
@@ -1896,10 +1934,18 @@ export class CodexSession {
 
   private adoptAppServerThread(threadId: string | null): void {
     if (!threadId) return;
+    const previousSessionId = this.sessionId
+      || this.threadId
+      || this.replacesSessionId
+      || this._resumeSessionId
+      || null;
     this.threadId = threadId;
     const isFirstTime = !this.sessionId;
     const replacesSessionId = this.replacesSessionId;
     this.sessionId = threadId;
+    if (previousSessionId && previousSessionId !== threadId) {
+      this.onSessionIdChanged?.(previousSessionId, threadId);
+    }
 
     if (!this._sessionInfoSaved) {
       const title =
@@ -3505,6 +3551,11 @@ export class CodexSession {
   private isArchivedAppServerError(err: any): boolean {
     const message = String(err?.message || err || "");
     return message.includes(" is archived") || message.includes("unarchive it first");
+  }
+
+  private isMissingRolloutAppServerError(err: any): boolean {
+    const message = String(err?.message || err || "");
+    return message.includes("no rollout found for thread id");
   }
 
   private contextUsageFromAppServerUsage(usage: NonNullable<CodexSession["_lastUsage"]>): Record<string, unknown> | null {

@@ -68,5 +68,6 @@ test("Codex sends a fresh cached catalog without starting app-server", async () 
   assert.equal(message.backend, "codex");
   assert.equal(message.cached, true);
   assert.equal(message.models[0].value, "gpt-test");
+  assert.equal(session.sessionModel, "gpt-test");
   assert.equal(session.appServer, null);
 });

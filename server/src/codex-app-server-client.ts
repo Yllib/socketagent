@@ -92,6 +92,7 @@ export interface CodexAppServerThreadResumeParams {
 export interface CodexAppServerTurnStartParams {
   threadId: string;
   input: CodexAppServerUserInput[];
+  model: string;
   cwd?: string;
   collaborationMode?: unknown;
   [key: string]: unknown;

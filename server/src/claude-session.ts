@@ -56,6 +56,22 @@ export interface ClaudeAvailability {
 
 const CLAUDE_AVAILABILITY_CACHE_MS = 5000;
 
+/**
+ * Claude local/slash commands can return text only on the final result event.
+ * Do not use that fallback when the SDK already emitted a completed assistant
+ * message for the turn, even if there were no stream_event text deltas.
+ */
+export function shouldEmitClaudeResultFallback(
+  resultContent: unknown,
+  currentText: string,
+  sawMainAssistantText: boolean,
+): boolean {
+  return typeof resultContent === "string"
+    && resultContent.length > 0
+    && currentText.length === 0
+    && !sawMainAssistantText;
+}
+
 function existingFile(filePath: string | undefined): string | undefined {
   if (!filePath) return undefined;
   try {
@@ -2260,6 +2276,7 @@ export class ClaudeSession {
       });
 
       let currentText = "";
+      let sawMainAssistantText = false;
       let lastResultContent = "";
       const now = () => new Date().toISOString();
 
@@ -3131,6 +3148,9 @@ export class ClaudeSession {
               .map((b: any) => b.text)
             : [];
           if (completedTextParts.length > 0) {
+            if (!(message as any).parent_tool_use_id) {
+              sawMainAssistantText = true;
+            }
             this.send({
               type: "text",
               content: completedTextParts.join(""),
@@ -3523,7 +3543,11 @@ export class ClaudeSession {
 
           // For slash commands / local commands: if result has content but no text
           // was streamed during this query, send the result as a text message
-          if (result.result && !currentText) {
+          if (shouldEmitClaudeResultFallback(
+            result.result,
+            currentText,
+            sawMainAssistantText,
+          )) {
             console.log(`[SDK] Slash command result: ${result.result.slice(0, 100)}`);
             this.send({
               type: "text",
@@ -3624,6 +3648,7 @@ export class ClaudeSession {
           this._resolvePendingTurn();
           this.onActivity?.();
           currentText = "";
+          sawMainAssistantText = false;
         }
       }
     } catch (err: any) {

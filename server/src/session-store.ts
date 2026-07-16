@@ -584,6 +584,46 @@ export function normalizeSendFileHistoryEntries(entries: HistoryEntry[]): Histor
   );
 }
 
+function assistantDuplicateTimestampsMatch(first: HistoryEntry, second: HistoryEntry): boolean {
+  const firstMs = Date.parse(first.timestamp || "");
+  const secondMs = Date.parse(second.timestamp || "");
+  if (!Number.isFinite(firstMs) || !Number.isFinite(secondMs)) return false;
+  return Math.abs(firstMs - secondMs) <= 2_500;
+}
+
+/**
+ * Older Claude result handling persisted the completed assistant message and
+ * then an UUID-less copy from the final result event. Collapse only that exact
+ * adjacent shape so historical paging and previews use one canonical entry.
+ */
+export function normalizeClaudeResultFallbackHistoryEntries(
+  entries: HistoryEntry[],
+): HistoryEntry[] {
+  const normalized: HistoryEntry[] = [];
+  for (const rawEntry of entries) {
+    const entry = cloneHistoryEntry(rawEntry);
+    const previous = normalized.at(-1);
+    const isExactFallbackDuplicate = previous?.role === "assistant"
+      && entry.role === "assistant"
+      && !previous.thinking
+      && !entry.thinking
+      && Boolean(previous.content)
+      && previous.content === entry.content
+      && (previous.parentToolUseId || null) === (entry.parentToolUseId || null)
+      && Boolean(previous.uuid) !== Boolean(entry.uuid)
+      && assistantDuplicateTimestampsMatch(previous, entry);
+
+    if (!isExactFallbackDuplicate) {
+      normalized.push(entry);
+      continue;
+    }
+
+    // Prefer the SDK assistant event because its UUID is stable across replay.
+    if (!previous?.uuid && entry.uuid) normalized[normalized.length - 1] = entry;
+  }
+  return normalized;
+}
+
 function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: boolean } = {}): HistoryEntry[] {
   const startedAt = Date.now();
   ensureHistoryDir();
@@ -603,8 +643,10 @@ function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: bo
     return cached.entries;
   }
 
-  const entries = normalizeSendFileHistoryEntries(
-    JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[],
+  const entries = normalizeClaudeResultFallbackHistoryEntries(
+    normalizeSendFileHistoryEntries(
+      JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[],
+    ),
   );
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
   warnIfSlow("history_read", startedAt, {

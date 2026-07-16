@@ -254,6 +254,7 @@ export function deleteSessionArtifacts(sessionId: string, sessionInfo?: SessionI
 
   unlinkIfExists(historyFile(sessionId), removed, "history");
   historyCache.delete(sessionId);
+  transcriptPositionStates.delete(sessionId);
   rmDirIfExists(toolOutputSessionDir(sessionId), removed, "tool-output");
   unlinkIfExists(todosFile(sessionId), removed, "todos");
   unlinkIfExists(sdkEventsFile(sessionId), removed, "sdk-events");
@@ -522,6 +523,154 @@ type HistoryCacheEntry = {
 
 const historyCache = new Map<string, HistoryCacheEntry>();
 
+type TranscriptPosition = {
+  entryId: string;
+  sessionSeq: number;
+  revision: number;
+};
+
+type TranscriptPositionState = {
+  nextSeq: number;
+  byKey: Map<string, TranscriptPosition>;
+  byEntryId: Map<string, TranscriptPosition>;
+};
+
+const transcriptPositionStates = new Map<string, TranscriptPositionState>();
+
+function positiveInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function historyPositionKey(entry: HistoryEntry): string | null {
+  if (entry.streamId) {
+    const streamRole = entry.thinking ? `${entry.role}_thinking` : entry.role;
+    return `${streamRole}:stream:${entry.streamId}`;
+  }
+  if (entry.toolUseId && (entry.role === "tool_call" || entry.role === "tool_result" || entry.role === "tool_image")) {
+    return `${entry.role}:tool:${entry.toolUseId}`;
+  }
+  if (entry.questionId) return `${entry.role}:question:${entry.questionId}`;
+  if (entry.role === "user" && entry.uuid) return `user:uuid:${entry.uuid}`;
+  if (entry.role === "monitor" && entry.taskId) return `monitor:${entry.taskId}`;
+  return null;
+}
+
+function serverMessagePositionKey(message: Record<string, any>): string | null {
+  const type = String(message.type || "");
+  if ((type === "text" || type === "thinking") && message.streamId) {
+    const role = type === "text" ? "assistant" : "assistant_thinking";
+    return `${role}:stream:${String(message.streamId)}`;
+  }
+  if ((type === "tool_call" || type === "tool_result" || type === "tool_image") && message.toolUseId) {
+    const role = type === "tool_call" ? "tool_call" : type === "tool_result" ? "tool_result" : "tool_image";
+    return `${role}:tool:${String(message.toolUseId)}`;
+  }
+  const questionId = message.questionId || message.requestId;
+  if (questionId && (type === "question" || type === "secure_input_request" || type === "elicitation_url")) {
+    const role = type === "secure_input_request" ? "secure_input" : type === "elicitation_url" ? "elicitation_url" : "question";
+    return `${role}:question:${String(questionId)}`;
+  }
+  if (type === "monitor_output" && message.taskId) return `monitor:${String(message.taskId)}`;
+  return null;
+}
+
+function syncTranscriptPositionState(sessionId: string, entries: HistoryEntry[]): TranscriptPositionState {
+  let state = transcriptPositionStates.get(sessionId);
+  if (!state) {
+    state = { nextSeq: 1, byKey: new Map(), byEntryId: new Map() };
+    transcriptPositionStates.set(sessionId, state);
+  }
+
+  // Legacy histories have no durable positions. Migrate the whole snapshot in
+  // physical order once, rather than mixing newly allocated positions with
+  // array indexes. Once positions exist, preserve them exactly: concurrent
+  // streams can finish and be persisted in a different order from the order
+  // in which their first live frames were allocated.
+  const needsMigration = entries.some((entry) =>
+    !entry.entryId || positiveInteger(entry.sessionSeq) === null,
+  );
+  let maxSeq = 0;
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    const sessionSeq = needsMigration
+      ? index + 1
+      : positiveInteger(entry.sessionSeq)!;
+    entry.sessionSeq = sessionSeq;
+    entry.entryId ||= `history:${sessionSeq}`;
+    entry.revision = positiveInteger(entry.revision) || 1;
+    maxSeq = Math.max(maxSeq, sessionSeq);
+
+    const position: TranscriptPosition = {
+      entryId: entry.entryId,
+      sessionSeq,
+      revision: entry.revision,
+    };
+    state.byEntryId.set(position.entryId, position);
+    const key = historyPositionKey(entry);
+    if (key) state.byKey.set(key, position);
+  }
+  state.nextSeq = Math.max(state.nextSeq, maxSeq + 1);
+  return state;
+}
+
+function transcriptPositionState(sessionId: string): TranscriptPositionState {
+  const existing = transcriptPositionStates.get(sessionId);
+  if (existing) return existing;
+  return syncTranscriptPositionState(sessionId, readHistoryEntries(sessionId));
+}
+
+function reserveTranscriptPosition(
+  sessionId: string,
+  key: string | null,
+  entryId?: string,
+  sessionSeq?: number,
+): TranscriptPosition {
+  const state = transcriptPositionState(sessionId);
+  const knownById = entryId ? state.byEntryId.get(entryId) : undefined;
+  const known = knownById || (key ? state.byKey.get(key) : undefined);
+  if (known) return known;
+
+  const reservedSeq = positiveInteger(sessionSeq) || state.nextSeq++;
+  state.nextSeq = Math.max(state.nextSeq, reservedSeq + 1);
+  const position: TranscriptPosition = {
+    entryId: entryId || crypto.randomUUID(),
+    sessionSeq: reservedSeq,
+    revision: 0,
+  };
+  state.byEntryId.set(position.entryId, position);
+  if (key) state.byKey.set(key, position);
+  return position;
+}
+
+/** Assign a durable transcript identity before the first live frame is sent. */
+export function positionSessionMessage<T extends Record<string, any>>(sessionId: string, message: T): T {
+  if (!sessionId) return message;
+  const mutable = message as Record<string, any>;
+  const key = serverMessagePositionKey(mutable);
+  if (!key && !mutable.entryId) return message;
+  const position = reserveTranscriptPosition(sessionId, key, mutable.entryId, mutable.sessionSeq);
+  if (!positiveInteger(mutable.revision)) position.revision++;
+  mutable.entryId = position.entryId;
+  mutable.sessionSeq = position.sessionSeq;
+  mutable.revision = positiveInteger(mutable.revision) || Math.max(1, position.revision);
+  return message;
+}
+
+function positionHistoryEntry(sessionId: string, entry: HistoryEntry): HistoryEntry {
+  const key = historyPositionKey(entry);
+  const position = reserveTranscriptPosition(sessionId, key, entry.entryId, entry.sessionSeq);
+  if (positiveInteger(entry.revision)) {
+    position.revision = Math.max(position.revision, entry.revision!);
+  } else if (position.revision === 0) {
+    position.revision = 1;
+  }
+  entry.entryId = position.entryId;
+  entry.sessionSeq = position.sessionSeq;
+  entry.revision = Math.max(1, position.revision);
+  return entry;
+}
+
 function isSendFileCall(entry: HistoryEntry): boolean {
   if (entry.role !== "tool_call") return false;
   const name = String(entry.toolName || "");
@@ -648,6 +797,7 @@ function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: bo
       JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[],
     ),
   );
+  syncTranscriptPositionState(sessionId, entries);
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
   warnIfSlow("history_read", startedAt, {
     sessionId,
@@ -726,7 +876,17 @@ function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
   const startedAt = Date.now();
   ensureHistoryDir();
   const file = historyFile(sessionId);
-  const redacted = redactSecretsDeep(entries) as HistoryEntry[];
+  const positioned = entries
+    .map((entry, originalIndex) => ({
+      entry: positionHistoryEntry(sessionId, entry),
+      originalIndex,
+    }))
+    .sort((left, right) =>
+      (left.entry.sessionSeq! - right.entry.sessionSeq!)
+      || (left.originalIndex - right.originalIndex),
+    )
+    .map(({ entry }) => entry);
+  const redacted = redactSecretsDeep(positioned) as HistoryEntry[];
   const safeEntries = redacted.map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
   fs.writeFileSync(file, JSON.stringify(safeEntries, null, 2), "utf-8");
   const stat = fs.statSync(file);
@@ -739,16 +899,18 @@ function writeHistoryEntries(sessionId: string, entries: HistoryEntry[]): void {
   });
 }
 
-export function appendHistory(sessionId: string, entry: HistoryEntry): void {
+export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEntry {
   const entries = readHistoryEntries(sessionId);
-  entries.push(entry);
+  const positioned = positionHistoryEntry(sessionId, entry);
+  entries.push(positioned);
   writeHistoryEntries(sessionId, entries);
+  return positioned;
 }
 
 export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[]): void {
   if (newEntries.length === 0) return;
   const entries = readHistoryEntries(sessionId);
-  entries.push(...newEntries);
+  entries.push(...newEntries.map((entry) => positionHistoryEntry(sessionId, entry)));
   writeHistoryEntries(sessionId, entries);
 }
 

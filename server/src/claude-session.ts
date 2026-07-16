@@ -16,7 +16,7 @@ import {
   AgentSessionSettings,
   Backend,
 } from "./protocol";
-import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid, cacheToolImage } from "./session-store";
+import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid, cacheToolImage, positionSessionMessage } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
@@ -1140,6 +1140,7 @@ export class ClaudeSession {
   }
 
   public send(msg: ServerMessage): void {
+    positionSessionMessage(String((msg as any).sessionId || this.sessionId || ""), msg as any);
     const deliveryAware = [...this.clientSockets].some(
       (socket) => (socket as any).supportsSessionEventAck === true,
     );
@@ -1355,7 +1356,7 @@ export class ClaudeSession {
 
     // Log injected message to history so it persists across sessions
     if (sessionId) {
-      appendHistory(sessionId, {
+      const historyEntry = appendHistory(sessionId, {
         role: "user",
         content: text,
         uuid: userMsgUuid,
@@ -1365,6 +1366,9 @@ export class ClaudeSession {
         type: "user_message_uuid",
         uuid: userMsgUuid,
         sessionId,
+        entryId: historyEntry.entryId,
+        sessionSeq: historyEntry.sessionSeq,
+        revision: historyEntry.revision,
       } as any);
     }
 
@@ -1411,7 +1415,7 @@ export class ClaudeSession {
     const turnPromise = this._trackPendingTurn();
 
     if (sid) {
-      appendHistory(sid, {
+      const historyEntry = appendHistory(sid, {
         role: "user",
         content: prompt,
         uuid: userMsgUuid,
@@ -1421,6 +1425,9 @@ export class ClaudeSession {
         type: "user_message_uuid",
         uuid: userMsgUuid,
         sessionId: sid,
+        entryId: historyEntry.entryId,
+        sessionSeq: historyEntry.sessionSeq,
+        revision: historyEntry.revision,
       } as any);
     }
 
@@ -2403,7 +2410,7 @@ export class ClaudeSession {
       let promptLogged = false;
       if (this.sessionId || resumeSessionId) {
         const sid = this.sessionId || resumeSessionId || "";
-        appendHistory(sid, {
+        const historyEntry = appendHistory(sid, {
           role: "user",
           content: prompt,
           uuid: userMsgUuid,
@@ -2415,6 +2422,9 @@ export class ClaudeSession {
           type: "user_message_uuid",
           uuid: userMsgUuid,
           sessionId: sid,
+          entryId: historyEntry.entryId,
+          sessionSeq: historyEntry.sessionSeq,
+          revision: historyEntry.revision,
         } as any);
         promptLogged = true;
       }
@@ -2693,7 +2703,7 @@ export class ClaudeSession {
 
           // Log user prompt now that we have the session ID (for new sessions)
           if (!promptLogged) {
-            appendHistory(message.session_id, {
+            const historyEntry = appendHistory(message.session_id, {
               role: "user",
               content: prompt,
               uuid: userMsgUuid,
@@ -2704,6 +2714,9 @@ export class ClaudeSession {
               type: "user_message_uuid",
               uuid: userMsgUuid,
               sessionId: message.session_id,
+              entryId: historyEntry.entryId,
+              sessionSeq: historyEntry.sessionSeq,
+              revision: historyEntry.revision,
             } as any);
             promptLogged = true;
           }
@@ -3280,6 +3293,7 @@ export class ClaudeSession {
                 appendHistory(this.sessionId, {
                   role: "assistant",
                   content: textParts.join(""),
+                  streamId: this._streamKey(message),
                   parentToolUseId: (message as any).parent_tool_use_id || null,
                   uuid: (message as any).uuid || undefined,
                   timestamp: now(),

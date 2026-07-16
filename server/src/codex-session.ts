@@ -23,6 +23,7 @@ import {
   remapSession,
   cacheToolImage,
   markQuestionAnswered,
+  positionSessionMessage,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
@@ -1504,6 +1505,7 @@ export class CodexSession {
   }
 
   public send(msg: ServerMessage): void {
+    positionSessionMessage(String((msg as any).sessionId || this.sessionId || ""), msg as any);
     const deliveryAware = [...this.clientSockets].some(
       (socket) => (socket as any).supportsSessionEventAck === true,
     );
@@ -2009,7 +2011,7 @@ export class CodexSession {
 
   private flushPendingUserPrompt(): void {
     if (!this.sessionId || !this._pendingUserPrompt) return;
-    appendHistory(this.sessionId, {
+    const historyEntry = appendHistory(this.sessionId, {
       role: "user",
       content: this._pendingUserPrompt.text,
       uuid: this._pendingUserPrompt.uuid,
@@ -2019,6 +2021,9 @@ export class CodexSession {
       type: "user_message_uuid",
       uuid: this._pendingUserPrompt.uuid,
       sessionId: this.sessionId,
+      entryId: historyEntry.entryId,
+      sessionSeq: historyEntry.sessionSeq,
+      revision: historyEntry.revision,
       ...(this._pendingUserPrompt.messageId ? { clientMessageId: this._pendingUserPrompt.messageId } : {}),
     } as any);
     this._pendingUserPrompt = null;
@@ -2171,7 +2176,7 @@ export class CodexSession {
   private persistAcceptedInjectedPrompt(prompt: { text: string; uuid: string; messageId?: string }): void {
     const sid = this.sessionId;
     if (!sid) return;
-    appendHistory(sid, {
+    const historyEntry = appendHistory(sid, {
       role: "user",
       content: prompt.text,
       uuid: prompt.uuid,
@@ -2181,6 +2186,9 @@ export class CodexSession {
       type: "user_message_uuid",
       uuid: prompt.uuid,
       sessionId: sid,
+      entryId: historyEntry.entryId,
+      sessionSeq: historyEntry.sessionSeq,
+      revision: historyEntry.revision,
       ...(prompt.messageId ? { clientMessageId: prompt.messageId } : {}),
     } as any);
   }
@@ -2960,6 +2968,7 @@ export class CodexSession {
         appendItem({
           role: "assistant",
           content: text,
+          streamId: String(item.id),
           timestamp: now(),
         });
       }

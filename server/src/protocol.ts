@@ -805,6 +805,9 @@ export interface TextServerMessage {
   snapshot?: boolean;
   finalSnapshot?: boolean;
   deliveryId?: string;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
 }
 
 export interface ToolCallServerMessage {
@@ -815,6 +818,9 @@ export interface ToolCallServerMessage {
   sessionId: string;
   parentToolUseId?: string | null;
   uuid?: string;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
 }
 
 export interface ToolResultServerMessage {
@@ -824,6 +830,9 @@ export interface ToolResultServerMessage {
   sessionId: string;
   parentToolUseId?: string | null;
   uuid?: string;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
 }
 
 export interface ToolImageServerMessage {
@@ -921,6 +930,9 @@ export interface ThinkingServerMessage {
   snapshot?: boolean;
   finalSnapshot?: boolean;
   deliveryId?: string;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
 }
 
 export interface UsageInfo {
@@ -1155,6 +1167,14 @@ export interface HistoryEntry {
   commandPayload?: Record<string, unknown>;
   // Permission mode fields (role === "permission_mode")
   permissionMode?: string;
+  /** Stable transcript identity shared by live delivery and history replay. */
+  entryId?: string;
+  /** Monotonic position within one SocketAgent session. */
+  sessionSeq?: number;
+  /** Monotonic content revision for streamed entries. */
+  revision?: number;
+  /** Stable backend stream identity used to join live frames to history. */
+  streamId?: string;
 }
 
 export interface SessionHistoryServerMessage {

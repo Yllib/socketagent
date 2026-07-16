@@ -450,6 +450,7 @@ export class ClaudeSession {
   private _requestedModel: string | null = null;
   private _streamingText = new Map<string, { content: string; parentToolUseId?: string; uuid?: string }>();
   private _streamingThinking = new Map<string, { content: string; parentToolUseId?: string; uuid?: string }>();
+  private _activeSdkMessageIds = new Map<string, string>();
   private _lastPreview: string = "";
   private _lastSessionInit: ServerMessage | null = null;
   private _lastSupportedModels: ServerMessage | null = null;
@@ -919,10 +920,33 @@ export class ClaudeSession {
     }));
   }
 
+  private _streamLane(message: any): string {
+    return String(message?.parent_tool_use_id || "") || "main";
+  }
+
   private _streamKey(message: any): string {
-    const parentToolUseId = String(message?.parent_tool_use_id || "");
-    const uuid = String(message?.uuid || "");
-    return `${parentToolUseId || "main"}:${uuid || "current"}`;
+    const lane = this._streamLane(message);
+    const event = message?.type === "stream_event" ? message?.event : undefined;
+    const apiMessageId = String(
+      event?.type === "message_start"
+        ? event?.message?.id || ""
+        : message?.message?.id || "",
+    );
+
+    if (apiMessageId) this._activeSdkMessageIds.set(lane, apiMessageId);
+
+    // The Agent SDK assigns a fresh outer UUID to every stream_event frame.
+    // The API message id from message_start remains stable for all deltas and
+    // for the completed assistant snapshot, so it is the card identity.
+    const stableId = apiMessageId
+      || this._activeSdkMessageIds.get(lane)
+      || String(message?.uuid || "")
+      || "current";
+    return `${lane}:${stableId}`;
+  }
+
+  private _finishSdkMessageStream(message: any): void {
+    this._activeSdkMessageIds.delete(this._streamLane(message));
   }
 
   private _appendLiveStream(
@@ -3091,6 +3115,10 @@ export class ClaudeSession {
               contextWindow: this._lastContextWindow,
               sessionId: this.sessionId || "",
             } as any);
+          }
+
+          if (event?.type === "message_stop") {
+            this._finishSdkMessageStream(message);
           }
         }
 

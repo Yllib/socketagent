@@ -113,6 +113,74 @@ test("replays concurrent Claude streams with their original parents", () => {
   assert.equal(childThinking.uuid, "thinking-message");
 });
 
+test("uses the stable Claude API message id across partial stream event UUIDs", () => {
+  const session = new ClaudeSession(testSocket([]), process.cwd(), []);
+
+  const started = session._streamKey({
+    type: "stream_event",
+    uuid: "event-frame-1",
+    parent_tool_use_id: null,
+    event: { type: "message_start", message: { id: "api-message-1" } },
+  });
+  const firstDelta = session._streamKey({
+    type: "stream_event",
+    uuid: "event-frame-2",
+    parent_tool_use_id: null,
+    event: { type: "content_block_delta", index: 0 },
+  });
+  const secondDelta = session._streamKey({
+    type: "stream_event",
+    uuid: "event-frame-3",
+    parent_tool_use_id: null,
+    event: { type: "content_block_delta", index: 0 },
+  });
+  const completed = session._streamKey({
+    type: "assistant",
+    uuid: "assistant-transcript-uuid",
+    parent_tool_use_id: null,
+    message: { id: "api-message-1" },
+  });
+
+  assert.equal(started, "main:api-message-1");
+  assert.equal(firstDelta, started);
+  assert.equal(secondDelta, started);
+  assert.equal(completed, started);
+});
+
+test("keeps interleaved Claude subagent message streams in separate lanes", () => {
+  const session = new ClaudeSession(testSocket([]), process.cwd(), []);
+
+  session._streamKey({
+    type: "stream_event",
+    parent_tool_use_id: null,
+    event: { type: "message_start", message: { id: "main-api-message" } },
+  });
+  session._streamKey({
+    type: "stream_event",
+    parent_tool_use_id: "agent-tool-1",
+    event: { type: "message_start", message: { id: "child-api-message" } },
+  });
+
+  assert.equal(
+    session._streamKey({
+      type: "stream_event",
+      uuid: "new-main-frame",
+      parent_tool_use_id: null,
+      event: { type: "content_block_delta", index: 0 },
+    }),
+    "main:main-api-message",
+  );
+  assert.equal(
+    session._streamKey({
+      type: "stream_event",
+      uuid: "new-child-frame",
+      parent_tool_use_id: "agent-tool-1",
+      event: { type: "content_block_delta", index: 0 },
+    }),
+    "agent-tool-1:child-api-message",
+  );
+});
+
 test("replays the active Claude tool card for a late-joining client", () => {
   const sent = [];
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);

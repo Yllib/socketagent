@@ -29,6 +29,7 @@ export class SessionEventDelivery {
     private readonly retryMs = 750,
     private readonly maxPending = 1_000,
     private readonly maxAgeMs = 10 * 60_000,
+    private readonly maxRetryAttempts = 3,
   ) {}
 
   prepare(message: SessionEvent): SessionEvent {
@@ -77,8 +78,13 @@ export class SessionEventDelivery {
 
   replayTo(dispatch: (message: SessionEvent) => void): void {
     for (const entry of this.pending.values()) {
+      // A reattached client is a new delivery opportunity. Reset the small
+      // automatic retry budget, but retain the original delivery identity so
+      // the app can collapse anything already applied before reconnecting.
+      entry.attempts = 0;
       dispatch({ ...entry.message, replay: true });
     }
+    this.scheduleRetry();
   }
 
   get pendingCount(): number {
@@ -92,7 +98,7 @@ export class SessionEventDelivery {
   }
 
   private scheduleRetry(): void {
-    if (this.retryTimer || this.pending.size === 0) return;
+    if (this.retryTimer || !this.hasRetryablePending()) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.retryPending();
@@ -107,6 +113,10 @@ export class SessionEventDelivery {
         this.pending.delete(deliveryId);
         continue;
       }
+      // Keep the event available for an explicit reconnect replay, but never
+      // flood a connected relay forever when a background session is not the
+      // phone's visible chat. History remains the durable recovery source.
+      if (entry.attempts >= this.maxRetryAttempts) continue;
       entry.attempts++;
       console.warn(
         `[SessionDelivery] retry type=${String(entry.message.type || "unknown")}`
@@ -123,6 +133,16 @@ export class SessionEventDelivery {
       });
     }
     this.scheduleRetry();
+  }
+
+  private hasRetryablePending(): boolean {
+    const cutoff = Date.now() - this.maxAgeMs;
+    for (const entry of this.pending.values()) {
+      if (entry.createdAt >= cutoff && entry.attempts < this.maxRetryAttempts) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private trim(): void {

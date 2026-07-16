@@ -26,6 +26,33 @@ test("tool cards retry until acknowledged", async () => {
   delivery.dispose();
 });
 
+test("automatic retries are bounded while the event remains reconnectable", async () => {
+  const sent = [];
+  const delivery = new SessionEventDelivery(
+    (message) => sent.push(message),
+    5,
+    100,
+    10_000,
+    2,
+  );
+  const prepared = delivery.prepare({
+    type: "tool_call",
+    sessionId: "background-session",
+    toolUseId: "tool-background",
+    tool: "Bash",
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(sent.length, 2);
+  assert.equal(delivery.pendingCount, 1);
+
+  const replayed = [];
+  delivery.replayTo((message) => replayed.push(message));
+  assert.equal(replayed.length, 1);
+  assert.equal(replayed[0].deliveryId, prepared.deliveryId);
+  delivery.dispose();
+});
+
 test("non-card stream deltas are not retried as duplicate deltas", () => {
   const delivery = new SessionEventDelivery(() => {});
   const message = { type: "text", content: "delta", streamId: "message-1" };

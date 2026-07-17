@@ -256,6 +256,13 @@ export interface FileManagerReadTextMessage {
   maxBytes?: number;
 }
 
+export interface FileManagerWriteTextMessage {
+  type: "file_manager_write_text";
+  requestId?: string;
+  path: string;
+  content: string;
+}
+
 export interface FileManagerMkdirMessage {
   type: "file_manager_mkdir";
   requestId?: string;
@@ -740,6 +747,7 @@ export type ClientMessage =
   | FileManagerSetProtectedMessage
   | FileManagerDownloadMessage
   | FileManagerReadTextMessage
+  | FileManagerWriteTextMessage
   | FileManagerMkdirMessage
   | FileManagerRenameMessage
   | FileManagerDeleteMessage
@@ -1310,7 +1318,7 @@ export interface FileManagerProtectedResultServerMessage {
 export interface FileManagerOperationResultServerMessage {
   type: "file_manager_operation_result";
   requestId?: string;
-  operation: "download" | "mkdir" | "rename" | "delete" | "upload_start";
+  operation: "download" | "mkdir" | "rename" | "delete" | "upload_start" | "write_text";
   ok: boolean;
   path?: string;
   newPath?: string;

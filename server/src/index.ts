@@ -36,7 +36,7 @@ import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, r
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
 import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, unregisterPushToken } from "./push-notifications";
-import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath } from "./file-manager";
+import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, writeFileManagerText } from "./file-manager";
 import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 import { runBackendInstall } from "./backend-installer";
@@ -5161,6 +5161,38 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({
             type: "file_manager_text_result",
             requestId,
+            ok: false,
+            path: filePath,
+            error: e.message || String(e),
+          });
+        }
+        break;
+      }
+
+      case "file_manager_write_text" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const filePath = String((msg as any).path || "");
+        const content = typeof (msg as any).content === "string"
+          ? (msg as any).content as string
+          : "";
+        try {
+          const saved = writeFileManagerText({
+            filePath,
+            content,
+            defaultCwd: getDefaultCwd(),
+          });
+          sendJson({
+            type: "file_manager_operation_result",
+            requestId,
+            operation: "write_text",
+            ok: true,
+            path: saved.path,
+          });
+        } catch (e: any) {
+          sendJson({
+            type: "file_manager_operation_result",
+            requestId,
+            operation: "write_text",
             ok: false,
             path: filePath,
             error: e.message || String(e),

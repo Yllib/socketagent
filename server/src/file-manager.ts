@@ -155,6 +155,32 @@ export function resolveFileManagerPath(inputPath: string | undefined, defaultCwd
   return path.resolve(inputPath);
 }
 
+export function writeFileManagerText(args: {
+  filePath: string;
+  content: string;
+  defaultCwd: string;
+  maxBytes?: number;
+}): { path: string; bytesWritten: number } {
+  const roots = getFileManagerRoots(args.defaultCwd);
+  const resolved = resolveFileManagerPath(args.filePath, args.defaultCwd);
+  assertFileManagerPathAllowed(resolved, roots);
+  const byteLength = Buffer.byteLength(args.content, "utf8");
+  const maxBytes = args.maxBytes ?? 1024 * 1024;
+  if (byteLength > maxBytes) {
+    throw new Error(`Text files are limited to ${maxBytes} bytes`);
+  }
+  const parent = path.dirname(resolved);
+  const parentStat = fs.statSync(parent);
+  if (!parentStat.isDirectory()) {
+    throw new Error(`Parent is not a directory: ${parent}`);
+  }
+  if (fs.existsSync(resolved) && !fs.statSync(resolved).isFile()) {
+    throw new Error(`Not a file: ${resolved}`);
+  }
+  fs.writeFileSync(resolved, args.content, { encoding: "utf8", mode: 0o600 });
+  return { path: resolved, bytesWritten: byteLength };
+}
+
 function classifyMedia(ext: string): FileManagerMediaKind {
   const lower = ext.toLowerCase();
   if (IMAGE_EXTENSIONS.has(lower)) return "image";

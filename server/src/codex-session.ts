@@ -415,7 +415,7 @@ export class CodexSession {
   get sessionModel(): string | null { return this._model; }
   get lastUsage(): NonNullable<CodexSession["_lastUsage"]> | null { return this._lastUsage; }
   get activeBackgroundTasks(): Map<string, string> { return new Map(); }
-  get lastPreview(): string { return ""; }
+  get lastPreview(): string { return this._lastAssistantText; }
   getSessionId(): string | null { return this.sessionId; }
   getCwd(): string { return this.cwd; }
   getActiveToolCall(): { toolUseId: string; name: string } | null {
@@ -3031,7 +3031,7 @@ export class CodexSession {
           };
           this.send({
             type: "result",
-            content: "",
+            content: this._lastAssistantText,
             sessionId: sid,
             usage,
           } as ServerMessage);

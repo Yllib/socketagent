@@ -400,4 +400,11 @@ test("Codex live text frames are cumulative snapshots with a durable final frame
   assert.ok(frames.every((message) => message.streamId === "message-1"));
   assert.ok(frames.every((message) => message.snapshot === true));
   assert.equal(frames.at(-1).finalSnapshot, true);
+  assert.equal(session.lastPreview, "first second");
+
+  session.handleAppServerNotification("turn/completed", {
+    threadId: rootId,
+  });
+  const result = sent.find((message) => message.type === "result");
+  assert.equal(result.content, "first second");
 });

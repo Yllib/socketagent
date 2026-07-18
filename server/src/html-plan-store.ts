@@ -39,6 +39,7 @@ export interface HtmlPlanDiffSegment {
 }
 
 interface StoredHtmlPlanRecord extends HtmlPlanRecord {
+  revisionScheme: 2;
   revisions: HtmlPlanRevisionRecord[];
 }
 
@@ -58,20 +59,24 @@ function normalizeStoredPlan(entry: any, sessionId: string): StoredHtmlPlanRecor
   const createdAt = String(entry.createdAt || entry.updatedAt || new Date().toISOString());
   const updatedAt = String(entry.updatedAt || createdAt);
   const legacyRevision: HtmlPlanRevisionRecord = {
-    revision: 1,
+    revision: 0,
     title: String(entry.title || "Plan"),
     html: entry.html,
     createdAt: updatedAt,
   };
-  const revisions = (Array.isArray(entry.revisions) ? entry.revisions : [legacyRevision])
+  const hasStoredRevisions = Array.isArray(entry.revisions) && entry.revisions.length > 0;
+  // v1.0.144 briefly stored snapshots as 1-based revisions. Convert those
+  // records on read so creation is version 0 and the first change is revision 1.
+  const legacyOffset = hasStoredRevisions && entry.revisionScheme !== 2 ? -1 : 0;
+  const revisions = (hasStoredRevisions ? entry.revisions : [legacyRevision])
     .filter((revision: any) => revision && Number.isInteger(Number(revision.revision)) && typeof revision.html === "string")
     .map((revision: any): HtmlPlanRevisionRecord => ({
-      revision: Number(revision.revision),
+      revision: Number(revision.revision) + legacyOffset,
       title: String(revision.title || entry.title || "Plan"),
       html: revision.html,
       createdAt: String(revision.createdAt || updatedAt),
       ...(Number.isInteger(Number(revision.restoredFromRevision))
-        ? { restoredFromRevision: Number(revision.restoredFromRevision) }
+        ? { restoredFromRevision: Number(revision.restoredFromRevision) + legacyOffset }
         : {}),
     }))
     .sort((left: HtmlPlanRevisionRecord, right: HtmlPlanRevisionRecord) => left.revision - right.revision);
@@ -85,7 +90,8 @@ function normalizeStoredPlan(entry: any, sessionId: string): StoredHtmlPlanRecor
     createdAt,
     updatedAt,
     currentRevision: current.revision,
-    revisionCount: revisions.length,
+    revisionCount: Math.max(0, revisions.length - 1),
+    revisionScheme: 2,
     revisions,
   };
 }
@@ -173,7 +179,7 @@ export function saveHtmlPlan(args: {
   const html = sanitizeHtmlPlan(args.html);
   const existing = existingIndex >= 0 ? plans[existingIndex] : null;
   if (existing && existing.title === title && existing.html === html) return publicPlan(existing);
-  const revision = existing ? existing.currentRevision + 1 : 1;
+  const revision = existing ? existing.currentRevision + 1 : 0;
   const revisions = existing ? [...existing.revisions] : [];
   revisions.push({ revision, title, html, createdAt: now });
   const record: StoredHtmlPlanRecord = {
@@ -184,7 +190,8 @@ export function saveHtmlPlan(args: {
     createdAt: existing?.createdAt || now,
     updatedAt: now,
     currentRevision: revision,
-    revisionCount: revisions.length,
+    revisionCount: Math.max(0, revisions.length - 1),
+    revisionScheme: 2,
     revisions,
   };
   if (existingIndex >= 0) plans[existingIndex] = record;
@@ -200,7 +207,7 @@ export function listHtmlPlans(sessionId: string): HtmlPlanRecord[] {
 }
 
 function publicPlan(plan: StoredHtmlPlanRecord): HtmlPlanRecord {
-  const { revisions: _revisions, ...record } = plan;
+  const { revisions: _revisions, revisionScheme: _revisionScheme, ...record } = plan;
   return record;
 }
 
@@ -218,7 +225,9 @@ export function listHtmlPlanRevisions(sessionId: string, planId: string): HtmlPl
     title: revision.title,
     createdAt: revision.createdAt,
     byteSize: Buffer.byteLength(revision.html, "utf8"),
-    ...(revision.restoredFromRevision ? { restoredFromRevision: revision.restoredFromRevision } : {}),
+    ...(revision.restoredFromRevision !== undefined
+      ? { restoredFromRevision: revision.restoredFromRevision }
+      : {}),
   }));
 }
 
@@ -333,7 +342,7 @@ export function rollbackHtmlPlan(sessionId: string, planId: string, revisionNumb
     html: source.html,
     updatedAt: now,
     currentRevision: nextRevision,
-    revisionCount: revisions.length,
+    revisionCount: Math.max(0, revisions.length - 1),
     revisions,
   };
   plans[index] = rolledBack;

@@ -4188,7 +4188,7 @@ function createConnectionHandler(transport: ClientTransport) {
             planId,
             ok: true,
             revision,
-            ...(diff.baseRevision ? { baseRevision: diff.baseRevision } : {}),
+            ...(diff.baseRevision !== undefined ? { baseRevision: diff.baseRevision } : {}),
             diff: diff.segments,
           });
         } catch (e: any) {

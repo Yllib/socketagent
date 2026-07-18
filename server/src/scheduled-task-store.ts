@@ -24,6 +24,7 @@ export interface TaskRun {
 
 export interface ScheduledTask {
   id: string;
+  name?: string;
   prompt: string;
   cwd: string;
   backend?: Backend;
@@ -46,6 +47,25 @@ export interface ScheduledTask {
   lastRunAt?: string;
   // History of all runs (for recurring tasks)
   runs?: TaskRun[];
+}
+
+export function scheduledTaskDisplayName(task: Pick<ScheduledTask, "name" | "prompt">): string {
+  const explicit = task.name?.trim().replace(/\s+/g, " ");
+  if (explicit) return explicit.slice(0, 100);
+  const firstPromptLine = task.prompt
+    .split(/\r?\n/, 1)[0]
+    ?.trim()
+    .replace(/\s+/g, " ");
+  if (!firstPromptLine) return "Scheduled task";
+  return firstPromptLine.length > 100
+    ? `${firstPromptLine.slice(0, 97)}...`
+    : firstPromptLine;
+}
+
+export function scheduledTaskUsesAutomaticNotifications(
+  task: Pick<ScheduledTask, "notificationMode">,
+): boolean {
+  return task.notificationMode !== "quiet";
 }
 
 function ensureDir(): void {

@@ -1595,6 +1595,7 @@ export class ClaudeSession {
             "ScheduleTask",
             "Schedule a Claude or Codex prompt to run automatically at a future time. Creates a new session in the specified directory and executes the prompt when the scheduled time arrives. The server runs 24/7 so the task will execute even if the app is closed. Use this when the user wants to defer a task to run later. Supports provider, model, effort, permission, recurrence, and session-reuse settings.",
             {
+              name: z.string().optional().describe("Short human-readable label for the task, used in task lists and notifications"),
               prompt: z.string().describe("The prompt/instructions for Claude to execute at the scheduled time"),
               cwd: z.string().describe("Working directory for the scheduled task (absolute path)"),
               backend: z.enum(["claude", "codex"]).optional().describe("Agent provider. Defaults to Claude."),
@@ -1625,6 +1626,7 @@ export class ClaudeSession {
               const backend = (args.backend || "claude") as Backend;
               const task: ScheduledTask = {
                 id: crypto.randomUUID(),
+                ...(args.name?.trim() ? { name: args.name.trim() } : {}),
                 prompt: args.prompt,
                 cwd: args.cwd,
                 backend,
@@ -1653,7 +1655,8 @@ export class ClaudeSession {
               const when = scheduledDate.toLocaleString();
               const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
               const notificationLabel = task.notificationMode === "quiet" ? " Quiet mode is on." : "";
-              return { content: [{ type: "text" as const, text: `Task scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
+              const label = task.name ? `"${task.name}"` : "Task";
+              return { content: [{ type: "text" as const, text: `${label} scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
             }
           ),
           tool(

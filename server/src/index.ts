@@ -27,7 +27,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
-import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, ScheduledTask } from "./scheduled-task-store";
+import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
@@ -1104,13 +1104,20 @@ function maybeSendPushNotification(msg: {
   body: string;
   sessionId: string;
   status?: "completed" | "failed" | "manual";
+  sessionCompletion?: boolean;
 }): void {
   if (!shouldSendPushNotification()) return;
+  const sessionCompletion = msg.sessionCompletion === true && Boolean(msg.sessionId);
   sendPushNotification({
     title: msg.title,
     body: msg.body,
     sessionId: msg.sessionId,
     status: msg.status || "manual",
+    ...(sessionCompletion ? {
+      kind: "session_finished",
+      data: { finishedAt: new Date().toISOString() },
+      showNotification: false,
+    } : {}),
   }).then((result) => {
     if (result.attempted > 0) {
       console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for session=${msg.sessionId || "none"} title=${msg.title.slice(0, 80)}`);
@@ -1127,6 +1134,10 @@ function notificationText(value: unknown, fallback: string): string {
 }
 
 function sessionNotificationTitle(sessionId: string, session: Session): string {
+  const scheduledTaskName = (session as any)._scheduledTaskName;
+  if (typeof scheduledTaskName === "string" && scheduledTaskName.trim()) {
+    return notificationText(scheduledTaskName, "Scheduled task");
+  }
   const info = getSession(sessionId);
   const title = info?.title?.trim();
   if (title && title !== "Untitled") return notificationText(title, "SocketAgent");
@@ -1244,9 +1255,16 @@ function broadcastScheduledTaskNotification(
   body: string,
   sessionId: string,
   status: "completed" | "failed" | "manual",
-  options: { sendPush?: boolean } = {},
+  options: { sendPush?: boolean; sessionCompletion?: boolean } = {},
 ): void {
-  const payload = { type: "scheduled_task_notification" as const, title, body, sessionId, status };
+  const payload = {
+    type: "scheduled_task_notification" as const,
+    title,
+    body,
+    sessionId,
+    status,
+    ...(options.sessionCompletion ? { sessionCompletion: true } : {}),
+  };
   const msg = JSON.stringify(payload);
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(msg);
@@ -3054,6 +3072,9 @@ function createConnectionHandler(transport: ClientTransport) {
           : undefined;
         const task: ScheduledTask = {
           id: crypto.randomUUID(),
+          ...(typeof (msg as any).name === "string" && (msg as any).name.trim()
+            ? { name: (msg as any).name.trim() }
+            : {}),
           prompt: (msg as any).prompt,
           cwd: (msg as any).cwd,
           backend,
@@ -3111,7 +3132,11 @@ function createConnectionHandler(transport: ClientTransport) {
 
       case "update_scheduled_task": {
         const task = getScheduledTask((msg as any).taskId);
-        if (task && (task.status === "pending" || task.status === "cancelled" || task.status === "running")) {
+        if (task) {
+          if ((msg as any).name !== undefined) {
+            const name = typeof (msg as any).name === "string" ? (msg as any).name.trim() : "";
+            task.name = name || undefined;
+          }
           if ((msg as any).prompt !== undefined) task.prompt = (msg as any).prompt;
           if ((msg as any).cwd !== undefined) task.cwd = (msg as any).cwd;
           if ((msg as any).backend !== undefined) {
@@ -3148,6 +3173,14 @@ function createConnectionHandler(transport: ClientTransport) {
           // Allow re-activating a cancelled task
           if (task.status === "cancelled") task.status = "pending";
           saveScheduledTask(task);
+          for (const session of activeSessions.values()) {
+            if ((session as any)._scheduledTaskId === task.id) {
+              (session as any)._scheduledTaskName = scheduledTaskDisplayName(task);
+              (session as any)._suppressOngoingNotification =
+                !scheduledTaskUsesAutomaticNotifications(task);
+            }
+          }
+          broadcastStatusSync();
           console.log(`[Scheduler] Task updated: ${task.id}`);
           broadcastScheduledTaskList();
         }
@@ -6090,10 +6123,12 @@ function buildStatusSyncMessage(): string {
   const sessionModels: Record<string, string> = {};
   for (const [sid, session] of activeSessions) {
     const busy = sessionIsBusy(session);
+    const placeholderId = (session as any)._scheduledPlaceholderSessionId;
+    const exposeSession = typeof placeholderId !== "string" || sid !== placeholderId;
     if (busy) {
       anyRunning = true;
     }
-    if (busy) {
+    if (busy && exposeSession) {
       runningSessions.push(sid);
       sessionTitles[sid] = sessionNotificationTitle(sid, session);
       if (sessionSuppressesOngoingNotification(session)) {
@@ -6104,13 +6139,13 @@ function buildStatusSyncMessage(): string {
         sessionActiveStartedAt[sid] = activeStartedAt;
       }
     }
-    if (session.isCompacting) {
+    if (session.isCompacting && exposeSession) {
       compactingSessions.push(sid);
     }
     for (const [taskId] of session.activeBackgroundTasks) {
       backgroundTaskIds.push(taskId);
     }
-    if (session.sessionModel) {
+    if (session.sessionModel && exposeSession) {
       sessionModels[sid] = session.sessionModel;
     }
   }
@@ -6164,7 +6199,7 @@ scheduleStatusSync();
 const SCHEDULER_INTERVAL = 30000; // 30s
 
 function scheduledTaskPrompt(task: ScheduledTask): string {
-  if (task.notificationMode !== "quiet") return task.prompt;
+  if (scheduledTaskUsesAutomaticNotifications(task)) return task.prompt;
   return [
     "<socketagent_scheduled_task>",
     "This scheduled task is running in quiet mode.",
@@ -6180,6 +6215,7 @@ function scheduledTaskPrompt(task: ScheduledTask): string {
 function applyLatestScheduledTaskEditableFields(task: ScheduledTask): void {
   const latest = getScheduledTask(task.id);
   if (!latest || latest.status !== "running") return;
+  task.name = latest.name;
   task.prompt = latest.prompt;
   task.cwd = latest.cwd;
   task.backend = latest.backend;
@@ -6220,8 +6256,13 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       else task.status = "failed";
       saveScheduledTask(task);
       broadcastScheduledTaskList();
-      if (task.notificationMode !== "quiet") {
-        broadcastScheduledTaskNotification("Scheduled task failed", task.error, "", "failed");
+      if (scheduledTaskUsesAutomaticNotifications(task)) {
+        broadcastScheduledTaskNotification(
+          `${scheduledTaskDisplayName(task)} failed`,
+          task.error,
+          "",
+          "failed",
+        );
       }
       return;
     }
@@ -6243,7 +6284,10 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       send: (data: string) => forwardHeadlessScheduledAgentMessage(data, session?.getSessionId() || task.sessionId || ""),
     } as any;
     session = createSession(backend, ws, task.cwd, plugins, codexDriver);
-    (session as any)._suppressOngoingNotification = task.notificationMode === "quiet";
+    (session as any)._suppressOngoingNotification =
+      !scheduledTaskUsesAutomaticNotifications(task);
+    (session as any)._scheduledTaskId = task.id;
+    (session as any)._scheduledTaskName = scheduledTaskDisplayName(task);
     await restorePersistedPermissionMode(session, reusableSessionInfo || undefined);
     if (shouldResume) (session as any)._resumeSessionId = task.sessionId;
     await restorePersistedAgentSettings(session, reusableSessionInfo || undefined);
@@ -6267,10 +6311,11 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     }
 
     const tempId = `scheduled-${task.id}`;
+    (session as any)._scheduledPlaceholderSessionId = tempId;
     activeSessions.set(tempId, session);
     let scheduledStartPushSent = false;
     const maybeSendScheduledStartPush = () => {
-      if (task.notificationMode === "quiet") return;
+      if (!scheduledTaskUsesAutomaticNotifications(task)) return;
       if (scheduledStartPushSent) return;
       const sid = session.getSessionId();
       if (!sid || sid === tempId) return;
@@ -6295,6 +6340,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         saveScheduledTask(task);
         maybeSendScheduledStartPush();
         broadcastSessionList();
+        broadcastStatusSync();
       }
     }, 500);
     setTimeout(() => clearInterval(registerInterval), 30000);
@@ -6303,12 +6349,13 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
 
     session.runQuery(scheduledTaskPrompt(task), resumeId).then(() => {
       clearInterval(registerInterval);
-      const sid = session.getSessionId() || tempId;
-      task.sessionId = sid;
-      currentRun.sessionId = sid;
+      const realSessionId = session.getSessionId();
+      const sid = realSessionId || tempId;
+      task.sessionId = realSessionId || undefined;
+      currentRun.sessionId = realSessionId || "";
       currentRun.completedAt = new Date().toISOString();
       currentRun.status = "completed";
-      currentRun.resultSummary = (session as any)._lastPreview || "Task completed";
+      currentRun.resultSummary = session.lastPreview || "Task completed";
 
       task.resultSummary = currentRun.resultSummary;
       task.runCount = runNumber;
@@ -6322,6 +6369,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       }
       if (activeSessions.get(sid) === session) activeSessions.delete(sid);
       if (activeSessions.get(tempId) === session) activeSessions.delete(tempId);
+      broadcastStatusSync();
 
       const runIsRecurring = !manualRun && task.recurrence && task.recurrence.type !== "once";
       if (manualRun) {
@@ -6343,21 +6391,15 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
 
       broadcastScheduledTaskList();
       broadcastSessionList();
-      if (task.notificationMode !== "quiet") {
-        const title = manualRun
-          ? "Scheduled task run complete"
-          : runIsRecurring ? `Recurring task complete (run #${runNumber})` : "Scheduled task complete";
+      if (scheduledTaskUsesAutomaticNotifications(task)) {
+        const title = `${scheduledTaskDisplayName(task)} completed`;
         const body = task.resultSummary || task.prompt;
-        const hasRealSessionId = Boolean(session.getSessionId());
-        if (hasRealSessionId) {
-          sendSessionCompletionPush(session, "completed", body);
-        }
         broadcastScheduledTaskNotification(
           title,
           body,
           task.sessionId || "",
           "completed",
-          hasRealSessionId ? { sendPush: false } : {},
+          { sessionCompletion: Boolean(task.sessionId) },
         );
       }
       console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
@@ -6382,6 +6424,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       }
       activeSessions.delete(tempId);
       if (sid !== tempId) activeSessions.delete(sid);
+      broadcastStatusSync();
 
       const runIsRecurring = !manualRun && task.recurrence && task.recurrence.type !== "once";
       if (manualRun) {
@@ -6401,20 +6444,16 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       saveScheduledTask(task);
 
       broadcastScheduledTaskList();
-      if (task.notificationMode !== "quiet") {
-        const title = manualRun
-          ? "Scheduled task run failed"
-          : runIsRecurring ? `Recurring task failed (run #${runNumber})` : "Scheduled task failed";
+      broadcastSessionList();
+      if (scheduledTaskUsesAutomaticNotifications(task)) {
+        const title = `${scheduledTaskDisplayName(task)} failed`;
         const body = currentRun.error || task.prompt;
-        if (session.getSessionId()) {
-          sendSessionCompletionPush(session, "failed", body);
-        }
         broadcastScheduledTaskNotification(
           title,
           body,
           task.sessionId || "",
           "failed",
-          session.getSessionId() ? { sendPush: false } : {},
+          { sessionCompletion: Boolean(task.sessionId) },
         );
       }
       console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);
@@ -6425,8 +6464,13 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     else task.status = "failed";
     saveScheduledTask(task);
     broadcastScheduledTaskList();
-    if (task.notificationMode !== "quiet") {
-      broadcastScheduledTaskNotification("Scheduled task failed", task.error!, "", "failed");
+    if (scheduledTaskUsesAutomaticNotifications(task)) {
+      broadcastScheduledTaskNotification(
+        `${scheduledTaskDisplayName(task)} failed`,
+        task.error!,
+        "",
+        "failed",
+      );
     }
   }
 }

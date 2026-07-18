@@ -42,6 +42,7 @@ export interface NotifyUserArgs {
 }
 
 export interface ScheduleTaskArgs {
+  name?: string;
   prompt: string;
   cwd: string;
   backend?: Backend;
@@ -364,6 +365,7 @@ export async function handleScheduleTaskTool(
   const backend = args.backend || ctx.getBackend?.() || "claude";
   const task: ScheduledTask = {
     id: crypto.randomUUID(),
+    ...(args.name?.trim() ? { name: args.name.trim() } : {}),
     prompt: args.prompt,
     cwd: args.cwd,
     backend,
@@ -393,7 +395,8 @@ export async function handleScheduleTaskTool(
   const when = scheduledDate.toLocaleString();
   const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
   const notificationLabel = task.notificationMode === "quiet" ? " Quiet mode is on." : "";
-  return { content: [{ type: "text", text: `Task scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
+  const label = task.name ? `"${task.name}"` : "Task";
+  return { content: [{ type: "text", text: `${label} scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
 }
 
 function codexSkillsForContext(ctx: AppToolContext): SkillEntry[] {

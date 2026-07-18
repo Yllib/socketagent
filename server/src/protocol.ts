@@ -633,6 +633,7 @@ export interface ListSdkSessionsMessage {
 
 export interface ScheduleTaskMessage {
   type: "schedule_task";
+  name?: string;
   prompt: string;
   cwd: string;
   backend?: Backend;
@@ -666,6 +667,7 @@ export interface ExecuteScheduledTaskMessage {
 export interface UpdateScheduledTaskMessage {
   type: "update_scheduled_task";
   taskId: string;
+  name?: string;
   prompt?: string;
   cwd?: string;
   backend?: Backend;
@@ -1459,6 +1461,7 @@ export interface ScheduledTaskNotificationServerMessage {
   body: string;
   sessionId: string;
   status?: "completed" | "failed" | "manual";
+  sessionCompletion?: boolean;
 }
 
 // SDK event forwarding messages

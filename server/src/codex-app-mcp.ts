@@ -200,6 +200,7 @@ function createServer(context: AppToolContext): McpServer {
       title: "Schedule Task",
       description: "Schedule a Codex/Claude prompt to run automatically at a future time. Use this when the user wants to defer work until later.",
       inputSchema: {
+        name: z.string().optional().describe("Short human-readable label for the task, used in task lists and notifications"),
         prompt: z.string().describe("The prompt/instructions to execute at the scheduled time"),
         cwd: z.string().describe("Working directory for the scheduled task (absolute path)"),
         backend: z.enum(["claude", "codex"]).optional().describe("Agent provider. Defaults to the current provider."),

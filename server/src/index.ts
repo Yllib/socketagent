@@ -27,7 +27,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry } from "./session-store";
-import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
+import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
@@ -1036,7 +1036,11 @@ function broadcastSessionList(delayMs = 500, reason = "update"): void {
 
 /** Broadcast scheduled task list to all connected clients */
 function broadcastScheduledTaskList(): void {
-  const msg = JSON.stringify({ type: "scheduled_task_list", tasks: listScheduledTasks() });
+  const msg = JSON.stringify({
+    type: "scheduled_task_list",
+    tasks: listScheduledTasks(),
+    revision: getScheduledTaskRevision(),
+  });
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(msg);
   }
@@ -3102,7 +3106,11 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "list_scheduled_tasks": {
-        sendJson({ type: "scheduled_task_list", tasks: listScheduledTasks() });
+        sendJson({
+          type: "scheduled_task_list",
+          tasks: listScheduledTasks(),
+          revision: getScheduledTaskRevision(),
+        });
         break;
       }
 
@@ -6218,6 +6226,7 @@ function buildStatusSyncMessage(): string {
     serverStartedAt: SERVER_STARTED_AT,
     serverPid: process.pid,
     serverVersion: SERVER_GIT_HASH || undefined,
+    scheduledTaskRevision: getScheduledTaskRevision(),
     backgroundTaskIds,
     ...(Object.keys(sessionActiveStartedAt).length > 0 ? { sessionActiveStartedAt } : {}),
     ...(Object.keys(sessionTitles).length > 0 ? { sessionTitles } : {}),

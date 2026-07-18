@@ -1510,6 +1510,7 @@ export interface ActiveSubagentsServerMessage {
 export interface ScheduledTaskListServerMessage {
   type: "scheduled_task_list";
   tasks: import("./scheduled-task-store").ScheduledTask[];
+  revision?: string;
 }
 
 export interface ScheduledTaskUpdateServerMessage {

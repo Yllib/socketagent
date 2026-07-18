@@ -95,6 +95,19 @@ export function listScheduledTasks(): ScheduledTask[] {
   );
 }
 
+export function scheduledTaskRevisionForPath(filePath: string): string {
+  try {
+    const stat = fs.statSync(filePath, { bigint: true });
+    return `${stat.mtimeNs}:${stat.size}`;
+  } catch {
+    return "missing";
+  }
+}
+
+export function getScheduledTaskRevision(): string {
+  return scheduledTaskRevisionForPath(TASKS_FILE);
+}
+
 export function getScheduledTask(id: string): ScheduledTask | undefined {
   return readTasks().find((t) => t.id === id);
 }

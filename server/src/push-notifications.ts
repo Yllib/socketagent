@@ -93,7 +93,54 @@ export function isPushConfigured(): boolean {
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON
       || process.env.FIREBASE_SERVICE_ACCOUNT_PATH
       || process.env.GOOGLE_APPLICATION_CREDENTIALS
+      || (process.env.RELAY_URL && process.env.PAIRING_TOKEN)
   );
+}
+
+function relayPushEndpoint(): string | null {
+  const relayUrl = String(process.env.RELAY_URL || "").trim();
+  const pairingToken = String(process.env.PAIRING_TOKEN || "").trim();
+  if (!relayUrl || !pairingToken) return null;
+  try {
+    const url = new URL(relayUrl);
+    url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
+    url.pathname = "/api/push/send";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function sendPushViaRelay(
+  endpoint: string,
+  pairingToken: string,
+  payload: PushNotificationPayload,
+): Promise<{ sent: number; attempted: number }> {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      pairingToken,
+      title: payload.title,
+      body: payload.body || "",
+      sessionId: payload.sessionId || "",
+      status: payload.status || "manual",
+      kind: payload.kind || "",
+      showNotification: payload.showNotification !== false,
+      data: payload.data || {},
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const body = await response.json() as any;
+  if (!response.ok || body?.ok !== true) {
+    throw new Error(`relay FCM request failed (${response.status}): ${body?.error || "unknown error"}`);
+  }
+  return {
+    sent: Number.isFinite(Number(body.sent)) ? Number(body.sent) : 0,
+    attempted: Number.isFinite(Number(body.attempted)) ? Number(body.attempted) : 0,
+  };
 }
 
 function loadServiceAccountCredentials(): Record<string, unknown> | null {
@@ -228,6 +275,12 @@ async function sendFcmHttpV1(
 export async function sendPushNotification(
   payload: PushNotificationPayload,
 ): Promise<{ sent: number; attempted: number }> {
+  const endpoint = relayPushEndpoint();
+  const pairingToken = String(process.env.PAIRING_TOKEN || "").trim();
+  if (endpoint && pairingToken) {
+    return sendPushViaRelay(endpoint, pairingToken, payload);
+  }
+
   const entries = readStore();
   const tokens = entries.map((entry) => entry.token).filter(Boolean);
   if (tokens.length === 0) return { sent: 0, attempted: 0 };

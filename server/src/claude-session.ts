@@ -21,6 +21,7 @@ import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
   AppToolContext,
+  handleHtmlPlanTool,
   handleNotifyUserTool,
   handleRequestSecureInputTool,
   handleScheduleReminderTool,
@@ -1535,7 +1536,7 @@ export class ClaudeSession {
         getBackend: () => "claude",
         send: (msg) => this.send(msg as ServerMessage),
         appendHistory: (entry) => {
-          if (this.sessionId) appendHistory(this.sessionId, entry as HistoryEntry);
+          if (this.sessionId) return appendHistory(this.sessionId, entry as HistoryEntry);
         },
         getTtsEngine: () => this._ttsEngine,
         getKokoroVoice: () => this._kokoroVoice,
@@ -1546,6 +1547,16 @@ export class ClaudeSession {
       const appTools = createSdkMcpServer({
         name: "app",
         tools: [
+          tool(
+            "HtmlPlan",
+            "Present a substantive user-facing plan as polished HTML in a durable SocketAgent card. Use this when you are building a plan for the user to review. Reuse plan_id from the prior result to update an existing plan. Do not use it for a tiny one- or two-step answer.",
+            {
+              title: z.string().describe("Short descriptive plan title"),
+              html: z.string().describe("Self-contained semantic HTML for the plan. Inline CSS is allowed; scripts and remote resources are not."),
+              plan_id: z.string().optional().describe("Existing plan ID to update. Omit when creating a new plan."),
+            },
+            async (args) => handleHtmlPlanTool(appToolContext, args)
+          ),
           tool(
             "Speak",
             "Speak text aloud to the user via text-to-speech. Use this to provide a concise spoken summary of your response. Keep it natural and conversational — no markdown, no code, no formatting. Summarize rather than reading everything verbatim. Only call this once per response. Avoid starting with a very short sentence — lead with a substantial opening sentence so audio playback begins with meaningful content.",
@@ -1886,7 +1897,7 @@ export class ClaudeSession {
       }
 
       const secureInputInventory = secureInputInventoryForAgent(this.sessionId || undefined, this.cwd);
-      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude or Codex session that runs automatically at the specified time. Supports provider, model, effort, permissions, recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nUse RequestSecureInput when you need an API key, password, auth token, cookie, or other secret. Do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata.\n\n${secureInputInventory}\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
+      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude or Codex session that runs automatically at the specified time. Supports provider, model, effort, permissions, recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nWhen building a substantive plan to present to the user, use HtmlPlan so it appears as a durable, full-screen-capable session artifact. Use semantic, self-contained HTML with inline CSS and no scripts or remote resources. Reuse a returned plan_id when revising a plan. Do not use HtmlPlan for a tiny one- or two-step answer.\n\nUse RequestSecureInput when you need an API key, password, auth token, cookie, or other secret. Do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata.\n\n${secureInputInventory}\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
 
       // Handle fork: use fork source as resume target + set forkSession flag
       const shouldFork = !!this._forkFromSessionId;

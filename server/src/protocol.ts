@@ -78,6 +78,27 @@ export interface SecretDeleteMessage {
   cwd?: string;
 }
 
+export interface HtmlPlanListMessage {
+  type: "html_plan_list";
+  requestId?: string;
+  sessionId: string;
+}
+
+export interface HtmlPlanRenameMessage {
+  type: "html_plan_rename";
+  requestId: string;
+  sessionId: string;
+  planId: string;
+  title: string;
+}
+
+export interface HtmlPlanDeleteMessage {
+  type: "html_plan_delete";
+  requestId: string;
+  sessionId: string;
+  planId: string;
+}
+
 export interface NewSessionMessage {
   type: "new_session";
   cwd?: string;
@@ -695,6 +716,9 @@ export type ClientMessage =
   | SecretInventoryRequestMessage
   | SecretReplaceMessage
   | SecretDeleteMessage
+  | HtmlPlanListMessage
+  | HtmlPlanRenameMessage
+  | HtmlPlanDeleteMessage
   | NewSessionMessage
   | ResumeSessionMessage
   | SessionEventAckMessage
@@ -929,6 +953,41 @@ export interface SecretOperationResultServerMessage {
   secret?: SecretInventoryEntry;
 }
 
+export interface HtmlPlanRecord {
+  planId: string;
+  sessionId: string;
+  title: string;
+  html: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HtmlPlanServerMessage extends HtmlPlanRecord {
+  type: "html_plan";
+  deliveryId?: string;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
+}
+
+export interface HtmlPlanListServerMessage {
+  type: "html_plan_list";
+  requestId?: string;
+  sessionId: string;
+  plans: HtmlPlanRecord[];
+}
+
+export interface HtmlPlanOperationResultServerMessage {
+  type: "html_plan_operation_result";
+  requestId: string;
+  operation: "rename" | "delete";
+  ok: boolean;
+  sessionId: string;
+  planId: string;
+  error?: string;
+  plan?: HtmlPlanRecord;
+}
+
 export interface QuestionItem {
   question: string;
   header?: string;
@@ -1068,6 +1127,9 @@ export interface ServerCapabilitiesMessage {
   secretManagement?: {
     version: number;
   };
+  htmlPlans?: {
+    version: number;
+  };
   /** Backends supported by this server build. Health/auth state is in backendHealth. */
   backends: Backend[];
   codexDriver?: CodexDriver;
@@ -1138,7 +1200,7 @@ export interface SessionArchiveFailedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "permission_mode";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "html_plan" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "permission_mode";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -1686,6 +1748,9 @@ export type ServerMessage =
   | SecureInputSavedServerMessage
   | SecretInventoryServerMessage
   | SecretOperationResultServerMessage
+  | HtmlPlanServerMessage
+  | HtmlPlanListServerMessage
+  | HtmlPlanOperationResultServerMessage
   | ResultServerMessage
   | SessionListServerMessage
   | SdkSessionListServerMessage

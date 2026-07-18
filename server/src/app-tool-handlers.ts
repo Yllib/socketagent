@@ -8,6 +8,8 @@ import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-
 import { listSkills, SkillEntry } from "./skills-manager";
 import { requestSecureInput, SecureInputRequestArgs, SecureInputRequestStatus } from "./secure-input-store";
 import { sendPushNotification } from "./push-notifications";
+import { saveHtmlPlan } from "./html-plan-store";
+import { removeHtmlPlanHistoryEntries } from "./session-store";
 
 export interface AppToolContext {
   getSessionId(): string;
@@ -15,7 +17,7 @@ export interface AppToolContext {
   getBackend?(): Backend;
   getCodexDriver?(): CodexDriver;
   send(msg: ServerMessage | Record<string, any>): void;
-  appendHistory?(entry: Record<string, any>): void;
+  appendHistory?(entry: Record<string, any>): Record<string, any> | void;
   getTtsEngine(): "system" | "kokoro_server" | "kokoro_device";
   getKokoroVoice(): string;
   getKokoroSpeed(): number;
@@ -77,6 +79,12 @@ export interface ReadSkillArgs {
 
 export type RequestSecureInputArgs = SecureInputRequestArgs;
 
+export interface HtmlPlanArgs {
+  title: string;
+  html: string;
+  plan_id?: string;
+}
+
 interface AppMonitorState {
   ctx: AppToolContext;
   description: string;
@@ -91,6 +99,48 @@ interface AppMonitorState {
 
 const recentSendFiles: Map<string, number> = new Map();
 const appMonitors: Map<string, AppMonitorState> = new Map();
+
+export async function handleHtmlPlanTool(
+  ctx: AppToolContext,
+  args: HtmlPlanArgs,
+): Promise<McpTextResult> {
+  try {
+    const sessionId = ctx.getSessionId();
+    const saved = saveHtmlPlan({
+      sessionId,
+      title: args.title,
+      html: args.html,
+      planId: args.plan_id,
+    });
+    removeHtmlPlanHistoryEntries(sessionId, saved.planId);
+    const positioned = ctx.appendHistory?.({
+      role: "html_plan",
+      content: saved.title,
+      toolName: "HtmlPlan",
+      toolInput: saved,
+      toolUseId: `html_plan_${saved.planId}`,
+      timestamp: saved.updatedAt,
+    }) as Record<string, any> | undefined;
+    ctx.send({
+      type: "html_plan",
+      ...saved,
+      ...(positioned?.entryId ? { entryId: positioned.entryId } : {}),
+      ...(positioned?.sessionSeq ? { sessionSeq: positioned.sessionSeq } : {}),
+      ...(positioned?.revision ? { revision: positioned.revision } : {}),
+    });
+    return {
+      content: [{
+        type: "text",
+        text: `HTML plan presented to the user. Plan ID: ${saved.planId}. Reuse this plan_id to update it instead of creating another plan.`,
+      }],
+    };
+  } catch (e: any) {
+    return {
+      content: [{ type: "text", text: `HTML plan error: ${e.message || String(e)}` }],
+      isError: true,
+    };
+  }
+}
 
 function appendVisibleToolHistory(
   ctx: AppToolContext,

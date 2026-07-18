@@ -88,3 +88,17 @@ test("pending cards replay immediately to a reattached client", () => {
   assert.equal(replayed[0].replay, true);
   delivery.dispose();
 });
+
+test("HTML plan cards use acknowledged delivery", () => {
+  const delivery = new SessionEventDelivery(() => {});
+  const prepared = delivery.prepare({
+    type: "html_plan",
+    sessionId: "plan-session",
+    planId: "plan-1",
+    title: "Plan",
+  });
+  assert.ok(prepared.deliveryId);
+  assert.equal(delivery.pendingCount, 1);
+  assert.equal(delivery.acknowledge(prepared.deliveryId), true);
+  delivery.dispose();
+});

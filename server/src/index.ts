@@ -26,7 +26,7 @@ import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath } from "./session-store";
+import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -45,6 +45,7 @@ import { terminalSessionManager } from "./terminal-session";
 import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInputRequestWithSavedSecret, createSecureInputInventoryMessage, deleteSecureInput, getAccessibleSecureInput, isSecureInputPending, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
 import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
+import { deleteHtmlPlan, deleteHtmlPlansForSession, listHtmlPlans, renameHtmlPlan } from "./html-plan-store";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -1069,6 +1070,7 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
     binaryEnvelope,
     terminal: true,
     secretManagement: { version: 1 },
+    htmlPlans: { version: 1 },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
     codexDriversAvailable: settings.codexDriversAvailable,
@@ -3021,6 +3023,7 @@ function createConnectionHandler(transport: ClientTransport) {
         try {
           const sessionInfo = getSession(sid) || await getCodexNativeThreadSessionInfo(sid, getDefaultCwd()) || undefined;
           const result = deleteSessionArtifacts(sid, sessionInfo);
+          deleteHtmlPlansForSession(sid);
           invalidateCodexNativeListCache();
           for (const warning of result.warnings) {
             console.warn(`[DeleteSession] ${warning}`);
@@ -3982,6 +3985,53 @@ function createConnectionHandler(transport: ClientTransport) {
             ok: false,
             error: e.message || String(e),
           });
+        }
+        break;
+      }
+
+      case "html_plan_list": {
+        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
+        const requestId = String((msg as any).requestId || "").trim() || undefined;
+        if (!sessionId) {
+          sendJson({ type: "error", message: "HTML plan list requires a session ID" });
+          break;
+        }
+        sendJson({ type: "html_plan_list", requestId, sessionId, plans: listHtmlPlans(sessionId) });
+        break;
+      }
+
+      case "html_plan_rename": {
+        const requestId = String((msg as any).requestId || "").trim();
+        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
+        const planId = String((msg as any).planId || "").trim();
+        try {
+          const plan = renameHtmlPlan(sessionId, planId, String((msg as any).title || ""));
+          updateHtmlPlanHistoryEntry(sessionId, plan);
+          sendJson({ type: "html_plan_operation_result", requestId, operation: "rename", ok: true, sessionId, planId, plan });
+        } catch (e: any) {
+          sendJson({ type: "html_plan_operation_result", requestId, operation: "rename", ok: false, sessionId, planId, error: e.message || String(e) });
+        }
+        break;
+      }
+
+      case "html_plan_delete": {
+        const requestId = String((msg as any).requestId || "").trim();
+        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
+        const planId = String((msg as any).planId || "").trim();
+        try {
+          const deleted = deleteHtmlPlan(sessionId, planId);
+          if (deleted) removeHtmlPlanHistoryEntries(sessionId, planId);
+          sendJson({
+            type: "html_plan_operation_result",
+            requestId,
+            operation: "delete",
+            ok: deleted,
+            sessionId,
+            planId,
+            ...(deleted ? {} : { error: "HTML plan not found in this session" }),
+          });
+        } catch (e: any) {
+          sendJson({ type: "html_plan_operation_result", requestId, operation: "delete", ok: false, sessionId, planId, error: e.message || String(e) });
         }
         break;
       }

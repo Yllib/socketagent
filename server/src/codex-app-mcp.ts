@@ -6,6 +6,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   AppToolContext,
+  handleHtmlPlanTool,
   handleMonitorTool,
   handleNotifyUserTool,
   handleRequestSecureInputTool,
@@ -23,6 +24,10 @@ export interface SocketAgentAppToolManifest {
 }
 
 export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
+  {
+    name: "HtmlPlan",
+    description: "Present or update a durable, full-screen HTML plan for the user.",
+  },
   {
     name: "SendFile",
     description: "Send a file to the user's mobile device for download.",
@@ -100,6 +105,20 @@ function createServer(context: AppToolContext): McpServer {
     name: "socketagent-app",
     version: "1.0.0",
   });
+
+  server.registerTool(
+    "HtmlPlan",
+    {
+      title: "HTML Plan",
+      description: "Present a substantive user-facing plan as polished HTML in a durable SocketAgent card. Reuse plan_id from the prior result to update an existing plan. Do not use for tiny one- or two-step answers.",
+      inputSchema: {
+        title: z.string().describe("Short descriptive plan title"),
+        html: z.string().describe("Self-contained semantic HTML. Inline CSS is allowed; scripts and remote resources are not."),
+        plan_id: z.string().optional().describe("Existing plan ID to update. Omit to create a new plan."),
+      },
+    },
+    async (args) => handleHtmlPlanTool(context, args as any),
+  );
 
   server.registerTool(
     "SearchSkills",

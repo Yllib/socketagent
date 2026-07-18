@@ -10,6 +10,7 @@ import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./cod
 import { buildCodexSpawn } from "./codex-env";
 import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
+import { remapHtmlPlans } from "./html-plan-store";
 
 const STORE_DIR = socketAgentDataPath();
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
@@ -288,6 +289,7 @@ export function remapSession(oldId: string, newId: string): void {
     delete (session as any).contextClearedAt;
     session.lastActive = new Date().toISOString();
     writeStore(sessions);
+    remapHtmlPlans(oldId, newId);
     console.log(`[Remap] Session ${oldId} → ${newId}`);
   }
 }
@@ -922,6 +924,31 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
   const positioned = newEntries.map((entry) => positionHistoryEntry(sessionId, entry));
   entries.push(...positioned);
   writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set(positioned) });
+}
+
+export function removeHtmlPlanHistoryEntries(sessionId: string, planId: string): void {
+  if (!sessionId || !planId) return;
+  const entries = readHistoryEntries(sessionId);
+  const filtered = entries.filter((entry) =>
+    !(entry.role === "html_plan" && String(entry.toolInput?.planId || "") === planId));
+  if (filtered.length !== entries.length) writeHistoryEntries(sessionId, filtered);
+}
+
+export function updateHtmlPlanHistoryEntry(
+  sessionId: string,
+  plan: { planId: string; title: string; html: string; createdAt: string; updatedAt: string },
+): void {
+  const entries = readHistoryEntries(sessionId);
+  let changed = false;
+  for (const entry of entries) {
+    if (entry.role !== "html_plan" || String(entry.toolInput?.planId || "") !== plan.planId) continue;
+    entry.content = plan.title;
+    entry.toolInput = { ...entry.toolInput, ...plan, sessionId };
+    entry.timestamp = plan.updatedAt;
+    entry.revision = Math.max(1, Number(entry.revision || 1) + 1);
+    changed = true;
+  }
+  if (changed) writeHistoryEntries(sessionId, entries);
 }
 
 function nativeSyncTextKey(entry: HistoryEntry): string | null {

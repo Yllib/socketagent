@@ -99,6 +99,30 @@ export interface HtmlPlanDeleteMessage {
   planId: string;
 }
 
+export interface HtmlPlanRevisionListMessage {
+  type: "html_plan_revision_list";
+  requestId: string;
+  sessionId: string;
+  planId: string;
+}
+
+export interface HtmlPlanRevisionGetMessage {
+  type: "html_plan_revision_get";
+  requestId: string;
+  sessionId: string;
+  planId: string;
+  revision: number;
+  baseRevision?: number;
+}
+
+export interface HtmlPlanRollbackMessage {
+  type: "html_plan_rollback";
+  requestId: string;
+  sessionId: string;
+  planId: string;
+  revision: number;
+}
+
 export interface NewSessionMessage {
   type: "new_session";
   cwd?: string;
@@ -728,6 +752,9 @@ export type ClientMessage =
   | HtmlPlanListMessage
   | HtmlPlanRenameMessage
   | HtmlPlanDeleteMessage
+  | HtmlPlanRevisionListMessage
+  | HtmlPlanRevisionGetMessage
+  | HtmlPlanRollbackMessage
   | NewSessionMessage
   | ResumeSessionMessage
   | SessionEventAckMessage
@@ -970,6 +997,29 @@ export interface HtmlPlanRecord {
   html: string;
   createdAt: string;
   updatedAt: string;
+  currentRevision: number;
+  revisionCount: number;
+}
+
+export interface HtmlPlanRevisionSummaryRecord {
+  revision: number;
+  title: string;
+  createdAt: string;
+  byteSize: number;
+  restoredFromRevision?: number;
+}
+
+export interface HtmlPlanRevisionRecord {
+  revision: number;
+  title: string;
+  html: string;
+  createdAt: string;
+  restoredFromRevision?: number;
+}
+
+export interface HtmlPlanDiffSegmentRecord {
+  type: "equal" | "added" | "removed";
+  text: string;
 }
 
 export interface HtmlPlanServerMessage extends HtmlPlanRecord {
@@ -990,12 +1040,34 @@ export interface HtmlPlanListServerMessage {
 export interface HtmlPlanOperationResultServerMessage {
   type: "html_plan_operation_result";
   requestId: string;
-  operation: "rename" | "delete";
+  operation: "rename" | "delete" | "rollback";
   ok: boolean;
   sessionId: string;
   planId: string;
   error?: string;
   plan?: HtmlPlanRecord;
+}
+
+export interface HtmlPlanRevisionListServerMessage {
+  type: "html_plan_revision_list";
+  requestId: string;
+  sessionId: string;
+  planId: string;
+  ok: boolean;
+  error?: string;
+  revisions: HtmlPlanRevisionSummaryRecord[];
+}
+
+export interface HtmlPlanRevisionServerMessage {
+  type: "html_plan_revision";
+  requestId: string;
+  sessionId: string;
+  planId: string;
+  ok: boolean;
+  error?: string;
+  revision?: HtmlPlanRevisionRecord;
+  baseRevision?: number;
+  diff: HtmlPlanDiffSegmentRecord[];
 }
 
 export interface QuestionItem {
@@ -1763,6 +1835,8 @@ export type ServerMessage =
   | HtmlPlanServerMessage
   | HtmlPlanListServerMessage
   | HtmlPlanOperationResultServerMessage
+  | HtmlPlanRevisionListServerMessage
+  | HtmlPlanRevisionServerMessage
   | ResultServerMessage
   | SessionListServerMessage
   | SdkSessionListServerMessage

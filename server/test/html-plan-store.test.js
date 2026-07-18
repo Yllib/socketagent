@@ -9,11 +9,15 @@ process.env.SOCKET_AGENT_DATA_DIR = dataDir;
 
 const {
   deleteHtmlPlan,
+  diffHtmlPlanRevisions,
+  getHtmlPlanRevision,
+  listHtmlPlanRevisions,
   listHtmlPlans,
   renameHtmlPlan,
   remapHtmlPlans,
   sanitizeHtmlPlan,
   saveHtmlPlan,
+  rollbackHtmlPlan,
 } = require("../dist/html-plan-store");
 const {
   appendHistory,
@@ -31,6 +35,8 @@ test("stores, updates, renames, and deletes plans within one session", () => {
     html: "<h1>Launch</h1><p>First version</p>",
   });
   assert.equal(listHtmlPlans("plan-session").length, 1);
+  assert.equal(created.currentRevision, 1);
+  assert.equal(created.revisionCount, 1);
 
   const updated = saveHtmlPlan({
     sessionId: "plan-session",
@@ -39,6 +45,8 @@ test("stores, updates, renames, and deletes plans within one session", () => {
     html: "<h1>Launch</h1><p>Revised version</p>",
   });
   assert.equal(updated.createdAt, created.createdAt);
+  assert.equal(updated.currentRevision, 2);
+  assert.equal(updated.revisionCount, 2);
   assert.match(updated.html, /Revised version/);
   assert.equal(listHtmlPlans("plan-session").length, 1);
 
@@ -46,6 +54,62 @@ test("stores, updates, renames, and deletes plans within one session", () => {
   assert.equal(renamed.title, "Release plan");
   assert.equal(deleteHtmlPlan("plan-session", created.planId), true);
   assert.deepEqual(listHtmlPlans("plan-session"), []);
+});
+
+test("retains revisions, generates diffs, and rolls back by appending a revision", () => {
+  const first = saveHtmlPlan({
+    sessionId: "revision-session",
+    title: "Deploy plan",
+    html: "<h1>Deploy</h1><p>Ship alpha today</p>",
+  });
+  const second = saveHtmlPlan({
+    sessionId: "revision-session",
+    planId: first.planId,
+    title: "Deploy plan",
+    html: "<h1>Deploy</h1><p>Ship beta tomorrow</p>",
+  });
+
+  const revisions = listHtmlPlanRevisions("revision-session", first.planId);
+  assert.deepEqual(revisions.map((revision) => revision.revision), [2, 1]);
+  assert.match(getHtmlPlanRevision("revision-session", first.planId, 1).html, /alpha today/);
+  const diff = diffHtmlPlanRevisions("revision-session", first.planId, 2);
+  assert.equal(diff.baseRevision, 1);
+  assert.match(diff.segments.filter((segment) => segment.type === "removed").map((segment) => segment.text).join(""), /alpha|today/);
+  assert.match(diff.segments.filter((segment) => segment.type === "added").map((segment) => segment.text).join(""), /beta|tomorrow/);
+
+  const restored = rollbackHtmlPlan("revision-session", first.planId, 1);
+  assert.equal(restored.currentRevision, 3);
+  assert.equal(restored.revisionCount, 3);
+  assert.match(restored.html, /alpha today/);
+  const restoredSummary = listHtmlPlanRevisions("revision-session", first.planId)[0];
+  assert.equal(restoredSummary.restoredFromRevision, 1);
+
+  const duplicate = saveHtmlPlan({
+    sessionId: "revision-session",
+    planId: first.planId,
+    title: restored.title,
+    html: restored.html,
+  });
+  assert.equal(duplicate.currentRevision, 3);
+  assert.equal(second.currentRevision, 2);
+});
+
+test("migrates legacy single-version plan files into revision one", () => {
+  const legacyDir = path.join(dataDir, "html-plans");
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.writeFileSync(path.join(legacyDir, "legacy-session.json"), JSON.stringify([{
+    planId: "legacy-plan",
+    sessionId: "legacy-session",
+    title: "Legacy",
+    html: "<p>Preserved</p>",
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T01:00:00.000Z",
+  }]));
+
+  const [plan] = listHtmlPlans("legacy-session");
+  assert.equal(plan.currentRevision, 1);
+  assert.equal(plan.revisionCount, 1);
+  assert.match(getHtmlPlanRevision("legacy-session", "legacy-plan", 1).html, /Preserved/);
 });
 
 test("removes executable and remote content while retaining formatting", () => {

@@ -46,7 +46,7 @@ import { terminalSessionManager } from "./terminal-session";
 import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInputRequestWithSavedSecret, createSecureInputInventoryMessage, deleteSecureInput, getAccessibleSecureInput, isSecureInputPending, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
 import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
-import { deleteHtmlPlan, deleteHtmlPlansForSession, listHtmlPlans, renameHtmlPlan } from "./html-plan-store";
+import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHtmlPlanRevision, listHtmlPlanRevisions, listHtmlPlans, renameHtmlPlan, rollbackHtmlPlan } from "./html-plan-store";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -1108,7 +1108,7 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
     binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
     terminal: true,
     secretManagement: { version: 1 },
-    htmlPlans: { version: 1 },
+    htmlPlans: { version: 2 },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
     codexDriversAvailable: settings.codexDriversAvailable,
@@ -4144,6 +4144,78 @@ function createConnectionHandler(transport: ClientTransport) {
           });
         } catch (e: any) {
           sendJson({ type: "html_plan_operation_result", requestId, operation: "delete", ok: false, sessionId, planId, error: e.message || String(e) });
+        }
+        break;
+      }
+
+      case "html_plan_revision_list": {
+        const requestId = String((msg as any).requestId || "").trim();
+        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
+        const planId = String((msg as any).planId || "").trim();
+        try {
+          sendJson({
+            type: "html_plan_revision_list",
+            requestId,
+            sessionId,
+            planId,
+            ok: true,
+            revisions: listHtmlPlanRevisions(sessionId, planId),
+          });
+        } catch (e: any) {
+          sendJson({ type: "html_plan_revision_list", requestId, sessionId, planId, ok: false, revisions: [], error: e.message || String(e) });
+        }
+        break;
+      }
+
+      case "html_plan_revision_get": {
+        const requestId = String((msg as any).requestId || "").trim();
+        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
+        const planId = String((msg as any).planId || "").trim();
+        const revisionNumber = Number((msg as any).revision);
+        const requestedBase = (msg as any).baseRevision;
+        try {
+          const revision = getHtmlPlanRevision(sessionId, planId, revisionNumber);
+          const diff = diffHtmlPlanRevisions(
+            sessionId,
+            planId,
+            revisionNumber,
+            Number.isInteger(Number(requestedBase)) ? Number(requestedBase) : undefined,
+          );
+          sendJson({
+            type: "html_plan_revision",
+            requestId,
+            sessionId,
+            planId,
+            ok: true,
+            revision,
+            ...(diff.baseRevision ? { baseRevision: diff.baseRevision } : {}),
+            diff: diff.segments,
+          });
+        } catch (e: any) {
+          sendJson({
+            type: "html_plan_revision",
+            requestId,
+            sessionId,
+            planId,
+            ok: false,
+            diff: [],
+            error: e.message || String(e),
+          });
+        }
+        break;
+      }
+
+      case "html_plan_rollback": {
+        const requestId = String((msg as any).requestId || "").trim();
+        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
+        const planId = String((msg as any).planId || "").trim();
+        const revisionNumber = Number((msg as any).revision);
+        try {
+          const plan = rollbackHtmlPlan(sessionId, planId, revisionNumber);
+          updateHtmlPlanHistoryEntry(sessionId, plan);
+          sendJson({ type: "html_plan_operation_result", requestId, operation: "rollback", ok: true, sessionId, planId, plan });
+        } catch (e: any) {
+          sendJson({ type: "html_plan_operation_result", requestId, operation: "rollback", ok: false, sessionId, planId, error: e.message || String(e) });
         }
         break;
       }

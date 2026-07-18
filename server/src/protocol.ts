@@ -395,6 +395,7 @@ export interface UploadChunkBinMessage {
 export interface ClientCapabilitiesMessage {
   type: "client_capabilities";
   binaryEnvelope?: boolean;
+  binaryFileDownloadVersion?: number;
   /**
    * Version 1 means the client acknowledges only after its live reducer has
    * applied a tracked session event. Do not infer this from the legacy boolean:
@@ -416,6 +417,7 @@ export interface DirectAuthMessage {
   type: "direct_auth";
   token: string;
   binaryEnvelope?: boolean;
+  binaryFileDownloadVersion?: number;
   sessionEventAckVersion?: number;
   /** @deprecated Ambiguous compatibility flag; never enables tracked delivery. */
   sessionEventAck?: boolean;
@@ -429,6 +431,13 @@ export function supportsSessionEventAcknowledgement(message: unknown): boolean {
   return typeof version === "number"
     && Number.isInteger(version)
     && version >= SESSION_EVENT_ACK_VERSION;
+}
+
+export interface FileDownloadAckMessage {
+  type: "file_download_ack";
+  fileId: string;
+  transferToken?: string;
+  receivedBytes: number;
 }
 
 export interface TerminalAttachMessage {
@@ -781,6 +790,7 @@ export type ClientMessage =
   | UploadStartMessage
   | UploadChunkMessage
   | UploadChunkBinMessage
+  | FileDownloadAckMessage
   | ClientCapabilitiesMessage
   | SetRawModeMessage
   | DirectAuthMessage
@@ -1124,6 +1134,7 @@ export interface PushRegistrationStatusServerMessage {
 export interface ServerCapabilitiesMessage {
   type: "server_capabilities";
   binaryEnvelope?: boolean;
+  binaryFileDownloadVersion?: number;
   secretManagement?: {
     version: number;
   };

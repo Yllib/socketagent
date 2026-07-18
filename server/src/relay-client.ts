@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
 import { ClientMessage, supportsSessionEventAcknowledgement } from "./protocol";
+import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { detectAvailableBackends } from "./codex-session";
 import { getAdvertisedServerSettings } from "./server-settings";
 
@@ -13,6 +14,7 @@ interface RelayPeer {
   publicKey: Uint8Array | null;
   binaryEnabled: boolean;
   supportsSessionEventAck: boolean;
+  supportsBinaryFileDownload: boolean;
 }
 
 export interface RelayOutboxDrain {
@@ -264,7 +266,12 @@ export class RelayClient {
   private getPeer(peerId = LEGACY_PEER_ID): RelayPeer {
     let peer = this.peers.get(peerId);
     if (!peer) {
-      peer = { publicKey: null, binaryEnabled: false, supportsSessionEventAck: false };
+      peer = {
+        publicKey: null,
+        binaryEnabled: false,
+        supportsSessionEventAck: false,
+        supportsBinaryFileDownload: false,
+      };
       this.peers.set(peerId, peer);
     }
     return peer;
@@ -309,6 +316,32 @@ export class RelayClient {
       const envelope = encrypt(json, peer.publicKey, this.opts.keyPair.secretKey);
       this.sendRawFrameToPeer(peerId, JSON.stringify(envelope), false);
     }
+  }
+
+  supportsBinaryFileDownloads(peerId?: string): boolean {
+    if (peerId) return this.getPeer(peerId).supportsBinaryFileDownload;
+    return Array.from(this.peers.values()).some((peer) => peer.supportsBinaryFileDownload);
+  }
+
+  sendFileDownloadChunk(
+    metadata: BinaryFileDownloadChunkMetadata,
+    bytes: Buffer,
+    peerId?: string,
+  ): boolean {
+    const targets = peerId
+      ? [[peerId, this.getPeer(peerId)] as const]
+      : Array.from(this.peers.entries());
+    if (targets.length === 0 || targets.some(([, peer]) =>
+      !peer.publicKey || !peer.binaryEnabled || !peer.supportsBinaryFileDownload
+    )) {
+      return false;
+    }
+    for (const [targetPeerId, peer] of targets) {
+      const plaintext = encodeBinaryFileDownloadChunk(metadata, bytes);
+      const envelope = encryptBinary(plaintext, peer.publicKey!, this.opts.keyPair.secretKey);
+      this.sendRawFrameToPeer(targetPeerId, envelope, true);
+    }
+    return true;
   }
 
   private handleRelayMessage(parsed: any): void {
@@ -481,6 +514,7 @@ export class RelayClient {
       const wantsBinary = !!(msg as any).binaryEnvelope;
       const peer = this.getPeer(peerId);
       peer.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
+      peer.supportsBinaryFileDownload = supportsBinaryFileDownload(msg);
       this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
         .some((connectedPeer) => connectedPeer.supportsSessionEventAck);
       if (wantsBinary && !peer.binaryEnabled) {
@@ -493,6 +527,7 @@ export class RelayClient {
       this.sendToPeer(peerId, {
         type: "server_capabilities",
         binaryEnvelope: peer.binaryEnabled,
+        binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
         secretManagement: { version: 1 },
         backends: detectAvailableBackends(),
         codexDriver: settings.codexDriver,
@@ -501,6 +536,11 @@ export class RelayClient {
       }, peer);
       return;
     }
+    Object.defineProperty(msg, "__relayPeerId", {
+      value: peerId,
+      enumerable: false,
+      configurable: true,
+    });
     this.opts.onMessage(msg);
   }
 
@@ -587,6 +627,18 @@ export class VirtualRelaySocket {
 
   get bufferedAmount(): number {
     return this.relay.bufferedAmount;
+  }
+
+  supportsBinaryFileDownload(peerId?: string): boolean {
+    return this.relay.supportsBinaryFileDownloads(peerId);
+  }
+
+  sendFileDownloadChunk(
+    metadata: BinaryFileDownloadChunkMetadata,
+    bytes: Buffer,
+    peerId?: string,
+  ): boolean {
+    return this.relay.sendFileDownloadChunk(metadata, bytes, peerId);
   }
 
   send(data: string): void {

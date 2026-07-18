@@ -29,6 +29,7 @@ import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread,
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
+import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
@@ -703,12 +704,19 @@ interface ClientTransport {
   readonly connectionGeneration?: number;
   supportsRawSdkEvents?: boolean;
   send(data: string): void;
+  supportsBinaryFileDownload?(peerId?: string): boolean;
+  sendFileDownloadChunk?(
+    metadata: BinaryFileDownloadChunkMetadata,
+    bytes: Buffer,
+    peerId?: string,
+  ): boolean;
 }
 
 class DirectClientTransport implements ClientTransport {
   private peerPublicKey: Uint8Array | null = null;
   private binaryEnabled = false;
   private authenticated: boolean;
+  private binaryFileDownloadEnabled = false;
   private authTimer: ReturnType<typeof setTimeout> | null = null;
   supportsRawSdkEvents = false;
 
@@ -795,6 +803,31 @@ class DirectClientTransport implements ClientTransport {
       clearTimeout(this.authTimer);
       this.authTimer = null;
     }
+  }
+
+  setClientCapabilities(message: unknown): void {
+    this.binaryFileDownloadEnabled = supportsBinaryFileDownload(message);
+  }
+
+  supportsBinaryFileDownload(): boolean {
+    return this.binaryFileDownloadEnabled;
+  }
+
+  sendFileDownloadChunk(
+    metadata: BinaryFileDownloadChunkMetadata,
+    bytes: Buffer,
+  ): boolean {
+    if (!this.binaryFileDownloadEnabled || this.ws.readyState !== WebSocket.OPEN) return false;
+    const plaintext = encodeBinaryFileDownloadChunk(metadata, bytes);
+    if (this.peerPublicKey) {
+      this.ws.send(
+        encryptBinary(plaintext, this.peerPublicKey, this.keyPair.secretKey),
+        { binary: true },
+      );
+    } else {
+      this.ws.send(plaintext, { binary: true });
+    }
+    return true;
   }
 
   decryptTextEnvelope(parsed: unknown): ClientMessage {
@@ -1072,6 +1105,7 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
   return {
     type: "server_capabilities",
     binaryEnvelope,
+    binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 1 },
@@ -1571,8 +1605,9 @@ function createConnectionHandler(transport: ClientTransport) {
     totalBytes: number;
     bytesReceived: number;
     lastProgressEmit: number;
-	  }>();
+  }>();
   const activeFileSendVersions = new Map<string, number>();
+  const activeFileDownloadAcks = new Map<string, { receivedBytes: number }>();
   let externalNativeWatchTimer: ReturnType<typeof setInterval> | null = null;
   let externalNativeWatchSessionId: string | null = null;
   let externalNativeWatchFingerprint: string | null = null;
@@ -1762,7 +1797,7 @@ function createConnectionHandler(transport: ClientTransport) {
   }
 
   async function waitForFileSendBackpressure(): Promise<void> {
-    const maxBufferedBytes = 512 * 1024;
+    const maxBufferedBytes = 4 * 1024 * 1024;
     while (transport.readyState === WebSocket.OPEN) {
       const bufferedAmount = Number((transport as any).bufferedAmount || 0);
       if (!Number.isFinite(bufferedAmount) || bufferedAmount <= maxBufferedBytes) {
@@ -1772,7 +1807,39 @@ function createConnectionHandler(transport: ClientTransport) {
     }
   }
 
-  async function sendFileChunks(filePath: string, fileId?: string, offsetBytes = 0, transferToken?: string): Promise<void> {
+  function fileDownloadAckKey(fileId: string, transferToken: string | undefined, peerId?: string): string {
+    return `${peerId || "direct"}:${fileId}:${transferToken || "legacy"}`;
+  }
+
+  async function waitForFileDownloadWindow(
+    ackKey: string,
+    sentThrough: number,
+    maxOutstandingBytes: number,
+  ): Promise<void> {
+    let lastReceived = activeFileDownloadAcks.get(ackKey)?.receivedBytes || 0;
+    let progressDeadline = Date.now() + 15_000;
+    while (transport.readyState === WebSocket.OPEN) {
+      const received = activeFileDownloadAcks.get(ackKey)?.receivedBytes || 0;
+      if (sentThrough - received <= maxOutstandingBytes) return;
+      if (received > lastReceived) {
+        lastReceived = received;
+        progressDeadline = Date.now() + 15_000;
+      }
+      if (Date.now() >= progressDeadline) {
+        throw new Error(`File transfer acknowledgement timed out at ${received}/${sentThrough} bytes`);
+      }
+      await sleep(10);
+    }
+    throw new Error("File transfer socket closed");
+  }
+
+  async function sendFileChunks(
+    filePath: string,
+    fileId?: string,
+    offsetBytes = 0,
+    transferToken?: string,
+    peerId?: string,
+  ): Promise<void> {
     if (!filePath || !fs.existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
     }
@@ -1782,67 +1849,103 @@ function createConnectionHandler(transport: ClientTransport) {
     }
     const transferId = fileId || crypto.randomUUID();
     const fileName = path.basename(filePath);
-    const transferVersion = (activeFileSendVersions.get(transferId) || 0) + 1;
+    const transferStateId = `${peerId || "direct"}:${transferId}`;
+    const transferVersion = (activeFileSendVersions.get(transferStateId) || 0) + 1;
     const connectionGeneration = transport.connectionGeneration;
-    activeFileSendVersions.set(transferId, transferVersion);
+    activeFileSendVersions.set(transferStateId, transferVersion);
     const isCurrentTransfer = () =>
-      activeFileSendVersions.get(transferId) === transferVersion &&
+      activeFileSendVersions.get(transferStateId) === transferVersion &&
       (connectionGeneration === undefined || transport.connectionGeneration === connectionGeneration);
-    const CHUNK_SIZE = 96 * 1024; // Keep encrypted/base64 JSON frames modest for mobile links.
+    const useBinaryDownload =
+      transport.supportsBinaryFileDownload?.(peerId) === true &&
+      typeof transport.sendFileDownloadChunk === "function";
+    const CHUNK_SIZE = useBinaryDownload ? 512 * 1024 : 96 * 1024;
+    const MAX_OUTSTANDING_BYTES = 4 * 1024 * 1024;
     const totalChunks = Math.ceil(stat.size / CHUNK_SIZE);
     const startOffset = Math.max(0, Math.min(Math.floor(offsetBytes || 0), stat.size));
-    console.log(`Sending file in ${totalChunks} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB${startOffset > 0 ? `, resume=${startOffset}` : ""})`);
-
-    const fd = fs.openSync(filePath, "r");
+    const ackKey = fileDownloadAckKey(transferId, transferToken, peerId);
+    if (useBinaryDownload) {
+      activeFileDownloadAcks.set(ackKey, { receivedBytes: startOffset });
+    }
     try {
-      const buf = Buffer.alloc(CHUNK_SIZE);
-      for (let position = startOffset; position < stat.size;) {
-        if (transport.readyState !== WebSocket.OPEN || !isCurrentTransfer()) {
-          console.warn(`File transfer aborted, socket closed: ${fileName} (id=${transferId}, offset=${position}/${stat.size})`);
-          return;
-        }
-        await waitForFileSendBackpressure();
-        if (!isCurrentTransfer()) {
-          console.warn(`File transfer superseded: ${fileName} (id=${transferId}, offset=${position}/${stat.size})`);
-          return;
-        }
-        const chunkIndex = Math.floor(position / CHUNK_SIZE);
-        const bytesRead = fs.readSync(fd, buf, 0, Math.min(CHUNK_SIZE, stat.size - position), position);
-        const chunk = buf.subarray(0, bytesRead).toString("base64");
-        sendJson({
-          type: "file_chunk",
-          fileId: transferId,
-          fileName,
-          fileSize: stat.size,
-          offsetBytes: position,
-          transferToken,
-          chunkIndex,
-          totalChunks,
-          data: chunk,
-        });
-        position += bytesRead;
-        await sleep(8);
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
+      console.log(`Sending file in ${totalChunks} ${useBinaryDownload ? "binary" : "legacy"} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB${startOffset > 0 ? `, resume=${startOffset}` : ""})`);
 
-    await waitForFileSendBackpressure();
-    if (transport.readyState !== WebSocket.OPEN || !isCurrentTransfer()) {
-      console.warn(`File transfer completion suppressed: ${fileName} (id=${transferId})`);
-      return;
+      const fd = fs.openSync(filePath, "r");
+      try {
+        const buf = Buffer.alloc(CHUNK_SIZE);
+        for (let position = startOffset; position < stat.size;) {
+          if (transport.readyState !== WebSocket.OPEN || !isCurrentTransfer()) {
+            throw new Error(`File transfer aborted at ${position}/${stat.size} bytes`);
+          }
+          await waitForFileSendBackpressure();
+          if (!isCurrentTransfer()) {
+            throw new Error(`File transfer superseded at ${position}/${stat.size} bytes`);
+          }
+          const chunkIndex = Math.floor(position / CHUNK_SIZE);
+          const bytesRead = fs.readSync(fd, buf, 0, Math.min(CHUNK_SIZE, stat.size - position), position);
+          const chunkBytes = Buffer.from(buf.subarray(0, bytesRead));
+          const metadata: BinaryFileDownloadChunkMetadata = {
+            fileId: transferId,
+            fileSize: stat.size,
+            offsetBytes: position,
+            transferToken,
+            chunkIndex,
+            totalChunks,
+          };
+          const sentBinary = useBinaryDownload && transport.sendFileDownloadChunk!(
+            metadata,
+            chunkBytes,
+            peerId,
+          );
+          if (!sentBinary) {
+            sendJson({
+              type: "file_chunk",
+              fileId: transferId,
+              fileName,
+              fileSize: stat.size,
+              offsetBytes: position,
+              transferToken,
+              chunkIndex,
+              totalChunks,
+              data: chunkBytes.toString("base64"),
+            });
+          }
+          position += bytesRead;
+          if (useBinaryDownload) {
+            await waitForFileDownloadWindow(
+              ackKey,
+              position,
+              MAX_OUTSTANDING_BYTES,
+            );
+          } else {
+            await sleep(8);
+          }
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      await waitForFileSendBackpressure();
+      if (transport.readyState !== WebSocket.OPEN || !isCurrentTransfer()) {
+        throw new Error("File transfer completion suppressed after socket changed");
+      }
+      if (useBinaryDownload) {
+        await waitForFileDownloadWindow(ackKey, stat.size, 0);
+      }
+      sendJson({
+        type: "file_complete",
+        fileId: transferId,
+        fileName,
+        fileSize: stat.size,
+        transferToken,
+      });
+      console.log(`File transfer complete: ${fileName}`);
+    } finally {
+      if (activeFileSendVersions.get(transferStateId) === transferVersion) {
+        activeFileSendVersions.delete(transferStateId);
+      }
+      activeFileDownloadAcks.delete(ackKey);
     }
-    sendJson({
-      type: "file_complete",
-      fileId: transferId,
-      fileName,
-      fileSize: stat.size,
-      transferToken,
-    });
-    if (activeFileSendVersions.get(transferId) === transferVersion) {
-      activeFileSendVersions.delete(transferId);
-    }
-    console.log(`File transfer complete: ${fileName}`);
   }
 
   function resolveUploadTarget(targetDir: string, fileNameInput: string, conflictPolicy: string): string {
@@ -1881,6 +1984,7 @@ function createConnectionHandler(transport: ClientTransport) {
     // app knows binary uploads are supported.
     if ((msg as any).type === "client_capabilities") {
       (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
+      (transport as any).setClientCapabilities?.(msg);
       sendJson({
         ...serverCapabilitiesPayload(true),
         codexCollaborationMode: "default",
@@ -5148,6 +5252,9 @@ function createConnectionHandler(transport: ClientTransport) {
           typeof (msg as any).transferToken === "string"
             ? (msg as any).transferToken
             : undefined;
+        const peerId = typeof (msg as any).__relayPeerId === "string"
+          ? (msg as any).__relayPeerId
+          : undefined;
         try {
           const { resolvedPath } = resolveAllowedDownloadFile(filePath);
           void sendFileChunks(
@@ -5155,6 +5262,7 @@ function createConnectionHandler(transport: ClientTransport) {
             fileId,
             Number.isFinite(offsetBytes) ? offsetBytes : 0,
             transferToken,
+            peerId,
           ).catch((e: any) => {
             sendJson({
               type: "file_error",
@@ -5170,6 +5278,26 @@ function createConnectionHandler(transport: ClientTransport) {
             message: e.message || String(e),
             ...(transferToken ? { transferToken } : {}),
           });
+        }
+        break;
+      }
+
+      case "file_download_ack": {
+        const fileId = String((msg as any).fileId || "");
+        const transferToken = typeof (msg as any).transferToken === "string"
+          ? (msg as any).transferToken
+          : undefined;
+        const peerId = typeof (msg as any).__relayPeerId === "string"
+          ? (msg as any).__relayPeerId
+          : undefined;
+        const receivedBytes = Number((msg as any).receivedBytes);
+        if (fileId && Number.isSafeInteger(receivedBytes) && receivedBytes >= 0) {
+          const state = activeFileDownloadAcks.get(
+            fileDownloadAckKey(fileId, transferToken, peerId),
+          );
+          if (state && receivedBytes > state.receivedBytes) {
+            state.receivedBytes = receivedBytes;
+          }
         }
         break;
       }
@@ -6629,6 +6757,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         return;
       }
       transport.authenticate((msg as any).binaryEnvelope === true);
+      transport.setClientCapabilities(msg);
       (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       console.log(`[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope})`);
       connectedClients.add(transport);

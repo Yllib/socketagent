@@ -26,7 +26,7 @@ import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry } from "./session-store";
+import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getBoundedHistoryTail, getBoundedHistoryDelta, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
@@ -2490,6 +2490,9 @@ function createConnectionHandler(transport: ClientTransport) {
         const historyRequestId = typeof (msg as any).historyRequestId === "string"
           ? (msg as any).historyRequestId as string
           : undefined;
+        const openTraceId = typeof (msg as any).openTraceId === "string"
+          ? (msg as any).openTraceId as string
+          : undefined;
         // Detach old session so it stops sending to this client
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
@@ -2594,16 +2597,19 @@ function createConnectionHandler(transport: ClientTransport) {
         sendJson(sessionSettingsPayload(activeSession, msg.sessionId));
         if (!existing) void activeSession.refreshSupportedModels();
 
-        // Send message history — if session is running, load back to last user prompt
+        // First paint is deliberately bounded. If the client has an authoritative
+        // cached sequence, send only newer durable entries; otherwise send a
+        // byte-capped latest page. Older context remains available via pagination.
         const historyStartMs = Date.now();
-        const runningSession = activeSessions.get(msg.sessionId);
-        const isRunning = !!runningSession && sessionIsBusy(runningSession);
         if (sessionInfo.backend === "codex" && !contextCleared && getHistoryCount(msg.sessionId) === 0) {
           syncCodexRolloutHistory(sessionInfo);
         }
-        const page = isRunning
-          ? getHistoryPageToLastPrompt(msg.sessionId, 50)
-          : getHistoryPage(msg.sessionId, 50);
+        const rawKnownSeq = Number((msg as any).knownSessionSeq);
+        const deltaPage = Number.isSafeInteger(rawKnownSeq) && rawKnownSeq >= 0
+          ? getBoundedHistoryDelta(msg.sessionId, rawKnownSeq)
+          : null;
+        const page = deltaPage ?? getBoundedHistoryTail(msg.sessionId);
+        const historyKind = deltaPage ? "delta" : "initial";
         const todos = getTodos(msg.sessionId);
         const lastSuggestion = getLastPromptSuggestion(msg.sessionId);
         sendJson({
@@ -2612,12 +2618,15 @@ function createConnectionHandler(transport: ClientTransport) {
           messages: page.entries,
           total: page.total,
           offset: page.offset,
-          historyKind: "initial",
+          historyKind,
+          deferredContextAvailable: page.deferredContextAvailable,
           ...(historyRequestId ? { requestId: historyRequestId } : {}),
+          ...(openTraceId ? { openTraceId } : {}),
           ...(todos.length > 0 ? { todos } : {}),
           ...(lastSuggestion ? { promptSuggestion: lastSuggestion } : {}),
         });
-        console.log(`[ResumeHistory] sent initial history for ${msg.sessionId}: entries=${page.entries.length} total=${page.total} offset=${page.offset} ms=${Date.now() - historyStartMs}`);
+        const historyBytes = Buffer.byteLength(JSON.stringify(page.entries), "utf8");
+        console.log(`[ResumeHistory] sent ${historyKind} for ${msg.sessionId}: entries=${page.entries.length} bytes=${historyBytes} total=${page.total} offset=${page.offset} deferred=${page.deferredContextAvailable} ms=${Date.now() - historyStartMs}${openTraceId ? ` trace=${openTraceId}` : ""}`);
 
         // Check for missed messages from Claude Code's session file
         const lastTimestamp = getLastHistoryTimestamp(msg.sessionId);

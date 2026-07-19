@@ -899,7 +899,13 @@ function writeHistoryEntries(
       : entry)
     : (redactSecretsDeep(positioned) as HistoryEntry[])
       .map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
-  fs.writeFileSync(file, JSON.stringify(safeEntries, null, 2), "utf-8");
+  // Transcripts can grow into tens of megabytes. Pretty-printing inflated
+  // every synchronous persistence pass and extended the Node event-loop stall
+  // for no runtime benefit. Write a compact, atomic snapshot instead.
+  const serialized = JSON.stringify(safeEntries);
+  const tempFile = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tempFile, serialized, { encoding: "utf-8", mode: 0o600 });
+  fs.renameSync(tempFile, file);
   const stat = fs.statSync(file);
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries: safeEntries });
   updateSessionHistoryMetadata(sessionId, safeEntries);
@@ -1279,6 +1285,87 @@ export function getHistoryPage(
   const end = Math.min(start + limit, total);
   warnIfSlow("history_page", startedAt, { sessionId, total, limit, offset: start });
   return { entries: hydrateHistoryEntries(all.slice(start, end)), total, offset: start };
+}
+
+export interface BoundedHistoryPage {
+  entries: HistoryEntry[];
+  total: number;
+  offset: number;
+  deferredContextAvailable: boolean;
+}
+
+function hydratedTailWithinBudget(
+  all: HistoryEntry[],
+  endExclusive: number,
+  maxEntries: number,
+  maxBytes: number,
+): { entries: HistoryEntry[]; offset: number } {
+  const selected: HistoryEntry[] = [];
+  let bytes = 2;
+  let offset = endExclusive;
+  for (let index = endExclusive - 1; index >= 0 && selected.length < maxEntries; index--) {
+    const hydrated = hydrateHistoryEntry(all[index]);
+    const entryBytes = Buffer.byteLength(JSON.stringify(hydrated), "utf8") + 1;
+    if (selected.length > 0 && bytes + entryBytes > maxBytes) break;
+    selected.unshift(hydrated);
+    bytes += entryBytes;
+    offset = index;
+  }
+  return { entries: selected, offset };
+}
+
+/** A ready-to-render latest page with hard entry and serialized-byte bounds. */
+export function getBoundedHistoryTail(
+  sessionId: string,
+  maxEntries = 50,
+  maxBytes = 256 * 1024,
+): BoundedHistoryPage {
+  const startedAt = Date.now();
+  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
+  const page = hydratedTailWithinBudget(all, all.length, maxEntries, maxBytes);
+  let lastUserIndex = -1;
+  for (let index = all.length - 1; index >= 0; index--) {
+    if (all[index].role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  warnIfSlow("history_bounded_tail", startedAt, {
+    sessionId,
+    total: all.length,
+    entries: page.entries.length,
+    offset: page.offset,
+  });
+  return {
+    ...page,
+    total: all.length,
+    deferredContextAvailable: lastUserIndex >= 0 && lastUserIndex < page.offset,
+  };
+}
+
+/**
+ * Return only durable entries newer than a cached sequence. Null means the
+ * cache is incompatible or the delta exceeds the initial response budget.
+ */
+export function getBoundedHistoryDelta(
+  sessionId: string,
+  knownSessionSeq: number,
+  maxEntries = 100,
+  maxBytes = 256 * 1024,
+): BoundedHistoryPage | null {
+  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
+  const knownIndex = all.findIndex((entry) => entry.sessionSeq === knownSessionSeq);
+  if (knownIndex < 0) return null;
+  const count = all.length - knownIndex - 1;
+  if (count > maxEntries) return null;
+  const entries = hydrateHistoryEntries(all.slice(knownIndex + 1));
+  if (Buffer.byteLength(JSON.stringify(entries), "utf8") > maxBytes) return null;
+  return {
+    entries,
+    total: all.length,
+    offset: knownIndex + 1,
+    deferredContextAvailable: false,
+  };
 }
 
 /**

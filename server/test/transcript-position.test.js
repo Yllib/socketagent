@@ -5,6 +5,8 @@ const { randomUUID } = require("node:crypto");
 const {
   appendHistory,
   deleteSessionArtifacts,
+  getBoundedHistoryDelta,
+  getBoundedHistoryTail,
   getHistory,
   positionSessionMessage,
 } = require("../dist/session-store");
@@ -64,6 +66,63 @@ test("live revisions and persisted history share one transcript position", () =>
       history.map((entry) => entry.sessionSeq),
       [firstFrame.sessionSeq, liveTool.sessionSeq],
     );
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});
+
+test("bounded history resumes with only entries newer than the cached sequence", () => {
+  const sessionId = `test-transcript-delta-${randomUUID()}`;
+  try {
+    const entries = [];
+    for (let index = 0; index < 8; index++) {
+      entries.push(appendHistory(sessionId, {
+        role: index === 0 ? "user" : "assistant",
+        content: `message-${index}`,
+        timestamp: new Date(Date.now() + index).toISOString(),
+      }));
+    }
+
+    const delta = getBoundedHistoryDelta(sessionId, entries[4].sessionSeq);
+    assert.ok(delta);
+    assert.deepEqual(
+      delta.entries.map((entry) => entry.content),
+      ["message-5", "message-6", "message-7"],
+    );
+    assert.equal(delta.offset, 5);
+    assert.equal(delta.total, 8);
+
+    const tail = getBoundedHistoryTail(sessionId, 3, 1024);
+    assert.deepEqual(
+      tail.entries.map((entry) => entry.content),
+      ["message-5", "message-6", "message-7"],
+    );
+    assert.equal(tail.offset, 5);
+    assert.equal(tail.total, 8);
+    assert.equal(tail.deferredContextAvailable, true);
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});
+
+test("oversized or incompatible deltas fail back to a bounded snapshot", () => {
+  const sessionId = `test-transcript-delta-fallback-${randomUUID()}`;
+  try {
+    const first = appendHistory(sessionId, {
+      role: "user",
+      content: "start",
+      timestamp: new Date().toISOString(),
+    });
+    for (let index = 0; index < 4; index++) {
+      appendHistory(sessionId, {
+        role: "assistant",
+        content: `answer-${index}`,
+        timestamp: new Date(Date.now() + index + 1).toISOString(),
+      });
+    }
+
+    assert.equal(getBoundedHistoryDelta(sessionId, 999999), null);
+    assert.equal(getBoundedHistoryDelta(sessionId, first.sessionSeq, 2), null);
   } finally {
     deleteSessionArtifacts(sessionId);
   }

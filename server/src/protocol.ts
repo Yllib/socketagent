@@ -135,6 +135,12 @@ export interface ResumeSessionMessage {
   sessionId: string;
   /** Correlates the initial history snapshot with the view that requested it. */
   historyRequestId?: string;
+  /** Last durable transcript position already cached by this client. */
+  knownSessionSeq?: number;
+  /** Oldest history offset represented by the client's cached snapshot. */
+  knownHistoryOffset?: number;
+  /** Optional client trace identifier for click-to-ready diagnostics. */
+  openTraceId?: string;
 }
 
 export interface SessionEventAckMessage {
@@ -1346,7 +1352,15 @@ export interface SessionHistoryServerMessage {
   /** Echoed from resume_session.historyRequestId or load_more_history.requestId. */
   requestId?: string;
   /** Explicit merge behavior; clients must not infer this from local state. */
-  historyKind?: "initial" | "older" | "append";
+  historyKind?: "initial" | "delta" | "older" | "append";
+  /** Total durable entries currently stored for the session. */
+  total?: number;
+  /** Zero-based position of the first entry in messages. */
+  offset?: number;
+  /** True when older context was intentionally deferred from first paint. */
+  deferredContextAvailable?: boolean;
+  /** Echoed client trace identifier for click-to-ready diagnostics. */
+  openTraceId?: string;
 }
 
 export interface StatusServerMessage {

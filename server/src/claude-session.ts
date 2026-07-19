@@ -28,13 +28,14 @@ import {
   handleSendFileTool,
   handleSpeakTool,
 } from "./app-tool-handlers";
-import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
+import { buildSocketAgentIntegrationInstructions } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
+import { maybeSendAgentAttentionPush } from "./push-notifications";
 
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
@@ -1151,6 +1152,7 @@ export class ClaudeSession {
 
   public send(msg: ServerMessage): void {
     positionSessionMessage(String((msg as any).sessionId || this.sessionId || ""), msg as any);
+    maybeSendAgentAttentionPush(msg as any, path.basename(this.cwd) || "SocketAgent");
     const streamKey = this.coalescedStreamKey(msg);
     if (streamKey && (msg as any).snapshot === true && (msg as any).finalSnapshot !== true) {
       this.streamSnapshots.push(streamKey, msg);
@@ -1897,7 +1899,22 @@ export class ClaudeSession {
       }
 
       const secureInputInventory = secureInputInventoryForAgent(this.sessionId || undefined, this.cwd);
-      const toolContext = `You can send an immediate mobile notification using NotifyUser(title, body). You can schedule reminders for the user using the ScheduleReminder tool — use ISO 8601 datetime for the scheduledTime parameter. You can also schedule deferred tasks using the ScheduleTask tool — these create a new Claude or Codex session that runs automatically at the specified time. Supports provider, model, effort, permissions, recurring schedules (daily, weekly, monthly, or custom interval), quiet notification mode, and optionally reusing the same session across recurrences.\n\nWhen building a substantive plan to present to the user, use HtmlPlan so it appears as a durable, full-screen-capable session artifact. Use semantic, self-contained HTML with inline CSS and no scripts or remote resources. Reuse a returned plan_id when revising a plan. Do not use HtmlPlan for a tiny one- or two-step answer.\n\nUse RequestSecureInput when you need an API key, password, auth token, cookie, or other secret. Do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata.\n\n${secureInputInventory}\n\nYou can monitor background processes using the Monitor tool. To start a new monitored process: Monitor(command="...", description="..."). To monitor an existing background task: Monitor(taskId="..."). To stop monitoring (process keeps running): Monitor(taskId="...", enabled=false). Monitored output is batched over 5 seconds and delivered to you automatically. Use timeoutSeconds to auto-stop monitoring after a duration.\n\n${SOCKETAGENT_FILE_LINK_INSTRUCTIONS}${ttsInstruction}${pluginContext}`;
+      const toolContext = `${buildSocketAgentIntegrationInstructions({
+        mcpServerName: "app",
+        toolNames: [
+          "HtmlPlan",
+          "SendFile",
+          "RequestSecureInput",
+          "Speak",
+          "ScheduleReminder",
+          "NotifyUser",
+          "ScheduleTask",
+          "Monitor",
+          "SearchSkills",
+          "ReadSkill",
+        ],
+        secureInventory: secureInputInventory,
+      })}${ttsInstruction}${pluginContext}`;
 
       // Handle fork: use fork source as resume target + set forkSession flag
       const shouldFork = !!this._forkFromSessionId;

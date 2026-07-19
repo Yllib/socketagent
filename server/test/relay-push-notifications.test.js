@@ -2,7 +2,21 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const test = require("node:test");
 
-const { isPushConfigured, sendPushNotification } = require("../dist/push-notifications");
+const {
+  isPushConfigured,
+  sendPushNotification,
+  shouldSendForwardedPush,
+} = require("../dist/push-notifications");
+
+test("headless forwarding never duplicates an FCM dispatch owned by NotifyUser", () => {
+  assert.equal(shouldSendForwardedPush({
+    type: "scheduled_task_notification",
+    fcmDispatched: true,
+  }), false);
+  assert.equal(shouldSendForwardedPush({
+    type: "scheduled_task_notification",
+  }), true);
+});
 
 test("routes authoritative FCM payloads through the configured relay", async () => {
   let received;

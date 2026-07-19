@@ -28,7 +28,7 @@ import {
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
 import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
-import { SOCKETAGENT_FILE_LINK_INSTRUCTIONS } from "./socketagent-instructions";
+import { buildSocketAgentIntegrationInstructions } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
@@ -43,6 +43,7 @@ import {
 import { buildCodexSpawn } from "./codex-env";
 import { listSkills, SkillEntry } from "./skills-manager";
 import { getClaudeAvailability } from "./claude-session";
+import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 
 const TRANSIENT_CODEX_RAW_EVENT_METHODS = new Set([
@@ -1605,6 +1606,7 @@ export class CodexSession {
 
   public send(msg: ServerMessage): void {
     positionSessionMessage(String((msg as any).sessionId || this.sessionId || ""), msg as any);
+    maybeSendAgentAttentionPush(msg as any, path.basename(this.cwd) || "SocketAgent");
     const streamKey = this.coalescedStreamKey(msg);
     if (streamKey && (msg as any).snapshot === true && (msg as any).finalSnapshot !== true) {
       this.streamSnapshots.push(streamKey, msg);
@@ -3795,13 +3797,12 @@ export class CodexSession {
   private codexDeveloperInstructions(): string | null {
     const parts: string[] = [];
 
-    parts.push(
-      `SocketAgent app tools are available through the MCP server named socketagent_app: ${SOCKETAGENT_APP_TOOLS.map((tool) => tool.name).join(", ")}. Use HtmlPlan whenever building a substantive plan to present to the user; provide semantic self-contained HTML with inline CSS, no scripts or remote resources, and reuse the returned plan_id for revisions. Do not use HtmlPlan for tiny one- or two-step answers. Use SendFile with an absolute file_path when the user asks you to send, share, or transfer a file to their phone. Use RequestSecureInput when you need an API key, password, auth token, cookie, or other secret; do not ask the user to paste secrets into chat. The app will show a secure input card and the tool returns only a local secret file path plus metadata. Use NotifyUser for important phone push notifications, ScheduleReminder for device reminders, ScheduleTask for scheduled agent work, Monitor for background command monitoring, and Speak only when text-to-speech is enabled or requested. If a SocketAgent app tool is not immediately visible, use tool discovery for socketagent_app instead of telling the user it must be loaded.`,
-    );
-
-    parts.push(secureInputInventoryForAgent(this.sessionId || undefined, this.cwd));
-
-    parts.push(SOCKETAGENT_FILE_LINK_INSTRUCTIONS);
+    parts.push(buildSocketAgentIntegrationInstructions({
+      mcpServerName: "socketagent_app",
+      toolNames: SOCKETAGENT_APP_TOOLS.map((tool) => tool.name),
+      secureInventory: secureInputInventoryForAgent(this.sessionId || undefined, this.cwd),
+      discoverMissingTools: true,
+    }));
 
     const emailToolsPath = path.resolve(__dirname, "..", "tools", "email-tools.js");
     if (fs.existsSync(emailToolsPath)) {

@@ -1,0 +1,23 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const {
+  buildSocketAgentIntegrationInstructions,
+} = require("../dist/socketagent-instructions");
+
+test("builds compact SocketAgent routing instructions without losing safety rules", () => {
+  const prompt = buildSocketAgentIntegrationInstructions({
+    mcpServerName: "socketagent_app",
+    toolNames: ["HtmlPlan", "SendFile", "RequestSecureInput"],
+    secureInventory: "<secret_inventory>\n[]\n</secret_inventory>",
+    discoverMissingTools: true,
+  });
+
+  assert.match(prompt, /MCP server: socketagent_app/);
+  assert.match(prompt, /Substantive plan for the user -> HtmlPlan/);
+  assert.match(prompt, /Never request secrets in normal chat/);
+  assert.match(prompt, /absolute file_path/);
+  assert.match(prompt, /discover tools for socketagent_app/);
+  assert.match(prompt, /socketagent:\/\/file\/download/);
+  assert.match(prompt, /<secret_inventory>\n\[\]\n<\/secret_inventory>/);
+});

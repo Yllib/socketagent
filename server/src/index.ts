@@ -36,7 +36,7 @@ import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBin
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
-import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, unregisterPushToken } from "./push-notifications";
+import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, writeFileManagerText } from "./file-manager";
 import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
@@ -1145,19 +1145,26 @@ function maybeSendPushNotification(msg: {
   sessionId: string;
   status?: "completed" | "failed" | "manual";
   sessionCompletion?: boolean;
+  kind?: string;
+  eventId?: string;
 }): void {
   if (!shouldSendPushNotification()) return;
   const sessionCompletion = msg.sessionCompletion === true && Boolean(msg.sessionId);
+  const finishedAt = sessionCompletion ? new Date().toISOString() : undefined;
+  const eventId = msg.eventId || (sessionCompletion
+    ? `session_finished:${msg.sessionId}:${finishedAt}`
+    : undefined);
   sendPushNotification({
     title: msg.title,
     body: msg.body,
     sessionId: msg.sessionId,
     status: msg.status || "manual",
-    ...(sessionCompletion ? {
-      kind: "session_finished",
-      data: { finishedAt: new Date().toISOString() },
-      showNotification: false,
-    } : {}),
+    kind: sessionCompletion ? "session_finished" : msg.kind,
+    data: {
+      ...(finishedAt ? { finishedAt } : {}),
+      ...(eventId ? { eventId } : {}),
+    },
+    showNotification: false,
   }).then((result) => {
     if (result.attempted > 0) {
       console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for session=${msg.sessionId || "none"} title=${msg.title.slice(0, 80)}`);
@@ -1272,13 +1279,17 @@ function sendSessionCompletionPush(session: Session, status: "completed" | "fail
     session,
     fallbackBody || (status === "failed" ? "Prompt failed" : "Prompt complete")
   );
+  const finishedAt = new Date().toISOString();
   sendPushNotification({
     title,
     body,
     sessionId,
     status,
     kind: "session_finished",
-    data: { finishedAt: new Date().toISOString() },
+    data: {
+      finishedAt,
+      eventId: `session_finished:${sessionId}:${finishedAt}`,
+    },
     showNotification: false,
   }).then((result) => {
     if (result.attempted > 0) {
@@ -1303,6 +1314,7 @@ function broadcastScheduledTaskNotification(
     body,
     sessionId,
     status,
+    eventId: `scheduled_task_notification:${sessionId || "none"}:${crypto.randomUUID()}`,
     ...(options.sessionCompletion ? { sessionCompletion: true } : {}),
   };
   const msg = JSON.stringify(payload);
@@ -1327,7 +1339,7 @@ function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: 
       if (client.readyState === WebSocket.OPEN) client.send(raw);
     }
     if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
-    if (msg.type === "scheduled_task_notification") {
+    if (shouldSendForwardedPush(msg)) {
       maybeSendPushNotification(msg);
     }
   } catch {

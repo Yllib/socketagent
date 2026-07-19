@@ -363,12 +363,19 @@ export async function handleNotifyUserTool(
     return { content: [{ type: "text", text: "NotifyUser error: title is required" }], isError: true };
   }
 
+  const eventId = `tool_notification:${ctx.getSessionId() || "none"}:${crypto.randomUUID()}`;
+
   ctx.send({
     type: "scheduled_task_notification",
     title,
     body,
     sessionId: ctx.getSessionId(),
     status: "manual",
+    kind: "tool_notification",
+    eventId,
+    // The tool handler owns delivery. Headless task forwarding must not send
+    // this same event through FCM a second time.
+    fcmDispatched: true,
   } as any);
   sendPushNotification({
     title,
@@ -376,6 +383,7 @@ export async function handleNotifyUserTool(
     sessionId: ctx.getSessionId(),
     status: "manual",
     kind: "tool_notification",
+    data: { eventId },
     showNotification: false,
   }).then((result) => {
     if (result.attempted > 0) {

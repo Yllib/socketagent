@@ -1608,6 +1608,9 @@ export interface ScheduledTaskNotificationServerMessage {
   sessionId: string;
   status?: "completed" | "failed" | "manual";
   sessionCompletion?: boolean;
+  kind?: string;
+  eventId?: string;
+  fcmDispatched?: boolean;
 }
 
 // SDK event forwarding messages

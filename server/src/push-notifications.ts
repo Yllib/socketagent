@@ -20,6 +20,67 @@ export interface PushNotificationPayload {
   showNotification?: boolean;
 }
 
+export function shouldSendForwardedPush(message: Record<string, any>): boolean {
+  return message.type === "scheduled_task_notification"
+    && message.fcmDispatched !== true;
+}
+
+const sentAttentionEvents = new Map<string, number>();
+
+/**
+ * Questions and secure-input requests are live UI events, but FCM is the sole
+ * notification transport. Replays use sendTo() and never reach this helper;
+ * this process-level guard also prevents duplicate sends across session objects.
+ */
+export function maybeSendAgentAttentionPush(
+  message: Record<string, any>,
+  fallbackTitle = "SocketAgent",
+): void {
+  const type = String(message.type || "");
+  if (type !== "question" && type !== "secure_input_request") return;
+  const sessionId = String(message.sessionId || "");
+  if (!sessionId) return;
+  const interactionId = type === "question"
+    ? String(message.questionId || "")
+    : String(message.requestId || "");
+  if (!interactionId) return;
+  const eventId = `${type}:${sessionId || "none"}:${interactionId}`;
+  if (sentAttentionEvents.has(eventId)) return;
+  const now = Date.now();
+  sentAttentionEvents.set(eventId, now);
+  if (sentAttentionEvents.size > 1000) {
+    for (const [key, timestamp] of sentAttentionEvents) {
+      if (now - timestamp > 24 * 60 * 60 * 1000 || sentAttentionEvents.size > 800) {
+        sentAttentionEvents.delete(key);
+      }
+    }
+  }
+
+  const firstQuestion = Array.isArray(message.questions)
+    ? String(message.questions[0]?.question || "").trim()
+    : "";
+  const label = String(message.label || "Secret").trim() || "Secret";
+  const body = type === "question"
+    ? (firstQuestion || "Your agent needs your input")
+    : `Secure input requested: ${label}`;
+  const kind = type === "question" ? "input_required" : "secure_input_required";
+  sendPushNotification({
+    title: fallbackTitle.trim() || "SocketAgent",
+    body: body.length > 220 ? `${body.slice(0, 217)}...` : body,
+    sessionId,
+    status: "manual",
+    kind,
+    data: { eventId },
+    showNotification: false,
+  }).then((result) => {
+    if (result.attempted > 0) {
+      console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for ${type} session=${sessionId || "none"}`);
+    }
+  }).catch((err) => {
+    console.warn(`[Push] ${type} push error: ${err?.message || err}`);
+  });
+}
+
 const STORE_PATH = process.env.PUSH_TOKEN_STORE
   || socketAgentDataPath("push-tokens.json");
 

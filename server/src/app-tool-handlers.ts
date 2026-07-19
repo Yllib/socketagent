@@ -1,7 +1,7 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
-import { spawn, ChildProcess } from "child_process";
+import { spawn, spawnSync, ChildProcess } from "child_process";
 import type { Backend, CodexDriver, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
@@ -594,6 +594,61 @@ export function stopAppMonitor(taskId: string, flush = true, killProcess = false
   }
   appMonitors.delete(taskId);
   return true;
+}
+
+async function terminateAppMonitorProcess(child: ChildProcess): Promise<void> {
+  // `killed` only means a signal was sent, not that the process exited.
+  if (!child.pid || child.exitCode !== null) return;
+  const killTree = (force: boolean) => {
+    if (!child.pid) return;
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/t", ...(force ? ["/f"] : [])], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      return;
+    }
+    try {
+      process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
+    } catch {
+      try { child.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
+    }
+  };
+
+  await new Promise<void>((resolve, reject) => {
+    let done = false;
+    const finish = (error?: Error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(forceTimer);
+      clearTimeout(abandonTimer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const forceTimer = setTimeout(() => killTree(true), 750);
+    const abandonTimer = setTimeout(() => finish(
+      new Error(`Monitor process tree ${child.pid} did not exit after SIGKILL`),
+    ), 2_000);
+    child.once("exit", () => finish());
+    killTree(false);
+  });
+}
+
+/** Hard-stop every Monitor process owned by a SocketAgent session. */
+export async function stopAppMonitorsForSession(sessionId: string): Promise<number> {
+  const owned = [...appMonitors.entries()].filter(([, state]) =>
+    state.ctx.getSessionId() === sessionId,
+  );
+  for (const [taskId, state] of owned) {
+    stopMonitorReader(taskId);
+    if (state.debounceTimer) clearTimeout(state.debounceTimer);
+    if (state.timeoutTimer) clearTimeout(state.timeoutTimer);
+  }
+  await Promise.all(owned.map(([, state]) =>
+    state.process ? terminateAppMonitorProcess(state.process) : Promise.resolve(),
+  ));
+  for (const [taskId] of owned) appMonitors.delete(taskId);
+  return owned.length;
 }
 
 export async function handleMonitorTool(

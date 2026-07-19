@@ -847,6 +847,68 @@ export class ClaudeSession {
     }
   }
 
+  private async _hardCleanupAllMonitors(): Promise<void> {
+    const owned = [...this._monitoredTasks.entries()];
+    for (const [taskId, state] of owned) {
+      this._stopMonitorReader(taskId);
+      if (state.timeoutTimer) {
+        clearTimeout(state.timeoutTimer);
+        state.timeoutTimer = null;
+      }
+    }
+    await Promise.all(owned.map(([, state]) => {
+      const child = state.process;
+      if (!child) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+      if (!child.pid || child.exitCode !== null) {
+        resolve();
+        return;
+      }
+      let finished = false;
+      const finish = (error?: Error) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(forceTimer);
+        clearTimeout(abandonTimer);
+        if (error) reject(error);
+        else resolve();
+      };
+      const killTree = (force: boolean) => {
+        if (!child.pid) return;
+        if (process.platform === "win32") {
+          spawnSync("taskkill", ["/pid", String(child.pid), "/t", ...(force ? ["/f"] : [])], {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          return;
+        }
+        try {
+          process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
+        } catch {
+          try { child.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
+        }
+      };
+      const forceTimer = setTimeout(() => killTree(true), 750);
+      const abandonTimer = setTimeout(() => finish(
+        new Error(`Monitor process tree ${child.pid} did not exit after SIGKILL`),
+      ), 2_000);
+      child.once("exit", () => finish());
+      killTree(false);
+      });
+    }));
+    for (const [taskId, state] of owned) {
+      if (this._monitoredTasks.get(taskId) !== state) continue;
+      this._monitoredTasks.delete(taskId);
+      this.send({
+        type: "monitor_started",
+        taskId,
+        description: state.description,
+        monitoring: false,
+        sessionId: this.sessionId || "",
+      } as any);
+    }
+  }
+
   public stopMonitoring(taskId: string): void {
     this._cleanupMonitor(taskId, true);
   }
@@ -1234,7 +1296,7 @@ export class ClaudeSession {
     return false;
   }
 
-  abort(): void {
+  async abort(): Promise<void> {
     this.streamSnapshots.flushAll();
     this._leaveWarmIdle();
     this.abortController?.abort();
@@ -1251,7 +1313,7 @@ export class ClaudeSession {
     this._runStartedAt = null;
     this._compactStartedAt = null;
     // Kill all monitored processes and clean up readers
-    this._cleanupAllMonitors();
+    await this._hardCleanupAllMonitors();
     // Stop all background bash watchers
     for (const [taskId] of this._bgBashWatchers) {
       this._stopBgBashWatcher(taskId);

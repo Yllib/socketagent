@@ -26,7 +26,7 @@ import {
   positionSessionMessage,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
-import { AppToolContext, stopAppMonitor } from "./app-tool-handlers";
+import { AppToolContext, stopAppMonitor, stopAppMonitorsForSession } from "./app-tool-handlers";
 import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
 import { buildSocketAgentIntegrationInstructions } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
@@ -1934,7 +1934,7 @@ export class CodexSession {
     }, delayMs);
   }
 
-  private async stopAppServerClient(): Promise<void> {
+  private async stopAppServerClient(requireConfirmedExit = false): Promise<void> {
     if (this.appServerIdleStopTimer) {
       clearTimeout(this.appServerIdleStopTimer);
       this.appServerIdleStopTimer = null;
@@ -1948,13 +1948,23 @@ export class CodexSession {
       this.appServerMcpRegistration = null;
     }
     if (!client) return;
+    let stopped = false;
     try {
-      await client.stop();
+      await client.stop("SIGTERM", 3000, requireConfirmedExit);
+      stopped = true;
     } catch (err: any) {
+      if (requireConfirmedExit) {
+        // Keep the process handle reachable so a retransmitted hard stop can
+        // attempt termination again instead of falsely treating it as absent.
+        this.appServer = client;
+        throw err;
+      }
       console.warn(`[codex app-server] cleanup failed: ${err?.message || err}`);
     } finally {
-      client.removeAllListeners();
-      this.onClose?.();
+      if (stopped || !requireConfirmedExit) {
+        client.removeAllListeners();
+        this.onClose?.();
+      }
     }
   }
 
@@ -2186,13 +2196,14 @@ export class CodexSession {
   }
 
   /** Mirrors the abort path. Interrupt the active app-server turn if possible. */
-  abort(): void {
+  async abort(): Promise<void> {
     this.streamSnapshots.flushAll();
     this._abortRequested = true;
     this.clearQueuedPrompts("Codex turn interrupted");
     this.clearPendingAppServerSteers("Codex turn interrupted");
-    if (this.appServer && this.threadId && this.activeAppServerTurnId) {
-      this.appServer.interruptTurn({
+    const client = this.appServer;
+    if (client && this.threadId && this.activeAppServerTurnId) {
+      void client.interruptTurn({
         threadId: this.threadId,
         turnId: this.activeAppServerTurnId,
       }).catch((err) => {
@@ -2213,7 +2224,11 @@ export class CodexSession {
         sessionId: this.sessionId,
       } as ServerMessage);
     }
-    void this.stopAppServerClient();
+    const sid = this.sessionId || this._resumeSessionId || "";
+    await Promise.all([
+      this.stopAppServerClient(true),
+      sid ? stopAppMonitorsForSession(sid) : Promise.resolve(0),
+    ]);
   }
 
   private dequeueNextPrompt(): QueuedPrompt | null {

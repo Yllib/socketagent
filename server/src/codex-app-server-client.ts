@@ -350,7 +350,11 @@ export class CodexAppServerClient extends EventEmitter {
     });
   }
 
-  async stop(signal: NodeJS.Signals = "SIGTERM", forceKillMs = 3000): Promise<void> {
+  async stop(
+    signal: NodeJS.Signals = "SIGTERM",
+    forceKillMs = 3000,
+    requireConfirmedExit = false,
+  ): Promise<void> {
     const proc = this.proc;
     if (!proc) return;
     if (this.closed) {
@@ -384,18 +388,22 @@ export class CodexAppServerClient extends EventEmitter {
       }
     };
 
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       let exited = false;
       let finished = false;
       let forceTimer: NodeJS.Timeout | null = null;
       let abandonTimer: NodeJS.Timeout | null = null;
-      const done = () => {
+      const done = (confirmedExit: boolean) => {
         if (finished) return;
         finished = true;
-        this.closed = true;
-        this.proc = null;
         if (forceTimer) clearTimeout(forceTimer);
         if (abandonTimer) clearTimeout(abandonTimer);
+        if (!confirmedExit && requireConfirmedExit) {
+          reject(new Error(`codex app-server process tree ${proc.pid ?? "unknown"} did not exit after SIGKILL`));
+          return;
+        }
+        this.closed = true;
+        this.proc = null;
         try { proc.unref(); } catch {}
         try { proc.removeAllListeners(); } catch {}
         try { proc.stdin.destroy(); } catch {}
@@ -406,10 +414,10 @@ export class CodexAppServerClient extends EventEmitter {
       forceTimer = setTimeout(() => {
         if (!exited) killProcessTree("SIGKILL");
       }, forceKillMs);
-      abandonTimer = setTimeout(done, forceKillMs + 2000);
+      abandonTimer = setTimeout(() => done(false), forceKillMs + 2000);
       proc.once("exit", () => {
         exited = true;
-        done();
+        done(true);
       });
       try {
         proc.stdin.end();

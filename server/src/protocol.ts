@@ -209,6 +209,8 @@ export interface RenameSessionMessage {
 export interface AbortMessage {
   type: "abort";
   sessionId?: string;
+  /** Stable id reused until the client receives abort_ack. */
+  requestId?: string;
 }
 
 export interface InterruptMessage {
@@ -1373,6 +1375,15 @@ export interface StatusServerMessage {
   permissionMode?: string;
 }
 
+export interface AbortAckServerMessage {
+  type: "abort_ack";
+  requestId: string;
+  sessionId: string;
+  stopped: boolean;
+  alreadyStopped?: boolean;
+  error?: string;
+}
+
 export interface CompactingServerMessage {
   type: "compacting";
   active: boolean;
@@ -1869,6 +1880,7 @@ export type ServerMessage =
   | SessionArchiveFailedServerMessage
   | SessionHistoryServerMessage
   | StatusServerMessage
+  | AbortAckServerMessage
   | CompactingServerMessage
   | FileChunkServerMessage
   | FileCompleteServerMessage

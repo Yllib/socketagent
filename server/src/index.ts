@@ -47,6 +47,7 @@ import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInp
 import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHtmlPlanRevision, listHtmlPlanRevisions, listHtmlPlans, renameHtmlPlan, rollbackHtmlPlan } from "./html-plan-store";
+import { HardAbortCoordinator } from "./hard-abort";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -890,6 +891,8 @@ function loadServerKeyPair(): KeyPair {
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
+const hardAbortCoordinator = new HardAbortCoordinator();
+const hardAbortedSessions = new WeakSet<Session>();
 
 type BackendOperationKind = "repair" | "auth";
 type ActiveBackendInstall = {
@@ -2930,14 +2933,18 @@ function createConnectionHandler(transport: ClientTransport) {
               console.log(`Session ${sid} completed, removed from active pool`);
             }
           }
-          sendSessionCompletionPush(sessionForRun, "completed");
+          if (!hardAbortedSessions.delete(sessionForRun)) {
+            sendSessionCompletionPush(sessionForRun, "completed");
+          }
           broadcastSessionList();
         }).catch((err: any) => {
           const sid = sessionForRun.getSessionId();
           if (sid && activeSessions.get(sid) === sessionForRun && !sessionShouldRemainPooled(sessionForRun)) {
             activeSessions.delete(sid);
           }
-          if (sessionForRun instanceof CodexSession && isCodexAuthError(err)) {
+          if (hardAbortedSessions.delete(sessionForRun)) {
+            console.log(`[Abort] Suppressed completion handling for hard-stopped session ${sid || "(pending)"}`);
+          } else if (sessionForRun instanceof CodexSession && isCodexAuthError(err)) {
             const detail = err?.message || String(err);
             markBackendAuthRequired("codex", detail);
             invalidateCodexAvailabilityCache();
@@ -3791,24 +3798,65 @@ function createConnectionHandler(transport: ClientTransport) {
       }
 
       case "abort": {
-        // Always use the explicit session ID from the client
+        // A safety-critical stop is acknowledged only after the backend's hard
+        // abort path has completed. The client retransmits the same requestId
+        // until this acknowledgement arrives.
         const targetSid = msg.sessionId || activeSessionId;
+        const requestId = typeof msg.requestId === "string" && msg.requestId
+          ? msg.requestId
+          : crypto.randomUUID();
         if (!targetSid) {
           console.log(`[Abort] No session ID provided and no active session`);
+          sendJson({
+            type: "abort_ack",
+            requestId,
+            sessionId: "",
+            stopped: false,
+            error: "No session ID provided",
+          });
           break;
         }
-        const targetSession = activeSessions.get(targetSid);
-        if (targetSession) {
-          console.log(`[Abort] Aborting session ${targetSid} (isRunning=${targetSession.isRunning})`);
-          targetSession.abort();
-          activeSessions.delete(targetSid);
+        try {
+          const result = await hardAbortCoordinator.abort(
+            requestId,
+            targetSid,
+            () => activeSessions.get(targetSid)
+              || (activeSession && activeSessionId === targetSid ? activeSession : null),
+            (target) => {
+              hardAbortedSessions.add(target as Session);
+              if (activeSessions.get(targetSid) === target) {
+                activeSessions.delete(targetSid);
+              }
+              try {
+                appendHistory(targetSid, {
+                  role: "notification",
+                  content: "Action cancelled",
+                  status: "cancelled",
+                  timestamp: new Date().toISOString(),
+                });
+              } catch (error: any) {
+                console.warn(`[Abort] Failed to persist cancellation marker for ${targetSid}: ${error?.message || error}`);
+              }
+            },
+          );
+          console.log(`[Abort] Hard stop completed session=${targetSid} request=${requestId} alreadyStopped=${result.alreadyStopped}`);
           broadcastStatusSync();
-        } else if (activeSession && activeSessionId === targetSid) {
-          console.log(`[Abort] Aborting connection-local session ${targetSid}`);
-          activeSession.abort();
-          broadcastStatusSync();
-        } else {
-          console.log(`[Abort] Session ${targetSid} not found in activeSessions`);
+          sendJson({
+            type: "abort_ack",
+            requestId,
+            sessionId: targetSid,
+            stopped: true,
+            alreadyStopped: result.alreadyStopped,
+          });
+        } catch (error: any) {
+          console.error(`[Abort] Hard stop failed session=${targetSid} request=${requestId}: ${error?.message || error}`);
+          sendJson({
+            type: "abort_ack",
+            requestId,
+            sessionId: targetSid,
+            stopped: false,
+            error: error?.message || String(error),
+          });
         }
         break;
       }
@@ -5886,12 +5934,16 @@ const httpServer = http.createServer((req, res) => {
           if (activeSessions.get(sid) === session && !sessionShouldRemainPooled(session)) {
             activeSessions.delete(sid);
           }
-          sendSessionCompletionPush(session, "completed");
+          if (!hardAbortedSessions.delete(session)) {
+            sendSessionCompletionPush(session, "completed");
+          }
           broadcastSessionList();
         }).catch((err) => {
           console.error(`[Continue] Query error: ${err.message}`);
           if (!sessionShouldRemainPooled(session)) activeSessions.delete(sessionId);
-          sendSessionCompletionPush(session, "failed", err.message || "Query failed");
+          if (!hardAbortedSessions.delete(session)) {
+            sendSessionCompletionPush(session, "failed", err.message || "Query failed");
+          }
         });
 
         res.writeHead(200, { "Content-Type": "application/json" });

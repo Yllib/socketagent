@@ -14,7 +14,11 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   });
 
   assert.match(prompt, /MCP server: socketagent_app/);
-  assert.match(prompt, /Substantive plan for the user -> HtmlPlan/);
+  assert.match(prompt, /HtmlPlan is reserved for detailed implementation or design plans for larger tasks/);
+  assert.match(prompt, /multi-component architecture/);
+  assert.match(prompt, /UI\/page mockups/);
+  assert.match(prompt, /Do not use HtmlPlan for checklists, TODO lists, routine status updates/);
+  assert.match(prompt, /inline SVG\/CSS or data-image assets/);
   assert.match(prompt, /Never request secrets in normal chat/);
   assert.match(prompt, /absolute file_path/);
   assert.match(prompt, /discover tools for socketagent_app/);

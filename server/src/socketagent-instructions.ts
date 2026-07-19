@@ -9,6 +9,9 @@ export const SOCKETAGENT_FILE_LINK_INSTRUCTIONS = [
   "- These links are non-destructive references; emitting one does not transfer or modify anything.",
 ].join("\n");
 
+export const HTML_PLAN_TOOL_DESCRIPTION =
+  "Create or revise a durable, full-screen HTML implementation or design plan for a large task. Use only when a rich document materially improves review, such as multi-component architecture, phased execution, tradeoffs, diagrams, embedded images, or UI/page mockups. Do not use for checklists, TODO lists, routine status updates, brief execution steps, or small tasks; answer those directly in chat. Reuse plan_id from the prior result when revising a plan.";
+
 export function buildSocketAgentIntegrationInstructions(options: {
   mcpServerName: string;
   toolNames: string[];
@@ -20,7 +23,7 @@ export function buildSocketAgentIntegrationInstructions(options: {
     ...(options.discoverMissingTools
       ? [`- If a SocketAgent tool is not visible, discover tools for ${options.mcpServerName} before claiming it is unavailable.`]
       : []),
-    "- Substantive plan for the user -> HtmlPlan. Use semantic, self-contained HTML with inline CSS only; no scripts or remote resources. Revisions must reuse plan_id. Do not use for trivial one- or two-step answers.",
+    "- HtmlPlan is reserved for detailed implementation or design plans for larger tasks where a rich full-screen document materially improves review, such as multi-component architecture, phased execution, important tradeoffs, diagrams, embedded images, or UI/page mockups. Do not use HtmlPlan for checklists, TODO lists, routine status updates, brief execution steps, or small tasks; answer those directly in chat. Use semantic, self-contained HTML with inline CSS only; use inline SVG/CSS or data-image assets when visuals help, never scripts or remote resources. Revisions must reuse plan_id.",
     "- User asks to send/share/transfer a file to their phone -> SendFile with an absolute file_path.",
     "- Credential, password, key, token, cookie, or other secret needed -> RequestSecureInput. Never request secrets in normal chat. The result contains metadata and a local secret-file path, not the value.",
     "- Important immediate phone notification -> NotifyUser.",

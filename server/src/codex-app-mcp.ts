@@ -17,6 +17,7 @@ import {
   handleSendFileTool,
   handleSpeakTool,
 } from "./app-tool-handlers";
+import { HTML_PLAN_TOOL_DESCRIPTION } from "./socketagent-instructions";
 
 export interface SocketAgentAppToolManifest {
   name: string;
@@ -26,7 +27,7 @@ export interface SocketAgentAppToolManifest {
 export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "HtmlPlan",
-    description: "Present or update a durable, full-screen HTML plan for the user.",
+    description: HTML_PLAN_TOOL_DESCRIPTION,
   },
   {
     name: "SendFile",
@@ -110,10 +111,10 @@ function createServer(context: AppToolContext): McpServer {
     "HtmlPlan",
     {
       title: "HTML Plan",
-      description: "Present a substantive user-facing plan as polished HTML in a durable SocketAgent card. Reuse plan_id from the prior result to update an existing plan. Do not use for tiny one- or two-step answers.",
+      description: HTML_PLAN_TOOL_DESCRIPTION,
       inputSchema: {
         title: z.string().describe("Short descriptive plan title"),
-        html: z.string().describe("Self-contained semantic HTML. Inline CSS is allowed; scripts and remote resources are not."),
+        html: z.string().describe("Polished, self-contained semantic HTML for a detailed implementation/design plan. Inline CSS, inline SVG, and embedded data images are allowed; scripts and remote resources are not."),
         plan_id: z.string().optional().describe("Existing plan ID to update. Omit to create a new plan."),
       },
     },

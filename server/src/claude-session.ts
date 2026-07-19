@@ -28,7 +28,7 @@ import {
   handleSendFileTool,
   handleSpeakTool,
 } from "./app-tool-handlers";
-import { buildSocketAgentIntegrationInstructions } from "./socketagent-instructions";
+import { buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
@@ -1613,10 +1613,10 @@ export class ClaudeSession {
         tools: [
           tool(
             "HtmlPlan",
-            "Present a substantive user-facing plan as polished HTML in a durable SocketAgent card. Use this when you are building a plan for the user to review. Reuse plan_id from the prior result to update an existing plan. Do not use it for a tiny one- or two-step answer.",
+            HTML_PLAN_TOOL_DESCRIPTION,
             {
               title: z.string().describe("Short descriptive plan title"),
-              html: z.string().describe("Self-contained semantic HTML for the plan. Inline CSS is allowed; scripts and remote resources are not."),
+              html: z.string().describe("Polished, self-contained semantic HTML for a detailed implementation/design plan. Inline CSS, inline SVG, and embedded data images are allowed; scripts and remote resources are not."),
               plan_id: z.string().optional().describe("Existing plan ID to update. Omit when creating a new plan."),
             },
             async (args) => handleHtmlPlanTool(appToolContext, args)

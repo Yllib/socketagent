@@ -45,13 +45,19 @@ test("routes authoritative FCM payloads through the configured relay", async () 
       status: "completed",
       kind: "session_finished",
       showNotification: false,
-      data: { finishedAt: "2026-07-18T13:00:00.000Z" },
+      data: {
+        finishedAt: "2026-07-18T13:00:00.000Z",
+        navigationTarget: "scheduled_tasks",
+        scheduledTaskId: "task-1",
+      },
     });
     assert.deepEqual(result, { sent: 1, attempted: 1 });
     assert.equal(received.pairingToken, "pairing-secret");
     assert.equal(received.kind, "session_finished");
     assert.equal(received.showNotification, false);
     assert.equal(received.data.finishedAt, "2026-07-18T13:00:00.000Z");
+    assert.equal(received.data.navigationTarget, "scheduled_tasks");
+    assert.equal(received.data.scheduledTaskId, "task-1");
   } finally {
     if (oldRelay === undefined) delete process.env.RELAY_URL;
     else process.env.RELAY_URL = oldRelay;

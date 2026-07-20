@@ -1637,6 +1637,8 @@ export interface ScheduledTaskNotificationServerMessage {
   sessionCompletion?: boolean;
   kind?: string;
   eventId?: string;
+  navigationTarget?: "scheduled_tasks";
+  scheduledTaskId?: string;
   fcmDispatched?: boolean;
 }
 

@@ -1150,6 +1150,8 @@ function maybeSendPushNotification(msg: {
   sessionCompletion?: boolean;
   kind?: string;
   eventId?: string;
+  navigationTarget?: "scheduled_tasks";
+  scheduledTaskId?: string;
 }): void {
   if (!shouldSendPushNotification()) return;
   const sessionCompletion = msg.sessionCompletion === true && Boolean(msg.sessionId);
@@ -1166,6 +1168,8 @@ function maybeSendPushNotification(msg: {
     data: {
       ...(finishedAt ? { finishedAt } : {}),
       ...(eventId ? { eventId } : {}),
+      ...(msg.navigationTarget ? { navigationTarget: msg.navigationTarget } : {}),
+      ...(msg.scheduledTaskId ? { scheduledTaskId: msg.scheduledTaskId } : {}),
     },
     showNotification: false,
   }).then((result) => {
@@ -1209,6 +1213,13 @@ function sessionNotificationBody(sessionId: string, session: Session, fallback: 
   return notificationText(preview, fallback);
 }
 
+function scheduledSessionPushData(session: Session): Record<string, string> {
+  const scheduledTaskId = String((session as any)._scheduledTaskId || "").trim();
+  return scheduledTaskId
+    ? { navigationTarget: "scheduled_tasks", scheduledTaskId }
+    : {};
+}
+
 const lastSessionStartedPush = new Map<string, string>();
 
 function sendSessionStartedPush(session: Session): boolean {
@@ -1224,7 +1235,7 @@ function sendSessionStartedPush(session: Session): boolean {
     sessionId,
     status: "running",
     kind: "session_started",
-    data: { startedAt },
+    data: { startedAt, ...scheduledSessionPushData(session) },
     showNotification: false,
   }).then((result) => {
     if (result.attempted > 0) {
@@ -1249,7 +1260,7 @@ async function sendSessionRunningPushRefresh(session: Session): Promise<void> {
     sessionId,
     status: "running",
     kind: "session_running",
-    data: { startedAt },
+    data: { startedAt, ...scheduledSessionPushData(session) },
     showNotification: false,
   });
 }
@@ -1292,6 +1303,7 @@ function sendSessionCompletionPush(session: Session, status: "completed" | "fail
     data: {
       finishedAt,
       eventId: `session_finished:${sessionId}:${finishedAt}`,
+      ...scheduledSessionPushData(session),
     },
     showNotification: false,
   }).then((result) => {
@@ -1309,7 +1321,7 @@ function broadcastScheduledTaskNotification(
   body: string,
   sessionId: string,
   status: "completed" | "failed" | "manual",
-  options: { sendPush?: boolean; sessionCompletion?: boolean } = {},
+  options: { sendPush?: boolean; sessionCompletion?: boolean; scheduledTaskId?: string } = {},
 ): void {
   const payload = {
     type: "scheduled_task_notification" as const,
@@ -1318,6 +1330,8 @@ function broadcastScheduledTaskNotification(
     sessionId,
     status,
     eventId: `scheduled_task_notification:${sessionId || "none"}:${crypto.randomUUID()}`,
+    navigationTarget: "scheduled_tasks" as const,
+    ...(options.scheduledTaskId ? { scheduledTaskId: options.scheduledTaskId } : {}),
     ...(options.sessionCompletion ? { sessionCompletion: true } : {}),
   };
   const msg = JSON.stringify(payload);
@@ -6595,6 +6609,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
           task.error,
           "",
           "failed",
+          { scheduledTaskId: task.id },
         );
       }
       return;
@@ -6732,7 +6747,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
           body,
           task.sessionId || "",
           "completed",
-          { sessionCompletion: Boolean(task.sessionId) },
+          { sessionCompletion: Boolean(task.sessionId), scheduledTaskId: task.id },
         );
       }
       console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
@@ -6786,7 +6801,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
           body,
           task.sessionId || "",
           "failed",
-          { sessionCompletion: Boolean(task.sessionId) },
+          { sessionCompletion: Boolean(task.sessionId), scheduledTaskId: task.id },
         );
       }
       console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);
@@ -6803,6 +6818,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         task.error!,
         "",
         "failed",
+        { scheduledTaskId: task.id },
       );
     }
   }

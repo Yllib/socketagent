@@ -4,7 +4,7 @@ import * as path from "path";
 import { spawn, spawnSync, ChildProcess } from "child_process";
 import type { Backend, CodexDriver, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
-import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
+import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
 import { requestSecureInput, SecureInputRequestArgs, SecureInputRequestStatus } from "./secure-input-store";
 import { sendPushNotification } from "./push-notifications";
@@ -364,6 +364,7 @@ export async function handleNotifyUserTool(
   }
 
   const eventId = `tool_notification:${ctx.getSessionId() || "none"}:${crypto.randomUUID()}`;
+  const fromScheduledTask = getScheduledTaskSessionIds().has(ctx.getSessionId());
 
   ctx.send({
     type: "scheduled_task_notification",
@@ -373,6 +374,7 @@ export async function handleNotifyUserTool(
     status: "manual",
     kind: "tool_notification",
     eventId,
+    ...(fromScheduledTask ? { navigationTarget: "scheduled_tasks" } : {}),
     // The tool handler owns delivery. Headless task forwarding must not send
     // this same event through FCM a second time.
     fcmDispatched: true,
@@ -383,7 +385,10 @@ export async function handleNotifyUserTool(
     sessionId: ctx.getSessionId(),
     status: "manual",
     kind: "tool_notification",
-    data: { eventId },
+    data: {
+      eventId,
+      ...(fromScheduledTask ? { navigationTarget: "scheduled_tasks" } : {}),
+    },
     showNotification: false,
   }).then((result) => {
     if (result.attempted > 0) {

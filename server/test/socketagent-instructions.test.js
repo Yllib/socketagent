@@ -18,6 +18,8 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /multi-component architecture/);
   assert.match(prompt, /UI\/page mockups/);
   assert.match(prompt, /Do not use HtmlPlan for checklists, TODO lists, routine status updates/);
+  assert.match(prompt, /native plan\/task tool for working plans and progress tracking/);
+  assert.match(prompt, /normal chat for concise user-facing content, whichever is appropriate/);
   assert.match(prompt, /inline SVG\/CSS or data-image assets/);
   assert.match(prompt, /Never request secrets in normal chat/);
   assert.match(prompt, /absolute file_path/);

@@ -100,6 +100,8 @@ test("bounded history resumes with only entries newer than the cached sequence",
     assert.equal(tail.offset, 5);
     assert.equal(tail.total, 8);
     assert.equal(tail.deferredContextAvailable, true);
+    assert.equal(tail.totalUserPrompts, 1);
+    assert.equal(delta.totalUserPrompts, 1);
   } finally {
     deleteSessionArtifacts(sessionId);
   }

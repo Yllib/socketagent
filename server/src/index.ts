@@ -2623,6 +2623,7 @@ function createConnectionHandler(transport: ClientTransport) {
           offset: page.offset,
           historyKind,
           deferredContextAvailable: page.deferredContextAvailable,
+          totalUserPrompts: page.totalUserPrompts,
           ...(historyRequestId ? { requestId: historyRequestId } : {}),
           ...(openTraceId ? { openTraceId } : {}),
           ...(todos.length > 0 ? { todos } : {}),

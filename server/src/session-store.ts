@@ -1292,6 +1292,7 @@ export interface BoundedHistoryPage {
   total: number;
   offset: number;
   deferredContextAvailable: boolean;
+  totalUserPrompts: number;
 }
 
 function hydratedTailWithinBudget(
@@ -1324,10 +1325,11 @@ export function getBoundedHistoryTail(
   const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
   const page = hydratedTailWithinBudget(all, all.length, maxEntries, maxBytes);
   let lastUserIndex = -1;
+  let totalUserPrompts = 0;
   for (let index = all.length - 1; index >= 0; index--) {
     if (all[index].role === "user") {
-      lastUserIndex = index;
-      break;
+      totalUserPrompts++;
+      if (lastUserIndex < 0) lastUserIndex = index;
     }
   }
   warnIfSlow("history_bounded_tail", startedAt, {
@@ -1340,6 +1342,7 @@ export function getBoundedHistoryTail(
     ...page,
     total: all.length,
     deferredContextAvailable: lastUserIndex >= 0 && lastUserIndex < page.offset,
+    totalUserPrompts,
   };
 }
 
@@ -1354,6 +1357,10 @@ export function getBoundedHistoryDelta(
   maxBytes = 256 * 1024,
 ): BoundedHistoryPage | null {
   const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
+  const totalUserPrompts = all.reduce(
+    (count, entry) => count + (entry.role === "user" ? 1 : 0),
+    0,
+  );
   const knownIndex = all.findIndex((entry) => entry.sessionSeq === knownSessionSeq);
   if (knownIndex < 0) return null;
   const count = all.length - knownIndex - 1;
@@ -1365,6 +1372,7 @@ export function getBoundedHistoryDelta(
     total: all.length,
     offset: knownIndex + 1,
     deferredContextAvailable: false,
+    totalUserPrompts,
   };
 }
 

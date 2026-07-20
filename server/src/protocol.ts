@@ -1361,6 +1361,8 @@ export interface SessionHistoryServerMessage {
   offset?: number;
   /** True when older context was intentionally deferred from first paint. */
   deferredContextAvailable?: boolean;
+  /** Total durable user prompts in the session, used to bound background backfill. */
+  totalUserPrompts?: number;
   /** Echoed client trace identifier for click-to-ready diagnostics. */
   openTraceId?: string;
 }

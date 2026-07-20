@@ -48,6 +48,7 @@ import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHtmlPlanRevision, listHtmlPlanRevisions, listHtmlPlans, renameHtmlPlan, rollbackHtmlPlan } from "./html-plan-store";
 import { HardAbortCoordinator } from "./hard-abort";
+import { MANAGED_BACKEND_PACKAGES, managedBackendSpecsNeedingUpdate, parseNpmVersionOutput } from "./managed-backend-update";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -2476,6 +2477,7 @@ function createConnectionHandler(transport: ClientTransport) {
       case "new_session": {
         stopExternalNativeWatcher();
         const cwd = msg.cwd || getDefaultCwd();
+        await waitForManagedBackendUpdate();
         if (msg.backend === "codex" && codexUnavailable()) {
           sendCodexUnavailable();
           break;
@@ -2574,6 +2576,7 @@ function createConnectionHandler(transport: ClientTransport) {
           broadcastSessionList();
           break;
         }
+        await waitForManagedBackendUpdate();
         if (sessionInfo.backend === "codex" && codexUnavailable()) {
           sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", msg.sessionId);
           break;
@@ -2813,6 +2816,7 @@ function createConnectionHandler(transport: ClientTransport) {
           }
           const savedPromptSession = savedResumeId ? getSession(savedResumeId) : undefined;
           const promptBackend = savedPromptSession?.backend;
+          await waitForManagedBackendUpdate();
           if (promptBackend === "codex" && codexUnavailable()) {
             sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", savedResumeId);
             break;
@@ -3482,8 +3486,12 @@ function createConnectionHandler(transport: ClientTransport) {
             ? path.join(GIT_ROOT, "server")
             : GIT_ROOT;
           runPackageUpdateSync(tscDir);
-          runManagedBackendUpdateSync();
-          markManagedBackendUpdateApplied(afterHash);
+          try {
+            runManagedBackendUpdateSync();
+            markManagedBackendUpdateApplied(afterHash);
+          } catch (backendErr: any) {
+            console.warn(`[ForceUpdate] Managed backend version check failed; keeping installed versions: ${backendErr?.message || String(backendErr)}`);
+          }
           installSocketAgentCliFromRepo(GIT_ROOT);
 
           if (beforeHash === afterHash) {
@@ -7375,16 +7383,72 @@ function managedBackendAutoUpdateEnabled(): boolean {
   return value !== "0" && value !== "false" && value !== "off";
 }
 
-function managedBackendUpdateArgs(runtime: UpdateRuntimeTools): string[] {
+function managedBackendInstallArgs(runtime: UpdateRuntimeTools, specs: string[]): string[] {
   return [
     "install",
     "-g",
     "--prefix",
     managedNpmPrefix(runtime.env),
     "--include=optional",
-    "@openai/codex@latest",
-    "@anthropic-ai/claude-code@latest",
+    ...specs,
   ];
+}
+
+function managedBackendPackageDir(runtime: UpdateRuntimeTools, packageName: string): string {
+  const nodeModules = process.platform === "win32"
+    ? path.join(managedNpmPrefix(runtime.env), "node_modules")
+    : path.join(managedNpmPrefix(runtime.env), "lib", "node_modules");
+  return path.join(nodeModules, ...packageName.split("/"));
+}
+
+function installedManagedBackendVersions(runtime: UpdateRuntimeTools): Record<string, string | undefined> {
+  const versions: Record<string, string | undefined> = {};
+  for (const { name } of MANAGED_BACKEND_PACKAGES) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(managedBackendPackageDir(runtime, name), "package.json"), "utf8"));
+      versions[name] = typeof pkg.version === "string" && pkg.version.trim() ? pkg.version.trim() : undefined;
+    } catch {
+      versions[name] = undefined;
+    }
+  }
+  return versions;
+}
+
+function managedBackendVersionsLabel(versions: Record<string, string | undefined>): string {
+  return MANAGED_BACKEND_PACKAGES
+    .map(({ name }) => `${name}=${versions[name] || "missing"}`)
+    .join(", ");
+}
+
+function latestManagedBackendVersionsSync(runtime: UpdateRuntimeTools): Record<string, string> {
+  const versions: Record<string, string> = {};
+  for (const { name, spec } of MANAGED_BACKEND_PACKAGES) {
+    const view = updateToolCommand(runtime.npm, ["view", spec, "version", "--json"]);
+    const output = execFileSync(view.command, view.args, {
+      cwd: SERVER_DIR,
+      env: runtime.env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30000,
+      windowsHide: true,
+    });
+    versions[name] = parseNpmVersionOutput(output);
+  }
+  return versions;
+}
+
+async function latestManagedBackendVersions(runtime: UpdateRuntimeTools): Promise<Record<string, string>> {
+  const entries = await Promise.all(MANAGED_BACKEND_PACKAGES.map(async ({ name, spec }) => {
+    const output = await runUpdateToolAsync(
+      runtime,
+      runtime.npm,
+      ["view", spec, "version", "--json"],
+      SERVER_DIR,
+      30000,
+    );
+    return [name, parseNpmVersionOutput(output)] as const;
+  }));
+  return Object.fromEntries(entries);
 }
 
 function refreshBackendRuntimeCaches(): void {
@@ -7400,9 +7464,16 @@ function runManagedBackendUpdateSync(): void {
     return;
   }
   const runtime = resolveUpdateRuntimeTools();
-  const args = managedBackendUpdateArgs(runtime);
+  const installed = installedManagedBackendVersions(runtime);
+  const latest = latestManagedBackendVersionsSync(runtime);
+  const specs = managedBackendSpecsNeedingUpdate(installed, latest);
+  if (specs.length === 0) {
+    console.log(`[Auto-update] Managed agent backends already current (${managedBackendVersionsLabel(installed)})`);
+    return;
+  }
+  const args = managedBackendInstallArgs(runtime, specs);
   const npm = updateToolCommand(runtime.npm, args);
-  console.log(`[Auto-update] Updating managed agent backends in ${managedNpmPrefix(runtime.env)}`);
+  console.log(`[Auto-update] Updating changed managed agent backends: ${specs.join(", ")}`);
   execFileSync(npm.command, npm.args, {
     cwd: SERVER_DIR,
     env: runtime.env,
@@ -7419,8 +7490,15 @@ async function runManagedBackendUpdate(): Promise<void> {
     return;
   }
   const runtime = resolveUpdateRuntimeTools();
-  console.log(`[Auto-update] Updating managed agent backends in ${managedNpmPrefix(runtime.env)}`);
-  await runUpdateToolAsync(runtime, runtime.npm, managedBackendUpdateArgs(runtime), SERVER_DIR, 300000);
+  const installed = installedManagedBackendVersions(runtime);
+  const latest = await latestManagedBackendVersions(runtime);
+  const specs = managedBackendSpecsNeedingUpdate(installed, latest);
+  if (specs.length === 0) {
+    console.log(`[Auto-update] Managed agent backends already current (${managedBackendVersionsLabel(installed)})`);
+    return;
+  }
+  console.log(`[Auto-update] Updating changed managed agent backends: ${specs.join(", ")}`);
+  await runUpdateToolAsync(runtime, runtime.npm, managedBackendInstallArgs(runtime, specs), SERVER_DIR, 300000);
   refreshBackendRuntimeCaches();
 }
 
@@ -7437,6 +7515,30 @@ function readManagedBackendUpdateHash(): string {
 }
 
 let managedBackendUpdateInProgress = false;
+let managedBackendUpdatePromise: Promise<void> | null = null;
+
+async function runManagedBackendUpdateTracked(): Promise<void> {
+  if (managedBackendUpdatePromise) return managedBackendUpdatePromise;
+  managedBackendUpdateInProgress = true;
+  const operation = runManagedBackendUpdate();
+  managedBackendUpdatePromise = operation;
+  try {
+    await operation;
+  } finally {
+    if (managedBackendUpdatePromise === operation) managedBackendUpdatePromise = null;
+    managedBackendUpdateInProgress = false;
+  }
+}
+
+async function waitForManagedBackendUpdate(): Promise<void> {
+  const update = managedBackendUpdatePromise;
+  if (!update) return;
+  try {
+    await update;
+  } catch {
+    // The existing backend remains usable when an update check/install fails.
+  }
+}
 
 async function ensureManagedBackendsUpdatedForCurrentHash(reason: string): Promise<void> {
   if (!autoUpdateEnabled() || !managedBackendAutoUpdateEnabled()) return;
@@ -7457,17 +7559,14 @@ async function ensureManagedBackendsUpdatedForCurrentHash(reason: string): Promi
     return;
   }
 
-  managedBackendUpdateInProgress = true;
   try {
-    console.log(`[Auto-update] Updating managed backends for current build ${currentHash.substring(0, 7)} (${reason})`);
-    await runManagedBackendUpdate();
+    console.log(`[Auto-update] Checking managed backends for current build ${currentHash.substring(0, 7)} (${reason})`);
+    await runManagedBackendUpdateTracked();
     markManagedBackendUpdateApplied(currentHash);
   } catch (e: any) {
     lastAutoUpdateError = `Managed backend update failed: ${e?.message || String(e)}`;
     console.error(`[Auto-update] ${lastAutoUpdateError}`);
     setTimeout(() => void ensureManagedBackendsUpdatedForCurrentHash(`${reason}-retry`), 300000);
-  } finally {
-    managedBackendUpdateInProgress = false;
   }
 }
 
@@ -7674,22 +7773,8 @@ function windowsRunServiceBatContent(): string {
     "if errorlevel 1 exit /b 1",
     'call "%NPX_CMD%" tsc',
     "if errorlevel 1 exit /b 1",
-    "call :update_managed_backends",
-    "if errorlevel 1 exit /b 1",
     '> "%REPO_ROOT%\\.last-auto-update-hash" echo %REMOTE_HASH%',
-    '> "%REPO_ROOT%\\.last-managed-backends-update-hash" echo %REMOTE_HASH%',
     "exit /b 0",
-    "",
-    ":update_managed_backends",
-    'if /I "%SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS%"=="0" exit /b 0',
-    'if /I "%SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS%"=="false" exit /b 0',
-    'if /I "%SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS%"=="off" exit /b 0',
-    'set "BACKEND_NPM_PREFIX=%SOCKET_AGENT_NPM_PREFIX%"',
-    'if not defined BACKEND_NPM_PREFIX set "BACKEND_NPM_PREFIX=%SOCKETAGENT_NPM_PREFIX%"',
-    'if not defined BACKEND_NPM_PREFIX set "BACKEND_NPM_PREFIX=%HOME%\\.socket-agent\\toolchains\\npm-global"',
-    'echo [Auto-update] Updating managed agent backends in %BACKEND_NPM_PREFIX%',
-    'call "%NPM_CMD%" install -g --prefix "%BACKEND_NPM_PREFIX%" --include=optional @openai/codex@latest @anthropic-ai/claude-code@latest',
-    "exit /b %ERRORLEVEL%",
     "",
     ":verify_update",
     'set "VERIFY_MODE=%SOCKETAGENT_AUTO_UPDATE_VERIFY%"',
@@ -7941,8 +8026,12 @@ async function checkForUpdates(): Promise<void> {
       : GIT_ROOT;
     // Install/update deps so SDK and other package changes are picked up
     await runPackageUpdate(tscDir);
-    await runManagedBackendUpdate();
-    markManagedBackendUpdateApplied(remote);
+    try {
+      await runManagedBackendUpdateTracked();
+      markManagedBackendUpdateApplied(remote);
+    } catch (backendErr: any) {
+      console.warn(`[Auto-update] Managed backend version check failed; keeping installed versions: ${backendErr?.message || String(backendErr)}`);
+    }
     installSocketAgentCliFromRepo(GIT_ROOT);
 
     lastAutoUpdateError = null;

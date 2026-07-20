@@ -36,6 +36,7 @@ import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } fr
 import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
+import { createInteractiveRequestId } from "./interactive-request-id";
 
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
@@ -455,7 +456,6 @@ export class ClaudeSession {
   private activeInputQueue: ClaudeInputQueue | null = null;
   private warmIdleTimer: NodeJS.Timeout | null = null;
   private pendingTurns: PendingTurn[] = [];
-  private questionCounter = 0;
   private _isRunning = false;
   private _isWarmIdle = false;
   private _runStartedAt: string | null = null;
@@ -1278,7 +1278,7 @@ export class ClaudeSession {
       send: (msg) => this.send(msg as ServerMessage),
       appendHistory: (entry) => { if (sid) appendHistory(sid, entry); },
       pendingQuestions: this.pendingQuestions,
-      questionCounter: { next: () => `q${++this.questionCounter}` },
+      questionCounter: { next: () => createInteractiveRequestId("q") },
     };
   }
 
@@ -2257,7 +2257,7 @@ export class ClaudeSession {
             // In bypassPermissions mode, canUseTool is only called for interactive tools.
 
             if (toolName === "AskUserQuestion") {
-              const qId = `q${++this.questionCounter}`;
+              const qId = createInteractiveRequestId("q");
               const questions: QuestionItem[] = [];
               const inputQuestions = (input as any).questions;
 
@@ -2343,7 +2343,7 @@ export class ClaudeSession {
                 console.error(`[Plan] Error reading plan file: ${e}`);
               }
 
-              const qId = `q${++this.questionCounter}`;
+              const qId = createInteractiveRequestId("q");
               const planQuestions: QuestionItem[] = [
                 {
                   question: planContent || "Claude has proposed a plan. Approve or reject?",
@@ -2402,7 +2402,7 @@ export class ClaudeSession {
 
             if (mode === 'url' && url) {
               // URL-mode: send a dedicated card so the app can open the URL
-              const qId = `elicit_${++this.questionCounter}`;
+              const qId = createInteractiveRequestId("elicit");
               const elicitMsg: ServerMessage = {
                 type: "elicitation_url",
                 questionId: qId,
@@ -2438,7 +2438,7 @@ export class ClaudeSession {
             }
 
             // Form-mode: convert requestedSchema to QuestionItems and use question card
-            const qId = `elicit_${++this.questionCounter}`;
+            const qId = createInteractiveRequestId("elicit");
             const questions: QuestionItem[] = [];
 
             if (requestedSchema && typeof requestedSchema === 'object') {

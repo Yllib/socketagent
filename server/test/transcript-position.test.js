@@ -176,3 +176,36 @@ test("history keeps first-live order when streams finish out of order", () => {
     deleteSessionArtifacts(sessionId);
   }
 });
+
+test("persisting another revision replaces the existing transcript row", () => {
+  const sessionId = `test-transcript-upsert-${randomUUID()}`;
+  try {
+    const first = appendHistory(sessionId, {
+      role: "secure_input",
+      content: "Need token",
+      questionId: "secure-test",
+      status: "pending",
+      answered: false,
+      toolInput: { label: "Token", reason: "Need token", scope: "session" },
+      timestamp: new Date().toISOString(),
+    });
+    const saved = appendHistory(sessionId, {
+      role: "secure_input",
+      content: "Need token",
+      questionId: "secure-test",
+      status: "saved",
+      answered: true,
+      toolInput: { label: "Token", reason: "Need token", scope: "session" },
+      timestamp: new Date(Date.now() + 1).toISOString(),
+    });
+
+    const history = getHistory(sessionId);
+    assert.equal(history.length, 1);
+    assert.equal(history[0].status, "saved");
+    assert.equal(saved.entryId, first.entryId);
+    assert.equal(saved.sessionSeq, first.sessionSeq);
+    assert.ok(saved.revision > first.revision);
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});

@@ -45,6 +45,7 @@ import { listSkills, SkillEntry } from "./skills-manager";
 import { getClaudeAvailability } from "./claude-session";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
+import { createInteractiveRequestId } from "./interactive-request-id";
 
 const TRANSIENT_CODEX_RAW_EVENT_METHODS = new Set([
   "item/agentMessage/delta",
@@ -349,7 +350,6 @@ export class CodexSession {
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
   private pendingQuestions = new Map<string, PendingQuestion>();
-  private questionCounter = 0;
   private clientSockets = new Set<WebSocket>();
   private sessionEventDelivery = new SessionEventDelivery((message) => {
     this.dispatchToClients(message as ServerMessage);
@@ -1557,7 +1557,7 @@ export class CodexSession {
         if (this.sessionId) appendHistory(this.sessionId, this.withCodexProtectedHistory(entry));
       },
       pendingQuestions: this.pendingQuestions,
-      questionCounter: { next: () => `q${++this.questionCounter}` },
+      questionCounter: { next: () => createInteractiveRequestId("q") },
     };
   }
 
@@ -2450,7 +2450,7 @@ export class CodexSession {
     }
 
     const sessionId = this.sessionId || this._resumeSessionId || String(params.threadId || "");
-    const questionId = `codex_elicit_${++this.questionCounter}`;
+    const questionId = createInteractiveRequestId("codex_elicit");
 
     if (prepared.mode === "url" && prepared.url) {
       const message: ServerMessage = {
@@ -2535,7 +2535,7 @@ export class CodexSession {
     }
 
     const sessionId = this.sessionId || this._resumeSessionId || String(params.threadId || "");
-    const questionId = `codex_input_${++this.questionCounter}`;
+    const questionId = createInteractiveRequestId("codex_input");
     const questionIds = new Map<string, string>();
     const usedText = new Set<string>();
     const questions = rawQuestions.map((rawQuestion: any, index: number) => {

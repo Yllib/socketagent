@@ -11,6 +11,8 @@ import { buildCodexSpawn } from "./codex-env";
 import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
 import { remapHtmlPlans } from "./html-plan-store";
+import { createInteractiveRequestId } from "./interactive-request-id";
+import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
 
 const STORE_DIR = socketAgentDataPath();
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
@@ -18,6 +20,7 @@ const HISTORY_DIR = path.join(STORE_DIR, "history");
 const TOOL_OUTPUT_DIR = path.join(STORE_DIR, "tool-output");
 const TOOL_IMAGE_CACHE_DIR = path.join(STORE_DIR, "tool-images");
 const ARCHIVED_SESSION_IDS_FILE = path.join(STORE_DIR, "archived-session-ids.json");
+const TRANSCRIPT_IDENTITY_REPAIR_MARKER = path.join(STORE_DIR, ".transcript-identity-repair-v1");
 const HISTORY_IO_WARN_MS = Number(process.env.SOCKETAGENT_HISTORY_IO_WARN_MS || 500);
 const HISTORY_PAGE_WARN_MS = Number(process.env.SOCKETAGENT_HISTORY_PAGE_WARN_MS || 250);
 const SESSION_LIST_WARN_MS = Number(process.env.SOCKETAGENT_SESSION_LIST_WARN_MS || 500);
@@ -795,11 +798,24 @@ function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: bo
     return cached.entries;
   }
 
-  const entries = normalizeClaudeResultFallbackHistoryEntries(
+  const normalized = normalizeClaudeResultFallbackHistoryEntries(
     normalizeSendFileHistoryEntries(
       JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[],
     ),
   );
+  const repair = repairTranscriptIdentityCollisions(normalized);
+  const entries = repair.entries;
+  if (repair.changed) {
+    // A positional repair must discard the old in-memory aliases before the
+    // repaired snapshot is positioned and persisted.
+    transcriptPositionStates.delete(sessionId);
+    syncTranscriptPositionState(sessionId, entries);
+    writeHistoryEntries(sessionId, entries);
+    console.warn(
+      `[HistoryRepair] session=${sessionId} rebased=${repair.rebased} collisions=${repair.collisions} collapsed=${repair.collapsed} rekeyedQuestions=${repair.rekeyedQuestions}`,
+    );
+    return historyCache.get(sessionId)?.entries || entries;
+  }
   syncTranscriptPositionState(sessionId, entries);
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
   warnIfSlow("history_read", startedAt, {
@@ -918,17 +934,88 @@ function writeHistoryEntries(
 
 export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEntry {
   const entries = readHistoryEntries(sessionId);
-  const positioned = positionHistoryEntry(sessionId, entry);
-  entries.push(positioned);
+  let positioned = positionHistoryEntry(sessionId, entry);
+  let existingIndex = entries.findIndex((candidate) => candidate.entryId === positioned.entryId);
+  if (existingIndex >= 0 && !sameLogicalTranscriptEntry(entries[existingIndex], positioned)) {
+    console.warn(
+      `[History] Refusing transcript identity collision session=${sessionId} entryId=${positioned.entryId} role=${positioned.role}`,
+    );
+    const repaired = { ...entry };
+    if (repaired.questionId) repaired.questionId = createInteractiveRequestId("recovered_question");
+    delete repaired.entryId;
+    delete repaired.sessionSeq;
+    delete repaired.revision;
+    positioned = positionHistoryEntry(sessionId, repaired);
+    existingIndex = -1;
+  }
+  if (existingIndex >= 0) {
+    positioned.revision = Math.max(
+      positiveInteger(positioned.revision) || 1,
+      (positiveInteger(entries[existingIndex].revision) || 1) + 1,
+    );
+    entries[existingIndex] = positioned;
+  } else {
+    entries.push(positioned);
+  }
   writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set([positioned]) });
   return positioned;
+}
+
+/** Run the collision migration before accepting clients on the first fixed build. */
+export function repairStoredTranscriptIdentitiesOnce(): void {
+  if (fs.existsSync(TRANSCRIPT_IDENTITY_REPAIR_MARKER)) return;
+  ensureHistoryDir();
+  let failures = 0;
+  let scanned = 0;
+  for (const fileName of fs.readdirSync(HISTORY_DIR)) {
+    if (!fileName.endsWith(".json") || fileName.startsWith("test-")) continue;
+    const sessionId = fileName.slice(0, -".json".length);
+    try {
+      readHistoryEntries(sessionId);
+      scanned++;
+    } catch (error: any) {
+      failures++;
+      console.error(`[HistoryRepair] Failed session=${sessionId}: ${error?.message || String(error)}`);
+    }
+  }
+  if (failures > 0) {
+    console.warn(`[HistoryRepair] Startup scan incomplete scanned=${scanned} failures=${failures}; retrying next start`);
+    return;
+  }
+  fs.writeFileSync(TRANSCRIPT_IDENTITY_REPAIR_MARKER, `${new Date().toISOString()}\n`, { mode: 0o600 });
+  console.log(`[HistoryRepair] Startup scan complete sessions=${scanned}`);
 }
 
 export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[]): void {
   if (newEntries.length === 0) return;
   const entries = readHistoryEntries(sessionId);
-  const positioned = newEntries.map((entry) => positionHistoryEntry(sessionId, entry));
-  entries.push(...positioned);
+  const positioned: HistoryEntry[] = [];
+  for (const newEntry of newEntries) {
+    let entry = positionHistoryEntry(sessionId, newEntry);
+    let existingIndex = entries.findIndex((candidate) => candidate.entryId === entry.entryId);
+    if (existingIndex >= 0) {
+      if (!sameLogicalTranscriptEntry(entries[existingIndex], entry)) {
+        console.warn(`[History] Recovering colliding bulk entry session=${sessionId} entryId=${entry.entryId}`);
+        const repaired = { ...newEntry };
+        if (repaired.questionId) repaired.questionId = createInteractiveRequestId("recovered_question");
+        delete repaired.entryId;
+        delete repaired.sessionSeq;
+        delete repaired.revision;
+        entry = positionHistoryEntry(sessionId, repaired);
+        existingIndex = -1;
+      }
+    }
+    if (existingIndex >= 0) {
+      entry.revision = Math.max(
+        positiveInteger(entry.revision) || 1,
+        (positiveInteger(entries[existingIndex].revision) || 1) + 1,
+      );
+      entries[existingIndex] = entry;
+    } else {
+      entries.push(entry);
+    }
+    positioned.push(entry);
+  }
   writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set(positioned) });
 }
 
@@ -1167,9 +1254,14 @@ export function markQuestionAnswered(sessionId: string, questionId: string): voi
   try {
     const entries = readHistoryEntries(sessionId);
     if (entries.length === 0) return;
-    const entry = entries.find(
-      (e) => e.role === "question" && e.questionId === questionId
-    );
+    let entry: HistoryEntry | undefined;
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const candidate = entries[index];
+      if (candidate.role === "question" && candidate.questionId === questionId) {
+        entry = candidate;
+        break;
+      }
+    }
     if (entry) {
       entry.answered = true;
       writeHistoryEntries(sessionId, entries);

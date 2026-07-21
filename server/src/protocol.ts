@@ -139,6 +139,8 @@ export interface ResumeSessionMessage {
   knownSessionSeq?: number;
   /** Oldest history offset represented by the client's cached snapshot. */
   knownHistoryOffset?: number;
+  /** Number of contiguous durable entries represented by the cached snapshot. */
+  knownHistoryEntryCount?: number;
   /** Optional client trace identifier for click-to-ready diagnostics. */
   openTraceId?: string;
 }

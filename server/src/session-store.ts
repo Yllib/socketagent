@@ -1447,6 +1447,8 @@ export function getBoundedHistoryDelta(
   knownSessionSeq: number,
   maxEntries = 100,
   maxBytes = 256 * 1024,
+  knownHistoryOffset?: number,
+  knownHistoryEntryCount?: number,
 ): BoundedHistoryPage | null {
   const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
   const totalUserPrompts = all.reduce(
@@ -1455,6 +1457,15 @@ export function getBoundedHistoryDelta(
   );
   const knownIndex = all.findIndex((entry) => entry.sessionSeq === knownSessionSeq);
   if (knownIndex < 0) return null;
+  if (knownHistoryOffset !== undefined || knownHistoryEntryCount !== undefined) {
+    if (!Number.isSafeInteger(knownHistoryOffset) ||
+        !Number.isSafeInteger(knownHistoryEntryCount) ||
+        knownHistoryOffset! < 0 ||
+        knownHistoryEntryCount! <= 0 ||
+        knownHistoryOffset! + knownHistoryEntryCount! !== knownIndex + 1) {
+      return null;
+    }
+  }
   const count = all.length - knownIndex - 1;
   if (count > maxEntries) return null;
   const entries = hydrateHistoryEntries(all.slice(knownIndex + 1));

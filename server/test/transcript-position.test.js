@@ -125,6 +125,13 @@ test("oversized or incompatible deltas fail back to a bounded snapshot", () => {
 
     assert.equal(getBoundedHistoryDelta(sessionId, 999999), null);
     assert.equal(getBoundedHistoryDelta(sessionId, first.sessionSeq, 2), null);
+    assert.equal(
+      getBoundedHistoryDelta(sessionId, first.sessionSeq, 100, 256 * 1024, 0, 2),
+      null,
+    );
+    assert.ok(
+      getBoundedHistoryDelta(sessionId, first.sessionSeq, 100, 256 * 1024, 0, 1),
+    );
   } finally {
     deleteSessionArtifacts(sessionId);
   }

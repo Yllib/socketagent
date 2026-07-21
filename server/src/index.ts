@@ -2625,8 +2625,17 @@ function createConnectionHandler(transport: ClientTransport) {
           syncCodexRolloutHistory(sessionInfo);
         }
         const rawKnownSeq = Number((msg as any).knownSessionSeq);
+        const rawKnownOffset = Number((msg as any).knownHistoryOffset);
+        const rawKnownEntryCount = Number((msg as any).knownHistoryEntryCount);
         const deltaPage = Number.isSafeInteger(rawKnownSeq) && rawKnownSeq >= 0
-          ? getBoundedHistoryDelta(msg.sessionId, rawKnownSeq)
+          ? getBoundedHistoryDelta(
+              msg.sessionId,
+              rawKnownSeq,
+              100,
+              256 * 1024,
+              Number.isSafeInteger(rawKnownOffset) ? rawKnownOffset : undefined,
+              Number.isSafeInteger(rawKnownEntryCount) ? rawKnownEntryCount : undefined,
+            )
           : null;
         const page = deltaPage ?? getBoundedHistoryTail(msg.sessionId);
         const historyKind = deltaPage ? "delta" : "initial";

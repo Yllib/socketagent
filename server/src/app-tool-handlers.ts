@@ -1,7 +1,6 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
-import { spawn, spawnSync, ChildProcess } from "child_process";
 import type { Backend, CodexDriver, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
@@ -10,6 +9,18 @@ import { requestSecureInput, SecureInputRequestArgs, SecureInputRequestStatus } 
 import { sendPushNotification } from "./push-notifications";
 import { saveHtmlPlan } from "./html-plan-store";
 import { removeHtmlPlanHistoryEntries } from "./session-store";
+import {
+  createDurableMonitorRecord,
+  DurableMonitorRecord,
+  getDurableMonitorRecord,
+  launchDurableMonitor,
+  listDurableMonitorRecords,
+  readDurableMonitorSlice,
+  removeDurableMonitorRecord,
+  stopDurableMonitor,
+  stopDurableMonitorAndWait,
+  updateDurableMonitorRecord,
+} from "./durable-monitor-store";
 
 export interface AppToolContext {
   getSessionId(): string;
@@ -87,15 +98,18 @@ export interface HtmlPlanArgs {
 
 interface AppMonitorState {
   ctx: AppToolContext;
+  record: DurableMonitorRecord;
   description: string;
   outputFile: string;
   lastSize: number;
+  agentReadOffset: number;
+  agentPendingEnd: number;
   readerInterval: ReturnType<typeof setInterval> | null;
   debounceTimer: ReturnType<typeof setTimeout> | null;
   timeoutTimer: ReturnType<typeof setTimeout> | null;
+  flushPromise: Promise<boolean> | null;
   outputBuffer: string[];
-  historyOutput: string[];
-  process?: ChildProcess;
+  completing: boolean;
 }
 
 const recentSendFiles: Map<string, number> = new Map();
@@ -540,22 +554,25 @@ function publishMonitorOutput(taskId: string, content: string): void {
   const state = appMonitors.get(taskId);
   if (!state || !content) return;
   const sessionId = state.ctx.getSessionId();
+  const cumulative = readDurableMonitorSlice(state.record, 0).content;
+  const positioned = state.ctx.appendHistory?.({
+    role: "monitor",
+    content: cumulative,
+    taskId,
+    description: state.description,
+    timestamp: new Date().toISOString(),
+  });
   state.ctx.send({
     type: "monitor_output",
     taskId,
     content,
     sessionId,
+    ...((positioned && typeof positioned === "object") ? {
+      entryId: (positioned as any).entryId,
+      sessionSeq: (positioned as any).sessionSeq,
+      revision: (positioned as any).revision,
+    } : {}),
   } as any);
-  state.historyOutput.push(content);
-  state.ctx.appendHistory?.({
-    role: "monitor",
-    // Monitor is one durable card whose live frames advance in place. Persist
-    // the cumulative snapshot so a history reload restores the whole log.
-    content: state.historyOutput.join("\n"),
-    taskId,
-    description: state.description,
-    timestamp: new Date().toISOString(),
-  });
 }
 
 /** Read every byte written since the last poll before reporting/injecting it. */
@@ -563,22 +580,25 @@ function readMonitorOutput(taskId: string): void {
   const state = appMonitors.get(taskId);
   if (!state || !fs.existsSync(state.outputFile)) return;
   try {
-    const stat = fs.statSync(state.outputFile);
-    if (stat.size <= state.lastSize) return;
+    const phoneSlice = readDurableMonitorSlice(state.record, state.lastSize);
+    if (phoneSlice.end > state.lastSize) {
+      state.lastSize = phoneSlice.end;
+      publishMonitorOutput(taskId, phoneSlice.content);
+      updateDurableMonitorRecord(taskId, { phoneOffset: phoneSlice.end });
+    }
 
-    const fd = fs.openSync(state.outputFile, "r");
-    const buf = Buffer.alloc(stat.size - state.lastSize);
-    fs.readSync(fd, buf, 0, buf.length, state.lastSize);
-    fs.closeSync(fd);
-    state.lastSize = stat.size;
-
-    const lines = buf.toString("utf8").split("\n").filter((line) => line.length > 0);
-    if (lines.length === 0) return;
-    const content = lines.join("\n");
-    publishMonitorOutput(taskId, content);
-    state.outputBuffer.push(...lines);
-    if (state.debounceTimer) clearTimeout(state.debounceTimer);
-    state.debounceTimer = setTimeout(() => flushMonitorBuffer(taskId), 5000);
+    const agentSlice = readDurableMonitorSlice(state.record, state.agentReadOffset);
+    if (agentSlice.end > state.agentReadOffset) {
+      const lines = agentSlice.content.split("\n").filter((line) => line.length > 0);
+      state.agentReadOffset = agentSlice.end;
+      state.agentPendingEnd = agentSlice.end;
+      state.outputBuffer.push(...lines);
+      if (state.debounceTimer) clearTimeout(state.debounceTimer);
+      state.debounceTimer = setTimeout(() => {
+        state.debounceTimer = null;
+        void flushMonitorBuffer(taskId);
+      }, 5000);
+    }
   } catch (err: any) {
     console.error(`[AppMonitor] Reader error for ${taskId}: ${err.message}`);
   }
@@ -588,7 +608,25 @@ function startMonitorReader(taskId: string): void {
   const state = appMonitors.get(taskId);
   if (!state) return;
   stopMonitorReader(taskId);
-  state.readerInterval = setInterval(() => readMonitorOutput(taskId), 1000);
+  state.readerInterval = setInterval(() => {
+    readMonitorOutput(taskId);
+    const latest = getDurableMonitorRecord(taskId);
+    if (!latest || state.completing || (latest.status !== "completed" && latest.status !== "failed")) return;
+    state.completing = true;
+    stopMonitorReader(taskId);
+    readMonitorOutput(taskId);
+    if (state.debounceTimer) clearTimeout(state.debounceTimer);
+    state.debounceTimer = null;
+    void flushMonitorBuffer(taskId).then((delivered) => {
+      if (delivered) {
+        const exitCode = latest.exitCode ?? "unknown";
+        finishAppMonitor(taskId, latest.status as "completed" | "failed", `Process exited with code ${exitCode}`);
+      } else if (appMonitors.get(taskId) === state) {
+        state.completing = false;
+        startMonitorReader(taskId);
+      }
+    });
+  }, 500);
 }
 
 function stopMonitorReader(taskId: string): void {
@@ -598,22 +636,79 @@ function stopMonitorReader(taskId: string): void {
   state.readerInterval = null;
 }
 
-function flushMonitorBuffer(taskId: string): void {
-  const state = appMonitors.get(taskId);
-  if (!state || state.outputBuffer.length === 0) return;
+async function deliverMonitorBuffer(taskId: string, state: AppMonitorState): Promise<boolean> {
+  if (state.outputBuffer.length === 0) return true;
   const deliveredLines = state.outputBuffer.length;
+  const deliveredEnd = state.agentPendingEnd;
   const content = state.outputBuffer.slice(0, deliveredLines).join("\n");
   const text = `[Monitor: "${state.description}" (${taskId})]\n${content}`;
 
   if (state.ctx.isRunning?.() && state.ctx.injectMessage) {
-    state.ctx.injectMessage(text, "next").then(
-      () => { state.outputBuffer.splice(0, deliveredLines); },
-      (err) => { console.error(`[AppMonitor] Inject error for ${taskId}: ${err.message}`); },
-    );
-  } else {
-    state.outputBuffer.splice(0, deliveredLines);
-    state.ctx.onMonitorOutput?.(text);
+    try {
+      await state.ctx.injectMessage(text, "next");
+      state.outputBuffer.splice(0, deliveredLines);
+      updateDurableMonitorRecord(taskId, { agentOffset: deliveredEnd });
+      return true;
+    } catch (err: any) {
+      state.agentReadOffset = getDurableMonitorRecord(taskId)?.agentOffset || 0;
+      state.outputBuffer = [];
+      console.error(`[AppMonitor] Inject error for ${taskId}: ${err.message}`);
+      return false;
+    }
   }
+
+  state.outputBuffer.splice(0, deliveredLines);
+  updateDurableMonitorRecord(taskId, { agentOffset: deliveredEnd });
+  state.ctx.onMonitorOutput?.(text);
+  return true;
+}
+
+async function flushMonitorBuffer(taskId: string): Promise<boolean> {
+  const state = appMonitors.get(taskId);
+  if (!state) return true;
+
+  // A debounce flush can overlap the terminal flush. Serialize deliveries so
+  // the completion path cannot remove the durable record while a newer chunk
+  // is still waiting behind an in-flight agent injection.
+  if (state.flushPromise) {
+    const active = state.flushPromise;
+    const delivered = await active;
+    if (state.flushPromise === active) state.flushPromise = null;
+    if (!delivered) return false;
+    return flushMonitorBuffer(taskId);
+  }
+
+  if (state.outputBuffer.length === 0) return true;
+  const delivery = deliverMonitorBuffer(taskId, state);
+  state.flushPromise = delivery;
+  const delivered = await delivery;
+  if (state.flushPromise === delivery) state.flushPromise = null;
+  if (!delivered) return false;
+  return state.outputBuffer.length > 0 ? flushMonitorBuffer(taskId) : true;
+}
+
+function finishAppMonitor(taskId: string, status: "completed" | "failed", summary: string): void {
+  const state = appMonitors.get(taskId);
+  if (!state) return;
+  stopMonitorReader(taskId);
+  if (state.debounceTimer) clearTimeout(state.debounceTimer);
+  if (state.timeoutTimer) clearTimeout(state.timeoutTimer);
+  appMonitors.delete(taskId);
+  removeDurableMonitorRecord(taskId);
+  state.ctx.send({
+    type: "monitor_started",
+    taskId,
+    description: state.description,
+    monitoring: false,
+    sessionId: state.ctx.getSessionId(),
+  } as any);
+  state.ctx.send({
+    type: "task_notification",
+    taskId,
+    status,
+    summary,
+    sessionId: state.ctx.getSessionId(),
+  } as any);
 }
 
 export function stopAppMonitor(taskId: string, flush = true, killProcess = false): boolean {
@@ -626,11 +721,10 @@ export function stopAppMonitor(taskId: string, flush = true, killProcess = false
     readMonitorOutput(taskId);
     if (state.debounceTimer) clearTimeout(state.debounceTimer);
     state.debounceTimer = null;
-    flushMonitorBuffer(taskId);
+    void flushMonitorBuffer(taskId);
   }
-  // Remove ownership before signalling/killing so the child exit callback
-  // cannot resurrect a monitor that the user explicitly stopped.
   appMonitors.delete(taskId);
+  stopDurableMonitor(taskId, killProcess);
   state.ctx.send({
     type: "monitor_started",
     taskId,
@@ -638,56 +732,7 @@ export function stopAppMonitor(taskId: string, flush = true, killProcess = false
     monitoring: false,
     sessionId: state.ctx.getSessionId(),
   } as any);
-  if (killProcess && state.process && !state.process.killed) {
-    try {
-      if (state.process.pid && process.platform !== "win32") {
-        process.kill(-state.process.pid, "SIGTERM");
-      } else {
-        state.process.kill("SIGTERM");
-      }
-    } catch {
-      try { state.process.kill("SIGTERM"); } catch {}
-    }
-  }
   return true;
-}
-
-async function terminateAppMonitorProcess(child: ChildProcess): Promise<void> {
-  // `killed` only means a signal was sent, not that the process exited.
-  if (!child.pid || child.exitCode !== null) return;
-  const killTree = (force: boolean) => {
-    if (!child.pid) return;
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/t", ...(force ? ["/f"] : [])], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      return;
-    }
-    try {
-      process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
-    } catch {
-      try { child.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
-    }
-  };
-
-  await new Promise<void>((resolve, reject) => {
-    let done = false;
-    const finish = (error?: Error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(forceTimer);
-      clearTimeout(abandonTimer);
-      if (error) reject(error);
-      else resolve();
-    };
-    const forceTimer = setTimeout(() => killTree(true), 750);
-    const abandonTimer = setTimeout(() => finish(
-      new Error(`Monitor process tree ${child.pid} did not exit after SIGKILL`),
-    ), 2_000);
-    child.once("exit", () => finish());
-    killTree(false);
-  });
 }
 
 /** Hard-stop every Monitor process owned by a SocketAgent session. */
@@ -708,10 +753,70 @@ export async function stopAppMonitorsForSession(sessionId: string): Promise<numb
       sessionId,
     } as any);
   }
-  await Promise.all(owned.map(([, state]) =>
-    state.process ? terminateAppMonitorProcess(state.process) : Promise.resolve(),
-  ));
+  await Promise.all(owned.map(([taskId]) => stopDurableMonitorAndWait(taskId, true)));
   return owned.length;
+}
+
+function scheduleMonitorTimeout(taskId: string, state: AppMonitorState): void {
+  if (!state.record.timeoutAt) return;
+  const remaining = new Date(state.record.timeoutAt).getTime() - Date.now();
+  if (remaining <= 0) {
+    stopAppMonitor(taskId, true, false);
+    return;
+  }
+  state.timeoutTimer = setTimeout(() => {
+    console.log(`[AppMonitor] Timeout reached for ${taskId}`);
+    stopAppMonitor(taskId, true, false);
+  }, remaining);
+}
+
+export function restoreAppMonitors(
+  contextFor: (record: DurableMonitorRecord) => AppToolContext,
+): number {
+  let restored = 0;
+  for (const record of listDurableMonitorRecords()) {
+    if (appMonitors.has(record.taskId)) continue;
+    const state: AppMonitorState = {
+      ctx: contextFor(record),
+      record,
+      description: record.description,
+      outputFile: record.outputFile,
+      lastSize: record.phoneOffset || 0,
+      agentReadOffset: record.agentOffset || 0,
+      agentPendingEnd: record.agentOffset || 0,
+      readerInterval: null,
+      debounceTimer: null,
+      timeoutTimer: null,
+      flushPromise: null,
+      outputBuffer: [],
+      completing: false,
+    };
+    appMonitors.set(record.taskId, state);
+    startMonitorReader(record.taskId);
+    scheduleMonitorTimeout(record.taskId, state);
+    state.ctx.send({
+      type: "task_started",
+      taskId: record.taskId,
+      toolUseId: `monitor-${record.taskId}`,
+      description: record.description,
+      taskType: "monitor",
+      sessionId: record.sessionId,
+    } as any);
+    state.ctx.send({
+      type: "monitor_started",
+      taskId: record.taskId,
+      description: record.description,
+      monitoring: true,
+      command: record.command,
+      sessionId: record.sessionId,
+    } as any);
+    restored++;
+  }
+  return restored;
+}
+
+export function activeAppMonitorRecords(): DurableMonitorRecord[] {
+  return listDurableMonitorRecords();
 }
 
 export async function handleMonitorTool(
@@ -736,63 +841,45 @@ export async function handleMonitorTool(
     const command = args.command;
     const description = args.description || command.slice(0, 60);
     const taskId = `monitor-${crypto.randomUUID().slice(0, 8)}`;
-    const outputFile = `/tmp/socketagent-monitor-${taskId}.log`;
-    const fd = fs.openSync(outputFile, "w");
-    const child = spawn(command, [], {
-      shell: true,
-      detached: true,
-      stdio: ["ignore", fd, fd],
+    const record = launchDurableMonitor(createDurableMonitorRecord({
+      taskId,
+      sessionId: ctx.getSessionId(),
+      backend: ctx.getBackend?.() || "codex",
       cwd: ctx.getCwd?.() || process.cwd(),
-      windowsHide: true,
-    });
-    child.unref();
-    fs.closeSync(fd);
+      command,
+      description,
+      timeoutSeconds: args.timeoutSeconds,
+    }));
 
     const state: AppMonitorState = {
       ctx,
+      record,
       description,
-      outputFile,
+      outputFile: record.outputFile,
       lastSize: 0,
+      agentReadOffset: 0,
+      agentPendingEnd: 0,
       readerInterval: null,
       debounceTimer: null,
       timeoutTimer: null,
+      flushPromise: null,
       outputBuffer: [],
-      historyOutput: [],
-      process: child,
+      completing: false,
     };
     appMonitors.set(taskId, state);
     startMonitorReader(taskId);
 
-    if (args.timeoutSeconds) {
-      state.timeoutTimer = setTimeout(() => {
-        console.log(`[AppMonitor] Timeout reached for ${taskId}`);
-        stopAppMonitor(taskId, true);
-      }, args.timeoutSeconds * 1000);
-    }
+    scheduleMonitorTimeout(taskId, state);
 
     ctx.send({ type: "task_started", taskId, toolUseId: `monitor-${taskId}`, description, taskType: "monitor", sessionId: ctx.getSessionId() } as any);
     ctx.send({ type: "monitor_started", taskId, description, monitoring: true, command, sessionId: ctx.getSessionId() } as any);
 
-    child.on("exit", (code, signal) => {
-      // A manual stop/timeout removes ownership. Do not deliver a late exit as
-      // a fresh agent turn after monitoring has intentionally ended.
-      if (appMonitors.get(taskId) !== state) return;
-      readMonitorOutput(taskId);
-      const exitLine = `Process exited with code ${code ?? "unknown"} (signal: ${signal || "none"})`;
-      publishMonitorOutput(taskId, exitLine);
-      state.outputBuffer.push(exitLine);
-      flushMonitorBuffer(taskId);
-      stopAppMonitor(taskId, false);
-      ctx.send({
-        type: "task_notification",
-        taskId,
-        status: code === 0 ? "completed" : "failed",
-        summary: `Process exited with code ${code ?? "unknown"}`,
-        sessionId: ctx.getSessionId(),
-      } as any);
-    });
-
-    return { content: [{ type: "text", text: `Process started and monitoring enabled. Task ID: ${taskId}. PID: ${child.pid || "unknown"}.${args.timeoutSeconds ? ` Monitoring timeout: ${args.timeoutSeconds}s.` : ""}` }] };
+    let launched = record;
+    for (let i = 0; i < 20 && !launched.processPid && launched.status === "starting"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      launched = getDurableMonitorRecord(taskId) || launched;
+    }
+    return { content: [{ type: "text", text: `Process started and monitoring enabled. Task ID: ${taskId}. PID: ${launched.processPid || "starting"}.${args.timeoutSeconds ? ` Monitoring timeout: ${args.timeoutSeconds}s.` : ""}` }] };
   } catch (e: any) {
     console.error(`[AppMonitor] Error: ${e.message}`, e.stack);
     return { content: [{ type: "text", text: `Monitor error: ${e.message}` }], isError: true };

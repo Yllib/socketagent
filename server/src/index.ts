@@ -49,6 +49,8 @@ import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } fr
 import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHtmlPlanRevision, listHtmlPlanRevisions, listHtmlPlans, renameHtmlPlan, rollbackHtmlPlan } from "./html-plan-store";
 import { HardAbortCoordinator } from "./hard-abort";
 import { MANAGED_BACKEND_PACKAGES, managedBackendSpecsNeedingUpdate, parseNpmVersionOutput } from "./managed-backend-update";
+import { activeAppMonitorRecords, AppToolContext, restoreAppMonitors } from "./app-tool-handlers";
+import type { DurableMonitorRecord } from "./durable-monitor-store";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -1400,6 +1402,96 @@ function attachSessionLifecycleCallbacks(session: Session): void {
     }
     broadcastSessionList();
     broadcastStatusSync();
+  };
+}
+
+const durableMonitorPromptQueues = new Map<string, Promise<void>>();
+
+function broadcastDurableMonitorMessage(message: Record<string, any>): void {
+  const raw = JSON.stringify(redactSecretsDeep(message));
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN) client.send(raw);
+  }
+  if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
+}
+
+async function runDurableMonitorPrompt(record: DurableMonitorRecord, text: string): Promise<void> {
+  const existing = activeSessions.get(record.sessionId);
+  if (existing) {
+    if (sessionIsBusy(existing)) {
+      await existing.injectMessage(text, "next");
+      return;
+    }
+    await existing.runQuery(text, record.sessionId);
+    return;
+  }
+
+  const sessionInfo = getSession(record.sessionId);
+  if (!sessionInfo) throw new Error(`Monitor session ${record.sessionId} no longer exists`);
+  let session: Session;
+  const headlessSocket = {
+    readyState: WebSocket.OPEN,
+    send: (data: string) => {
+      try {
+        const message = JSON.parse(data);
+        if (!message.sessionId) message.sessionId = record.sessionId;
+        broadcastDurableMonitorMessage(message);
+      } catch {}
+    },
+  } as any;
+  session = createSession(
+    sessionInfo.backend,
+    headlessSocket,
+    sessionInfo.cwd,
+    plugins,
+    getStoredCodexDriver(sessionInfo),
+  );
+  await restorePersistedPermissionMode(session, sessionInfo);
+  (session as any)._resumeSessionId = record.sessionId;
+  await restorePersistedAgentSettings(session, sessionInfo);
+  attachSessionLifecycleCallbacks(session);
+  activeSessions.set(record.sessionId, session);
+  try {
+    await session.runQuery(text, record.sessionId);
+  } finally {
+    const sid = session.getSessionId() || record.sessionId;
+    if (activeSessions.get(sid) === session && !sessionShouldRemainPooled(session)) {
+      activeSessions.delete(sid);
+    }
+    broadcastSessionList();
+    broadcastStatusSync();
+  }
+}
+
+function queueDurableMonitorPrompt(record: DurableMonitorRecord, text: string): Promise<void> {
+  const previous = durableMonitorPromptQueues.get(record.sessionId) || Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(() => runDurableMonitorPrompt(record, text));
+  durableMonitorPromptQueues.set(record.sessionId, next);
+  return next.finally(() => {
+    if (durableMonitorPromptQueues.get(record.sessionId) === next) {
+      durableMonitorPromptQueues.delete(record.sessionId);
+    }
+  });
+}
+
+function durableMonitorContext(record: DurableMonitorRecord): AppToolContext {
+  return {
+    getSessionId: () => record.sessionId,
+    getCwd: () => record.cwd,
+    getBackend: () => record.backend,
+    ...(record.backend === "codex" ? { getCodexDriver: () => "app-server" as const } : {}),
+    send: (message) => broadcastDurableMonitorMessage(message as Record<string, any>),
+    appendHistory: (entry) => appendHistory(record.sessionId, entry as any),
+    getTtsEngine: () => "system",
+    getKokoroVoice: () => "af_heart",
+    getKokoroSpeed: () => 1,
+    // Restored monitors always use the promise-returning delivery path so the
+    // durable agent offset advances only after the resumed session accepts it.
+    isRunning: () => true,
+    injectMessage: (text) => queueDurableMonitorPrompt(record, text),
+    onMonitorOutput: (text) => { void queueDurableMonitorPrompt(record, text); },
   };
 }
 
@@ -6407,6 +6499,10 @@ httpServer.listen(PORT, BIND_HOST, async () => {
       console.error(`[Relay] Failed to start relay client: ${e?.message || String(e)}`);
     }
   }
+  const restoredMonitors = restoreAppMonitors(durableMonitorContext);
+  if (restoredMonitors > 0) {
+    console.log(`[AppMonitor] Restored ${restoredMonitors} durable monitor(s)`);
+  }
 });
 
 // Clean up any tool calls left pending from a previous server crash
@@ -6523,6 +6619,15 @@ function buildStatusSyncMessage(): string {
     }
     anyRunning = true;
   }
+  const durableMonitors = activeAppMonitorRecords().map((record) => ({
+    taskId: record.taskId,
+    sessionId: record.sessionId,
+    description: record.description,
+    startedAt: record.createdAt,
+  }));
+  for (const monitor of durableMonitors) {
+    if (!backgroundTaskIds.includes(monitor.taskId)) backgroundTaskIds.push(monitor.taskId);
+  }
   return JSON.stringify({
     type: "status_sync",
     running: anyRunning || compactingSessions.length > 0,
@@ -6534,6 +6639,7 @@ function buildStatusSyncMessage(): string {
     serverVersion: SERVER_GIT_HASH || undefined,
     scheduledTaskRevision: getScheduledTaskRevision(),
     backgroundTaskIds,
+    durableMonitors,
     ...(Object.keys(sessionActiveStartedAt).length > 0 ? { sessionActiveStartedAt } : {}),
     ...(Object.keys(sessionTitles).length > 0 ? { sessionTitles } : {}),
     ...(Object.keys(sessionModels).length > 0 ? { sessionModels } : {}),

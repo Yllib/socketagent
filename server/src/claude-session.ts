@@ -22,11 +22,14 @@ import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
   AppToolContext,
   handleHtmlPlanTool,
+  handleMonitorTool,
   handleNotifyUserTool,
   handleRequestSecureInputTool,
   handleScheduleReminderTool,
   handleSendFileTool,
   handleSpeakTool,
+  stopAppMonitor,
+  stopAppMonitorsForSession,
 } from "./app-tool-handlers";
 import { buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
@@ -910,6 +913,7 @@ export class ClaudeSession {
   }
 
   public stopMonitoring(taskId: string): void {
+    if (stopAppMonitor(taskId, true, true)) return;
     this._cleanupMonitor(taskId, true);
   }
 
@@ -1312,8 +1316,13 @@ export class ClaudeSession {
     this._isCompacting = false;
     this._runStartedAt = null;
     this._compactStartedAt = null;
-    // Kill all monitored processes and clean up readers
-    await this._hardCleanupAllMonitors();
+    // Kill both legacy task-tail monitors and durable Monitor-owned commands.
+    await Promise.all([
+      this._hardCleanupAllMonitors(),
+      (this.sessionId || this._resumeSessionId)
+        ? stopAppMonitorsForSession((this.sessionId || this._resumeSessionId)!)
+        : Promise.resolve(0),
+    ]);
     // Stop all background bash watchers
     for (const [taskId] of this._bgBashWatchers) {
       this._stopBgBashWatcher(taskId);
@@ -1605,6 +1614,9 @@ export class ClaudeSession {
         getTtsEngine: () => this._ttsEngine,
         getKokoroVoice: () => this._kokoroVoice,
         getKokoroSpeed: () => this._kokoroSpeed,
+        isRunning: () => this._isRunning,
+        injectMessage: (text, priority) => this.injectMessage(text, priority),
+        onMonitorOutput: (text) => this.onMonitorOutput?.(text),
       };
 
       // Build the MCP server with app-facing tools.
@@ -1745,6 +1757,11 @@ export class ClaudeSession {
               enabled: z.boolean().optional().describe("Enable (true) or disable (false) monitoring. Default: true"),
             },
             async (args) => {
+              // Monitor-owned commands run in the durable worker. Existing
+              // background task IDs keep the legacy output-file tailer.
+              if (args.command || args.taskId?.startsWith("monitor-")) {
+                return handleMonitorTool(appToolContext, args);
+              }
               try {
                 const isSpawn = !!args.command;
                 const isToggle = !!args.taskId && !args.command;

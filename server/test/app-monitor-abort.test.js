@@ -1,5 +1,14 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
+
+const monitorDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-monitor-test-"));
+process.env.SOCKETAGENT_DATA_DIR = monitorDataDir;
+process.env.SOCKETAGENT_MONITOR_LAUNCH_MODE = "direct";
+
+test.after(() => fs.rmSync(monitorDataDir, { recursive: true, force: true }));
 
 const {
   handleMonitorTool,
@@ -110,4 +119,41 @@ test("hard stop terminates detached Monitor process trees owned by the session",
   assert.equal(await stopAppMonitorsForSession("another-session"), 0);
   assert.equal(await stopAppMonitorsForSession(sessionId), 1);
   assert.throws(() => process.kill(pid, 0));
+});
+
+test("terminal output waits behind an in-flight agent delivery without loss or duplication", async () => {
+  if (process.platform === "win32") return;
+  const sessionId = `monitor-overlap-${Date.now()}`;
+  const sent = [];
+  const injected = [];
+  await handleMonitorTool(
+    {
+      getSessionId: () => sessionId,
+      getCwd: () => process.cwd(),
+      send: (message) => sent.push(message),
+      getTtsEngine: () => "system",
+      getKokoroVoice: () => "",
+      getKokoroSpeed: () => 1,
+      isRunning: () => true,
+      injectMessage: async (text) => {
+        injected.push(text);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      },
+    },
+    {
+      // The initial output starts the 5s debounce delivery. The command exits
+      // while that delivery is still awaiting the agent.
+      command: "printf 'first\\n'; sleep 5.6; printf 'last\\n'",
+      description: "overlapping terminal flush",
+    },
+  );
+
+  await waitFor(
+    () => sent.find((message) => message.type === "task_notification"),
+    10_000,
+  );
+  const delivered = injected.join("\n");
+  assert.equal((delivered.match(/first/g) || []).length, 1);
+  assert.equal((delivered.match(/last/g) || []).length, 1);
+  assert.match(delivered, /Process exited with code 0/);
 });

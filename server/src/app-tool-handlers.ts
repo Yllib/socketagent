@@ -94,6 +94,7 @@ interface AppMonitorState {
   debounceTimer: ReturnType<typeof setTimeout> | null;
   timeoutTimer: ReturnType<typeof setTimeout> | null;
   outputBuffer: string[];
+  historyOutput: string[];
   process?: ChildProcess;
 }
 
@@ -535,31 +536,59 @@ export async function handleReadSkillTool(
   };
 }
 
+function publishMonitorOutput(taskId: string, content: string): void {
+  const state = appMonitors.get(taskId);
+  if (!state || !content) return;
+  const sessionId = state.ctx.getSessionId();
+  state.ctx.send({
+    type: "monitor_output",
+    taskId,
+    content,
+    sessionId,
+  } as any);
+  state.historyOutput.push(content);
+  state.ctx.appendHistory?.({
+    role: "monitor",
+    // Monitor is one durable card whose live frames advance in place. Persist
+    // the cumulative snapshot so a history reload restores the whole log.
+    content: state.historyOutput.join("\n"),
+    taskId,
+    description: state.description,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+/** Read every byte written since the last poll before reporting/injecting it. */
+function readMonitorOutput(taskId: string): void {
+  const state = appMonitors.get(taskId);
+  if (!state || !fs.existsSync(state.outputFile)) return;
+  try {
+    const stat = fs.statSync(state.outputFile);
+    if (stat.size <= state.lastSize) return;
+
+    const fd = fs.openSync(state.outputFile, "r");
+    const buf = Buffer.alloc(stat.size - state.lastSize);
+    fs.readSync(fd, buf, 0, buf.length, state.lastSize);
+    fs.closeSync(fd);
+    state.lastSize = stat.size;
+
+    const lines = buf.toString("utf8").split("\n").filter((line) => line.length > 0);
+    if (lines.length === 0) return;
+    const content = lines.join("\n");
+    publishMonitorOutput(taskId, content);
+    state.outputBuffer.push(...lines);
+    if (state.debounceTimer) clearTimeout(state.debounceTimer);
+    state.debounceTimer = setTimeout(() => flushMonitorBuffer(taskId), 5000);
+  } catch (err: any) {
+    console.error(`[AppMonitor] Reader error for ${taskId}: ${err.message}`);
+  }
+}
+
 function startMonitorReader(taskId: string): void {
   const state = appMonitors.get(taskId);
   if (!state) return;
   stopMonitorReader(taskId);
-  state.readerInterval = setInterval(() => {
-    try {
-      if (!fs.existsSync(state.outputFile)) return;
-      const stat = fs.statSync(state.outputFile);
-      if (stat.size <= state.lastSize) return;
-
-      const fd = fs.openSync(state.outputFile, "r");
-      const buf = Buffer.alloc(stat.size - state.lastSize);
-      fs.readSync(fd, buf, 0, buf.length, state.lastSize);
-      fs.closeSync(fd);
-      state.lastSize = stat.size;
-
-      const lines = buf.toString("utf8").split("\n").filter((line) => line.length > 0);
-      if (lines.length === 0) return;
-      state.outputBuffer.push(...lines);
-      if (state.debounceTimer) clearTimeout(state.debounceTimer);
-      state.debounceTimer = setTimeout(() => flushMonitorBuffer(taskId), 5000);
-    } catch (err: any) {
-      console.error(`[AppMonitor] Reader error for ${taskId}: ${err.message}`);
-    }
-  }, 1000);
+  state.readerInterval = setInterval(() => readMonitorOutput(taskId), 1000);
 }
 
 function stopMonitorReader(taskId: string): void {
@@ -593,11 +622,33 @@ export function stopAppMonitor(taskId: string, flush = true, killProcess = false
   stopMonitorReader(taskId);
   if (state.debounceTimer) clearTimeout(state.debounceTimer);
   if (state.timeoutTimer) clearTimeout(state.timeoutTimer);
-  if (flush) flushMonitorBuffer(taskId);
-  if (killProcess && state.process && !state.process.killed) {
-    state.process.kill("SIGTERM");
+  if (flush) {
+    readMonitorOutput(taskId);
+    if (state.debounceTimer) clearTimeout(state.debounceTimer);
+    state.debounceTimer = null;
+    flushMonitorBuffer(taskId);
   }
+  // Remove ownership before signalling/killing so the child exit callback
+  // cannot resurrect a monitor that the user explicitly stopped.
   appMonitors.delete(taskId);
+  state.ctx.send({
+    type: "monitor_started",
+    taskId,
+    description: state.description,
+    monitoring: false,
+    sessionId: state.ctx.getSessionId(),
+  } as any);
+  if (killProcess && state.process && !state.process.killed) {
+    try {
+      if (state.process.pid && process.platform !== "win32") {
+        process.kill(-state.process.pid, "SIGTERM");
+      } else {
+        state.process.kill("SIGTERM");
+      }
+    } catch {
+      try { state.process.kill("SIGTERM"); } catch {}
+    }
+  }
   return true;
 }
 
@@ -648,11 +699,18 @@ export async function stopAppMonitorsForSession(sessionId: string): Promise<numb
     stopMonitorReader(taskId);
     if (state.debounceTimer) clearTimeout(state.debounceTimer);
     if (state.timeoutTimer) clearTimeout(state.timeoutTimer);
+    appMonitors.delete(taskId);
+    state.ctx.send({
+      type: "monitor_started",
+      taskId,
+      description: state.description,
+      monitoring: false,
+      sessionId,
+    } as any);
   }
   await Promise.all(owned.map(([, state]) =>
     state.process ? terminateAppMonitorProcess(state.process) : Promise.resolve(),
   ));
-  for (const [taskId] of owned) appMonitors.delete(taskId);
   return owned.length;
 }
 
@@ -699,6 +757,7 @@ export async function handleMonitorTool(
       debounceTimer: null,
       timeoutTimer: null,
       outputBuffer: [],
+      historyOutput: [],
       process: child,
     };
     appMonitors.set(taskId, state);
@@ -715,9 +774,14 @@ export async function handleMonitorTool(
     ctx.send({ type: "monitor_started", taskId, description, monitoring: true, command, sessionId: ctx.getSessionId() } as any);
 
     child.on("exit", (code, signal) => {
-      const exitMsg = `[Monitor: "${description}" (${taskId})] Process exited with code ${code ?? "unknown"} (signal: ${signal || "none"})`;
+      // A manual stop/timeout removes ownership. Do not deliver a late exit as
+      // a fresh agent turn after monitoring has intentionally ended.
+      if (appMonitors.get(taskId) !== state) return;
+      readMonitorOutput(taskId);
+      const exitLine = `Process exited with code ${code ?? "unknown"} (signal: ${signal || "none"})`;
+      publishMonitorOutput(taskId, exitLine);
+      state.outputBuffer.push(exitLine);
       flushMonitorBuffer(taskId);
-      ctx.onMonitorOutput?.(exitMsg);
       stopAppMonitor(taskId, false);
       ctx.send({
         type: "task_notification",

@@ -839,7 +839,9 @@ export class CodexSession {
   submitAuthCode(_code: string): void {}
   interrupt(): void { this.abort(); }
   stopMonitoring(taskId: string): void {
-    stopAppMonitor(taskId, true);
+    // The app's stop button is a process stop, not merely an unsubscribe.
+    // The Monitor tool's enabled=false path still leaves the process running.
+    stopAppMonitor(taskId, true, true);
   }
 
   async stopTask(_taskId: string): Promise<void> {}

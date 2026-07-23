@@ -137,6 +137,32 @@ test("oversized or incompatible deltas fail back to a bounded snapshot", () => {
   }
 });
 
+test("default delta budget retains a large active-turn transcript", () => {
+  const sessionId = `test-transcript-large-delta-${randomUUID()}`;
+  try {
+    const first = appendHistory(sessionId, {
+      role: "user",
+      content: "start",
+      timestamp: new Date().toISOString(),
+    });
+    for (let index = 0; index < 300; index++) {
+      appendHistory(sessionId, {
+        role: "assistant",
+        content: `answer-${index}-${"x".repeat(1024)}`,
+        timestamp: new Date(Date.now() + index + 1).toISOString(),
+      });
+    }
+
+    const delta = getBoundedHistoryDelta(sessionId, first.sessionSeq);
+    assert.ok(delta);
+    assert.equal(delta.entries.length, 300);
+    assert.equal(delta.offset, 1);
+    assert.equal(delta.total, 301);
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});
+
 test("history keeps first-live order when streams finish out of order", () => {
   const sessionId = `test-transcript-concurrency-${randomUUID()}`;
   try {

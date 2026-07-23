@@ -1445,8 +1445,8 @@ export function getBoundedHistoryTail(
 export function getBoundedHistoryDelta(
   sessionId: string,
   knownSessionSeq: number,
-  maxEntries = 100,
-  maxBytes = 256 * 1024,
+  maxEntries = 500,
+  maxBytes = 2 * 1024 * 1024,
   knownHistoryOffset?: number,
   knownHistoryEntryCount?: number,
 ): BoundedHistoryPage | null {

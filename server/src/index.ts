@@ -2723,8 +2723,8 @@ function createConnectionHandler(transport: ClientTransport) {
           ? getBoundedHistoryDelta(
               msg.sessionId,
               rawKnownSeq,
-              100,
-              256 * 1024,
+              500,
+              2 * 1024 * 1024,
               Number.isSafeInteger(rawKnownOffset) ? rawKnownOffset : undefined,
               Number.isSafeInteger(rawKnownEntryCount) ? rawKnownEntryCount : undefined,
             )

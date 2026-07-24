@@ -5,6 +5,8 @@ const {
   BINARY_FILE_DOWNLOAD_VERSION,
   BIN_MARKER_FILE_DOWNLOAD_CHUNK,
   encodeBinaryFileDownloadChunk,
+  fileTransferVersion,
+  resolveFileResumeOffset,
   supportsBinaryFileDownload,
 } = require("../dist/file-transfer-wire");
 const {
@@ -69,4 +71,30 @@ test("raw download frames remain opaque inside the existing NaCl envelope", () =
     Buffer.from(decryptBinary(ciphertext, server.publicKey, phone.secretKey)),
     frame,
   );
+});
+
+test("resumes only when the client identifies the same file version", () => {
+  const version = fileTransferVersion({
+    size: 1000,
+    mtimeMs: 1234.5,
+    ctimeMs: 1200,
+    ino: 42,
+  });
+  assert.equal(resolveFileResumeOffset({
+    requestedOffset: 400,
+    fileSize: 1000,
+    expectedFileVersion: version,
+    actualFileVersion: version,
+  }), 400);
+  assert.equal(resolveFileResumeOffset({
+    requestedOffset: 400,
+    fileSize: 1000,
+    actualFileVersion: version,
+  }), 0);
+  assert.equal(resolveFileResumeOffset({
+    requestedOffset: 400,
+    fileSize: 1000,
+    expectedFileVersion: `${version}-stale`,
+    actualFileVersion: version,
+  }), 0);
 });

@@ -10,6 +10,36 @@ export interface BinaryFileDownloadChunkMetadata {
   totalChunks: number;
 }
 
+export function fileTransferVersion(stat: {
+  size: number;
+  mtimeMs: number;
+  ctimeMs?: number;
+  ino?: number;
+}): string {
+  return [
+    "v1",
+    Math.trunc(stat.size).toString(36),
+    Math.trunc(stat.mtimeMs * 1000).toString(36),
+    Math.trunc((stat.ctimeMs || 0) * 1000).toString(36),
+    Math.trunc(stat.ino || 0).toString(36),
+  ].join("-");
+}
+
+export function resolveFileResumeOffset(options: {
+  requestedOffset: number;
+  fileSize: number;
+  expectedFileVersion?: string;
+  actualFileVersion: string;
+}): number {
+  const requested = Math.floor(options.requestedOffset);
+  if (!Number.isSafeInteger(requested) || requested <= 0) return 0;
+  if (!options.expectedFileVersion ||
+      options.expectedFileVersion !== options.actualFileVersion) {
+    return 0;
+  }
+  return Math.min(requested, options.fileSize);
+}
+
 /**
  * Encode one server→phone file chunk without JSON/base64 inflation.
  * The caller encrypts the returned plaintext as one NaCl binary envelope.

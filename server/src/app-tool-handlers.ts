@@ -9,6 +9,7 @@ import { requestSecureInput, SecureInputRequestArgs, SecureInputRequestStatus } 
 import { sendPushNotification } from "./push-notifications";
 import { saveHtmlPlan } from "./html-plan-store";
 import { removeHtmlPlanHistoryEntries } from "./session-store";
+import { fileTransferVersion } from "./file-transfer-wire";
 import {
   createDurableMonitorRecord,
   DurableMonitorRecord,
@@ -263,6 +264,7 @@ export async function handleSendFileTool(
       fileName,
       filePath,
       fileSize: stat.size,
+      fileVersion: fileTransferVersion(stat),
       sessionId,
     });
 

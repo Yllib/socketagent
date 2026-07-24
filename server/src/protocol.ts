@@ -244,6 +244,7 @@ export interface RequestFileMessage {
   fileId?: string;
   offsetBytes?: number;
   transferToken?: string;
+  expectedFileVersion?: string;
 }
 
 export interface LoadMoreHistoryMessage {
@@ -302,6 +303,7 @@ export interface FileManagerDownloadMessage {
   fileId?: string;
   offsetBytes?: number;
   transferToken?: string;
+  expectedFileVersion?: string;
 }
 
 export interface FileManagerReadTextMessage {
@@ -1401,6 +1403,7 @@ export interface FileChunkServerMessage {
   fileSize: number;
   offsetBytes?: number;
   transferToken?: string;
+  fileVersion?: string;
   chunkIndex: number;
   totalChunks: number;
   data: string;
@@ -1412,6 +1415,7 @@ export interface FileCompleteServerMessage {
   fileName: string;
   fileSize?: number;
   transferToken?: string;
+  fileVersion?: string;
 }
 
 export interface FileErrorServerMessage {

@@ -29,7 +29,7 @@ import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread,
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getBoundedHistoryTail, getBoundedHistoryDelta, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
-import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
+import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
@@ -1961,6 +1961,7 @@ function createConnectionHandler(transport: ClientTransport) {
     offsetBytes = 0,
     transferToken?: string,
     peerId?: string,
+    expectedFileVersion?: string,
   ): Promise<void> {
     if (!filePath || !fs.existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
@@ -1984,7 +1985,19 @@ function createConnectionHandler(transport: ClientTransport) {
     const CHUNK_SIZE = useBinaryDownload ? 512 * 1024 : 96 * 1024;
     const MAX_OUTSTANDING_BYTES = 4 * 1024 * 1024;
     const totalChunks = Math.ceil(stat.size / CHUNK_SIZE);
-    const startOffset = Math.max(0, Math.min(Math.floor(offsetBytes || 0), stat.size));
+    const actualFileVersion = fileTransferVersion(stat);
+    const startOffset = resolveFileResumeOffset({
+      requestedOffset: offsetBytes,
+      fileSize: stat.size,
+      expectedFileVersion,
+      actualFileVersion,
+    });
+    if (offsetBytes > 0 && startOffset === 0) {
+      console.warn(
+        `[File] Refusing unsafe resume for ${fileName}: client file identity `
+        + `${expectedFileVersion ? "changed" : "was not supplied"}`,
+      );
+    }
     const ackKey = fileDownloadAckKey(transferId, transferToken, peerId);
     if (useBinaryDownload) {
       activeFileDownloadAcks.set(ackKey, { receivedBytes: startOffset });
@@ -2027,6 +2040,7 @@ function createConnectionHandler(transport: ClientTransport) {
               fileSize: stat.size,
               offsetBytes: position,
               transferToken,
+              fileVersion: actualFileVersion,
               chunkIndex,
               totalChunks,
               data: chunkBytes.toString("base64"),
@@ -2060,6 +2074,7 @@ function createConnectionHandler(transport: ClientTransport) {
         fileName,
         fileSize: stat.size,
         transferToken,
+        fileVersion: actualFileVersion,
       });
       console.log(`File transfer complete: ${fileName}`);
     } finally {
@@ -5517,6 +5532,10 @@ function createConnectionHandler(transport: ClientTransport) {
           typeof (msg as any).transferToken === "string"
             ? (msg as any).transferToken
             : undefined;
+        const expectedFileVersion =
+          typeof (msg as any).expectedFileVersion === "string"
+            ? (msg as any).expectedFileVersion
+            : undefined;
         const peerId = typeof (msg as any).__relayPeerId === "string"
           ? (msg as any).__relayPeerId
           : undefined;
@@ -5528,6 +5547,7 @@ function createConnectionHandler(transport: ClientTransport) {
             Number.isFinite(offsetBytes) ? offsetBytes : 0,
             transferToken,
             peerId,
+            expectedFileVersion,
           ).catch((e: any) => {
             sendJson({
               type: "file_error",
@@ -5586,11 +5606,17 @@ function createConnectionHandler(transport: ClientTransport) {
             typeof (msg as any).transferToken === "string"
               ? (msg as any).transferToken
               : undefined;
+          const expectedFileVersion =
+            typeof (msg as any).expectedFileVersion === "string"
+              ? (msg as any).expectedFileVersion
+              : undefined;
           void sendFileChunks(
             resolvedPath,
             fileId,
             Number.isFinite(offsetBytes) ? offsetBytes : 0,
             transferToken,
+            undefined,
+            expectedFileVersion,
           ).catch((e: any) => {
             sendJson({
               type: "file_error",

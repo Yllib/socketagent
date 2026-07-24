@@ -907,6 +907,31 @@ type ActiveBackendInstall = {
 };
 
 const activeBackendInstalls = new Map<Backend, ActiveBackendInstall>();
+type ActiveFileTransferKind = "download" | "http-download" | "upload";
+const activeFileTransfers = new Map<string, {
+  kind: ActiveFileTransferKind;
+  name: string;
+  startedAt: number;
+}>();
+
+function beginFileTransfer(kind: ActiveFileTransferKind, name: string): string {
+  const id = crypto.randomUUID();
+  activeFileTransfers.set(id, { kind, name, startedAt: Date.now() });
+  return id;
+}
+
+function finishFileTransfer(id: string): void {
+  activeFileTransfers.delete(id);
+}
+
+function describeActiveFileTransfers(): string {
+  const labels = Array.from(activeFileTransfers.values())
+    .slice(0, 3)
+    .map((transfer) => `${transfer.kind}:${transfer.name}`);
+  const remaining = activeFileTransfers.size - labels.length;
+  return `${labels.join(", ")}${remaining > 0 ? `, +${remaining} more` : ""}`;
+}
+
 const pendingClaudeBackendAuth = new Map<string, {
   request: ClaudeAuthRequest;
   sendProgress: (progress: Record<string, unknown>) => void;
@@ -957,6 +982,9 @@ function describeActiveSessions(): string {
 function autoUpdateBlockReason(): string | null {
   if (activeBackendInstalls.size > 0) {
     return `backend repair is running (${Array.from(activeBackendInstalls.keys()).join(", ")})`;
+  }
+  if (activeFileTransfers.size > 0) {
+    return `file transfers are active (${describeActiveFileTransfers()})`;
   }
   for (const [, session] of activeSessions) {
     if (sessionIsBusy(session)) {
@@ -1719,6 +1747,7 @@ function createConnectionHandler(transport: ClientTransport) {
   // Track active file uploads from the app
   const activeUploads = new Map<string, {
     fd: number;
+    activityId: string;
     filePath: string;
     fileName: string;
     receivedChunks: number;
@@ -1793,6 +1822,13 @@ function createConnectionHandler(transport: ClientTransport) {
     stopExternalNativeWatcher();
     cancelScheduledCodexNativeHistorySync();
     terminalSessionManager.detach(transport);
+    for (const upload of activeUploads.values()) {
+      try {
+        fs.closeSync(upload.fd);
+      } catch {}
+      finishFileTransfer(upload.activityId);
+    }
+    activeUploads.clear();
   }
 
   function resolveTerminalCwd(rawCwd: unknown): string {
@@ -2002,6 +2038,7 @@ function createConnectionHandler(transport: ClientTransport) {
     if (useBinaryDownload) {
       activeFileDownloadAcks.set(ackKey, { receivedBytes: startOffset });
     }
+    const activityId = beginFileTransfer("download", fileName);
     try {
       console.log(`Sending file in ${totalChunks} ${useBinaryDownload ? "binary" : "legacy"} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB${startOffset > 0 ? `, resume=${startOffset}` : ""})`);
 
@@ -2082,6 +2119,7 @@ function createConnectionHandler(transport: ClientTransport) {
         activeFileSendVersions.delete(transferStateId);
       }
       activeFileDownloadAcks.delete(ackKey);
+      finishFileTransfer(activityId);
     }
   }
 
@@ -5782,8 +5820,10 @@ function createConnectionHandler(transport: ClientTransport) {
             String((msg as any).conflictPolicy || "rename"),
           );
           const fd = fs.openSync(filePath, "w");
+          const activityId = beginFileTransfer("upload", path.basename(filePath));
           activeUploads.set(uploadId, {
             fd,
+            activityId,
             filePath,
             fileName: path.basename(filePath),
             receivedChunks: 0,
@@ -5837,8 +5877,10 @@ function createConnectionHandler(transport: ClientTransport) {
         }
 
         const fd = fs.openSync(filePath, "w");
+        const activityId = beginFileTransfer("upload", fileName);
         activeUploads.set(uploadId, {
           fd,
+          activityId,
           filePath,
           fileName,
           receivedChunks: 0,
@@ -5873,6 +5915,7 @@ function createConnectionHandler(transport: ClientTransport) {
           fs.closeSync(upload.fd);
           maybeEmitUploadProgress(uploadId, true);  // final 100% tick
           activeUploads.delete(uploadId);
+          finishFileTransfer(upload.activityId);
           sendJson({
             type: "upload_complete",
             uploadId,
@@ -5903,6 +5946,7 @@ function createConnectionHandler(transport: ClientTransport) {
           fs.closeSync(upload.fd);
           maybeEmitUploadProgress(uploadId, true);
           activeUploads.delete(uploadId);
+          finishFileTransfer(upload.activityId);
           sendJson({
             type: "upload_complete",
             uploadId,
@@ -6209,6 +6253,15 @@ const httpServer = http.createServer((req, res) => {
 
     const contentLength = end - start + 1;
     console.log(`[HTTP Download] Serving ${fileName} (${(contentLength / 1024 / 1024).toFixed(1)} MB${statusCode === 206 ? ` range=${start}-${end}/${fileSize}` : ""})`);
+    const activityId = beginFileTransfer("http-download", fileName);
+    let transferFinished = false;
+    const finishTransfer = () => {
+      if (transferFinished) return;
+      transferFinished = true;
+      finishFileTransfer(activityId);
+    };
+    res.once("finish", finishTransfer);
+    res.once("close", finishTransfer);
     res.writeHead(statusCode, {
       "Accept-Ranges": "bytes",
       "Content-Type": "application/octet-stream",
@@ -6220,6 +6273,7 @@ const httpServer = http.createServer((req, res) => {
     stream.pipe(res);
     stream.on("error", (err) => {
       console.error(`[HTTP Download] Stream error for ${filePath}: ${err.message}`);
+      finishTransfer();
       if (!res.headersSent) res.writeHead(500);
       res.end();
     });

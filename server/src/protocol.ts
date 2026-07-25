@@ -1120,6 +1120,12 @@ export interface ThinkingServerMessage {
   type: "thinking";
   content: string;
   sessionId: string;
+  /** Final estimated reasoning tokens when the backend provides them. */
+  thinkingTokens?: number;
+  /** Wall-clock duration of this reasoning block. */
+  thinkingDurationMs?: number;
+  /** Start time used for durable ordering and elapsed-time display. */
+  timestamp?: string;
   streamId?: string;
   parentToolUseId?: string | null;
   uuid?: string;
@@ -1135,8 +1141,9 @@ export interface ThinkingServerMessage {
 /**
  * Live thinking progress. When extended thinking is redacted the API streams
  * pings instead of text, so `thinking` messages never arrive and this running
- * token estimate is the only sign that reasoning is happening. Transient — not
- * persisted to history.
+ * token estimate is the only sign that reasoning is happening. Progress frames
+ * are transient; the completed reasoning lifecycle is persisted as a Thinking
+ * history entry even when its text is withheld.
  */
 export interface ThinkingTokensServerMessage {
   type: "thinking_tokens";
@@ -1368,6 +1375,10 @@ export interface HistoryEntry {
   precedingToolUseIds?: string[];
   // Thinking block
   thinking?: boolean;
+  /** Estimated reasoning tokens, when reported by the backend. */
+  thinkingTokens?: number;
+  /** Wall-clock duration of the completed reasoning block. */
+  thinkingDurationMs?: number;
   // Tool image fields (role === "tool_image")
   filePath?: string;
   mimeType?: string;

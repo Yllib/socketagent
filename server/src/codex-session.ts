@@ -298,6 +298,7 @@ export class CodexSession {
   private appServerAgentText = new Map<string, string>();
   private appServerReasoningText = new Map<string, string>();
   private appServerReasoningParents = new Map<string, string>();
+  private appServerReasoningStartedAt = new Map<string, number>();
   private appServerToolOutput = new Map<string, string>();
   private appServerActiveToolCalls = new Map<string, {
     tool: string;
@@ -1701,6 +1702,7 @@ export class CodexSession {
     this.appServerReasoningText.clear();
     this.appServerStreamParents.clear();
     this.appServerReasoningParents.clear();
+    this.appServerReasoningStartedAt.clear();
     this.appServerToolOutput.clear();
 
     const resumeTarget = resumeSessionId || this._resumeSessionId;
@@ -2786,6 +2788,9 @@ export class CodexSession {
         const sid = this.sessionId;
         const itemId = p?.itemId || p?.item?.id || "reasoning";
         const delta = String(p?.delta ?? "");
+        if (!this.appServerReasoningStartedAt.has(String(itemId))) {
+          this.appServerReasoningStartedAt.set(String(itemId), Date.now());
+        }
         const accumulated = (this.appServerReasoningText.get(itemId) || "") + delta;
         if (delta) this.appServerReasoningText.set(itemId, accumulated);
         const parentToolUseId = this.parentToolUseIdForThread(p?.threadId);
@@ -3100,6 +3105,11 @@ export class CodexSession {
       });
     };
 
+    if (item.type === "reasoning" && method === "item/started") {
+      this.appServerReasoningStartedAt.set(String(item.id), Date.now());
+      return;
+    }
+
     if (item.type === "userMessage") {
       if (!this.appServerSeenUserMessageItems.has(item.id)) {
         this.appServerSeenUserMessageItems.add(item.id);
@@ -3138,14 +3148,32 @@ export class CodexSession {
         ...(Array.isArray(item.content) ? item.content : []),
       ].join("\n");
       const streamed = this.appServerReasoningText.get(item.id) || "";
-      if (text && !streamed) sendItem({
+      const content = text || streamed;
+      const startedAtMs = this.appServerReasoningStartedAt.get(String(item.id))
+        || Date.now();
+      const thinkingDurationMs = Math.max(1, Date.now() - startedAtMs);
+      const timestamp = new Date(startedAtMs).toISOString();
+      sendItem({
         type: "thinking",
-        content: text,
+        content,
         sessionId: sid,
         streamId: String(item.id),
+        snapshot: true,
+        finalSnapshot: true,
+        thinkingDurationMs,
+        timestamp,
+      });
+      appendItem({
+        role: "assistant",
+        content,
+        thinking: true,
+        streamId: String(item.id),
+        thinkingDurationMs,
+        timestamp,
       });
       if (item.id) this.appServerReasoningText.delete(item.id);
       if (item.id) this.appServerReasoningParents.delete(item.id);
+      if (item.id) this.appServerReasoningStartedAt.delete(String(item.id));
       return;
     }
 

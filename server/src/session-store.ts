@@ -3406,7 +3406,8 @@ function buildCodexRolloutRestorePath(sessionId: string, archivePath: string): s
  *   - response_item function_call       → role: "tool_call" (exec_command is
  *     re-labelled as "Bash" so the existing tool-call rendering picks it up)
  *   - response_item function_call_output → role: "tool_result"
- *   - everything else (session_meta, turn_context, reasoning items,
+ *   - response_item reasoning             → role: "assistant", thinking=true
+ *   - everything else (session_meta, turn_context,
  *     event_msg token_count/task_started/etc.) → skipped
  */
 export function readCodexRolloutHistory(sessionId: string): HistoryEntry[] {

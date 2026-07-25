@@ -161,6 +161,18 @@ export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: st
       continue;
     }
 
+    if (payload.type === "reasoning") {
+      const content = extractText(payload.summary) || extractText(payload.content);
+      result.push({
+        role: "assistant",
+        content,
+        thinking: true,
+        streamId: String(payload.id || `reasoning_${timestamp}`),
+        timestamp,
+      });
+      continue;
+    }
+
     if (payload.type === "function_call") {
       const args = parseJsonObject(payload.arguments);
       const toolName = normalizeToolName(payload.name);

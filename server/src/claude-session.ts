@@ -525,8 +525,9 @@ export class ClaudeSession {
   private _lastContextWindow = 0;  // last known context window size from modelUsage
   private _sessionModel: string | null = null;  // model reported by SessionStart hook
   private _requestedModel: string | null = null;
-  private _streamingText = new Map<string, { content: string; parentToolUseId?: string; uuid?: string }>();
-  private _streamingThinking = new Map<string, { content: string; parentToolUseId?: string; uuid?: string }>();
+  private _streamingText = new Map<string, { content: string; parentToolUseId?: string; uuid?: string; startedAtMs?: number }>();
+  private _streamingThinking = new Map<string, { content: string; parentToolUseId?: string; uuid?: string; startedAtMs?: number }>();
+  private _thinkingProgress: { startedAtMs: number; estimatedTokens: number; uuid?: string } | null = null;
   private _activeSdkMessageIds = new Map<string, string>();
   private _lastPreview: string = "";
   private _lastSessionInit: ServerMessage | null = null;
@@ -1135,7 +1136,7 @@ export class ClaudeSession {
   }
 
   private _appendLiveStream(
-    streams: Map<string, { content: string; parentToolUseId?: string; uuid?: string }>,
+    streams: Map<string, { content: string; parentToolUseId?: string; uuid?: string; startedAtMs?: number }>,
     message: any,
     content: string,
   ): string {
@@ -1145,6 +1146,7 @@ export class ClaudeSession {
     const existing = streams.get(key);
     streams.set(key, {
       content: (existing?.content || "") + content,
+      startedAtMs: existing?.startedAtMs || Date.now(),
       ...(parentToolUseId ? { parentToolUseId } : {}),
       ...(uuid ? { uuid } : {}),
     });
@@ -1671,6 +1673,7 @@ export class ClaudeSession {
     this._authErrorSent = false;
     this._streamingText.clear();
     this._streamingThinking.clear();
+    this._thinkingProgress = null;
     this._lastPreview = "";
     this.onActivity?.();
 
@@ -1716,6 +1719,7 @@ export class ClaudeSession {
     this._authErrorSent = false;
     this._streamingText.clear();
     this._streamingThinking.clear();
+    this._thinkingProgress = null;
     this._lastPreview = "";
     this.onActivity?.();
 
@@ -2801,17 +2805,6 @@ export class ClaudeSession {
                     text: block.text,
                     deltaCount: block.deltaCount,
                   });
-                  // Persist thinking blocks to chat history
-                  if (block.type === "thinking" && block.text.length > 0) {
-                    appendHistory(sid, {
-                      role: "assistant",
-                      content: block.text,
-                      thinking: true,
-                      parentToolUseId: (message as any).parent_tool_use_id || null,
-                      uuid: (message as any).uuid || undefined,
-                      timestamp: now(),
-                    });
-                  }
                   sdkBlocks.delete(blockKey);
                 }
               } else if (evtType === "message_start") {
@@ -3058,6 +3051,15 @@ export class ClaudeSession {
         // empty bubble or nothing at all.
         if (message.type === "system" && (message as any).subtype === "thinking_tokens") {
           const tt = message as any;
+          this._thinkingProgress ??= {
+            startedAtMs: Date.now(),
+            estimatedTokens: 0,
+            ...(tt.uuid ? { uuid: String(tt.uuid) } : {}),
+          };
+          this._thinkingProgress.estimatedTokens = Math.max(
+            this._thinkingProgress.estimatedTokens,
+            Number(tt.estimated_tokens || 0),
+          );
           // These arrive once or twice a second for the whole thinking phase.
           // Coalesce so a phone on the relay isn't woken for every ping.
           const nowMs = Date.now();
@@ -3585,6 +3587,57 @@ export class ClaudeSession {
           }
 
           const apiMessage = (message as any).message;
+          const completedThinkingParts = apiMessage?.content && Array.isArray(apiMessage.content)
+            ? apiMessage.content
+              .filter((b: any) => b.type === "thinking")
+              .map((b: any) => b.thinking || b.text || "")
+            : [];
+          const thinkingStreamId = this._streamKey(message);
+          const thinkingStream = this._streamingThinking.get(thinkingStreamId);
+          const isRootMessage = !(message as any).parent_tool_use_id;
+          const progress = isRootMessage ? this._thinkingProgress : null;
+          const thinkingContent = completedThinkingParts.join("")
+            || thinkingStream?.content
+            || "";
+          if (thinkingStream || progress || thinkingContent.trim()) {
+            const startCandidates = [
+              thinkingStream?.startedAtMs,
+              progress?.startedAtMs,
+            ].filter((value): value is number => typeof value === "number");
+            const startedAtMs = startCandidates.length > 0
+              ? Math.min(...startCandidates)
+              : Date.now();
+            const thinkingDurationMs = Math.max(1, Date.now() - startedAtMs);
+            const thinkingTokens = Math.max(0, progress?.estimatedTokens || 0);
+            const thinkingTimestamp = new Date(startedAtMs).toISOString();
+            this.send({
+              type: "thinking",
+              content: thinkingContent,
+              sessionId: this.sessionId || "",
+              streamId: thinkingStreamId,
+              snapshot: true,
+              finalSnapshot: true,
+              thinkingDurationMs,
+              ...(thinkingTokens > 0 ? { thinkingTokens } : {}),
+              timestamp: thinkingTimestamp,
+              parentToolUseId: (message as any).parent_tool_use_id || null,
+              uuid: (message as any).uuid || progress?.uuid || undefined,
+            } as any);
+            if (this.sessionId) {
+              appendHistory(this.sessionId, {
+                role: "assistant",
+                content: thinkingContent,
+                thinking: true,
+                streamId: thinkingStreamId,
+                thinkingDurationMs,
+                ...(thinkingTokens > 0 ? { thinkingTokens } : {}),
+                parentToolUseId: (message as any).parent_tool_use_id || null,
+                uuid: (message as any).uuid || progress?.uuid || undefined,
+                timestamp: thinkingTimestamp,
+              });
+            }
+          }
+          if (isRootMessage) this._thinkingProgress = null;
           const completedTextParts = apiMessage?.content && Array.isArray(apiMessage.content)
             ? apiMessage.content
               .filter((b: any) => b.type === "text")

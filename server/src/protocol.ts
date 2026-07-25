@@ -17,7 +17,14 @@ export interface PromptMessage {
   text: string;
   sessionId?: string;
   cwd?: string;
+  backend?: Backend;
   codexFastMode?: boolean;
+  /**
+   * Settings selected while composing a brand-new session. The server applies
+   * these immediately before the first turn so the first prompt cannot race
+   * separate setting messages.
+   */
+  initialSettings?: InitialSessionSettings;
 }
 
 export interface RetractQueuedPromptMessage {
@@ -614,6 +621,10 @@ export interface AgentSessionSettings {
   claudeAutoCompact?: boolean;
   disallowedTools?: string[];
   systemPrompt?: string;
+}
+
+export interface InitialSessionSettings extends AgentSessionSettings {
+  permissionMode?: string;
 }
 
 export interface StopTaskMessage {

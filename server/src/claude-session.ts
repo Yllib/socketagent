@@ -466,7 +466,7 @@ export class ClaudeSession {
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   private _kokoroVoice: string = "af_heart";
   private _kokoroSpeed: number = 1.0;
-  private _effort: 'low' | 'medium' | 'high' | 'max' = 'high';
+  private _effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' = 'high';
   private _thinking: { type: 'adaptive' } | { type: 'enabled'; budgetTokens: number } | { type: 'disabled' } = { type: 'adaptive' };
   private _disallowedTools: string[] = [];
   private _appendSystemPrompt: string = '';
@@ -553,7 +553,7 @@ export class ClaudeSession {
     this._kokoroSpeed = speed;
   }
 
-  setEffort(effort: 'low' | 'medium' | 'high' | 'max'): void {
+  setEffort(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'): void {
     this._effort = effort;
     this.persistAgentSettings({ effort });
     console.log(`Effort set to ${effort} for session ${this.sessionId || '(pending)'}`);

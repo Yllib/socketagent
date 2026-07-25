@@ -52,6 +52,7 @@ import { backendsForManagedBackendSpecs, MANAGED_BACKEND_PACKAGES, managedBacken
 import { invalidateCachedModelCatalog } from "./model-catalog-store";
 import { activeAppMonitorRecords, AppToolContext, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
+import { applyInitialSessionSettings } from "./initial-session-settings";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -2970,7 +2971,7 @@ function createConnectionHandler(transport: ClientTransport) {
             addRecentCwd(cwd);
           }
           const savedPromptSession = savedResumeId ? getSession(savedResumeId) : undefined;
-          const promptBackend = savedPromptSession?.backend;
+          const promptBackend = savedPromptSession?.backend || (!savedResumeId ? msg.backend : undefined);
           await waitForManagedBackendUpdate();
           if (promptBackend === "codex" && codexUnavailable()) {
             sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", savedResumeId);
@@ -2985,6 +2986,16 @@ function createConnectionHandler(transport: ClientTransport) {
           activeSession.setTtsEngine(pendingTtsEngine);
           activeSession.setKokoroVoice(pendingKokoroVoice);
           activeSession.setKokoroSpeed(pendingKokoroSpeed);
+        }
+
+        if (!msg.sessionId && !activeSession.getSessionId() && msg.initialSettings) {
+          const initialBackend: Backend = activeSession instanceof CodexSession ? "codex" : "claude";
+          const applied = await applyInitialSessionSettings(
+            activeSession,
+            initialBackend,
+            msg.initialSettings,
+          );
+          console.log(`[Prompt] Applied initial ${initialBackend} settings: ${Object.keys(applied).join(", ") || "none"}`);
         }
 
         // If session is already running, inject the message inline between turns

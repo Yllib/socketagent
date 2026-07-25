@@ -9,6 +9,7 @@ const { CodexSession } = require("../dist/codex-session");
 const {
   ClaudeSession,
   claudeAgentRunsInBackground,
+  isClaudeAgentLaunchOutput,
   isClaudeTaskNotificationResult,
 } = require("../dist/claude-session");
 
@@ -171,6 +172,13 @@ test("distinguishes SDK background follow-up results from phone turns", () => {
     false,
   );
   assert.equal(isClaudeTaskNotificationResult({ type: "result" }), false);
+});
+
+test("recognizes every structured non-terminal Agent launch result", () => {
+  assert.equal(isClaudeAgentLaunchOutput({ status: "async_launched" }), true);
+  assert.equal(isClaudeAgentLaunchOutput({ status: "remote_launched" }), true);
+  assert.equal(isClaudeAgentLaunchOutput({ status: "completed" }), false);
+  assert.equal(isClaudeAgentLaunchOutput(null), false);
 });
 
 test("reduces Claude task lifecycle events by task and tool identity", () => {

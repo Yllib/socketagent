@@ -119,6 +119,13 @@ export function isClaudeTaskNotificationResult(message: unknown): boolean {
   return origin?.kind === "task-notification";
 }
 
+/** Structured Agent launch acknowledgements are non-terminal tool results. */
+export function isClaudeAgentLaunchOutput(output: unknown): boolean {
+  if (!output || typeof output !== "object") return false;
+  const status = (output as Record<string, unknown>).status;
+  return status === "async_launched" || status === "remote_launched";
+}
+
 function existingFile(filePath: string | undefined): string | undefined {
   if (!filePath) return undefined;
   try {
@@ -4280,15 +4287,20 @@ export class ClaudeSession {
                     ? (message as any).tool_use_result as any
                     : undefined;
                 let backgroundPending = false;
-                if (subagentState && structuredAgentOutput?.status === "async_launched") {
-                  const agentId = String(structuredAgentOutput.agentId || subagentState.agentId || "");
+                if (subagentState && isClaudeAgentLaunchOutput(structuredAgentOutput)) {
+                  const isRemote = structuredAgentOutput.status === "remote_launched";
+                  const agentId = String(
+                    (isRemote ? structuredAgentOutput.taskId : structuredAgentOutput.agentId)
+                    || subagentState.agentId
+                    || "",
+                  );
                   if (agentId) {
                     subagentState.agentId = agentId;
                     this._sdkTaskIds.add(agentId);
                     this._taskIdToToolUseId.set(agentId, toolUseId);
                     this._sdkBackgroundTasks.set(agentId, {
                       taskId: agentId,
-                      taskType: "local_agent",
+                      taskType: isRemote ? "remote_agent" : "local_agent",
                       description: String(structuredAgentOutput.description || subagentState.description),
                     });
                   }

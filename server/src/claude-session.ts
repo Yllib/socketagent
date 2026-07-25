@@ -623,6 +623,15 @@ export class ClaudeSession {
   setClaudeAutoCompact(enabled: boolean): void {
     this._autoCompactEnabled = enabled;
     this.persistAgentSettings({ claudeAutoCompact: enabled });
+    if (this.activeQuery) {
+      void this.activeQuery
+        .applyFlagSettings({ autoCompactEnabled: enabled })
+        .catch((err: any) => {
+          console.warn(
+            `Failed to apply Claude auto-compact setting live: ${err?.message || String(err)}`,
+          );
+        });
+    }
     console.log(`Claude auto-compact ${enabled ? 'enabled' : 'disabled'} for session ${this.sessionId || '(pending)'}`);
   }
 
@@ -638,6 +647,15 @@ export class ClaudeSession {
     } else if (!options.inherited) {
       this._autoCompactWindowOverride = normalized;
       this.persistAgentSettings({ claudeAutoCompactWindow: normalized });
+    }
+    if (this.activeQuery) {
+      void this.activeQuery
+        .applyFlagSettings({ autoCompactWindow: normalized ?? null })
+        .catch((err: any) => {
+          console.warn(
+            `Failed to apply Claude auto-compact window live: ${err?.message || String(err)}`,
+          );
+        });
     }
     console.log(
       `Claude auto-compact window set to ${normalized ?? "SDK default"}`

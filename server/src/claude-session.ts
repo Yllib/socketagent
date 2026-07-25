@@ -545,10 +545,6 @@ export class ClaudeSession {
   public replacesSessionId?: string;
   public _resumeSessionId?: string;
   // Queue for injecting user messages mid-conversation
-  private _pendingInjections: Array<{
-    text: string;
-    resolve: () => void;
-  }> = [];
 
   constructor(
     private ws: WebSocket,
@@ -1545,11 +1541,29 @@ export class ClaudeSession {
     return null;
   }
 
-  /** Inject a user message into the running conversation between turns.
-   *  priority: 'now' = interrupt current tool, 'next' = between turns, 'later' = after current task */
-  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'now', _messageId?: string): Promise<void> {
+  /**
+   * Inject a user message into the running conversation.
+   *
+   *  'now'   - priority 'now'. The backend aborts the running tool to deliver it.
+   *  'next'  - shouldQuery: false. Appended to the transcript and merged into the
+   *            next user message that queries, which in an agent loop is the next
+   *            tool result. So it lands at the next tool boundary without ever
+   *            asking the backend to reach one, and nothing is cancelled to get
+   *            there. Priority 'next' delivers at the same point, but is defined
+   *            as "reach a turn boundary" and will manufacture one by cancelling
+   *            whatever the model just produced when no tool happens to be
+   *            running — telling the model the user refused it. Same delivery
+   *            point, and the difference is decided purely by timing, so we do
+   *            not use it.
+   *  'later' - priority 'later'. The backend holds it until the whole task ends.
+   */
+  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'next', _messageId?: string): Promise<void> {
     if (!this.activeQuery || !this._isRunning) return;
-    console.log(`[Inject] Queuing message (priority=${priority}): ${text.slice(0, 80)}...`);
+    const atNextBoundary = priority === 'next';
+    console.log(
+      `[Inject] Queuing message (${atNextBoundary ? 'shouldQuery=false' : `priority=${priority}`}):`
+      + ` ${text.slice(0, 80)}...`,
+    );
 
     const sessionId = this.sessionId || "";
     const userMsgUuid = crypto.randomUUID();
@@ -1582,7 +1596,7 @@ export class ClaudeSession {
       },
       parent_tool_use_id: null,
       session_id: sessionId,
-      priority,
+      ...(atNextBoundary ? { shouldQuery: false } : { priority }),
     };
 
     const singleMessageStream = async function* () {

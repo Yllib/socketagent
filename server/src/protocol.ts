@@ -945,6 +945,8 @@ export interface ToolResultServerMessage {
   toolUseId: string;
   output: string;
   sessionId: string;
+  /** The Agent tool returned its non-terminal async launch acknowledgement. */
+  backgroundPending?: boolean;
   parentToolUseId?: string | null;
   uuid?: string;
   entryId?: string;
@@ -1351,6 +1353,8 @@ export interface HistoryEntry {
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
   toolOutput?: string;
+  /** Non-terminal Agent async-launch acknowledgement; completion arrives later. */
+  backgroundPending?: boolean;
   fileId?: string;
   fileName?: string;
   fileSize?: number;
@@ -1391,6 +1395,13 @@ export interface HistoryEntry {
   // Notification fields (role === "notification")
   status?: string;
   originToolUseId?: string;
+  taskType?: string;
+  subagentType?: string;
+  taskUsage?: {
+    totalTokens: number;
+    toolUses: number;
+    durationMs: number;
+  };
   commandName?: string;
   commandPayload?: Record<string, unknown>;
   // Permission mode fields (role === "permission_mode")
@@ -1597,6 +1608,13 @@ export interface TaskNotificationServerMessage {
   sessionId: string;
   originToolUseId?: string;
   parentToolUseId?: string | null;
+  subagentType?: string;
+  usage?: {
+    totalTokens: number;
+    toolUses: number;
+    durationMs: number;
+  };
+  skipTranscript?: boolean;
   uuid?: string;
 }
 
@@ -1673,6 +1691,14 @@ export interface ActiveSubagentsServerMessage {
     model?: string;
     reasoningEffort?: string;
     agentPath?: string;
+    isBackgrounded?: boolean;
+    progressSummary?: string;
+    lastToolName?: string;
+    usage?: {
+      totalTokens: number;
+      toolUses: number;
+      durationMs: number;
+    };
     parentToolUseId?: string | null;
   }[];
 }
@@ -1719,7 +1745,10 @@ export interface TaskStartedServerMessage {
   toolUseId?: string;
   description: string;
   taskType?: string;
+  subagentType?: string;
+  workflowName?: string;
   prompt?: string;
+  skipTranscript?: boolean;
   sessionId: string;
 }
 
@@ -1728,9 +1757,37 @@ export interface BgTaskProgressServerMessage {
   taskId: string;
   toolUseId?: string;
   description?: string;
+  subagentType?: string;
   usage?: Record<string, unknown>;
   lastToolName?: string;
   summary?: string;
+  sessionId: string;
+}
+
+export interface TaskUpdatedServerMessage {
+  type: "task_updated";
+  taskId: string;
+  toolUseId?: string;
+  patch: {
+    status?: "pending" | "running" | "completed" | "failed" | "killed" | "paused";
+    description?: string;
+    endTime?: number;
+    totalPausedMs?: number;
+    error?: string;
+    isBackgrounded?: boolean;
+  };
+  sessionId: string;
+}
+
+export interface BackgroundTasksChangedServerMessage {
+  type: "background_tasks_changed";
+  /** Authoritative replacement snapshot for Claude SDK background work. */
+  tasks: {
+    taskId: string;
+    taskType: string;
+    description: string;
+    toolUseId?: string;
+  }[];
   sessionId: string;
 }
 
@@ -1975,6 +2032,8 @@ export type ServerMessage =
   | RateLimitEventServerMessage
   | TaskStartedServerMessage
   | BgTaskProgressServerMessage
+  | TaskUpdatedServerMessage
+  | BackgroundTasksChangedServerMessage
   | ApiRetryServerMessage
   | LocalCommandOutputServerMessage
   | PromptSuggestionServerMessage

@@ -6,7 +6,11 @@ const os = require("node:os");
 const path = require("node:path");
 
 const { CodexSession } = require("../dist/codex-session");
-const { ClaudeSession } = require("../dist/claude-session");
+const {
+  ClaudeSession,
+  claudeAgentRunsInBackground,
+  isClaudeTaskNotificationResult,
+} = require("../dist/claude-session");
 
 function testSocket(sent) {
   return {
@@ -136,6 +140,102 @@ test("replays concurrent Claude streams with their original parents", () => {
   assert.equal(childText.uuid, "child-message");
   assert.equal(childThinking.parentToolUseId, "agent-tool-2");
   assert.equal(childThinking.uuid, "thinking-message");
+});
+
+test("uses Claude's current default-background Agent semantics", () => {
+  assert.equal(claudeAgentRunsInBackground({}), true);
+  assert.equal(claudeAgentRunsInBackground({ prompt: "inspect" }), true);
+  assert.equal(
+    claudeAgentRunsInBackground({ run_in_background: true }),
+    true,
+  );
+  assert.equal(
+    claudeAgentRunsInBackground({ run_in_background: false }),
+    false,
+  );
+});
+
+test("distinguishes SDK background follow-up results from phone turns", () => {
+  assert.equal(
+    isClaudeTaskNotificationResult({
+      type: "result",
+      origin: { kind: "task-notification" },
+    }),
+    true,
+  );
+  assert.equal(
+    isClaudeTaskNotificationResult({
+      type: "result",
+      origin: { kind: "human" },
+    }),
+    false,
+  );
+  assert.equal(isClaudeTaskNotificationResult({ type: "result" }), false);
+});
+
+test("reduces Claude task lifecycle events by task and tool identity", () => {
+  const sent = [];
+  const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
+
+  session._activeSubagents.set("agent-tool-1", {
+    toolUseId: "agent-tool-1",
+    description: "Inspect lifecycle",
+    subagentType: "general-purpose",
+    startedAt: "2026-07-25T12:00:00.000Z",
+    isBackgrounded: true,
+    status: "running",
+  });
+
+  session._handleSdkTaskStarted({
+    task_id: "agent-1",
+    tool_use_id: "agent-tool-1",
+    task_type: "local_agent",
+    subagent_type: "general-purpose",
+    description: "Inspect lifecycle",
+    prompt: "Audit the task lifecycle",
+  });
+  session._handleSdkTaskProgress({
+    task_id: "agent-1",
+    tool_use_id: "agent-tool-1",
+    subagent_type: "general-purpose",
+    description: "Inspect lifecycle",
+    summary: "Checking task events",
+    last_tool_name: "Read",
+    usage: {
+      total_tokens: 640,
+      tool_uses: 3,
+      duration_ms: 12_000,
+    },
+  });
+
+  const started = sent.find((message) => message.type === "task_started");
+  assert.equal(started.taskId, "agent-1");
+  assert.equal(started.toolUseId, "agent-tool-1");
+  assert.equal(started.subagentType, "general-purpose");
+
+  const progress = sent.find((message) => message.type === "bg_task_progress");
+  assert.deepEqual(progress.usage, {
+    totalTokens: 640,
+    toolUses: 3,
+    durationMs: 12_000,
+  });
+  assert.equal(progress.summary, "Checking task events");
+  assert.equal(session.isBusy, true);
+
+  session._handleSdkBackgroundTasksChanged({
+    tasks: [],
+  });
+
+  const level = sent.filter(
+    (message) => message.type === "background_tasks_changed",
+  ).at(-1);
+  assert.deepEqual(level.tasks, []);
+  const active = sent.filter(
+    (message) => message.type === "active_subagents",
+  ).at(-1);
+  assert.equal(active.tasks[0].toolUseId, "agent-tool-1");
+  assert.equal(active.tasks[0].status, "completed");
+  assert.equal(session.isBusy, false);
 });
 
 test("uses the stable Claude API message id across partial stream event UUIDs", () => {

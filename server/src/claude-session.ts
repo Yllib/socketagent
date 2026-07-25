@@ -62,6 +62,32 @@ export interface ClaudeAvailability {
   version?: string;
 }
 
+interface ClaudeSubagentState {
+  agentId?: string;
+  toolUseId: string;
+  description: string;
+  subagentType: string;
+  startedAt: string;
+  parentToolUseId?: string;
+  prompt?: string;
+  resolvedModel?: string;
+  isBackgrounded: boolean;
+  status: "pending" | "running" | "completed" | "failed" | "stopped" | "paused";
+  progressSummary?: string;
+  lastToolName?: string;
+  usage?: {
+    totalTokens: number;
+    toolUses: number;
+    durationMs: number;
+  };
+}
+
+interface ClaudeSdkBackgroundTask {
+  taskId: string;
+  taskType: string;
+  description: string;
+}
+
 const CLAUDE_AVAILABILITY_CACHE_MS = 5000;
 
 /**
@@ -78,6 +104,19 @@ export function shouldEmitClaudeResultFallback(
     && resultContent.length > 0
     && currentText.length === 0
     && !sawMainAssistantText;
+}
+
+/** Claude Code 2.1.198+ treats omitted run_in_background as true. */
+export function claudeAgentRunsInBackground(input: unknown): boolean {
+  return !(input && typeof input === "object"
+    && (input as Record<string, unknown>).run_in_background === false);
+}
+
+/** Background completion follow-ups are SDK-owned turns, not phone prompts. */
+export function isClaudeTaskNotificationResult(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const origin = (message as Record<string, any>).origin;
+  return origin?.kind === "task-notification";
 }
 
 function existingFile(filePath: string | undefined): string | undefined {
@@ -508,9 +547,11 @@ export class ClaudeSession {
   private _forkFromSessionId?: string;
   private _suppressedToolResultIds: Set<string> = new Set();  // toolUseIds whose results should be hidden from client
   private _taskIdToToolUseId: Map<string, string> = new Map();  // agentId → toolUseId mapping
+  private _sdkTaskIds: Set<string> = new Set();
+  private _sdkBackgroundTasks: Map<string, ClaudeSdkBackgroundTask> = new Map();
   private _monitoredTasks: Map<string, MonitorState> = new Map();
   private _taskOutputFiles: Map<string, string> = new Map();  // taskId → outputFile path
-  private _activeSubagents: Map<string, { agentId?: string; toolUseId: string; description: string; subagentType: string; startedAt: string; parentToolUseId?: string }> = new Map();
+  private _activeSubagents: Map<string, ClaudeSubagentState> = new Map();
   private _activeBashStream: { interval: NodeJS.Timeout; filePath: string; lastSize: number } | null = null;
   private _bgBashWatchers: Map<string, { interval: NodeJS.Timeout; filePath: string; lastSize: number }> = new Map();
   private _activeToolUseId: string | null = null;  // currently-executing tool call
@@ -1004,8 +1045,15 @@ export class ClaudeSession {
     return this._isWarmIdle;
   }
 
+  private _hasClaudeBackgroundWork(): boolean {
+    return this._sdkBackgroundTasks.size > 0
+      || Array.from(this._activeSubagents.values()).some(
+        (task) => task.isBackgrounded && (task.status === "pending" || task.status === "running" || task.status === "paused"),
+      );
+  }
+
   get isBusy(): boolean {
-    return this._isRunning || this._isCompacting;
+    return this._isRunning || this._isCompacting || this._hasClaudeBackgroundWork();
   }
 
   get isCompacting(): boolean {
@@ -1015,6 +1063,13 @@ export class ClaudeSession {
   get activeStartedAt(): string | null {
     if (this._isCompacting) return this._compactStartedAt || this._runStartedAt;
     if (this._isRunning) return this._runStartedAt;
+    if (this._hasClaudeBackgroundWork()) {
+      const starts = Array.from(this._activeSubagents.values())
+        .filter((task) => task.isBackgrounded)
+        .map((task) => task.startedAt)
+        .sort();
+      return starts[0] || this._runStartedAt;
+    }
     return null;
   }
 
@@ -1065,6 +1120,15 @@ export class ClaudeSession {
 
   private _enterWarmIdle(): void {
     if (!this.activeQuery || !this.activeInputQueue || CLAUDE_WARM_IDLE_TIMEOUT_MS <= 0) return;
+    // A root turn can finish while background subagents are still running.
+    // Keep the SDK process alive until its authoritative live-task snapshot is
+    // empty; closing the warm stream here would terminate those agents.
+    if (this._hasClaudeBackgroundWork()) {
+      this._isWarmIdle = false;
+      this._clearWarmIdleTimer();
+      console.log(`[WarmIdle] Deferred while ${this.activeBackgroundTasks.size} Claude background task(s) remain`);
+      return;
+    }
     this._isRunning = false;
     this._isWarmIdle = true;
     this._clearWarmIdleTimer();
@@ -1091,19 +1155,331 @@ export class ClaudeSession {
 
   /** Active background task IDs (agentId → toolUseId) */
   get activeBackgroundTasks(): Map<string, string> {
-    return this._taskIdToToolUseId;
+    const active = new Map<string, string>();
+    for (const [taskId, toolUseId] of this._taskIdToToolUseId) {
+      if (!this._sdkTaskIds.has(taskId) || this._sdkBackgroundTasks.has(taskId)) {
+        active.set(taskId, toolUseId);
+      }
+    }
+    for (const taskId of this._sdkBackgroundTasks.keys()) {
+      if (!active.has(taskId)) {
+        active.set(taskId, this._taskIdToToolUseId.get(taskId) || taskId);
+      }
+    }
+    for (const task of this._activeSubagents.values()) {
+      if (!task.isBackgrounded) continue;
+      const taskId = task.agentId || task.toolUseId;
+      if (!active.has(taskId)) active.set(taskId, task.toolUseId);
+    }
+    return active;
   }
 
   /** Active subagent tasks with metadata */
-  getActiveSubagents(): Array<{ agentId: string; toolUseId: string; description: string; subagentType: string; startedAt: string; parentToolUseId?: string }> {
+  getActiveSubagents(): ActiveSubagentsServerMessage["tasks"] {
     return Array.from(this._activeSubagents.entries()).map(([toolUseId, info]) => ({
       agentId: info.agentId || toolUseId,
       toolUseId: info.toolUseId,
       description: info.description,
       subagentType: info.subagentType,
       startedAt: info.startedAt,
+      status: info.status === "stopped" ? "interrupted"
+        : info.status === "failed" ? "errored"
+        : info.status === "paused" ? "pending"
+        : info.status === "completed" ? "completed"
+        : "running",
+      isBackgrounded: info.isBackgrounded,
+      ...(info.prompt ? { prompt: info.prompt } : {}),
+      ...(info.resolvedModel ? { model: info.resolvedModel } : {}),
+      ...(info.progressSummary ? { progressSummary: info.progressSummary } : {}),
+      ...(info.lastToolName ? { lastToolName: info.lastToolName } : {}),
+      ...(info.usage ? { usage: info.usage } : {}),
       ...(info.parentToolUseId ? { parentToolUseId: info.parentToolUseId } : {}),
     }));
+  }
+
+  private _taskUsage(raw: any): ClaudeSubagentState["usage"] | undefined {
+    if (!raw || typeof raw !== "object") return undefined;
+    const totalTokens = Number(raw.total_tokens ?? raw.totalTokens);
+    const toolUses = Number(raw.tool_uses ?? raw.toolUses);
+    const durationMs = Number(raw.duration_ms ?? raw.durationMs);
+    if (![totalTokens, toolUses, durationMs].some(Number.isFinite)) return undefined;
+    return {
+      totalTokens: Number.isFinite(totalTokens) ? totalTokens : 0,
+      toolUses: Number.isFinite(toolUses) ? toolUses : 0,
+      durationMs: Number.isFinite(durationMs) ? durationMs : 0,
+    };
+  }
+
+  private _isSubagentTask(taskType: unknown, subagentType?: unknown): boolean {
+    if (typeof subagentType === "string" && subagentType.length > 0) return true;
+    const normalized = String(taskType || "").toLowerCase();
+    return normalized.includes("agent") || normalized === "subagent";
+  }
+
+  private _findSubagentByTaskId(taskId: string): [string, ClaudeSubagentState] | undefined {
+    for (const entry of this._activeSubagents.entries()) {
+      if (entry[1].agentId === taskId) return entry;
+    }
+    return undefined;
+  }
+
+  private _emitActiveSubagentsSnapshot(): void {
+    this.send({
+      type: "active_subagents",
+      tasks: this.getActiveSubagents(),
+      sessionId: this.sessionId || "",
+      backend: "claude",
+      replace: true,
+    });
+  }
+
+  private _handleSdkTaskStarted(ts: any): void {
+    const taskId = String(ts.task_id || "");
+    const directToolUseId = String(ts.tool_use_id || "") || undefined;
+    const toolUseId = directToolUseId || this._taskIdToToolUseId.get(taskId);
+    if (taskId) {
+      this._sdkTaskIds.add(taskId);
+      if (toolUseId) this._taskIdToToolUseId.set(taskId, toolUseId);
+      this._sdkBackgroundTasks.set(taskId, {
+        taskId,
+        taskType: String(ts.task_type || ""),
+        description: String(ts.description || ""),
+      });
+    }
+
+    if (toolUseId && this._isSubagentTask(ts.task_type, ts.subagent_type)) {
+      const previous = this._activeSubagents.get(toolUseId);
+      this._activeSubagents.set(toolUseId, {
+        toolUseId,
+        agentId: taskId || previous?.agentId,
+        description: String(ts.description || previous?.description || "Agent"),
+        subagentType: String(ts.subagent_type || previous?.subagentType || ""),
+        startedAt: previous?.startedAt || new Date().toISOString(),
+        isBackgrounded: true,
+        status: "running",
+        ...(String(ts.prompt || previous?.prompt || "") ? { prompt: String(ts.prompt || previous?.prompt || "") } : {}),
+        ...(previous?.parentToolUseId ? { parentToolUseId: previous.parentToolUseId } : {}),
+        ...(previous?.resolvedModel ? { resolvedModel: previous.resolvedModel } : {}),
+        ...(previous?.progressSummary ? { progressSummary: previous.progressSummary } : {}),
+        ...(previous?.lastToolName ? { lastToolName: previous.lastToolName } : {}),
+        ...(previous?.usage ? { usage: previous.usage } : {}),
+      });
+    }
+
+    this.send({
+      type: "task_started",
+      taskId,
+      toolUseId,
+      description: String(ts.description || ""),
+      taskType: String(ts.task_type || "") || undefined,
+      subagentType: String(ts.subagent_type || "") || undefined,
+      workflowName: String(ts.workflow_name || "") || undefined,
+      prompt: String(ts.prompt || "") || undefined,
+      skipTranscript: ts.skip_transcript === true || undefined,
+      sessionId: this.sessionId || "",
+    });
+    this._emitActiveSubagentsSnapshot();
+    this.onActivity?.();
+  }
+
+  private _handleSdkTaskProgress(tp: any): void {
+    const taskId = String(tp.task_id || "");
+    const toolUseId = String(tp.tool_use_id || "")
+      || this._taskIdToToolUseId.get(taskId)
+      || undefined;
+    const usage = this._taskUsage(tp.usage);
+    if (taskId) this._sdkTaskIds.add(taskId);
+    if (taskId && toolUseId) this._taskIdToToolUseId.set(taskId, toolUseId);
+
+    if (toolUseId && this._isSubagentTask(undefined, tp.subagent_type)) {
+      const previous = this._activeSubagents.get(toolUseId);
+      this._activeSubagents.set(toolUseId, {
+        toolUseId,
+        agentId: taskId || previous?.agentId,
+        description: String(tp.description || previous?.description || "Agent"),
+        subagentType: String(tp.subagent_type || previous?.subagentType || ""),
+        startedAt: previous?.startedAt || new Date().toISOString(),
+        isBackgrounded: previous?.isBackgrounded ?? this._sdkBackgroundTasks.has(taskId),
+        status: "running",
+        ...(previous?.prompt ? { prompt: previous.prompt } : {}),
+        ...(previous?.parentToolUseId ? { parentToolUseId: previous.parentToolUseId } : {}),
+        ...(previous?.resolvedModel ? { resolvedModel: previous.resolvedModel } : {}),
+        ...(String(tp.summary || previous?.progressSummary || "") ? { progressSummary: String(tp.summary || previous?.progressSummary || "") } : {}),
+        ...(String(tp.last_tool_name || previous?.lastToolName || "") ? { lastToolName: String(tp.last_tool_name || previous?.lastToolName || "") } : {}),
+        ...(usage || previous?.usage ? { usage: usage || previous?.usage } : {}),
+      });
+    }
+
+    this.send({
+      type: "bg_task_progress",
+      taskId,
+      toolUseId,
+      description: String(tp.description || ""),
+      subagentType: String(tp.subagent_type || "") || undefined,
+      usage,
+      lastToolName: String(tp.last_tool_name || "") || undefined,
+      summary: String(tp.summary || "") || undefined,
+      sessionId: this.sessionId || "",
+    });
+    this.onActivity?.();
+  }
+
+  private _handleSdkTaskUpdated(tu: any): void {
+    const taskId = String(tu.task_id || "");
+    const toolUseId = this._taskIdToToolUseId.get(taskId)
+      || this._findSubagentByTaskId(taskId)?.[0];
+    const rawPatch = tu.patch && typeof tu.patch === "object" ? tu.patch : {};
+    const rawStatus = String(rawPatch.status || "");
+    const state = toolUseId ? this._activeSubagents.get(toolUseId) : undefined;
+    if (state) {
+      if (rawPatch.description) state.description = String(rawPatch.description);
+      if (typeof rawPatch.is_backgrounded === "boolean") {
+        state.isBackgrounded = rawPatch.is_backgrounded;
+      }
+      if (rawStatus === "killed") state.status = "stopped";
+      else if (rawStatus === "pending" || rawStatus === "running" || rawStatus === "completed"
+        || rawStatus === "failed" || rawStatus === "paused") {
+        state.status = rawStatus;
+      }
+    }
+
+    this.send({
+      type: "task_updated",
+      taskId,
+      toolUseId,
+      patch: {
+        ...(rawStatus ? { status: rawStatus } : {}),
+        ...(rawPatch.description ? { description: String(rawPatch.description) } : {}),
+        ...(Number.isFinite(Number(rawPatch.end_time)) ? { endTime: Number(rawPatch.end_time) } : {}),
+        ...(Number.isFinite(Number(rawPatch.total_paused_ms)) ? { totalPausedMs: Number(rawPatch.total_paused_ms) } : {}),
+        ...(rawPatch.error ? { error: String(rawPatch.error) } : {}),
+        ...(typeof rawPatch.is_backgrounded === "boolean" ? { isBackgrounded: rawPatch.is_backgrounded } : {}),
+      },
+      sessionId: this.sessionId || "",
+    } as any);
+    this._emitActiveSubagentsSnapshot();
+    this.onActivity?.();
+  }
+
+  private _handleSdkBackgroundTasksChanged(message: any): void {
+    const tasks = Array.isArray(message.tasks) ? message.tasks : [];
+    const replacement = new Map<string, ClaudeSdkBackgroundTask>();
+    for (const task of tasks) {
+      const taskId = String(task?.task_id || "");
+      if (!taskId) continue;
+      replacement.set(taskId, {
+        taskId,
+        taskType: String(task?.task_type || ""),
+        description: String(task?.description || ""),
+      });
+      this._sdkTaskIds.add(taskId);
+      const mapped = this._taskIdToToolUseId.get(taskId);
+      const subagent = mapped ? this._activeSubagents.get(mapped) : this._findSubagentByTaskId(taskId)?.[1];
+      if (subagent) {
+        subagent.isBackgrounded = true;
+        subagent.status = "running";
+        if (task?.description) subagent.description = String(task.description);
+      }
+    }
+
+    const liveIds = new Set(replacement.keys());
+    for (const [toolUseId, state] of this._activeSubagents) {
+      if (state.isBackgrounded && state.agentId && !liveIds.has(state.agentId)) {
+        // The level snapshot is authoritative for liveness but carries no
+        // terminal outcome. Retain the identity until task_notification so
+        // its summary/output can still be attributed; expose it as settled.
+        state.isBackgrounded = false;
+        if (state.status === "running" || state.status === "pending" || state.status === "paused") {
+          state.status = "completed";
+        }
+      }
+    }
+    this._sdkBackgroundTasks = replacement;
+
+    this.send({
+      type: "background_tasks_changed",
+      tasks: Array.from(replacement.values()).map((task) => ({
+        taskId: task.taskId,
+        taskType: task.taskType,
+        description: task.description,
+        ...(this._taskIdToToolUseId.get(task.taskId)
+          ? { toolUseId: this._taskIdToToolUseId.get(task.taskId)! }
+          : {}),
+      })),
+      sessionId: this.sessionId || "",
+    });
+    this._emitActiveSubagentsSnapshot();
+    if (!this._isRunning && !this._hasClaudeBackgroundWork()) this._enterWarmIdle();
+    this.onActivity?.();
+  }
+
+  private _resetSdkTaskTracking(
+    status: "stopped" | "failed",
+    summary: string,
+    notify = true,
+  ): void {
+    const states = Array.from(this._activeSubagents.entries()).filter(([, state]) =>
+      state.status === "pending" || state.status === "running" || state.status === "paused"
+    );
+    if (notify) {
+      for (const [toolUseId, state] of states) {
+        const taskId = state.agentId || toolUseId;
+        this.send({
+          type: "tool_result",
+          toolUseId,
+          output: summary,
+          backgroundPending: false,
+          parentToolUseId: state.parentToolUseId || null,
+          sessionId: this.sessionId || "",
+        });
+        this.send({
+          type: "task_notification",
+          taskId,
+          status,
+          summary,
+          originToolUseId: toolUseId,
+          parentToolUseId: state.parentToolUseId || null,
+          subagentType: state.subagentType || undefined,
+          sessionId: this.sessionId || "",
+        });
+        if (this.sessionId) {
+          appendHistory(this.sessionId, {
+            role: "tool_result",
+            content: "",
+            toolUseId,
+            toolOutput: summary,
+            backgroundPending: false,
+            parentToolUseId: state.parentToolUseId || null,
+            timestamp: new Date().toISOString(),
+          });
+          appendHistory(this.sessionId, {
+            role: "notification",
+            content: summary,
+            status,
+            taskId,
+            originToolUseId: toolUseId,
+            parentToolUseId: state.parentToolUseId || null,
+            subagentType: state.subagentType || undefined,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+    }
+    for (const taskId of this._sdkTaskIds) {
+      this._taskIdToToolUseId.delete(taskId);
+    }
+    this._sdkTaskIds.clear();
+    this._sdkBackgroundTasks.clear();
+    this._activeSubagents.clear();
+    if (notify) {
+      this.send({
+        type: "background_tasks_changed",
+        tasks: [],
+        sessionId: this.sessionId || "",
+      });
+      this._emitActiveSubagentsSnapshot();
+    }
+    this.onActivity?.();
   }
 
   private _streamLane(message: any): string {
@@ -1389,6 +1765,7 @@ export class ClaudeSession {
       try { this.activeQuery.close(); } catch {}
       this.activeQuery = null;
     }
+    this._resetSdkTaskTracking("stopped", "Stopped by user");
     this._rejectPendingTurns(new Error("Claude session aborted"));
     this._isRunning = false;
     this._isCompacting = false;
@@ -1704,10 +2081,16 @@ export class ClaudeSession {
   }
 
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
-    if (this.activeQuery && this.activeInputQueue && this._isWarmIdle) {
+    // The SDK stream also remains reusable while a completed root turn waits
+    // for background work. A new phone prompt must join that process rather
+    // than replacing activeQuery and orphaning its task lifecycle events.
+    if (this.activeQuery && this.activeInputQueue && !this._isRunning) {
       return this._runWarmPrompt(prompt, resumeSessionId);
     }
 
+    if (this._activeSubagents.size > 0 || this._sdkBackgroundTasks.size > 0) {
+      this._resetSdkTaskTracking("failed", "Previous Claude SDK process ended", false);
+    }
     this.abortController = new AbortController();
     this._stopRequested = false;
     this._unexpectedCancellations = 0;
@@ -2182,6 +2565,10 @@ export class ClaudeSession {
           permissionMode: initialPermissionMode as any,
           allowDangerouslySkipPermissions: initialPermissionMode === "bypassPermissions",
           includePartialMessages: true,
+          // Complete subagent messages carry parent_tool_use_id. Forward their
+          // text/thinking so the app can render the nested transcript instead
+          // of receiving only otherwise-contextless child tool cards.
+          forwardSubagentText: true,
           resume: resumeTarget,
           forkSession: shouldFork || undefined,
           resumeSessionAt: resumeAt,
@@ -3147,6 +3534,10 @@ export class ClaudeSession {
           const parentToolUseId = originToolUseId
             ? this._toolParentIds.get(originToolUseId)
             : undefined;
+          const subagentState = originToolUseId
+            ? this._activeSubagents.get(originToolUseId)
+            : this._findSubagentByTaskId(sdkTaskId)?.[1];
+          const taskUsage = this._taskUsage(tn.usage);
           console.log(`[SDK] Task notification: id=${sdkTaskId} status=${tn.status} originToolUseId=${originToolUseId} summary=${tn.summary?.slice(0, 80)}`);
           // If this task was being monitored, flush output and send final notification
           if (sdkTaskId && this._monitoredTasks.has(sdkTaskId)) {
@@ -3189,17 +3580,33 @@ export class ClaudeSession {
             } catch {}
           }
 
-          if (sdkTaskId) this._taskIdToToolUseId.delete(sdkTaskId);
           if (sdkTaskId) this._taskOutputFiles.delete(sdkTaskId);
           if (sdkTaskId) this._stopBgBashWatcher(sdkTaskId);
 
-          // Persist the full output as the tool_result for the bash card in history
-          if (bgOutputContent && originToolUseId && this.sessionId) {
+          // The terminal task event, not the Agent tool's async-launch
+          // acknowledgement, completes a background card. Always emit a final
+          // tool result for subagents so live UI and history settle identically,
+          // including failed/stopped tasks with no output file.
+          const terminalOutput = bgOutputContent
+            || String(tn.summary || "")
+            || `Task ${tn.status || "completed"}`;
+          if (originToolUseId && (bgOutputContent || subagentState)) {
+            this.send({
+              type: "tool_result",
+              toolUseId: originToolUseId,
+              output: terminalOutput,
+              backgroundPending: false,
+              parentToolUseId: parentToolUseId || null,
+              sessionId: this.sessionId || "",
+            });
+          }
+          if (originToolUseId && (bgOutputContent || subagentState) && this.sessionId) {
             appendHistory(this.sessionId, {
               role: "tool_result",
               content: "",
               toolUseId: originToolUseId,
-              toolOutput: bgOutputContent,
+              toolOutput: terminalOutput,
+              backgroundPending: false,
               parentToolUseId: parentToolUseId || null,
               timestamp: new Date().toISOString(),
             });
@@ -3213,6 +3620,9 @@ export class ClaudeSession {
             summary: tn.summary || "",
             originToolUseId,
             parentToolUseId: parentToolUseId || null,
+            subagentType: subagentState?.subagentType || undefined,
+            usage: taskUsage,
+            skipTranscript: tn.skip_transcript === true || undefined,
             sessionId: this.sessionId || "",
           } as any);
           if (this.sessionId) {
@@ -3222,10 +3632,25 @@ export class ClaudeSession {
               status: tn.status || "completed",
               originToolUseId,
               parentToolUseId: parentToolUseId || null,
+              subagentType: subagentState?.subagentType || undefined,
+              taskUsage,
               timestamp: new Date().toISOString(),
             });
           }
+          if (originToolUseId) this._activeSubagents.delete(originToolUseId);
+          else {
+            const entry = this._findSubagentByTaskId(sdkTaskId);
+            if (entry) this._activeSubagents.delete(entry[0]);
+          }
+          if (sdkTaskId) {
+            this._sdkBackgroundTasks.delete(sdkTaskId);
+            this._sdkTaskIds.delete(sdkTaskId);
+            this._taskIdToToolUseId.delete(sdkTaskId);
+          }
           if (originToolUseId) this._toolParentIds.delete(originToolUseId);
+          this._emitActiveSubagentsSnapshot();
+          if (!this._isRunning && !this._hasClaudeBackgroundWork()) this._enterWarmIdle();
+          this.onActivity?.();
         }
 
         // Handle tool use summaries — clean human-readable summaries of tool groups
@@ -3271,37 +3696,25 @@ export class ClaudeSession {
         if (message.type === "system" && (message as any).subtype === "task_started") {
           const ts = message as any;
           console.log(`[SDK] Task started: id=${ts.task_id} toolUseId=${ts.tool_use_id} desc=${ts.description} type=${ts.task_type}`);
-          // Build task_id ↔ tool_use_id mapping (replaces regex agentId extraction)
-          if (ts.task_id && ts.tool_use_id) {
-            this._taskIdToToolUseId.set(ts.task_id, ts.tool_use_id);
-            const subagent = this._activeSubagents.get(ts.tool_use_id);
-            if (subagent) subagent.agentId = ts.task_id;
-          }
-          this.send({
-            type: "task_started",
-            taskId: ts.task_id || "",
-            toolUseId: ts.tool_use_id || undefined,
-            description: ts.description || "",
-            taskType: ts.task_type || undefined,
-            prompt: ts.prompt || undefined,
-            sessionId: this.sessionId || "",
-          } as any);
+          this._handleSdkTaskStarted(ts);
         }
 
         if (message.type === "system" && (message as any).subtype === "task_progress") {
           const tp = message as any;
-          const toolUseId = tp.tool_use_id || this._taskIdToToolUseId.get(tp.task_id) || undefined;
-          console.log(`[SDK] Task progress: id=${tp.task_id} toolUseId=${toolUseId} tool=${tp.last_tool_name} summary=${tp.summary?.slice(0, 60)}`);
-          this.send({
-            type: "bg_task_progress",
-            taskId: tp.task_id || "",
-            toolUseId,
-            description: tp.description || "",
-            usage: tp.usage || undefined,
-            lastToolName: tp.last_tool_name || undefined,
-            summary: tp.summary || undefined,
-            sessionId: this.sessionId || "",
-          } as any);
+          console.log(`[SDK] Task progress: id=${tp.task_id} toolUseId=${tp.tool_use_id || this._taskIdToToolUseId.get(tp.task_id)} tool=${tp.last_tool_name} summary=${tp.summary?.slice(0, 60)}`);
+          this._handleSdkTaskProgress(tp);
+        }
+
+        if (message.type === "system" && (message as any).subtype === "task_updated") {
+          const tu = message as any;
+          console.log(`[SDK] Task updated: id=${tu.task_id} patch=${JSON.stringify(tu.patch || {}).slice(0, 160)}`);
+          this._handleSdkTaskUpdated(tu);
+        }
+
+        if (message.type === "system" && (message as any).subtype === "background_tasks_changed") {
+          const btc = message as any;
+          console.log(`[SDK] Background task snapshot: count=${Array.isArray(btc.tasks) ? btc.tasks.length : 0}`);
+          this._handleSdkBackgroundTasksChanged(btc);
         }
 
         // Forward API retry events (#10 — defensive, needs SDK v0.2.77+)
@@ -3785,6 +4198,9 @@ export class ClaudeSession {
                 if (block.name === "Agent" || block.name === "Task") {
                   const desc = (block.input as any)?.description || "Agent";
                   const subagentType = (block.input as any)?.subagent_type || "";
+                  // Claude Code 2.1.198+ backgrounds Agent calls by default.
+                  // Only an explicit false means this invocation is foreground.
+                  const isBackgrounded = claudeAgentRunsInBackground(block.input);
                   const mappedAgentId = Array.from(this._taskIdToToolUseId.entries())
                     .find(([, mappedToolUseId]) => mappedToolUseId === block.id)?.[0];
                   this._activeSubagents.set(block.id, {
@@ -3793,25 +4209,14 @@ export class ClaudeSession {
                     description: desc,
                     subagentType,
                     startedAt: now(),
+                    prompt: String((block.input as any)?.prompt || ""),
+                    isBackgrounded,
+                    status: "running",
                     ...((message as any).parent_tool_use_id
                       ? { parentToolUseId: (message as any).parent_tool_use_id }
                       : {}),
                   });
-                  console.log(`[SDK] Subagent started: ${desc} (toolUseId=${block.id}, type=${subagentType})`);
-
-                  // Background task notification (immediate UI feedback before task_started arrives)
-                  if ((block.input as any)?.run_in_background) {
-                    console.log(`[SDK] Background task launched: ${desc} (toolUseId=${block.id})`);
-                    this.send({
-                      type: "task_notification",
-                      taskId: block.id,
-                      status: "started",
-                      summary: desc,
-                      originToolUseId: block.id,
-                      parentToolUseId: (message as any).parent_tool_use_id || null,
-                      sessionId: this.sessionId || "",
-                    } as any);
-                  }
+                  console.log(`[SDK] Subagent started: ${desc} (toolUseId=${block.id}, type=${subagentType}, background=${isBackgrounded})`);
                 }
 
                 if (this.sessionId) {
@@ -3859,7 +4264,7 @@ export class ClaudeSession {
                   continue;
                 }
 
-                const output =
+                let output =
                   typeof block.content === "string"
                     ? block.content
                     : Array.isArray(block.content)
@@ -3868,6 +4273,53 @@ export class ClaudeSession {
                           .map((c: any) => c.text)
                           .join("\n")
                       : JSON.stringify(block.content);
+                const subagentState = this._activeSubagents.get(toolUseId);
+                const structuredAgentOutput = subagentState
+                  && (message as any).tool_use_result
+                  && typeof (message as any).tool_use_result === "object"
+                    ? (message as any).tool_use_result as any
+                    : undefined;
+                let backgroundPending = false;
+                if (subagentState && structuredAgentOutput?.status === "async_launched") {
+                  const agentId = String(structuredAgentOutput.agentId || subagentState.agentId || "");
+                  if (agentId) {
+                    subagentState.agentId = agentId;
+                    this._sdkTaskIds.add(agentId);
+                    this._taskIdToToolUseId.set(agentId, toolUseId);
+                    this._sdkBackgroundTasks.set(agentId, {
+                      taskId: agentId,
+                      taskType: "local_agent",
+                      description: String(structuredAgentOutput.description || subagentState.description),
+                    });
+                  }
+                  subagentState.description = String(structuredAgentOutput.description || subagentState.description);
+                  subagentState.prompt = String(structuredAgentOutput.prompt || subagentState.prompt || "");
+                  subagentState.resolvedModel = String(structuredAgentOutput.resolvedModel || "") || undefined;
+                  subagentState.isBackgrounded = true;
+                  subagentState.status = "running";
+                  const outputFile = String(structuredAgentOutput.outputFile || "");
+                  if (agentId && outputFile) this._taskOutputFiles.set(agentId, outputFile);
+                  backgroundPending = true;
+                } else if (subagentState && structuredAgentOutput?.status === "completed") {
+                  const report = Array.isArray(structuredAgentOutput.content)
+                    ? structuredAgentOutput.content
+                      .filter((part: any) => part?.type === "text")
+                      .map((part: any) => String(part.text || ""))
+                      .join("\n")
+                    : "";
+                  if (report) output = report;
+                  subagentState.status = "completed";
+                  subagentState.resolvedModel = String(structuredAgentOutput.resolvedModel || "") || undefined;
+                  subagentState.usage = {
+                    totalTokens: Number(structuredAgentOutput.totalTokens || 0),
+                    toolUses: Number(structuredAgentOutput.totalToolUseCount || 0),
+                    durationMs: Number(structuredAgentOutput.totalDurationMs || 0),
+                  };
+                } else if (subagentState?.isBackgrounded) {
+                  // Compatibility fallback for an older emitter that lacks
+                  // structured AgentOutput. Current SDKs use async_launched.
+                  backgroundPending = /(?:async|background|launched|output file)/i.test(output);
+                }
 
                 // Extract image blocks from tool results (e.g., Read on image files)
                 if (Array.isArray(block.content)) {
@@ -3919,6 +4371,7 @@ export class ClaudeSession {
                 // Detect bash command moved to background (timeout)
                 const bgMatch = output.match(/Command running in background with ID: (\S+)\. Output is being written to: (\S+)/);
                 if (bgMatch && this._activeBashStream) {
+                  backgroundPending = true;
                   const bgTaskId = bgMatch[1];
                   const outputFile = bgMatch[2];
                   console.log(`[SDK] Bash moved to background: taskId=${bgTaskId}, outputFile=${outputFile}, toolUseId=${toolUseId}`);
@@ -3950,14 +4403,17 @@ export class ClaudeSession {
                   this._stopBashWatcher();
                 }
 
-                // Remove completed subagent from active tracking. Keep its
-                // parent mapping until the SDK task notification arrives.
-                let completedSubagent = false;
+                // A background Agent tool result is only the launch
+                // acknowledgement. Its terminal task_notification owns
+                // completion. Foreground Agent results complete immediately.
                 if (this._activeSubagents.has(toolUseId)) {
-                  completedSubagent = true;
                   const info = this._activeSubagents.get(toolUseId)!;
-                  console.log(`[SDK] Subagent completed: ${info.description} (toolUseId=${toolUseId})`);
-                  this._activeSubagents.delete(toolUseId);
+                  if (backgroundPending) {
+                    console.log(`[SDK] Subagent backgrounded: ${info.description} (toolUseId=${toolUseId}, taskId=${info.agentId || "pending"})`);
+                  } else {
+                    console.log(`[SDK] Subagent completed: ${info.description} (toolUseId=${toolUseId})`);
+                    this._activeSubagents.delete(toolUseId);
+                  }
                 }
 
                 // Clear active tool tracking — tool has completed
@@ -3990,6 +4446,7 @@ export class ClaudeSession {
                     type: "tool_result",
                     toolUseId,
                     output,
+                    backgroundPending,
                     sessionId: this.sessionId || "",
                     parentToolUseId: parentId,
                     uuid: msgUuid,
@@ -4005,13 +4462,18 @@ export class ClaudeSession {
                     content: "",
                     toolUseId: block.tool_use_id || "",
                     toolOutput: output,
+                    backgroundPending,
                     parentToolUseId: parentId,
                     uuid: msgUuid,
                     timestamp: now(),
                   });
                 }
-                if (!bgMatch && !completedSubagent) {
+                if (!bgMatch && !backgroundPending) {
                   this._toolParentIds.delete(toolUseId);
+                }
+                if (subagentState) {
+                  this._emitActiveSubagentsSnapshot();
+                  this.onActivity?.();
                 }
               }
             }
@@ -4036,6 +4498,18 @@ export class ClaudeSession {
               terminalReason: result.terminal_reason || undefined,
               sessionId: this.sessionId || "",
             } as any);
+            continue;
+          }
+          if (isClaudeTaskNotificationResult(result)) {
+            // Claude may synthesize a main-thread follow-up after background
+            // work completes. Its assistant content has already streamed, but
+            // this Result is not the completion of a phone-authored prompt:
+            // do not resolve a pending turn, emit a second "session finished",
+            // or overwrite the user's last-result bookkeeping.
+            console.log(`[SDK] Background task follow-up result: subtype=${result.subtype} turns=${result.num_turns}`);
+            currentText = "";
+            sawMainAssistantText = false;
+            this.onActivity?.();
             continue;
           }
           lastResultContent =
@@ -4166,6 +4640,14 @@ export class ClaudeSession {
         });
       }
     } finally {
+      if (this._activeSubagents.size > 0 || this._sdkBackgroundTasks.size > 0) {
+        this._resetSdkTaskTracking(
+          this._stopRequested ? "stopped" : "failed",
+          this._stopRequested
+            ? "Stopped by user"
+            : "Claude SDK process ended before the task reported completion",
+        );
+      }
       this._leaveWarmIdle();
       this._isRunning = false;
       this._isWarmIdle = false;

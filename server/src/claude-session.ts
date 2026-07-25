@@ -252,6 +252,30 @@ export function invalidateClaudeAvailabilityCache(): void {
   cachedClaudeAvailability = null;
 }
 
+/**
+ * Sentinel tool_result bodies Claude Code substitutes when a tool use is
+ * cancelled instead of executed. These are internal CLI constants, not model
+ * output: the tool never runs, no PreToolUse hook fires, and the text is
+ * addressed to the model ("the user doesn't want..."). Once the turn's abort
+ * signal is set, every remaining tool call in that run gets one of these, so
+ * the model concludes it is being denied and gives up — even in bypassPermissions.
+ * We match them so the app can label the cancellation instead of rendering it
+ * as ordinary tool output.
+ */
+const TOOL_CANCELLED_SENTINELS = [
+  "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.",
+  "[Request interrupted by user for tool use]",
+  "[Request interrupted by user]",
+];
+
+/** Minimum gap between forwarded thinking-token progress updates. */
+const THINKING_TOKENS_MIN_INTERVAL_MS = 500;
+
+function isCancelledToolResult(output: string): boolean {
+  const trimmed = output.trim();
+  return TOOL_CANCELLED_SENTINELS.some((s) => trimmed.startsWith(s));
+}
+
 export function getClaudeAvailability(): ClaudeAvailability {
   const now = Date.now();
   if (cachedClaudeAvailability && now - cachedClaudeAvailability.checkedAt < CLAUDE_AVAILABILITY_CACHE_MS) {
@@ -455,6 +479,13 @@ export class ClaudeSession {
   private sessionId: string | null = null;
   private pendingQuestions: Map<string, PendingQuestion> = new Map();
   private abortController: AbortController | null = null;
+  /** Set when SocketAgent itself stopped the run, so backend-initiated tool
+   *  cancellations can be told apart from ones the user actually asked for. */
+  private _stopRequested = false;
+  /** Tool cancellations seen in the current run that nobody asked for. */
+  private _unexpectedCancellations = 0;
+  /** Throttle clock for live thinking-token progress. */
+  private _lastThinkingTokensSentAt = 0;
   private activeQuery: ReturnType<typeof query> | null = null;
   private activeInputQueue: ClaudeInputQueue | null = null;
   private warmIdleTimer: NodeJS.Timeout | null = null;
@@ -1147,6 +1178,7 @@ export class ClaudeSession {
       } as any);
     }
     for (const [streamId, stream] of this._streamingThinking) {
+      if (!stream.content.trim()) continue;  // signature-only thinking, nothing to show
       this.sendTo(ws, {
         type: "thinking",
         content: stream.content,
@@ -1301,6 +1333,7 @@ export class ClaudeSession {
   }
 
   async abort(): Promise<void> {
+    this._stopRequested = true;
     this.streamSnapshots.flushAll();
     this._leaveWarmIdle();
     this.abortController?.abort();
@@ -1339,8 +1372,55 @@ export class ClaudeSession {
 
   /** Gracefully stop the current query between turns — session stays alive and can continue */
   interrupt(): void {
+    this._stopRequested = true;
     if (this.activeQuery) {
       this.activeQuery.interrupt();
+    }
+  }
+
+  /**
+   * A tool call came back with Claude Code's cancellation sentinel instead of
+   * running. If we asked for the stop that is expected. If we did not, the
+   * backend aborted the turn on its own — the abort signal stays set, so every
+   * remaining tool call this run is cancelled the same way while the model keeps
+   * generating. The model reads the sentinel as a refusal from the user and
+   * reports being blocked, which is not what happened, so say so explicitly.
+   */
+  private _reportCancelledTool(toolUseId: string, parentToolUseId: string | null): void {
+    if (this._stopRequested) {
+      console.log(`[Cancelled] Tool ${toolUseId} cancelled by requested stop`);
+      return;
+    }
+    this._unexpectedCancellations++;
+    console.warn(
+      `[Cancelled] Tool ${toolUseId} was cancelled by the backend without a stop request `
+      + `(#${this._unexpectedCancellations} this run). The turn's abort signal is set; `
+      + `further tool calls will also be cancelled.`,
+    );
+    if (this._unexpectedCancellations !== 1) return;  // one card per run
+
+    const summary =
+      "Claude Code cancelled this tool call before running it. This was not a permission "
+      + "denial and you did not stop anything — the backend aborted the turn. Remaining tool "
+      + "calls this turn will be cancelled too, so send a new message to continue.";
+    this.send({
+      type: "task_notification",
+      taskId: "",
+      status: "cancelled",
+      summary,
+      originToolUseId: toolUseId,
+      parentToolUseId: parentToolUseId || null,
+      sessionId: this.sessionId || "",
+    } as any);
+    if (this.sessionId) {
+      appendHistory(this.sessionId, {
+        role: "notification",
+        content: summary,
+        status: "cancelled",
+        originToolUseId: toolUseId,
+        parentToolUseId: parentToolUseId || null,
+        timestamp: new Date().toISOString(),
+      });
     }
   }
 
@@ -1562,6 +1642,9 @@ export class ClaudeSession {
     }
 
     this.abortController = new AbortController();
+    this._stopRequested = false;
+    this._unexpectedCancellations = 0;
+    this._lastThinkingTokensSentAt = 0;
     this._isRunning = true;
     this._runStartedAt = new Date().toISOString();
     this._isWarmIdle = false;
@@ -2046,7 +2129,7 @@ export class ClaudeSession {
           promptSuggestions: true,
           agentProgressSummaries: true,
           toolConfig: { askUserQuestion: { previewFormat: 'markdown' } },
-          settingSources: ["user", "project"],
+          settingSources: ["user", "project", "local"],
           mcpServers: (() => {
             const servers: Record<string, any> = { "app": appTools };
             for (const plugin of this.plugins) {
@@ -2904,6 +2987,28 @@ export class ClaudeSession {
           } as any);
         }
 
+        // Live thinking progress. When extended thinking is redacted the API
+        // streams pings rather than text, so thinking_delta carries no words and
+        // the only signal that reasoning is happening is this running token
+        // estimate. Forward it so the app can show progress instead of either an
+        // empty bubble or nothing at all.
+        if (message.type === "system" && (message as any).subtype === "thinking_tokens") {
+          const tt = message as any;
+          // These arrive once or twice a second for the whole thinking phase.
+          // Coalesce so a phone on the relay isn't woken for every ping.
+          const nowMs = Date.now();
+          if (nowMs - this._lastThinkingTokensSentAt >= THINKING_TOKENS_MIN_INTERVAL_MS) {
+            this._lastThinkingTokensSentAt = nowMs;
+            this.send({
+              type: "thinking_tokens",
+              estimatedTokens: tt.estimated_tokens || 0,
+              estimatedTokensDelta: tt.estimated_tokens_delta || 0,
+              sessionId: this.sessionId || "",
+              uuid: tt.uuid || undefined,
+            } as any);
+          }
+        }
+
         // Forward auth status changes (authenticating state)
         if (message.type === "auth_status") {
           const auth = message as any;
@@ -3303,15 +3408,20 @@ export class ClaudeSession {
             const accumulated = this._streamingThinking.get(streamId)?.content
               || event.delta.thinking
               || "";
-            this.send({
-              type: "thinking",
-              content: accumulated,
-              sessionId: this.sessionId || "",
-              streamId,
-              snapshot: true,
-              parentToolUseId: (message as any).parent_tool_use_id || null,
-              uuid: (message as any).uuid || undefined,
-            });
+            // The API emits thinking_delta events carrying only a signature when
+            // the thinking text itself is withheld. Forwarding those would render
+            // an empty thinking bubble that never fills in.
+            if (accumulated.trim()) {
+              this.send({
+                type: "thinking",
+                content: accumulated,
+                sessionId: this.sessionId || "",
+                streamId,
+                snapshot: true,
+                parentToolUseId: (message as any).parent_tool_use_id || null,
+                uuid: (message as any).uuid || undefined,
+              });
+            }
           }
 
           // Track per-turn usage from message_start (input tokens for this turn)
@@ -3767,6 +3877,10 @@ export class ClaudeSession {
                     parentToolUseId: parentId,
                     uuid: msgUuid,
                   });
+                }
+
+                if (isCancelledToolResult(output)) {
+                  this._reportCancelledTool(toolUseId, parentId);
                 }
                 if (this.sessionId) {
                   appendHistory(this.sessionId, {

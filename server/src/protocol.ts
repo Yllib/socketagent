@@ -1116,6 +1116,20 @@ export interface ThinkingServerMessage {
   revision?: number;
 }
 
+/**
+ * Live thinking progress. When extended thinking is redacted the API streams
+ * pings instead of text, so `thinking` messages never arrive and this running
+ * token estimate is the only sign that reasoning is happening. Transient — not
+ * persisted to history.
+ */
+export interface ThinkingTokensServerMessage {
+  type: "thinking_tokens";
+  estimatedTokens: number;
+  estimatedTokensDelta: number;
+  sessionId: string;
+  uuid?: string;
+}
+
 export interface UsageInfo {
   inputTokens: number;
   outputTokens: number;
@@ -1923,6 +1937,7 @@ export type ServerMessage =
   | BranchResultServerMessage
   | TtsAudioServerMessage
   | ThinkingServerMessage
+  | ThinkingTokensServerMessage
   | ToolImageServerMessage
   | ActiveSubagentsServerMessage
   | ScheduledTaskListServerMessage

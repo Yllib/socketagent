@@ -48,7 +48,8 @@ import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHtmlPlanRevision, listHtmlPlanRevisions, listHtmlPlans, renameHtmlPlan, rollbackHtmlPlan } from "./html-plan-store";
 import { HardAbortCoordinator } from "./hard-abort";
-import { MANAGED_BACKEND_PACKAGES, managedBackendSpecsNeedingUpdate, parseNpmVersionOutput } from "./managed-backend-update";
+import { backendsForManagedBackendSpecs, MANAGED_BACKEND_PACKAGES, managedBackendSpecsNeedingUpdate, parseNpmVersionOutput } from "./managed-backend-update";
+import { invalidateCachedModelCatalog } from "./model-catalog-store";
 import { activeAppMonitorRecords, AppToolContext, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 
@@ -7647,7 +7648,10 @@ async function latestManagedBackendVersions(runtime: UpdateRuntimeTools): Promis
   return Object.fromEntries(entries);
 }
 
-function refreshBackendRuntimeCaches(): void {
+function refreshBackendRuntimeCaches(updatedBackends: readonly Backend[] = ["claude", "codex"]): void {
+  for (const backend of updatedBackends) {
+    invalidateCachedModelCatalog(backend);
+  }
   refreshClaudeExecutableInfo();
   invalidateCodexAvailabilityCache();
   invalidateCodexDriverAvailabilityCache();
@@ -7677,7 +7681,7 @@ function runManagedBackendUpdateSync(): void {
     timeout: 300000,
     windowsHide: true,
   });
-  refreshBackendRuntimeCaches();
+  refreshBackendRuntimeCaches(backendsForManagedBackendSpecs(specs));
 }
 
 async function runManagedBackendUpdate(): Promise<void> {
@@ -7695,7 +7699,7 @@ async function runManagedBackendUpdate(): Promise<void> {
   }
   console.log(`[Auto-update] Updating changed managed agent backends: ${specs.join(", ")}`);
   await runUpdateToolAsync(runtime, runtime.npm, managedBackendInstallArgs(runtime, specs), SERVER_DIR, 300000);
-  refreshBackendRuntimeCaches();
+  refreshBackendRuntimeCaches(backendsForManagedBackendSpecs(specs));
 }
 
 function markManagedBackendUpdateApplied(hash: string): void {

@@ -1,6 +1,8 @@
+import type { Backend } from "./protocol";
+
 export const MANAGED_BACKEND_PACKAGES = [
-  { name: "@openai/codex", spec: "@openai/codex@latest" },
-  { name: "@anthropic-ai/claude-code", spec: "@anthropic-ai/claude-code@latest" },
+  { name: "@openai/codex", spec: "@openai/codex@latest", backend: "codex" },
+  { name: "@anthropic-ai/claude-code", spec: "@anthropic-ai/claude-code@latest", backend: "claude" },
 ] as const;
 
 export function parseNpmVersionOutput(output: string): string {
@@ -26,4 +28,11 @@ export function managedBackendSpecsNeedingUpdate(
   return MANAGED_BACKEND_PACKAGES
     .filter(({ name }) => !installed[name] || installed[name] !== latest[name])
     .map(({ spec }) => spec);
+}
+
+export function backendsForManagedBackendSpecs(specs: readonly string[]): Backend[] {
+  const requested = new Set(specs);
+  return MANAGED_BACKEND_PACKAGES
+    .filter(({ spec }) => requested.has(spec))
+    .map(({ backend }) => backend);
 }

@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  backendsForManagedBackendSpecs,
   managedBackendSpecsNeedingUpdate,
   parseNpmVersionOutput,
 } = require("../dist/managed-backend-update");
@@ -35,4 +36,15 @@ test("parses npm scalar and version-list responses", () => {
   assert.equal(parseNpmVersionOutput('"0.144.6"'), "0.144.6");
   assert.equal(parseNpmVersionOutput('["0.144.5", "0.144.6"]'), "0.144.6");
   assert.equal(parseNpmVersionOutput("2.1.215"), "2.1.215");
+});
+
+test("maps changed managed packages to the model catalogs they invalidate", () => {
+  assert.deepEqual(
+    backendsForManagedBackendSpecs(["@anthropic-ai/claude-code@latest"]),
+    ["claude"],
+  );
+  assert.deepEqual(
+    backendsForManagedBackendSpecs(["@openai/codex@latest", "@anthropic-ai/claude-code@latest"]),
+    ["codex", "claude"],
+  );
 });

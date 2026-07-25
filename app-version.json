@@ -1,7 +1,7 @@
 {
-  "version": "1.0.174",
-  "url": "https://github.com/Yllib/socketagent/releases/download/v1.0.174/app-release.apk",
-  "sha256": "de0a349772e980501886afce52e8624bfd605a2f26d75f27e976467f12f6ca6a",
-  "size": 83461638,
+  "version": "1.0.175",
+  "url": "https://github.com/Yllib/socketagent/releases/download/v1.0.175/app-release.apk",
+  "sha256": "5cb41904d5c26b7344bec3ef29cdcbe7ae6c12eedbdc0920fc142c3aa50fcc3f",
+  "size": 83466090,
   "signingCertSha256": "ffce847792875fd4e48ef57ce70171fb3a674b4ccb11666bc24daf8a31ff9bc9"
 }

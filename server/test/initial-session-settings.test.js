@@ -13,6 +13,7 @@ function fakeSession() {
     setEffort(value) { calls.push(["effort", value]); },
     setThinking(value) { calls.push(["thinking", value]); },
     setClaudeAutoCompact(value) { calls.push(["autoCompact", value]); },
+    setClaudeAutoCompactWindow(value) { calls.push(["autoCompactWindow", value]); },
     setCodexFastMode(value) { calls.push(["fastMode", value]); },
     setCodexCollaborationMode(value) { calls.push(["collaborationMode", value]); },
     async setPermissionMode(value) { calls.push(["permissionMode", value]); },
@@ -26,6 +27,7 @@ test("applies complete Claude preflight settings before the first turn", async (
     effort: "xhigh",
     thinking: { type: "adaptive" },
     claudeAutoCompact: false,
+    claudeAutoCompactWindow: 350000,
     permissionMode: "default",
     codexFastMode: true,
   });
@@ -35,6 +37,7 @@ test("applies complete Claude preflight settings before the first turn", async (
     effort: "xhigh",
     thinking: { type: "adaptive" },
     claudeAutoCompact: false,
+    claudeAutoCompactWindow: 350000,
     permissionMode: "default",
   });
   assert.deepEqual(session.calls, [
@@ -42,8 +45,23 @@ test("applies complete Claude preflight settings before the first turn", async (
     ["effort", "xhigh"],
     ["thinking", { type: "adaptive" }],
     ["autoCompact", false],
+    ["autoCompactWindow", 350000],
     ["permissionMode", "default"],
   ]);
+});
+
+test("rejects Claude auto-compact windows outside the SDK range", async () => {
+  for (const claudeAutoCompactWindow of [99999, 1000001, 250000.5, "nope"]) {
+    const session = fakeSession();
+    const applied = await applyInitialSessionSettings(session, "claude", {
+      claudeAutoCompactWindow,
+    });
+    assert.equal(applied.claudeAutoCompactWindow, undefined);
+    assert.equal(
+      session.calls.some(([name]) => name === "autoCompactWindow"),
+      false,
+    );
+  }
 });
 
 test("applies Codex-only settings and rejects invalid client values", async () => {

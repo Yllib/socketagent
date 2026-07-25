@@ -503,6 +503,8 @@ export class ClaudeSession {
   private _appendSystemPrompt: string = '';
   private _systemPromptOverride: string | undefined;
   private _autoCompactEnabled = true;
+  private _autoCompactWindow: number | undefined;
+  private _autoCompactWindowOverride: number | undefined;
   private _forkFromSessionId?: string;
   private _suppressedToolResultIds: Set<string> = new Set();  // toolUseIds whose results should be hidden from client
   private _taskIdToToolUseId: Map<string, string> = new Map();  // agentId → toolUseId mapping
@@ -624,9 +626,36 @@ export class ClaudeSession {
     console.log(`Claude auto-compact ${enabled ? 'enabled' : 'disabled'} for session ${this.sessionId || '(pending)'}`);
   }
 
+  setClaudeAutoCompactWindow(
+    window: number | null | undefined,
+    options: { inherited?: boolean; clearOverride?: boolean } = {},
+  ): void {
+    const normalized = window == null ? undefined : window;
+    this._autoCompactWindow = normalized;
+    if (options.clearOverride) {
+      this._autoCompactWindowOverride = undefined;
+      this.persistAgentSettings({ claudeAutoCompactWindow: undefined });
+    } else if (!options.inherited) {
+      this._autoCompactWindowOverride = normalized;
+      this.persistAgentSettings({ claudeAutoCompactWindow: normalized });
+    }
+    console.log(
+      `Claude auto-compact window set to ${normalized ?? "SDK default"}`
+      + `${options.inherited || options.clearOverride ? " (inherited)" : " (session override)"}`
+      + ` for session ${this.sessionId || "(pending)"}`,
+    );
+  }
+
+  get claudeAutoCompactWindowOverride(): number | undefined {
+    return this._autoCompactWindowOverride;
+  }
+
   private claudeFlagSettings(): Settings {
     return {
       autoCompactEnabled: this._autoCompactEnabled,
+      ...(this._autoCompactWindow !== undefined
+        ? { autoCompactWindow: this._autoCompactWindow }
+        : {}),
     };
   }
 
@@ -1474,6 +1503,9 @@ export class ClaudeSession {
       effort: this._effort,
       thinking: this._thinking,
       claudeAutoCompact: this._autoCompactEnabled,
+      ...(this._autoCompactWindowOverride !== undefined
+        ? { claudeAutoCompactWindow: this._autoCompactWindowOverride }
+        : {}),
       disallowedTools: [...this._disallowedTools],
       ...(this._systemPromptOverride !== undefined ? { systemPrompt: this._systemPromptOverride } : {}),
     };

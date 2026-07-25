@@ -91,6 +91,15 @@ export async function applyInitialSessionSettings(
       (session as any).setClaudeAutoCompact?.(raw.claudeAutoCompact);
       applied.claudeAutoCompact = raw.claudeAutoCompact;
     }
+    const autoCompactWindow = Number(raw.claudeAutoCompactWindow);
+    if (
+      Number.isSafeInteger(autoCompactWindow)
+      && autoCompactWindow >= 100_000
+      && autoCompactWindow <= 1_000_000
+    ) {
+      (session as any).setClaudeAutoCompactWindow?.(autoCompactWindow);
+      applied.claudeAutoCompactWindow = autoCompactWindow;
+    }
   } else {
     if (typeof raw.codexFastMode === "boolean") {
       (session as any).setCodexFastMode?.(raw.codexFastMode);

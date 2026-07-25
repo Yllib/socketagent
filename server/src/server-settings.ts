@@ -18,6 +18,8 @@ export interface ServerSettings {
   defaultCwd: string;
   systemPrompt: string;
   systemPromptInitialized: boolean;
+  /** Null delegates the window selection to the Claude SDK/model. */
+  claudeAutoCompactWindow: number | null;
 }
 
 const STORE_DIR = socketAgentDataPath();
@@ -33,6 +35,15 @@ let cachedBackendHealth: { checkedAt: number; value: BackendHealthInfo[] } | nul
 
 function normalizeSystemPrompt(value: unknown): string {
   return typeof value === "string" ? value.slice(0, 20_000) : "";
+}
+
+export function normalizeClaudeAutoCompactWindow(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 100_000 || parsed > 1_000_000) {
+    throw new Error("Claude auto-compact window must be an integer from 100,000 to 1,000,000 tokens");
+  }
+  return parsed;
 }
 const backendHealthOverrides = new Map<Backend, BackendHealthInfo>();
 
@@ -243,7 +254,13 @@ export function loadServerSettings(): ServerSettings {
   if (cachedSettings) return cachedSettings;
   ensureStoreDir();
   if (!fs.existsSync(SETTINGS_FILE)) {
-    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER, defaultCwd: BOOT_DEFAULT_CWD, systemPrompt: "", systemPromptInitialized: false };
+    cachedSettings = {
+      codexDriver: DEFAULT_CODEX_DRIVER,
+      defaultCwd: BOOT_DEFAULT_CWD,
+      systemPrompt: "",
+      systemPromptInitialized: false,
+      claudeAutoCompactWindow: null,
+    };
     return cachedSettings;
   }
 
@@ -254,10 +271,17 @@ export function loadServerSettings(): ServerSettings {
       defaultCwd: normalizeDefaultCwd(raw.defaultCwd),
       systemPrompt: normalizeSystemPrompt(raw.systemPrompt),
       systemPromptInitialized: raw.systemPromptInitialized === true,
+      claudeAutoCompactWindow: normalizeClaudeAutoCompactWindow(raw.claudeAutoCompactWindow),
     };
   } catch (err: any) {
     console.warn(`[settings] Failed to read server settings: ${err?.message || String(err)}`);
-    cachedSettings = { codexDriver: DEFAULT_CODEX_DRIVER, defaultCwd: BOOT_DEFAULT_CWD, systemPrompt: "", systemPromptInitialized: false };
+    cachedSettings = {
+      codexDriver: DEFAULT_CODEX_DRIVER,
+      defaultCwd: BOOT_DEFAULT_CWD,
+      systemPrompt: "",
+      systemPromptInitialized: false,
+      claudeAutoCompactWindow: null,
+    };
   }
   return cachedSettings;
 }
@@ -270,6 +294,9 @@ export function saveServerSettings(settings: ServerSettings): ServerSettings {
     defaultCwd: normalizeDefaultCwd(settings.defaultCwd ?? previous.defaultCwd),
     systemPrompt: normalizeSystemPrompt(settings.systemPrompt ?? previous.systemPrompt),
     systemPromptInitialized: settings.systemPromptInitialized ?? previous.systemPromptInitialized,
+    claudeAutoCompactWindow: settings.claudeAutoCompactWindow === undefined
+      ? previous.claudeAutoCompactWindow
+      : normalizeClaudeAutoCompactWindow(settings.claudeAutoCompactWindow),
   };
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(cachedSettings, null, 2), "utf-8");
   return cachedSettings;
@@ -297,6 +324,17 @@ export function getServerSystemPrompt(): string {
 
 export function isServerSystemPromptInitialized(): boolean {
   return loadServerSettings().systemPromptInitialized;
+}
+
+export function setClaudeAutoCompactWindow(window: number | null): ServerSettings {
+  return saveServerSettings({
+    ...loadServerSettings(),
+    claudeAutoCompactWindow: normalizeClaudeAutoCompactWindow(window),
+  });
+}
+
+export function getClaudeAutoCompactWindow(): number | null {
+  return loadServerSettings().claudeAutoCompactWindow;
 }
 
 export function getCodexDriversAvailable(): CodexDriver[] {
@@ -367,6 +405,7 @@ export function getAdvertisedServerSettings(): ServerSettings & {
     defaultCwd: settings.defaultCwd,
     systemPrompt: settings.systemPrompt,
     systemPromptInitialized: settings.systemPromptInitialized,
+    claudeAutoCompactWindow: settings.claudeAutoCompactWindow,
     codexDriversAvailable,
     backendHealth: getBackendHealth(),
   };

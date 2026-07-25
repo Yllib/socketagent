@@ -184,6 +184,11 @@ export interface SetServerSettingsMessage {
   type: "set_server_settings";
   defaultCwd?: string;
   systemPrompt?: string;
+  /**
+   * Server-wide Claude auto-compaction window in tokens. Null restores the
+   * Claude SDK/model default.
+   */
+  claudeAutoCompactWindow?: number | null;
   /** Migration helper: seed the server only when it has no prompt yet. */
   systemPromptIfUnset?: string;
 }
@@ -581,6 +586,14 @@ export interface SetClaudeAutoCompactMessage {
   enabled: boolean;
 }
 
+export interface SetClaudeAutoCompactWindowMessage {
+  type: "set_claude_auto_compact_window";
+  /** Per-session override in tokens. Omit when clearing the override. */
+  window?: number;
+  /** Remove the session override and inherit the server setting. */
+  clearOverride?: boolean;
+}
+
 export interface SetThinkingMessage {
   type: "set_thinking";
   thinking:
@@ -619,6 +632,8 @@ export interface AgentSessionSettings {
   codexFastMode?: boolean;
   codexCollaborationMode?: string;
   claudeAutoCompact?: boolean;
+  /** Per-session override; absent means inherit the server setting. */
+  claudeAutoCompactWindow?: number;
   disallowedTools?: string[];
   systemPrompt?: string;
 }
@@ -804,6 +819,7 @@ export type ClientMessage =
   | SetEffortMessage
   | SetCodexFastModeMessage
   | SetClaudeAutoCompactMessage
+  | SetClaudeAutoCompactWindowMessage
   | SetThinkingMessage
   | SetDisallowedToolsMessage
   | SetSystemPromptMessage
@@ -1284,6 +1300,8 @@ export interface ServerSettingsMessage {
   defaultCwd: string;
   systemPrompt: string;
   systemPromptInitialized?: boolean;
+  /** Null means use the Claude SDK/model default. */
+  claudeAutoCompactWindow: number | null;
   codexDriversAvailable: CodexDriver[];
   backendHealth?: BackendHealthInfo[];
 }

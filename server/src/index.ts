@@ -35,7 +35,7 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
-import { clearBackendHealthOverride, getAdvertisedServerSettings, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
+import { clearBackendHealthOverride, getAdvertisedServerSettings, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
 import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, writeFileManagerText } from "./file-manager";
 import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
@@ -1724,6 +1724,14 @@ async function restorePersistedAgentSettings(session: Session, sessionInfo?: Ses
   if (settings.claudeAutoCompact !== undefined) {
     (session as any).setClaudeAutoCompact?.(settings.claudeAutoCompact);
   }
+  if (settings.claudeAutoCompactWindow !== undefined) {
+    (session as any).setClaudeAutoCompactWindow?.(settings.claudeAutoCompactWindow);
+  } else {
+    (session as any).setClaudeAutoCompactWindow?.(
+      getClaudeAutoCompactWindow(),
+      { inherited: true },
+    );
+  }
 }
 
 function sessionSettingsPayload(session: Session, sessionId: string): Record<string, unknown> {
@@ -2557,6 +2565,26 @@ function createConnectionHandler(transport: ClientTransport) {
             applyDefault(activeSession);
             for (const session of activeSessions.values()) applyDefault(session);
           }
+          if (Object.prototype.hasOwnProperty.call(msg, "claudeAutoCompactWindow")) {
+            const window = normalizeClaudeAutoCompactWindow(
+              (msg as any).claudeAutoCompactWindow,
+            );
+            setClaudeAutoCompactWindow(window);
+            const applyDefault = (session: Session | null | undefined) => {
+              if (
+                session
+                && !(session instanceof CodexSession)
+                && (session as any).claudeAutoCompactWindowOverride === undefined
+              ) {
+                (session as any).setClaudeAutoCompactWindow?.(
+                  window,
+                  { inherited: true },
+                );
+              }
+            };
+            applyDefault(activeSession);
+            for (const session of activeSessions.values()) applyDefault(session);
+          }
           sendJson({
             type: "server_settings",
             ...getAdvertisedServerSettings(),
@@ -2640,6 +2668,10 @@ function createConnectionHandler(transport: ClientTransport) {
         activeSession.setKokoroVoice(pendingKokoroVoice);
         activeSession.setKokoroSpeed(pendingKokoroSpeed);
         activeSession.setAppendSystemPrompt(getServerSystemPrompt(), { inherited: true });
+        (activeSession as any).setClaudeAutoCompactWindow?.(
+          getClaudeAutoCompactWindow(),
+          { inherited: true },
+        );
 
         addRecentCwd(cwd);
         sendJson({
@@ -4556,6 +4588,37 @@ function createConnectionHandler(transport: ClientTransport) {
           (activeSession as any).setClaudeAutoCompact?.(enabled);
         }
         console.log(`Claude auto-compact ${enabled ? "enabled" : "disabled"} (session ${activeSession ? 'active' : 'none'})`);
+        break;
+      }
+
+      case "set_claude_auto_compact_window": {
+        if (!activeSession || activeSession instanceof CodexSession) {
+          sendJson({ type: "error", message: "No active Claude session" });
+          break;
+        }
+        try {
+          if ((msg as any).clearOverride === true) {
+            (activeSession as any).setClaudeAutoCompactWindow?.(
+              getClaudeAutoCompactWindow(),
+              { clearOverride: true },
+            );
+          } else {
+            const window = normalizeClaudeAutoCompactWindow((msg as any).window);
+            if (window === null) {
+              throw new Error("A session override requires a token window");
+            }
+            (activeSession as any).setClaudeAutoCompactWindow?.(window);
+          }
+          sendJson(sessionSettingsPayload(
+            activeSession,
+            activeSession.getSessionId() || activeSessionId || "",
+          ));
+        } catch (e: any) {
+          sendJson({
+            type: "error",
+            message: `Failed to update Claude auto-compact window: ${e.message || String(e)}`,
+          });
+        }
         break;
       }
 

@@ -257,6 +257,15 @@ export function deleteSessionArtifacts(sessionId: string, sessionInfo?: SessionI
   const backend = info?.backend;
 
   unlinkIfExists(historyFile(sessionId), removed, "history");
+  unlinkIfExists(historyBackupFile(sessionId), removed, "history-backup");
+  try {
+    for (const fileName of fs.readdirSync(HISTORY_DIR)) {
+      if (fileName.startsWith(`${sessionId}.json.corrupt-`)
+          || fileName.startsWith(`${sessionId}.json.bak.corrupt-`)) {
+        unlinkIfExists(path.join(HISTORY_DIR, fileName), removed, "history-corrupt");
+      }
+    }
+  } catch {}
   historyCache.delete(sessionId);
   transcriptPositionStates.delete(sessionId);
   rmDirIfExists(toolOutputSessionDir(sessionId), removed, "tool-output");
@@ -372,6 +381,10 @@ function ensureHistoryDir(): void {
 
 function historyFile(sessionId: string): string {
   return path.join(HISTORY_DIR, `${sessionId}.json`);
+}
+
+function historyBackupFile(sessionId: string): string {
+  return `${historyFile(sessionId)}.bak`;
 }
 
 function toolOutputSessionDir(sessionId: string): string {
@@ -782,11 +795,90 @@ export function normalizeClaudeResultFallbackHistoryEntries(
   return normalized;
 }
 
+function parseHistorySnapshot(file: string): HistoryEntry[] {
+  const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+  if (!Array.isArray(parsed)) {
+    throw new Error(`History snapshot is not an array: ${file}`);
+  }
+  return normalizeClaudeResultFallbackHistoryEntries(
+    normalizeSendFileHistoryEntries(parsed as HistoryEntry[]),
+  );
+}
+
+function quarantineCorruptHistoryFile(file: string): string | undefined {
+  if (!fs.existsSync(file)) return undefined;
+  const quarantined = `${file}.corrupt-${Date.now()}-${process.pid}`;
+  fs.renameSync(file, quarantined);
+  return quarantined;
+}
+
+function recoverCorruptHistory(
+  sessionId: string,
+  file: string,
+  originalError: unknown,
+): HistoryEntry[] {
+  historyCache.delete(sessionId);
+  transcriptPositionStates.delete(sessionId);
+  const backup = historyBackupFile(sessionId);
+
+  if (fs.existsSync(backup)) {
+    let backupEntries: HistoryEntry[] | undefined;
+    try {
+      backupEntries = parseHistorySnapshot(backup);
+    } catch (backupError: any) {
+      const quarantinedBackup = quarantineCorruptHistoryFile(backup);
+      console.error(
+        `[HistoryRecovery] Invalid backup session=${sessionId}`
+        + ` quarantined=${quarantinedBackup || "none"}`
+        + ` error=${backupError?.message || String(backupError)}`,
+      );
+    }
+    if (backupEntries) {
+      const quarantined = quarantineCorruptHistoryFile(file);
+      syncTranscriptPositionState(sessionId, backupEntries);
+      writeHistoryEntries(sessionId, backupEntries);
+      console.warn(
+        `[HistoryRecovery] Restored backup session=${sessionId}`
+        + ` entries=${backupEntries.length} quarantined=${quarantined || "none"}`,
+      );
+      return historyCache.get(sessionId)?.entries || backupEntries;
+    }
+  }
+
+  const session = getSession(sessionId);
+  if (session?.backend === "claude" && session.cwd) {
+    const nativeEntries = getMissedMessages(
+      sessionId,
+      session.cwd,
+      new Date(0).toISOString(),
+    );
+    if (nativeEntries.length > 0) {
+      const quarantined = quarantineCorruptHistoryFile(file);
+      syncTranscriptPositionState(sessionId, nativeEntries);
+      writeHistoryEntries(sessionId, nativeEntries);
+      console.warn(
+        `[HistoryRecovery] Rebuilt from Claude transcript session=${sessionId}`
+        + ` entries=${nativeEntries.length} quarantined=${quarantined || "none"}`,
+      );
+      return historyCache.get(sessionId)?.entries || nativeEntries;
+    }
+  }
+
+  throw originalError;
+}
+
 function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: boolean } = {}): HistoryEntry[] {
   const startedAt = Date.now();
   ensureHistoryDir();
   const file = historyFile(sessionId);
   if (!fs.existsSync(file)) {
+    if (fs.existsSync(historyBackupFile(sessionId))) {
+      return recoverCorruptHistory(
+        sessionId,
+        file,
+        new Error(`History snapshot missing for ${sessionId}`),
+      );
+    }
     historyCache.delete(sessionId);
     return [];
   }
@@ -801,11 +893,12 @@ function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: bo
     return cached.entries;
   }
 
-  const normalized = normalizeClaudeResultFallbackHistoryEntries(
-    normalizeSendFileHistoryEntries(
-      JSON.parse(fs.readFileSync(file, "utf-8")) as HistoryEntry[],
-    ),
-  );
+  let normalized: HistoryEntry[];
+  try {
+    normalized = parseHistorySnapshot(file);
+  } catch (error) {
+    return recoverCorruptHistory(sessionId, file, error);
+  }
   const repair = repairTranscriptIdentityCollisions(normalized);
   const entries = repair.entries;
   if (repair.changed) {
@@ -922,9 +1015,40 @@ function writeHistoryEntries(
   // every synchronous persistence pass and extended the Node event-loop stall
   // for no runtime benefit. Write a compact, atomic snapshot instead.
   const serialized = JSON.stringify(safeEntries);
-  const tempFile = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tempFile, serialized, { encoding: "utf-8", mode: 0o600 });
-  fs.renameSync(tempFile, file);
+  const backup = historyBackupFile(sessionId);
+  const tempFile = `${file}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  let tempFd: number | undefined;
+  try {
+    tempFd = fs.openSync(tempFile, "w", 0o600);
+    fs.writeFileSync(tempFd, serialized, { encoding: "utf-8" });
+    fs.fsyncSync(tempFd);
+  } catch (error) {
+    try { fs.rmSync(tempFile, { force: true }); } catch {}
+    throw error;
+  } finally {
+    if (tempFd !== undefined) fs.closeSync(tempFd);
+  }
+  try {
+    if (fs.existsSync(file)) {
+      fs.rmSync(backup, { force: true });
+      fs.renameSync(file, backup);
+    }
+    fs.renameSync(tempFile, file);
+    // Make the directory entry updates durable as well as the snapshot bytes.
+    // Some Windows filesystems do not allow opening/fsyncing a directory.
+    let directoryFd: number | undefined;
+    try {
+      directoryFd = fs.openSync(HISTORY_DIR, "r");
+      fs.fsyncSync(directoryFd);
+    } catch {
+      // The file itself was fsynced before rename, which is the portable floor.
+    } finally {
+      if (directoryFd !== undefined) fs.closeSync(directoryFd);
+    }
+  } catch (error) {
+    try { fs.rmSync(tempFile, { force: true }); } catch {}
+    throw error;
+  }
   const stat = fs.statSync(file);
   historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries: safeEntries });
   updateSessionHistoryMetadata(sessionId, safeEntries);
@@ -2050,11 +2174,18 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
 
   // 2. Archive our chat history
   const histFile = historyFile(sessionId);
+  const histBackup = historyBackupFile(sessionId);
   if (fs.existsSync(histFile)) {
     const archiveName = `${sessionId}_${ts}_history.json`;
     fs.renameSync(histFile, path.join(ARCHIVE_DIR, archiveName));
+    fs.rmSync(histBackup, { force: true });
     historyCache.delete(sessionId);
     console.log(`[ClearContext] Archived history: ${archiveName}`);
+  } else if (fs.existsSync(histBackup)) {
+    const archiveName = `${sessionId}_${ts}_history.json`;
+    fs.renameSync(histBackup, path.join(ARCHIVE_DIR, archiveName));
+    historyCache.delete(sessionId);
+    console.log(`[ClearContext] Archived history backup: ${archiveName}`);
   }
 
   // 3. Archive todos
@@ -2368,6 +2499,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
   if (fs.existsSync(histArchive)) {
     ensureHistoryDir();
     if (fs.existsSync(liveHist)) fs.unlinkSync(liveHist);
+    fs.rmSync(historyBackupFile(sid), { force: true });
     fs.renameSync(histArchive, liveHist);
     historyCache.delete(sid);
   }

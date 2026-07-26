@@ -2881,6 +2881,27 @@ export class ClaudeSession {
       const promptStream = new ClaudeInputQueue();
       this.activeInputQueue = promptStream;
       promptStream.push(this._createUserMessage(prompt, promptSessionId, userMsgUuid));
+      // Validate and persist resumed-session history before query() launches a
+      // Claude subprocess. A corrupt crash snapshot must not strand an orphan.
+      let promptLogged = false;
+      if (this.sessionId || resumeSessionId) {
+        const sid = this.sessionId || resumeSessionId || "";
+        const historyEntry = appendHistory(sid, {
+          role: "user",
+          content: prompt,
+          uuid: userMsgUuid,
+          timestamp: new Date().toISOString(),
+        });
+        this.send({
+          type: "user_message_uuid",
+          uuid: userMsgUuid,
+          sessionId: sid,
+          entryId: historyEntry.entryId,
+          sessionSeq: historyEntry.sessionSeq,
+          revision: historyEntry.revision,
+        } as any);
+        promptLogged = true;
+      }
 
       console.log(`Starting query: resume=${resumeTarget || 'none'}${shouldFork ? ' (FORK)' : ''}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt=${prompt.slice(0, 80)}..., uuid=${userMsgUuid}, cwd=${this.cwd}`);
 
@@ -3499,29 +3520,6 @@ export class ClaudeSession {
       let lastTurnCacheCreateTokens = 0;
 
       const initialTurnPromise = this._trackPendingTurn();
-
-      // Log the user prompt to history (for resumed sessions we already have the ID)
-      let promptLogged = false;
-      if (this.sessionId || resumeSessionId) {
-        const sid = this.sessionId || resumeSessionId || "";
-        const historyEntry = appendHistory(sid, {
-          role: "user",
-          content: prompt,
-          uuid: userMsgUuid,
-          timestamp: now(),
-        });
-        // Forward UUID to app right away so the rewind affordance shows on the
-        // bubble without waiting for an SDK echo.
-        this.send({
-          type: "user_message_uuid",
-          uuid: userMsgUuid,
-          sessionId: sid,
-          entryId: historyEntry.entryId,
-          sessionSeq: historyEntry.sessionSeq,
-          revision: historyEntry.revision,
-        } as any);
-        promptLogged = true;
-      }
 
       const consumeQuery = async () => {
         try {
@@ -5113,8 +5111,10 @@ export class ClaudeSession {
       this._isCompacting = false;
       this._runStartedAt = null;
       this._compactStartedAt = null;
+      this._pendingBoundaryContext = [];
       this.activeInputQueue?.close();
       this.activeInputQueue = null;
+      try { this.activeQuery?.close(); } catch {}
       this.activeQuery = null;
       this._rejectPendingTurns(new Error("Claude SDK stream closed"));
       this.onActivity?.();

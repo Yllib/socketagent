@@ -1,6 +1,9 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { randomUUID } = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const {
   appendHistory,
@@ -10,6 +13,46 @@ const {
   getHistory,
   positionSessionMessage,
 } = require("../dist/session-store");
+
+test("corrupt current history recovers from the last durable snapshot", () => {
+  const sessionId = `test-history-recovery-${randomUUID()}`;
+  const historyPath = path.join(os.homedir(), ".socket-agent", "history", `${sessionId}.json`);
+  try {
+    appendHistory(sessionId, {
+      role: "user",
+      content: "known-good",
+      timestamp: new Date().toISOString(),
+    });
+    appendHistory(sessionId, {
+      role: "assistant",
+      content: "newer-current-entry",
+      timestamp: new Date(Date.now() + 1).toISOString(),
+    });
+
+    // Model the observed crash: a present snapshot replaced by NUL bytes.
+    fs.writeFileSync(historyPath, Buffer.alloc(97));
+
+    const recovered = getHistory(sessionId);
+    assert.deepEqual(recovered.map((entry) => entry.content), ["known-good"]);
+    assert.doesNotThrow(() => JSON.parse(fs.readFileSync(historyPath, "utf8")));
+    assert.ok(
+      fs.readdirSync(path.dirname(historyPath))
+        .some((name) => name.startsWith(`${sessionId}.json.corrupt-`)),
+    );
+
+    appendHistory(sessionId, {
+      role: "assistant",
+      content: "works-after-recovery",
+      timestamp: new Date(Date.now() + 2).toISOString(),
+    });
+    assert.deepEqual(
+      getHistory(sessionId).map((entry) => entry.content),
+      ["known-good", "works-after-recovery"],
+    );
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});
 
 test("live revisions and persisted history share one transcript position", () => {
   const sessionId = `test-transcript-position-${randomUUID()}`;

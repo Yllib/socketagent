@@ -559,6 +559,9 @@ function historyPositionKey(entry: HistoryEntry): string | null {
   if (entry.questionId) return `${entry.role}:question:${entry.questionId}`;
   if (entry.role === "user" && entry.uuid) return `user:uuid:${entry.uuid}`;
   if (entry.role === "monitor" && entry.taskId) return `monitor:${entry.taskId}`;
+  if (entry.role === "task_state" && entry.taskId) {
+    return `task_state:${entry.taskKind || "background"}:${entry.taskId}`;
+  }
   return null;
 }
 
@@ -1331,6 +1334,13 @@ export function getHistory(sessionId: string): HistoryEntry[] {
   return hydrateHistoryEntries(readHistoryEntries(sessionId, { backfillUserUuids: true }));
 }
 
+/** Latest canonical lifecycle snapshot for every native task/runtime task. */
+export function getTaskStates(sessionId: string): HistoryEntry[] {
+  return readHistoryEntries(sessionId, { backfillUserUuids: false })
+    .filter((entry) => entry.role === "task_state")
+    .map(cloneHistoryEntry);
+}
+
 export function getHistoryCount(sessionId: string): number {
   return readHistoryEntries(sessionId).length;
 }
@@ -1542,6 +1552,8 @@ export function truncateHistoryAtMessage(
 // ── Per-session todo list ──
 
 const TODOS_DIR = path.join(STORE_DIR, "todos");
+const CLAUDE_TASK_BACKFILL_SCANNED = new Set<string>();
+const SERVER_PROCESS_STARTED_AT_MS = Date.now();
 
 function ensureTodosDir(): void {
   if (!fs.existsSync(TODOS_DIR)) {
@@ -1569,6 +1581,154 @@ export function getTodos(sessionId: string): any[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * One-time-compatible recovery for Claude's modern TaskCreate/TaskUpdate list.
+ * Older SocketAgent builds persisted the tool transcript but discarded the
+ * TaskCreated hooks, so rebuild missing native task rows from the full durable
+ * history before sending the bounded resume page.
+ */
+export function deriveClaudeTasksFromHistoryEntries(entries: HistoryEntry[]): any[] {
+  const derived = new Map<string, any>();
+  const pendingCreates = new Map<string, {
+    subject: string;
+    description?: string;
+  }>();
+  for (const entry of entries) {
+    if (entry.role === "tool_call" && entry.toolName === "TaskCreate") {
+      const input = entry.toolInput || {};
+      pendingCreates.set(String(entry.toolUseId || ""), {
+        subject: String(input.subject || ""),
+        description: String(input.description || "") || undefined,
+      });
+      continue;
+    }
+    if (entry.role === "tool_result") {
+      const output = String(entry.toolOutput || entry.content || "");
+      const match = output.match(/Task #([^\s]+) created successfully:\s*(.*)/i);
+      if (!match) continue;
+      const pending = pendingCreates.get(String(entry.toolUseId || ""));
+      const taskId = match[1];
+      const subject = String(pending?.subject || match[2] || `Task #${taskId}`);
+      derived.set(taskId, {
+        id: taskId,
+        taskId,
+        content: subject,
+        activeForm: subject,
+        status: "pending",
+        source: "claude_tasks",
+        ...(pending?.description ? { description: pending.description } : {}),
+      });
+      continue;
+    }
+    if (entry.role !== "tool_call" || entry.toolName !== "TaskUpdate") continue;
+    const input = entry.toolInput || {};
+    const taskId = String(input.taskId || "");
+    if (!taskId) continue;
+    const status = String(input.status || "");
+    if (status === "deleted") {
+      derived.delete(taskId);
+      continue;
+    }
+    const previous = derived.get(taskId);
+    const subject = String(input.subject || previous?.content || `Task #${taskId}`);
+    derived.set(taskId, {
+      ...(previous || {}),
+      id: taskId,
+      taskId,
+      content: subject,
+      activeForm: subject,
+      status: status === "pending"
+        || status === "in_progress"
+        || status === "completed"
+        ? status
+        : previous?.status || "pending",
+      source: "claude_tasks",
+    });
+  }
+  return Array.from(derived.values());
+}
+
+export function backfillClaudeTasksFromHistory(sessionId: string): any[] {
+  const current = getTodos(sessionId);
+  if (CLAUDE_TASK_BACKFILL_SCANNED.has(sessionId)) return current;
+  CLAUDE_TASK_BACKFILL_SCANNED.add(sessionId);
+  let entries: HistoryEntry[];
+  try {
+    entries = readHistoryEntries(sessionId, { backfillUserUuids: false });
+  } catch {
+    return current;
+  }
+  const derived = deriveClaudeTasksFromHistoryEntries(entries);
+
+  const existingIds = new Set(
+    current
+      .filter((item) => item?.source === "claude_tasks")
+      .map((item) => String(item?.id ?? item?.taskId ?? "")),
+  );
+  const recovered = derived.filter(
+    (item) => !existingIds.has(String(item.id)),
+  );
+  if (recovered.length === 0) return current;
+  const merged = [...current, ...recovered];
+  saveTodos(sessionId, merged);
+  for (const task of recovered) {
+    appendHistory(sessionId, {
+      role: "task_state",
+      content: String(task.content || ""),
+      taskId: String(task.id || task.taskId || ""),
+      taskKind: "claude_task",
+      status: String(task.status || "pending"),
+      taskSubject: String(task.content || "") || undefined,
+      taskDescription: task.description,
+      teammateName: task.teammateName,
+      isBackgrounded: false,
+      timestamp: new Date().toISOString(),
+    });
+  }
+  console.log(`[Tasks] Recovered ${recovered.length} Claude task(s) from history for ${sessionId}`);
+  return merged;
+}
+
+/**
+ * Settle runtime work whose owning SDK process died in a previous server
+ * process. Do not settle work merely because its foreground turn is idle:
+ * Claude background work can legitimately outlive that turn.
+ */
+export function settleStaleRuntimeTaskStates(sessionId: string): number {
+  let entries: HistoryEntry[];
+  try {
+    entries = readHistoryEntries(sessionId, { backfillUserUuids: false });
+  } catch {
+    return 0;
+  }
+  let settled = 0;
+  const timestamp = new Date().toISOString();
+  for (const entry of entries) {
+    if (entry.role !== "task_state"
+      || entry.taskKind === "claude_task"
+      || !["pending", "running", "paused"].includes(String(entry.status || ""))
+      || !Number.isFinite(Date.parse(entry.timestamp || ""))
+      || Date.parse(entry.timestamp || "") >= SERVER_PROCESS_STARTED_AT_MS) {
+      continue;
+    }
+    entry.status = "stopped";
+    entry.isBackgrounded = false;
+    entry.content = entry.content || "Interrupted when the Claude SDK process ended";
+    entry.timestamp = timestamp;
+    entry.revision = (positiveInteger(entry.revision) || 1) + 1;
+    settled++;
+  }
+  if (settled > 0) {
+    writeHistoryEntries(sessionId, entries, {
+      dirtyEntries: new Set(entries.filter((entry) =>
+        entry.role === "task_state" && entry.timestamp === timestamp
+      )),
+    });
+    console.log(`[Tasks] Settled ${settled} stale runtime task(s) for ${sessionId}`);
+  }
+  return settled;
 }
 
 /** Sanitize CWD to match the SDK's project directory naming convention.

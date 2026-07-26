@@ -242,3 +242,39 @@ test("persisting another revision replaces the existing transcript row", () => {
     deleteSessionArtifacts(sessionId);
   }
 });
+
+test("task lifecycle progress revises one durable history row", () => {
+  const sessionId = `test-task-state-upsert-${randomUUID()}`;
+  try {
+    const started = appendHistory(sessionId, {
+      role: "task_state",
+      content: "Inspect event stream",
+      taskId: "agent-42",
+      taskKind: "subagent",
+      status: "running",
+      originToolUseId: "tool-agent-42",
+      progressSummary: "Starting",
+      timestamp: new Date().toISOString(),
+    });
+    const completed = appendHistory(sessionId, {
+      role: "task_state",
+      content: "Audit complete",
+      taskId: "agent-42",
+      taskKind: "subagent",
+      status: "completed",
+      originToolUseId: "tool-agent-42",
+      progressSummary: "All events accounted for",
+      timestamp: new Date(Date.now() + 1).toISOString(),
+    });
+
+    const history = getHistory(sessionId);
+    assert.equal(history.length, 1);
+    assert.equal(history[0].status, "completed");
+    assert.equal(history[0].progressSummary, "All events accounted for");
+    assert.equal(completed.entryId, started.entryId);
+    assert.equal(completed.sessionSeq, started.sessionSeq);
+    assert.ok(completed.revision > started.revision);
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});

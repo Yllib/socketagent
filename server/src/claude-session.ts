@@ -126,6 +126,83 @@ export function isClaudeAgentLaunchOutput(output: unknown): boolean {
   return status === "async_launched" || status === "remote_launched";
 }
 
+export interface ClaudeTaskStateUpdate {
+  taskId: string;
+  subject?: string;
+  description?: string;
+  teammateName?: string;
+  status?: "pending" | "in_progress" | "completed" | "deleted";
+}
+
+/**
+ * Claude's TaskCreate/TaskUpdate list is not a subagent list. Keep it in the
+ * same durable session task store used by TodoWrite while preserving any
+ * legacy TodoWrite entries that may coexist during an upgrade.
+ */
+export function reduceClaudeTaskTodos(
+  current: any[],
+  update: ClaudeTaskStateUpdate,
+): any[] {
+  const taskId = String(update.taskId || "");
+  if (!taskId) return current.map((item) => ({ ...item }));
+  const result = current.map((item) => ({ ...item }));
+  const index = result.findIndex(
+    (item) => item?.source === "claude_tasks"
+      && String(item?.id ?? item?.taskId ?? "") === taskId,
+  );
+  if (update.status === "deleted") {
+    if (index >= 0) result.splice(index, 1);
+    return result;
+  }
+
+  const previous = index >= 0 ? result[index] : undefined;
+  const subject = String(update.subject || previous?.content || `Task #${taskId}`);
+  const next = {
+    ...(previous || {}),
+    id: taskId,
+    taskId,
+    content: subject,
+    activeForm: subject,
+    status: update.status || previous?.status || "pending",
+    source: "claude_tasks",
+    ...(update.description !== undefined
+      ? { description: update.description }
+      : previous?.description !== undefined
+        ? { description: previous.description }
+        : {}),
+    ...(update.teammateName !== undefined
+      ? { teammateName: update.teammateName }
+      : previous?.teammateName !== undefined
+        ? { teammateName: previous.teammateName }
+        : {}),
+  };
+  if (index >= 0) result[index] = next;
+  else result.push(next);
+  return result;
+}
+
+export function replaceClaudeTaskTodos(current: any[], tasks: any[]): any[] {
+  let result = current
+    .filter((item) => item?.source !== "claude_tasks")
+    .map((item) => ({ ...item }));
+  const previousTasks = current.filter((item) => item?.source === "claude_tasks");
+  for (const task of tasks) {
+    const taskId = String(task?.id || task?.taskId || "");
+    if (!taskId) continue;
+    const previous = previousTasks.find(
+      (item) => String(item?.id ?? item?.taskId ?? "") === taskId,
+    );
+    result = reduceClaudeTaskTodos(result, {
+      taskId,
+      subject: String(task?.subject || previous?.content || `Task #${taskId}`),
+      description: task?.description ?? previous?.description,
+      teammateName: task?.owner ?? task?.teammateName ?? previous?.teammateName,
+      status: task?.status || previous?.status || "pending",
+    });
+  }
+  return result;
+}
+
 function existingFile(filePath: string | undefined): string | undefined {
   if (!filePath) return undefined;
   try {
@@ -556,6 +633,7 @@ export class ClaudeSession {
   private _taskIdToToolUseId: Map<string, string> = new Map();  // agentId → toolUseId mapping
   private _sdkTaskIds: Set<string> = new Set();
   private _sdkBackgroundTasks: Map<string, ClaudeSdkBackgroundTask> = new Map();
+  private _taskStatePersistedAt: Map<string, number> = new Map();
   private _monitoredTasks: Map<string, MonitorState> = new Map();
   private _taskOutputFiles: Map<string, string> = new Map();  // taskId → outputFile path
   private _activeSubagents: Map<string, ClaudeSubagentState> = new Map();
@@ -1254,7 +1332,8 @@ export class ClaudeSession {
       });
     }
 
-    if (toolUseId && this._isSubagentTask(ts.task_type, ts.subagent_type)) {
+    const isSubagent = this._isSubagentTask(ts.task_type, ts.subagent_type);
+    if (toolUseId && isSubagent) {
       const previous = this._activeSubagents.get(toolUseId);
       this._activeSubagents.set(toolUseId, {
         toolUseId,
@@ -1273,6 +1352,19 @@ export class ClaudeSession {
       });
     }
 
+    this._persistTaskState({
+      taskId,
+      taskKind: isSubagent ? "subagent" : "background",
+      status: "running",
+      content: String(ts.description || ""),
+      taskDescription: String(ts.description || "") || undefined,
+      originToolUseId: toolUseId,
+      taskType: String(ts.task_type || "") || undefined,
+      subagentType: String(ts.subagent_type || "") || undefined,
+      prompt: String(ts.prompt || "") || undefined,
+      isBackgrounded: true,
+      skipTranscript: ts.skip_transcript === true || undefined,
+    });
     this.send({
       type: "task_started",
       taskId,
@@ -1298,7 +1390,11 @@ export class ClaudeSession {
     if (taskId) this._sdkTaskIds.add(taskId);
     if (taskId && toolUseId) this._taskIdToToolUseId.set(taskId, toolUseId);
 
-    if (toolUseId && this._isSubagentTask(undefined, tp.subagent_type)) {
+    const isSubagent = Boolean(
+      (toolUseId && this._activeSubagents.has(toolUseId))
+      || this._isSubagentTask(undefined, tp.subagent_type),
+    );
+    if (toolUseId && isSubagent) {
       const previous = this._activeSubagents.get(toolUseId);
       this._activeSubagents.set(toolUseId, {
         toolUseId,
@@ -1317,6 +1413,23 @@ export class ClaudeSession {
       });
     }
 
+    const subagent = toolUseId ? this._activeSubagents.get(toolUseId) : undefined;
+    this._persistTaskState({
+      taskId,
+      taskKind: isSubagent ? "subagent" : "background",
+      status: "running",
+      content: String(tp.summary || tp.description || ""),
+      taskDescription: String(tp.description || subagent?.description || "") || undefined,
+      originToolUseId: toolUseId,
+      parentToolUseId: subagent?.parentToolUseId || null,
+      taskType: this._sdkBackgroundTasks.get(taskId)?.taskType || undefined,
+      subagentType: String(tp.subagent_type || subagent?.subagentType || "") || undefined,
+      prompt: subagent?.prompt,
+      progressSummary: String(tp.summary || "") || undefined,
+      lastToolName: String(tp.last_tool_name || "") || undefined,
+      usage: usage || subagent?.usage,
+      isBackgrounded: this._sdkBackgroundTasks.has(taskId) || subagent?.isBackgrounded,
+    }, 1_500);
     this.send({
       type: "bg_task_progress",
       taskId,
@@ -1350,6 +1463,25 @@ export class ClaudeSession {
       }
     }
 
+    const normalizedStatus = rawStatus === "killed" ? "stopped" : rawStatus || state?.status || "running";
+    this._persistTaskState({
+      taskId,
+      taskKind: state ? "subagent" : "background",
+      status: normalizedStatus,
+      content: String(rawPatch.error || rawPatch.description || state?.progressSummary || state?.description || ""),
+      taskDescription: String(rawPatch.description || state?.description || "") || undefined,
+      originToolUseId: toolUseId,
+      parentToolUseId: state?.parentToolUseId || null,
+      taskType: this._sdkBackgroundTasks.get(taskId)?.taskType || undefined,
+      subagentType: state?.subagentType || undefined,
+      prompt: state?.prompt,
+      progressSummary: state?.progressSummary,
+      lastToolName: state?.lastToolName,
+      usage: state?.usage,
+      isBackgrounded: typeof rawPatch.is_backgrounded === "boolean"
+        ? rawPatch.is_backgrounded
+        : state?.isBackgrounded ?? this._sdkBackgroundTasks.has(taskId),
+    });
     this.send({
       type: "task_updated",
       taskId,
@@ -1431,6 +1563,21 @@ export class ClaudeSession {
     if (notify) {
       for (const [toolUseId, state] of states) {
         const taskId = state.agentId || toolUseId;
+        this._persistTaskState({
+          taskId,
+          taskKind: "subagent",
+          status,
+          content: summary,
+          taskDescription: state.description,
+          originToolUseId: toolUseId,
+          parentToolUseId: state.parentToolUseId || null,
+          subagentType: state.subagentType || undefined,
+          prompt: state.prompt,
+          progressSummary: state.progressSummary,
+          lastToolName: state.lastToolName,
+          usage: state.usage,
+          isBackgrounded: false,
+        });
         this.send({
           type: "tool_result",
           toolUseId,
@@ -1478,6 +1625,7 @@ export class ClaudeSession {
     this._sdkTaskIds.clear();
     this._sdkBackgroundTasks.clear();
     this._activeSubagents.clear();
+    this._taskStatePersistedAt.clear();
     if (notify) {
       this.send({
         type: "background_tasks_changed",
@@ -1485,6 +1633,140 @@ export class ClaudeSession {
         sessionId: this.sessionId || "",
       });
       this._emitActiveSubagentsSnapshot();
+    }
+    this.onActivity?.();
+  }
+
+  private _persistTaskState(state: {
+    taskId: string;
+    taskKind: "claude_task" | "subagent" | "background";
+    status: string;
+    content?: string;
+    taskSubject?: string;
+    taskDescription?: string;
+    teammateName?: string;
+    originToolUseId?: string;
+    parentToolUseId?: string | null;
+    taskType?: string;
+    subagentType?: string;
+    prompt?: string;
+    progressSummary?: string;
+    lastToolName?: string;
+    usage?: ClaudeSubagentState["usage"];
+    isBackgrounded?: boolean;
+    skipTranscript?: boolean;
+  }, throttleMs = 0): void {
+    if (!this.sessionId || !state.taskId) return;
+    const persistenceKey = `${state.taskKind}:${state.taskId}`;
+    const nowMs = Date.now();
+    const previousMs = this._taskStatePersistedAt.get(persistenceKey) || 0;
+    if (throttleMs > 0 && nowMs - previousMs < throttleMs) return;
+    this._taskStatePersistedAt.set(persistenceKey, nowMs);
+    appendHistory(this.sessionId, {
+      role: "task_state",
+      content: state.content || state.taskDescription || state.taskSubject || "",
+      taskId: state.taskId,
+      taskKind: state.taskKind,
+      status: state.status,
+      taskSubject: state.taskSubject,
+      taskDescription: state.taskDescription,
+      teammateName: state.teammateName,
+      originToolUseId: state.originToolUseId,
+      parentToolUseId: state.parentToolUseId,
+      taskType: state.taskType,
+      subagentType: state.subagentType,
+      toolInput: state.prompt ? { prompt: state.prompt } : undefined,
+      progressSummary: state.progressSummary,
+      lastToolName: state.lastToolName,
+      taskUsage: state.usage,
+      isBackgrounded: state.isBackgrounded,
+      skipTranscript: state.skipTranscript,
+      timestamp: new Date(nowMs).toISOString(),
+    });
+    if (state.status === "completed"
+      || state.status === "failed"
+      || state.status === "stopped"
+      || state.status === "deleted") {
+      this._taskStatePersistedAt.delete(persistenceKey);
+    }
+  }
+
+  private _publishClaudeTaskUpdate(update: ClaudeTaskStateUpdate): void {
+    if (!this.sessionId) return;
+    const current = getTodos(this.sessionId);
+    const next = reduceClaudeTaskTodos(current, update);
+    const task = next.find(
+      (item) => item?.source === "claude_tasks"
+        && String(item?.id ?? item?.taskId ?? "") === update.taskId,
+    ) || current.find(
+      (item) => item?.source === "claude_tasks"
+        && String(item?.id ?? item?.taskId ?? "") === update.taskId,
+    );
+    this._persistTaskState({
+      taskId: update.taskId,
+      taskKind: "claude_task",
+      status: update.status || task?.status || "pending",
+      content: update.subject || task?.content || `Task #${update.taskId}`,
+      taskSubject: update.subject || task?.content,
+      taskDescription: update.description ?? task?.description,
+      teammateName: update.teammateName ?? task?.teammateName,
+      isBackgrounded: false,
+    });
+    if (JSON.stringify(current) !== JSON.stringify(next)) {
+      saveTodos(this.sessionId, next);
+      this.send({
+        type: "todos",
+        todos: next,
+        sessionId: this.sessionId,
+      } as any);
+    }
+    this.onActivity?.();
+  }
+
+  private _publishClaudeTaskSnapshot(tasks: any[]): void {
+    if (!this.sessionId) return;
+    const current = getTodos(this.sessionId);
+    const next = replaceClaudeTaskTodos(current, tasks);
+    const nextNativeIds = new Set(
+      next
+        .filter((item) => item?.source === "claude_tasks")
+        .map((item) => String(item?.id ?? item?.taskId ?? "")),
+    );
+    for (const previous of current.filter((item) => item?.source === "claude_tasks")) {
+      const taskId = String(previous?.id ?? previous?.taskId ?? "");
+      if (taskId && !nextNativeIds.has(taskId)) {
+        this._persistTaskState({
+          taskId,
+          taskKind: "claude_task",
+          status: "deleted",
+          content: String(previous.content || `Task #${taskId}`),
+          taskSubject: String(previous.content || "") || undefined,
+          taskDescription: previous.description,
+          teammateName: previous.teammateName,
+          isBackgrounded: false,
+        });
+      }
+    }
+    for (const task of next.filter((item) => item?.source === "claude_tasks")) {
+      const taskId = String(task?.id ?? task?.taskId ?? "");
+      this._persistTaskState({
+        taskId,
+        taskKind: "claude_task",
+        status: String(task.status || "pending"),
+        content: String(task.content || `Task #${taskId}`),
+        taskSubject: String(task.content || "") || undefined,
+        taskDescription: task.description,
+        teammateName: task.teammateName,
+        isBackgrounded: false,
+      });
+    }
+    if (JSON.stringify(current) !== JSON.stringify(next)) {
+      saveTodos(this.sessionId, next);
+      this.send({
+        type: "todos",
+        todos: next,
+        sessionId: this.sessionId,
+      } as any);
     }
     this.onActivity?.();
   }
@@ -2679,6 +2961,60 @@ export class ClaudeSession {
                 return { continue: true };
               }],
             }],
+            PostToolUse: [{
+              hooks: [async (input: any) => {
+                try {
+                  const toolName = String(input.tool_name || "");
+                  const toolInput = input.tool_input && typeof input.tool_input === "object"
+                    ? input.tool_input
+                    : {};
+                  const toolResponse = input.tool_response && typeof input.tool_response === "object"
+                    ? input.tool_response
+                    : {};
+                  if (toolName === "TaskCreate") {
+                    const task = toolResponse.task && typeof toolResponse.task === "object"
+                      ? toolResponse.task
+                      : {};
+                    this._publishClaudeTaskUpdate({
+                      taskId: String(task.id || ""),
+                      subject: String(task.subject || toolInput.subject || ""),
+                      description: String(toolInput.description || "") || undefined,
+                      status: "pending",
+                    });
+                  } else if (toolName === "TaskUpdate" && toolResponse.success !== false) {
+                    const status = String(
+                      toolResponse.statusChange?.to
+                      || toolInput.status
+                      || "",
+                    );
+                    this._publishClaudeTaskUpdate({
+                      taskId: String(toolResponse.taskId || toolInput.taskId || ""),
+                      subject: String(toolInput.subject || "") || undefined,
+                      status: status === "pending"
+                        || status === "in_progress"
+                        || status === "completed"
+                        || status === "deleted"
+                        ? status
+                        : undefined,
+                    });
+                  } else if (toolName === "TaskGet" && toolResponse.task) {
+                    const task = toolResponse.task;
+                    this._publishClaudeTaskUpdate({
+                      taskId: String(task.id || ""),
+                      subject: String(task.subject || ""),
+                      description: String(task.description || "") || undefined,
+                      teammateName: String(task.owner || "") || undefined,
+                      status: task.status,
+                    });
+                  } else if (toolName === "TaskList" && Array.isArray(toolResponse.tasks)) {
+                    this._publishClaudeTaskSnapshot(toolResponse.tasks);
+                  }
+                } catch (error) {
+                  console.warn(`[Hook] Failed to persist Claude task state: ${error}`);
+                }
+                return { continue: true };
+              }],
+            }],
             SubagentStart: [{
               hooks: [async (input: any) => {
                 try {
@@ -2759,14 +3095,13 @@ export class ClaudeSession {
                   const description = input.task_description || "";
                   const teammateName = input.teammate_name || "";
                   console.log(`[Hook] TaskCreated: id=${taskId} subject=${subject}`);
-                  this.send({
-                    type: "task_created_hook",
+                  this._publishClaudeTaskUpdate({
                     taskId,
                     subject,
                     description: description || undefined,
                     teammateName: teammateName || undefined,
-                    sessionId: this.sessionId || "",
-                  } as any);
+                    status: "pending",
+                  });
                 } catch {}
                 return { continue: true };
               }],
@@ -2779,14 +3114,13 @@ export class ClaudeSession {
                   const description = input.task_description || "";
                   const teammateName = input.teammate_name || "";
                   console.log(`[Hook] TaskCompleted: id=${taskId} subject=${subject} desc=${description?.slice(0, 80)}`);
-                  this.send({
-                    type: "task_completed_hook",
+                  this._publishClaudeTaskUpdate({
                     taskId,
                     subject,
                     description: description || undefined,
                     teammateName: teammateName || undefined,
-                    sessionId: this.sessionId || "",
-                  } as any);
+                    status: "completed",
+                  });
                 } catch {}
                 return { continue: true };
               }],
@@ -3619,6 +3953,23 @@ export class ClaudeSession {
             });
           }
 
+          this._persistTaskState({
+            taskId: sdkTaskId,
+            taskKind: subagentState ? "subagent" : "background",
+            status: tn.status || "completed",
+            content: terminalOutput,
+            taskDescription: subagentState?.description || String(tn.summary || "") || undefined,
+            originToolUseId,
+            parentToolUseId: parentToolUseId || null,
+            taskType: this._sdkBackgroundTasks.get(sdkTaskId)?.taskType || undefined,
+            subagentType: subagentState?.subagentType || undefined,
+            prompt: subagentState?.prompt,
+            progressSummary: subagentState?.progressSummary,
+            lastToolName: subagentState?.lastToolName,
+            usage: taskUsage || subagentState?.usage,
+            isBackgrounded: false,
+            skipTranscript: tn.skip_transcript === true || undefined,
+          });
           this.send({
             type: "task_notification",
             taskId: sdkTaskId,

@@ -1347,7 +1347,7 @@ export interface SessionArchiveFailedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "html_plan" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "permission_mode";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "html_plan" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -1396,6 +1396,15 @@ export interface HistoryEntry {
   status?: string;
   originToolUseId?: string;
   taskType?: string;
+  /** Durable lifecycle category; native checklist tasks are not subagents. */
+  taskKind?: "claude_task" | "subagent" | "background";
+  taskSubject?: string;
+  taskDescription?: string;
+  teammateName?: string;
+  progressSummary?: string;
+  lastToolName?: string;
+  isBackgrounded?: boolean;
+  skipTranscript?: boolean;
   subagentType?: string;
   taskUsage?: {
     totalTokens: number;
@@ -1434,6 +1443,10 @@ export interface SessionHistoryServerMessage {
   totalUserPrompts?: number;
   /** Echoed client trace identifier for click-to-ready diagnostics. */
   openTraceId?: string;
+  /** Authoritative native task list, independent of the bounded history page. */
+  todos?: Record<string, unknown>[];
+  /** Latest lifecycle revision for tasks/subagents, independent of the delta cursor. */
+  taskStates?: HistoryEntry[];
 }
 
 export interface StatusServerMessage {

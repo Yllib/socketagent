@@ -26,7 +26,7 @@ import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getBoundedHistoryTail, getBoundedHistoryDelta, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getBoundedHistoryTail, getBoundedHistoryDelta, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
@@ -2803,6 +2803,12 @@ function createConnectionHandler(transport: ClientTransport) {
         if (sessionInfo.backend === "codex" && !contextCleared && getHistoryCount(msg.sessionId) === 0) {
           syncCodexRolloutHistory(sessionInfo);
         }
+        if (sessionInfo.backend === "claude") {
+          if (!activeSession.isBusy) {
+            settleStaleRuntimeTaskStates(msg.sessionId);
+          }
+          backfillClaudeTasksFromHistory(msg.sessionId);
+        }
         const rawKnownSeq = Number((msg as any).knownSessionSeq);
         const rawKnownOffset = Number((msg as any).knownHistoryOffset);
         const rawKnownEntryCount = Number((msg as any).knownHistoryEntryCount);
@@ -2819,6 +2825,7 @@ function createConnectionHandler(transport: ClientTransport) {
         const page = deltaPage ?? getBoundedHistoryTail(msg.sessionId);
         const historyKind = deltaPage ? "delta" : "initial";
         const todos = getTodos(msg.sessionId);
+        const taskStates = getTaskStates(msg.sessionId);
         const lastSuggestion = getLastPromptSuggestion(msg.sessionId);
         sendJson({
           type: "session_history",
@@ -2832,6 +2839,7 @@ function createConnectionHandler(transport: ClientTransport) {
           ...(historyRequestId ? { requestId: historyRequestId } : {}),
           ...(openTraceId ? { openTraceId } : {}),
           ...(todos.length > 0 ? { todos } : {}),
+          taskStates,
           ...(lastSuggestion ? { promptSuggestion: lastSuggestion } : {}),
         });
         const historyBytes = Buffer.byteLength(JSON.stringify(page.entries), "utf8");

@@ -7,10 +7,15 @@ const path = require("node:path");
 
 const { CodexSession } = require("../dist/codex-session");
 const {
+  deriveClaudeTasksFromHistoryEntries,
+} = require("../dist/session-store");
+const {
   ClaudeSession,
   claudeAgentRunsInBackground,
   isClaudeAgentLaunchOutput,
   isClaudeTaskNotificationResult,
+  reduceClaudeTaskTodos,
+  replaceClaudeTaskTodos,
 } = require("../dist/claude-session");
 
 function testSocket(sent) {
@@ -179,6 +184,127 @@ test("recognizes every structured non-terminal Agent launch result", () => {
   assert.equal(isClaudeAgentLaunchOutput({ status: "remote_launched" }), true);
   assert.equal(isClaudeAgentLaunchOutput({ status: "completed" }), false);
   assert.equal(isClaudeAgentLaunchOutput(null), false);
+});
+
+test("keeps native Claude task state separate and durable", () => {
+  const legacyTodo = {
+    content: "Legacy TodoWrite item",
+    status: "pending",
+  };
+  let todos = reduceClaudeTaskTodos([legacyTodo], {
+    taskId: "17",
+    subject: "Inspect parser",
+    description: "Trace event attribution",
+    teammateName: "researcher",
+    status: "pending",
+  });
+  assert.equal(todos.length, 2);
+  assert.deepEqual(todos[0], legacyTodo);
+  assert.deepEqual(todos[1], {
+    id: "17",
+    taskId: "17",
+    content: "Inspect parser",
+    activeForm: "Inspect parser",
+    status: "pending",
+    source: "claude_tasks",
+    description: "Trace event attribution",
+    teammateName: "researcher",
+  });
+
+  todos = reduceClaudeTaskTodos(todos, {
+    taskId: "17",
+    status: "in_progress",
+  });
+  assert.equal(todos[1].status, "in_progress");
+  assert.equal(todos[1].teammateName, "researcher");
+
+  todos = replaceClaudeTaskTodos(todos, [{
+    id: "17",
+    subject: "Inspect parser",
+    status: "completed",
+    owner: "researcher",
+    blockedBy: [],
+  }, {
+    id: "18",
+    subject: "Fix history",
+    status: "pending",
+    blockedBy: [],
+  }]);
+  assert.equal(todos.length, 3);
+  assert.equal(todos[0].content, "Legacy TodoWrite item");
+  assert.equal(todos[1].status, "completed");
+  assert.equal(todos[2].content, "Fix history");
+
+  todos = reduceClaudeTaskTodos(todos, {
+    taskId: "17",
+    status: "deleted",
+  });
+  assert.equal(todos.some((todo) => todo.taskId === "17"), false);
+  assert.equal(todos.some((todo) => todo.content === "Legacy TodoWrite item"), true);
+});
+
+test("recovers pre-fix Claude task state from durable tool history", () => {
+  const tasks = deriveClaudeTasksFromHistoryEntries([
+    {
+      role: "tool_call",
+      content: "",
+      toolName: "TaskCreate",
+      toolUseId: "create-1",
+      toolInput: {
+        subject: "Trace lifecycle",
+        description: "Inspect every event",
+      },
+      timestamp: "2026-07-25T00:00:00.000Z",
+    },
+    {
+      role: "tool_result",
+      content: "",
+      toolUseId: "create-1",
+      toolOutput: "Task #17 created successfully: Trace lifecycle",
+      timestamp: "2026-07-25T00:00:01.000Z",
+    },
+    {
+      role: "tool_call",
+      content: "",
+      toolName: "TaskUpdate",
+      toolUseId: "update-1",
+      toolInput: { taskId: "17", status: "in_progress" },
+      timestamp: "2026-07-25T00:00:02.000Z",
+    },
+    {
+      role: "tool_call",
+      content: "",
+      toolName: "TaskCreate",
+      toolUseId: "create-2",
+      toolInput: { subject: "Discarded task" },
+      timestamp: "2026-07-25T00:00:03.000Z",
+    },
+    {
+      role: "tool_result",
+      content: "",
+      toolUseId: "create-2",
+      toolOutput: "Task #18 created successfully: Discarded task",
+      timestamp: "2026-07-25T00:00:04.000Z",
+    },
+    {
+      role: "tool_call",
+      content: "",
+      toolName: "TaskUpdate",
+      toolUseId: "update-2",
+      toolInput: { taskId: "18", status: "deleted" },
+      timestamp: "2026-07-25T00:00:05.000Z",
+    },
+  ]);
+
+  assert.deepEqual(tasks, [{
+    id: "17",
+    taskId: "17",
+    content: "Trace lifecycle",
+    activeForm: "Trace lifecycle",
+    status: "in_progress",
+    source: "claude_tasks",
+    description: "Inspect every event",
+  }]);
 });
 
 test("reduces Claude task lifecycle events by task and tool identity", () => {

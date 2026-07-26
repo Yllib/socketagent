@@ -12,6 +12,7 @@ test.after(() => fs.rmSync(monitorDataDir, { recursive: true, force: true }));
 
 const {
   handleMonitorTool,
+  rebindAppMonitorsForSession,
   stopAppMonitor,
   stopAppMonitorsForSession,
 } = require("../dist/app-tool-handlers");
@@ -95,6 +96,64 @@ test("disabling Monitor clears the phone lifecycle without killing the process",
     message.taskId === taskId &&
     message.monitoring === false,
   ));
+});
+
+test("a persistent Monitor rebinds away from a completed Claude turn", async () => {
+  if (process.platform === "win32") return;
+  const sessionId = `monitor-rebind-${Date.now()}`;
+  const original = [];
+  const durable = [];
+  const result = await handleMonitorTool(
+    {
+      getSessionId: () => sessionId,
+      getCwd: () => process.cwd(),
+      getBackend: () => "claude",
+      send: (message) => original.push(message),
+      getTtsEngine: () => "system",
+      getKokoroVoice: () => "",
+      getKokoroSpeed: () => 1,
+      isRunning: () => false,
+      onMonitorOutput: () => {
+        throw new Error("completed turn context should not receive output");
+      },
+    },
+    {
+      command: "sleep 0.2; printf 'after-turn\\n'; sleep 0.1",
+      description: "persistent Claude monitor",
+    },
+  );
+  const taskId = /Task ID: ([A-Za-z0-9_-]+)/.exec(result.content[0].text)?.[1];
+  assert.ok(taskId);
+
+  assert.equal(
+    rebindAppMonitorsForSession(sessionId, (record) => ({
+      getSessionId: () => record.sessionId,
+      getCwd: () => record.cwd,
+      getBackend: () => record.backend,
+      send: (message) => durable.push(message),
+      getTtsEngine: () => "system",
+      getKokoroVoice: () => "",
+      getKokoroSpeed: () => 1,
+      isRunning: () => false,
+      onMonitorOutput: (text) => durable.push({ type: "agent_output", text }),
+    })),
+    1,
+  );
+
+  await waitFor(
+    () => durable.find((message) => message.type === "task_notification"),
+    5_000,
+  );
+  assert.ok(
+    durable.some(
+      (message) =>
+        message.type === "agent_output" && /after-turn/.test(message.text),
+    ),
+  );
+  assert.equal(
+    original.some((message) => message.type === "task_notification"),
+    false,
+  );
 });
 
 test("hard stop terminates detached Monitor process trees owned by the session", async () => {

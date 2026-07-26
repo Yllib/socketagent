@@ -50,7 +50,7 @@ import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHt
 import { HardAbortCoordinator } from "./hard-abort";
 import { backendsForManagedBackendSpecs, MANAGED_BACKEND_PACKAGES, managedBackendSpecsNeedingUpdate, parseNpmVersionOutput } from "./managed-backend-update";
 import { invalidateCachedModelCatalog } from "./model-catalog-store";
-import { activeAppMonitorRecords, AppToolContext, restoreAppMonitors } from "./app-tool-handlers";
+import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings } from "./initial-session-settings";
 import {
@@ -3210,6 +3210,18 @@ function createConnectionHandler(transport: ClientTransport) {
             sendSessionCompletionPush(sessionForRun, "failed", err.message || "Query failed");
           }
           broadcastSessionList();
+        }).finally(() => {
+          const sid = sessionForRun.getSessionId();
+          if (!sid) return;
+          const rebound = rebindAppMonitorsForSession(
+            sid,
+            durableMonitorContext,
+          );
+          if (rebound > 0) {
+            console.log(
+              `[AppMonitor] Detached ${rebound} monitor(s) from completed turn ${sid}`,
+            );
+          }
         });
 
         // Register the session globally once it has an ID

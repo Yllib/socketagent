@@ -555,7 +555,7 @@ export async function handleReadSkillTool(
 function publishMonitorOutput(taskId: string, content: string): void {
   const state = appMonitors.get(taskId);
   if (!state || !content) return;
-  const sessionId = state.ctx.getSessionId();
+  const sessionId = state.record.sessionId;
   const cumulative = readDurableMonitorSlice(state.record, 0).content;
   const positioned = state.ctx.appendHistory?.({
     role: "monitor",
@@ -702,14 +702,14 @@ function finishAppMonitor(taskId: string, status: "completed" | "failed", summar
     taskId,
     description: state.description,
     monitoring: false,
-    sessionId: state.ctx.getSessionId(),
+    sessionId: state.record.sessionId,
   } as any);
   state.ctx.send({
     type: "task_notification",
     taskId,
     status,
     summary,
-    sessionId: state.ctx.getSessionId(),
+    sessionId: state.record.sessionId,
   } as any);
 }
 
@@ -732,7 +732,7 @@ export function stopAppMonitor(taskId: string, flush = true, killProcess = false
     taskId,
     description: state.description,
     monitoring: false,
-    sessionId: state.ctx.getSessionId(),
+    sessionId: state.record.sessionId,
   } as any);
   return true;
 }
@@ -740,7 +740,7 @@ export function stopAppMonitor(taskId: string, flush = true, killProcess = false
 /** Hard-stop every Monitor process owned by a SocketAgent session. */
 export async function stopAppMonitorsForSession(sessionId: string): Promise<number> {
   const owned = [...appMonitors.entries()].filter(([, state]) =>
-    state.ctx.getSessionId() === sessionId,
+    state.record.sessionId === sessionId,
   );
   for (const [taskId, state] of owned) {
     stopMonitorReader(taskId);
@@ -821,6 +821,24 @@ export function activeAppMonitorRecords(): DurableMonitorRecord[] {
   return listDurableMonitorRecords();
 }
 
+/**
+ * Detach live monitor delivery from a completed agent turn. Future output uses
+ * the durable server router, which can resume the correct session even after
+ * the original SDK object or phone connection has gone away.
+ */
+export function rebindAppMonitorsForSession(
+  sessionId: string,
+  contextFor: (record: DurableMonitorRecord) => AppToolContext,
+): number {
+  let rebound = 0;
+  for (const state of appMonitors.values()) {
+    if (state.record.sessionId !== sessionId) continue;
+    state.ctx = contextFor(state.record);
+    rebound++;
+  }
+  return rebound;
+}
+
 export async function handleMonitorTool(
   ctx: AppToolContext,
   args: MonitorArgs,
@@ -840,12 +858,22 @@ export async function handleMonitorTool(
       return { content: [{ type: "text", text: "Monitor requires either 'command' to start a monitored process or 'taskId' with enabled=false to stop monitoring." }], isError: true };
     }
 
+    const sessionId = ctx.getSessionId();
+    if (!sessionId) {
+      return {
+        content: [{
+          type: "text",
+          text: "Monitor could not start before the native session ID was available. Retry the Monitor call.",
+        }],
+        isError: true,
+      };
+    }
     const command = args.command;
     const description = args.description || command.slice(0, 60);
     const taskId = `monitor-${crypto.randomUUID().slice(0, 8)}`;
     const record = launchDurableMonitor(createDurableMonitorRecord({
       taskId,
-      sessionId: ctx.getSessionId(),
+      sessionId,
       backend: ctx.getBackend?.() || "codex",
       cwd: ctx.getCwd?.() || process.cwd(),
       command,
@@ -873,8 +901,8 @@ export async function handleMonitorTool(
 
     scheduleMonitorTimeout(taskId, state);
 
-    ctx.send({ type: "task_started", taskId, toolUseId: `monitor-${taskId}`, description, taskType: "monitor", sessionId: ctx.getSessionId() } as any);
-    ctx.send({ type: "monitor_started", taskId, description, monitoring: true, command, sessionId: ctx.getSessionId() } as any);
+    ctx.send({ type: "task_started", taskId, toolUseId: `monitor-${taskId}`, description, taskType: "monitor", sessionId } as any);
+    ctx.send({ type: "monitor_started", taskId, description, monitoring: true, command, sessionId } as any);
 
     let launched = record;
     for (let i = 0; i < 20 && !launched.processPid && launched.status === "starting"; i++) {

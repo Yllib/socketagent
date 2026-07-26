@@ -553,7 +553,41 @@ type ClaudeQueuedUserMessage = {
   };
   parent_tool_use_id: null;
   priority?: "now" | "next" | "later";
+  shouldQuery?: boolean;
 };
+
+export interface ClaudePendingContext {
+  text: string;
+  uuid: string;
+}
+
+export function formatClaudeBoundaryContext(
+  pending: readonly ClaudePendingContext[],
+): string {
+  if (pending.length === 0) return "";
+  const messages = pending.map(
+    (entry, index) => `<additional-user-context index="${index + 1}">\n${entry.text}\n</additional-user-context>`,
+  );
+  return [
+    "The user sent the following additional context while this turn was running.",
+    "Treat it as context or help for the work in progress. Receiving it is not itself a refusal, denial, interruption, or cancellation; follow the content itself normally.",
+    ...messages,
+  ].join("\n\n");
+}
+
+export function createClaudeContinuationMessages(
+  pending: readonly ClaudePendingContext[],
+  sessionId: string,
+): ClaudeQueuedUserMessage[] {
+  return pending.map((entry, index) => ({
+    type: "user",
+    uuid: entry.uuid,
+    session_id: sessionId,
+    message: { role: "user", content: entry.text },
+    parent_tool_use_id: null,
+    ...(index < pending.length - 1 ? { shouldQuery: false } : {}),
+  }));
+}
 
 class ClaudeInputQueue implements AsyncIterable<ClaudeQueuedUserMessage> {
   private messages: ClaudeQueuedUserMessage[] = [];
@@ -611,6 +645,8 @@ export class ClaudeSession {
   private _lastThinkingTokensSentAt = 0;
   private activeQuery: ReturnType<typeof query> | null = null;
   private activeInputQueue: ClaudeInputQueue | null = null;
+  /** User-authored "next" messages waiting for a non-cancelling SDK boundary. */
+  private _pendingBoundaryContext: ClaudePendingContext[] = [];
   private warmIdleTimer: NodeJS.Timeout | null = null;
   private pendingTurns: PendingTurn[] = [];
   private _isRunning = false;
@@ -1192,6 +1228,7 @@ export class ClaudeSession {
     sessionId: string,
     uuid: string,
     priority?: "now" | "next" | "later",
+    shouldQuery?: boolean,
   ): ClaudeQueuedUserMessage {
     return {
       type: "user",
@@ -1200,7 +1237,13 @@ export class ClaudeSession {
       message: { role: "user", content: text },
       parent_tool_use_id: null,
       ...(priority ? { priority } : {}),
+      ...(shouldQuery === undefined ? {} : { shouldQuery }),
     };
+  }
+
+  private _takePendingBoundaryContext(): ClaudePendingContext[] {
+    if (this._pendingBoundaryContext.length === 0) return [];
+    return this._pendingBoundaryContext.splice(0);
   }
 
   private _enterWarmIdle(): void {
@@ -2044,6 +2087,7 @@ export class ClaudeSession {
 
   async abort(): Promise<void> {
     this._stopRequested = true;
+    this._pendingBoundaryContext = [];
     this.streamSnapshots.flushAll();
     this._leaveWarmIdle();
     this.abortController?.abort();
@@ -2084,6 +2128,7 @@ export class ClaudeSession {
   /** Gracefully stop the current query between turns — session stays alive and can continue */
   interrupt(): void {
     this._stopRequested = true;
+    this._pendingBoundaryContext = [];
     if (this.activeQuery) {
       this.activeQuery.interrupt();
     }
@@ -2263,23 +2308,19 @@ export class ClaudeSession {
    * Inject a user message into the running conversation.
    *
    *  'now'   - priority 'now'. The backend aborts the running tool to deliver it.
-   *  'next'  - shouldQuery: false. Appended to the transcript and merged into the
-   *            next user message that queries, which in an agent loop is the next
-   *            tool result. So it lands at the next tool boundary without ever
-   *            asking the backend to reach one, and nothing is cancelled to get
-   *            there. Priority 'next' delivers at the same point, but is defined
-   *            as "reach a turn boundary" and will manufacture one by cancelling
-   *            whatever the model just produced when no tool happens to be
-   *            running — telling the model the user refused it. Same delivery
-   *            point, and the difference is decided purely by timing, so we do
-   *            not use it.
+   *  'next'  - held by SocketAgent until PostToolBatch, whose additionalContext
+   *            is inserted after every tool in the batch resolves and before the
+   *            next model request. If the turn ends first, the message starts a
+   *            seamless follow-up turn. We deliberately do not call streamInput
+   *            while Claude is generating: even shouldQuery:false can hit the
+   *            SDK's cancellation path at that timing.
    *  'later' - priority 'later'. The backend holds it until the whole task ends.
    */
   async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'next', _messageId?: string): Promise<void> {
     if (!this.activeQuery || !this._isRunning) return;
     const atNextBoundary = priority === 'next';
     console.log(
-      `[Inject] Queuing message (${atNextBoundary ? 'shouldQuery=false' : `priority=${priority}`}):`
+      `[Inject] Queuing message (${atNextBoundary ? 'SocketAgent boundary queue' : `priority=${priority}`}):`
       + ` ${text.slice(0, 80)}...`,
     );
 
@@ -2304,25 +2345,24 @@ export class ClaudeSession {
       } as any);
     }
 
-    // Create an async iterable that yields the user message
-    const userMessage = {
-      type: "user" as const,
-      uuid: userMsgUuid,
-      message: {
-        role: "user" as const,
-        content: text,
-      },
-      parent_tool_use_id: null,
-      session_id: sessionId,
-      ...(atNextBoundary ? { shouldQuery: false } : { priority }),
-    };
+    if (atNextBoundary) {
+      this._pendingBoundaryContext.push({ text, uuid: userMsgUuid });
+      console.log(`[Inject] Message retained for the next safe boundary`);
+      return;
+    }
 
+    const userMessage = this._createUserMessage(
+      text,
+      sessionId,
+      userMsgUuid,
+      priority,
+    );
     const singleMessageStream = async function* () {
       yield userMessage;
     };
 
     try {
-      await this.activeQuery.streamInput(singleMessageStream());
+      await this.activeQuery.streamInput(singleMessageStream() as any);
       console.log(`[Inject] Message injected successfully`);
     } catch (e) {
       console.error(`[Inject] streamInput error: ${e}`);
@@ -3013,6 +3053,25 @@ export class ClaudeSession {
                   console.warn(`[Hook] Failed to persist Claude task state: ${error}`);
                 }
                 return { continue: true };
+              }],
+            }],
+            PostToolBatch: [{
+              hooks: [async (input: any) => {
+                // Subagent batches belong to their own context. Only feed
+                // phone-authored context into the main thread.
+                if (input.agent_id) return { continue: true };
+                const pending = this._takePendingBoundaryContext();
+                if (pending.length === 0) return { continue: true };
+                console.log(
+                  `[Inject] Delivering ${pending.length} queued message(s) through PostToolBatch`,
+                );
+                return {
+                  continue: true,
+                  hookSpecificOutput: {
+                    hookEventName: "PostToolBatch" as const,
+                    additionalContext: formatClaudeBoundaryContext(pending),
+                  },
+                };
               }],
             }],
             SubagentStart: [{
@@ -4934,10 +4993,35 @@ export class ClaudeSession {
             costUsd: result.usage.costUSD || 0,
           } : undefined;
 
+          // "next" context is normally delivered by PostToolBatch. A
+          // text-only turn has no such boundary, so continue the same live
+          // run with a fresh SDK input turn instead of resolving the phone
+          // prompt and sending a false completion notification.
+          const pendingContinuation = this._takePendingBoundaryContext();
+          let continuationPending = false;
+          if (pendingContinuation.length > 0 && this.activeInputQueue) {
+            try {
+              for (const userMessage of createClaudeContinuationMessages(
+                pendingContinuation,
+                this.sessionId || "",
+              )) {
+                this.activeInputQueue.push(userMessage);
+              }
+              continuationPending = true;
+              console.log(
+                `[Inject] Continuing after result with ${pendingContinuation.length} queued message(s)`,
+              );
+            } catch (error) {
+              this._pendingBoundaryContext.unshift(...pendingContinuation);
+              console.error(`[Inject] Failed to start continuation: ${error}`);
+            }
+          }
+
           this.send({
             type: "result",
             content: lastResultContent,
             sessionId: this.sessionId || "",
+            continuationPending: continuationPending || undefined,
             costUsd: result.total_cost_usd,
             durationMs: result.duration_ms,
             durationApiMs: result.duration_api_ms || undefined,
@@ -4975,6 +5059,17 @@ export class ClaudeSession {
             }).catch(() => {});
           }
 
+          if (continuationPending) {
+            currentText = "";
+            sawMainAssistantText = false;
+            lastTurnInputTokens = 0;
+            lastTurnOutputTokens = 0;
+            lastTurnCacheReadTokens = 0;
+            lastTurnCacheCreateTokens = 0;
+            this.onActivity?.();
+            continue;
+          }
+
           this._isRunning = false;
           this._runStartedAt = null;
           if (CLAUDE_WARM_IDLE_TIMEOUT_MS > 0) {
@@ -5003,6 +5098,7 @@ export class ClaudeSession {
         });
       }
     } finally {
+      this._pendingBoundaryContext = [];
       if (this._activeSubagents.size > 0 || this._sdkBackgroundTasks.size > 0) {
         this._resetSdkTaskTracking(
           this._stopRequested ? "stopped" : "failed",

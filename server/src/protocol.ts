@@ -1175,6 +1175,8 @@ export interface ResultServerMessage {
   type: "result";
   content: string;
   sessionId: string;
+  /** More user context was queued and this SDK stream is continuing. */
+  continuationPending?: boolean;
   costUsd?: number;
   durationMs?: number;
   durationApiMs?: number;

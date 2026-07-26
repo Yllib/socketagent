@@ -16,7 +16,7 @@ import {
   AgentSessionSettings,
   Backend,
 } from "./protocol";
-import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid, cacheToolImage, positionSessionMessage } from "./session-store";
+import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid, cacheToolImage, positionSessionMessage, clearSessionPendingHandoffContext } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
@@ -661,6 +661,7 @@ export class ClaudeSession {
   private _disallowedTools: string[] = [];
   private _appendSystemPrompt: string = '';
   private _systemPromptOverride: string | undefined;
+  private _pendingTransferContext: string | null = null;
   private _autoCompactEnabled = true;
   private _autoCompactWindow: number | undefined;
   private _autoCompactWindowOverride: number | undefined;
@@ -781,6 +782,10 @@ export class ClaudeSession {
       this.persistAgentSettings({ systemPrompt: text });
     }
     console.log(`Append system prompt set (${text.length} chars) for session ${this.sessionId || '(pending)'}`);
+  }
+
+  setPendingTransferContext(context: string): void {
+    this._pendingTransferContext = context.trim() || null;
   }
 
   setClaudeAutoCompact(enabled: boolean): void {
@@ -2878,9 +2883,13 @@ export class ClaudeSession {
       // the same ID we hand to the app.)
       const userMsgUuid = crypto.randomUUID();
       const promptSessionId = resumeTarget || this.sessionId || "";
+      const transferContext = this._pendingTransferContext;
+      const nativePrompt = transferContext
+        ? `<socketagent_session_handoff>\n${transferContext}\n</socketagent_session_handoff>\n\nCurrent user message:\n${prompt}`
+        : prompt;
       const promptStream = new ClaudeInputQueue();
       this.activeInputQueue = promptStream;
-      promptStream.push(this._createUserMessage(prompt, promptSessionId, userMsgUuid));
+      promptStream.push(this._createUserMessage(nativePrompt, promptSessionId, userMsgUuid));
       // Validate and persist resumed-session history before query() launches a
       // Claude subprocess. A corrupt crash snapshot must not strand an orphan.
       let promptLogged = false;
@@ -3496,6 +3505,11 @@ export class ClaudeSession {
           },
         },
       });
+      this._pendingTransferContext = null;
+      if (transferContext) {
+        const transferSessionId = this.sessionId || this.replacesSessionId || resumeTarget;
+        if (transferSessionId) clearSessionPendingHandoffContext(transferSessionId);
+      }
 
       let currentText = "";
       let sawMainAssistantText = false;

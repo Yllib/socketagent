@@ -206,6 +206,21 @@ export function listHtmlPlans(sessionId: string): HtmlPlanRecord[] {
     .map(publicPlan);
 }
 
+/** Complete revision-preserving representation used by encrypted session transfer. */
+export function exportHtmlPlansForSession(sessionId: string): unknown[] {
+  return readPlans(sessionId).map((plan) => JSON.parse(JSON.stringify(plan)));
+}
+
+/** Restore plans while rebinding every record to the destination session. */
+export function importHtmlPlansForSession(sessionId: string, rawPlans: unknown): void {
+  if (!Array.isArray(rawPlans) || rawPlans.length === 0) return;
+  const normalized = rawPlans
+    .map((entry) => normalizeStoredPlan(entry, sessionId))
+    .filter((entry): entry is StoredHtmlPlanRecord => entry !== null)
+    .map((entry) => ({ ...entry, sessionId }));
+  if (normalized.length > 0) writePlans(sessionId, normalized);
+}
+
 function publicPlan(plan: StoredHtmlPlanRecord): HtmlPlanRecord {
   const { revisions: _revisions, revisionScheme: _revisionScheme, ...record } = plan;
   return record;

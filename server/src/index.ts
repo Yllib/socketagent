@@ -53,6 +53,12 @@ import { invalidateCachedModelCatalog } from "./model-catalog-store";
 import { activeAppMonitorRecords, AppToolContext, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings } from "./initial-session-settings";
+import {
+  discardSessionTransfer,
+  exportSessionTransfer,
+  importSessionTransfer,
+  isSessionTransferPath,
+} from "./session-transfer";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -614,7 +620,9 @@ function resolveAllowedDownloadFile(inputPath: string): { resolvedPath: string; 
   if (!inputPath) throw new Error("Missing path");
   const roots = getFileManagerRoots(getDefaultCwd());
   const resolvedPath = resolveFileManagerPath(inputPath, getDefaultCwd());
-  assertFileManagerPathAllowed(resolvedPath, roots);
+  if (!isSessionTransferPath(resolvedPath)) {
+    assertFileManagerPathAllowed(resolvedPath, roots);
+  }
   if (!fs.existsSync(resolvedPath)) throw new Error(`File not found: ${resolvedPath}`);
   const stat = fs.statSync(resolvedPath);
   if (!stat.isFile()) throw new Error(`Not a file: ${resolvedPath}`);
@@ -1145,6 +1153,7 @@ function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknow
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 2 },
+    sessionTransfer: { version: 1 },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
     codexDriversAvailable: settings.codexDriversAvailable,
@@ -3074,6 +3083,11 @@ function createConnectionHandler(transport: ClientTransport) {
         // set covers the current process; contextClearedAt covers restarts
         // between the clear and the user's next prompt.
         const resumeSessionInfo = resumeId ? getSession(resumeId) : undefined;
+        if (resumeSessionInfo?.pendingHandoffContext) {
+          (activeSession as any).setPendingTransferContext?.(
+            resumeSessionInfo.pendingHandoffContext,
+          );
+        }
         if (resumeId && isContextClearedSession(resumeSessionInfo, resumeId)) {
           console.log(`[Clear] Session ${resumeId} was cleared, starting fresh (no resume)`);
           clearedSessions.delete(resumeId);
@@ -3913,6 +3927,90 @@ function createConnectionHandler(transport: ClientTransport) {
           sendJson({ type: "session_archived", sessionId: sid });
           broadcastSessionList();
         }
+        break;
+      }
+
+      case "session_transfer_export": {
+        const requestId = String((msg as any).requestId || "");
+        const sessionId = String((msg as any).sessionId || "");
+        try {
+          const live = activeSessions.get(sessionId)
+            || ((activeSession?.getSessionId?.() === sessionId
+              || (activeSession as any)?._resumeSessionId === sessionId)
+              ? activeSession
+              : undefined);
+          if (live && sessionIsBusy(live)) {
+            throw new Error("Stop or wait for the session to become idle before transferring it");
+          }
+          const result = await exportSessionTransfer(sessionId);
+          sendJson({
+            type: "session_transfer_export_result",
+            requestId,
+            ok: true,
+            ...result,
+          });
+        } catch (error: any) {
+          sendJson({
+            type: "session_transfer_export_result",
+            requestId,
+            ok: false,
+            error: error?.message || String(error),
+          });
+        }
+        break;
+      }
+
+      case "session_transfer_import": {
+        const requestId = String((msg as any).requestId || "");
+        try {
+          const { resolvedPath } = resolveAllowedDownloadFile(
+            String((msg as any).bundlePath || ""),
+          );
+          const targetBackend = (msg as any).targetBackend === "codex"
+            ? "codex"
+            : "claude";
+          await waitForManagedBackendUpdate();
+          if (targetBackend === "codex" && codexUnavailable()) {
+            throw new Error("Codex is not available on the destination server");
+          }
+          const result = await importSessionTransfer({
+            bundlePath: resolvedPath,
+            expectedSha256: String((msg as any).expectedSha256 || ""),
+            targetCwd: String((msg as any).targetCwd || ""),
+            targetBackend,
+            mode: (msg as any).mode === "clone" ? "clone" : "move",
+            nativeMode: (msg as any).nativeMode === "exact" ? "exact" : "handoff",
+          });
+          addRecentCwd(result.session.cwd);
+          sendJson({
+            type: "session_transfer_import_result",
+            requestId,
+            ok: true,
+            session: result.session,
+            sourceSessionId: result.sourceSessionId,
+            exactNativeResume: result.exactNativeResume,
+          });
+          broadcastSessionList();
+        } catch (error: any) {
+          sendJson({
+            type: "session_transfer_import_result",
+            requestId,
+            ok: false,
+            error: error?.message || String(error),
+          });
+        }
+        break;
+      }
+
+      case "session_transfer_discard": {
+        const requestId = String((msg as any).requestId || "");
+        const discarded = discardSessionTransfer(String((msg as any).bundlePath || ""));
+        sendJson({
+          type: "session_transfer_discard_result",
+          requestId,
+          ok: discarded,
+          ...(discarded ? {} : { error: "Transfer bundle path is not disposable" }),
+        });
         break;
       }
 

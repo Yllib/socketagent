@@ -163,6 +163,15 @@ export function updateSessionAgentSettings(id: string, patch: Partial<AgentSessi
   writeStore(sessions);
 }
 
+/** Clear a transferred handoff only after the destination accepted it. */
+export function clearSessionPendingHandoffContext(id: string): void {
+  const sessions = readStore();
+  const session = sessions.find((entry) => entry.id === id);
+  if (!session?.pendingHandoffContext) return;
+  delete session.pendingHandoffContext;
+  writeStore(sessions);
+}
+
 export function deleteSession(id: string): void {
   const sessions = readStore().filter((s) => s.id !== id);
   writeStore(sessions);
@@ -297,6 +306,56 @@ export function remapSession(oldId: string, newId: string): void {
   const sessions = readStore();
   const session = sessions.find((s) => s.id === oldId);
   if (session) {
+    const oldHistory = historyFile(oldId);
+    const newHistory = historyFile(newId);
+    const oldHistoryBackup = historyBackupFile(oldId);
+    if (fs.existsSync(oldHistory) && !fs.existsSync(newHistory)) {
+      const oldImageDir = path.join(
+        TOOL_IMAGE_CACHE_DIR,
+        oldId.replace(/[^A-Za-z0-9_-]/g, "_"),
+      );
+      const newImageDir = path.join(
+        TOOL_IMAGE_CACHE_DIR,
+        newId.replace(/[^A-Za-z0-9_-]/g, "_"),
+      );
+      const transferredHistory = getHistory(oldId).map((entry) => {
+        if (!entry.filePath || !entry.filePath.startsWith(oldImageDir + path.sep)) {
+          return entry;
+        }
+        return {
+          ...entry,
+          filePath: path.join(newImageDir, path.relative(oldImageDir, entry.filePath)),
+        };
+      });
+      if (fs.existsSync(oldImageDir) && !fs.existsSync(newImageDir)) {
+        fs.mkdirSync(path.dirname(newImageDir), { recursive: true });
+        fs.renameSync(oldImageDir, newImageDir);
+      }
+      replaceHistory(newId, transferredHistory);
+      fs.rmSync(oldHistory, { force: true });
+      fs.rmSync(oldHistoryBackup, { force: true });
+      fs.rmSync(toolOutputSessionDir(oldId), { recursive: true, force: true });
+    }
+    historyCache.delete(oldId);
+    historyCache.delete(newId);
+    transcriptPositionStates.delete(oldId);
+    transcriptPositionStates.delete(newId);
+
+    const oldTodos = todosFile(oldId);
+    const newTodos = todosFile(newId);
+    if (fs.existsSync(oldTodos) && !fs.existsSync(newTodos)) {
+      ensureTodosDir();
+      fs.renameSync(oldTodos, newTodos);
+    }
+
+    const oldSdkEvents = sdkEventsFile(oldId);
+    const newSdkEvents = sdkEventsFile(newId);
+    flushSdkEventQueue(oldId);
+    if (fs.existsSync(oldSdkEvents) && !fs.existsSync(newSdkEvents)) {
+      ensureSdkEventsDir();
+      fs.renameSync(oldSdkEvents, newSdkEvents);
+    }
+
     session.id = newId;
     delete (session as any).contextClearedAt;
     session.lastActive = new Date().toISOString();
@@ -1144,6 +1203,14 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
     positioned.push(entry);
   }
   writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set(positioned) });
+}
+
+/** Replace a session transcript with an already validated transfer snapshot. */
+export function replaceHistory(sessionId: string, entries: HistoryEntry[]): void {
+  transcriptPositionStates.delete(sessionId);
+  historyCache.delete(sessionId);
+  syncTranscriptPositionState(sessionId, entries);
+  writeHistoryEntries(sessionId, entries);
 }
 
 export function removeHtmlPlanHistoryEntries(sessionId: string, planId: string): void {
@@ -2077,6 +2144,32 @@ export function getSdkEvents(sessionId: string, limit = 300): Record<string, any
   } catch {
     return [];
   }
+}
+
+/** Replace the bounded raw SDK event tail restored by a session transfer. */
+export function replaceSdkEvents(
+  sessionId: string,
+  events: Record<string, any>[],
+): void {
+  discardPendingSdkEvents(sessionId);
+  ensureSdkEventsDir();
+  const file = sdkEventsFile(sessionId);
+  if (!Array.isArray(events) || events.length === 0) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  const lines = events
+    .filter((event) => event && typeof event === "object" && !Array.isArray(event))
+    .map((event) => `${JSON.stringify(event)}\n`);
+  let bytes = 0;
+  const retained: string[] = [];
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const lineBytes = Buffer.byteLength(lines[index], "utf8");
+    if (bytes + lineBytes > SDK_EVENTS_KEEP_BYTES) break;
+    retained.unshift(lines[index]);
+    bytes += lineBytes;
+  }
+  fs.writeFileSync(file, retained.join(""), { encoding: "utf8", mode: 0o600 });
 }
 
 function readJsonlTailLines(

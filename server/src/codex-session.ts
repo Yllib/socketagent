@@ -24,6 +24,7 @@ import {
   cacheToolImage,
   markQuestionAnswered,
   positionSessionMessage,
+  clearSessionPendingHandoffContext,
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor, stopAppMonitorsForSession } from "./app-tool-handlers";
@@ -325,6 +326,7 @@ export class CodexSession {
   private _permissionMode = "bypassPermissions";
   private _appendSystemPrompt = "";
   private _systemPromptOverride: string | undefined;
+  private _pendingTransferContext: string | null = null;
   private _disallowedTools: string[] = [];
   private _collaborationMode = "default";
   private _ttsEnabled = false;
@@ -791,6 +793,9 @@ export class CodexSession {
       this._systemPromptOverride = s;
       this.persistAgentSettings({ systemPrompt: s });
     }
+  }
+  setPendingTransferContext(context: string): void {
+    this._pendingTransferContext = context.trim() || null;
   }
   setCodexCollaborationMode(mode: string): void {
     const trimmed = (mode || "default").trim();
@@ -1698,6 +1703,10 @@ export class CodexSession {
     this._abortRequested = false;
     this._currentPrompt = prompt;
     this._lastAssistantText = "";
+    const transferContext = this._pendingTransferContext;
+    const nativePrompt = transferContext
+      ? `<socketagent_session_handoff>\n${transferContext}\n</socketagent_session_handoff>\n\nCurrent user message:\n${prompt}`
+      : prompt;
     this.appServerAgentText.clear();
     this.appServerReasoningText.clear();
     this.appServerStreamParents.clear();
@@ -1778,10 +1787,15 @@ export class CodexSession {
       const turn = await this.appServer!.startTurn({
         threadId: this.threadId,
         cwd: this.cwd,
-        input: this.buildAppServerTurnInput(prompt),
+        input: this.buildAppServerTurnInput(nativePrompt),
         model: turnModel,
         ...(collaborationMode ? { collaborationMode } : {}),
       });
+      this._pendingTransferContext = null;
+      if (transferContext) {
+        const transferSessionId = this.sessionId || this.replacesSessionId;
+        if (transferSessionId) clearSessionPendingHandoffContext(transferSessionId);
+      }
       this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
       this.flushPendingUserPrompt();
       this.flushPendingAppServerSteers();

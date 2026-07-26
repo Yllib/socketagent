@@ -394,6 +394,29 @@ export interface ArchiveSessionMessage {
   sessionId: string;
 }
 
+export interface SessionTransferExportMessage {
+  type: "session_transfer_export";
+  requestId: string;
+  sessionId: string;
+}
+
+export interface SessionTransferImportMessage {
+  type: "session_transfer_import";
+  requestId: string;
+  bundlePath: string;
+  expectedSha256: string;
+  targetCwd: string;
+  targetBackend: Backend;
+  mode: "move" | "clone";
+  nativeMode: "exact" | "handoff";
+}
+
+export interface SessionTransferDiscardMessage {
+  type: "session_transfer_discard";
+  requestId: string;
+  bundlePath: string;
+}
+
 export interface ListArchivesMessage {
   type: "list_archives";
 }
@@ -811,6 +834,9 @@ export type ClientMessage =
   | CompactContextMessage
   | CodexRollbackThreadMessage
   | ArchiveSessionMessage
+  | SessionTransferExportMessage
+  | SessionTransferImportMessage
+  | SessionTransferDiscardMessage
   | AbortMessage
   | InterruptMessage
   | SetTtsMessage
@@ -1236,6 +1262,16 @@ export interface SessionInfo {
   agentSettings?: AgentSessionSettings;
   /** Set after clear-context until the next fresh backend session replaces this id. */
   contextClearedAt?: string;
+  /** One-shot context used to seed a new native thread after a harness transfer. */
+  pendingHandoffContext?: string;
+  /** Transfer lineage retained independently of provider-native thread IDs. */
+  transferLineage?: {
+    sourceSessionId: string;
+    sourceBackend: Backend;
+    sourceServerLabel?: string;
+    transferredAt: string;
+    mode: "move" | "clone";
+  };
 }
 
 export interface ErrorServerMessage {
@@ -1275,6 +1311,9 @@ export interface ServerCapabilitiesMessage {
     version: number;
   };
   htmlPlans?: {
+    version: number;
+  };
+  sessionTransfer?: {
     version: number;
   };
   /** Backends supported by this server build. Health/auth state is in backendHealth. */

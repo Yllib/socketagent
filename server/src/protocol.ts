@@ -1272,6 +1272,9 @@ export interface SessionInfo {
     transferredAt: string;
     mode: "move" | "clone";
   };
+  /** Full-session delegation lineage, distinct from provider-native subagents. */
+  delegatedBySessionId?: string;
+  delegationId?: string;
 }
 
 export interface ErrorServerMessage {

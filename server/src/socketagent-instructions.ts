@@ -34,6 +34,7 @@ export function buildSocketAgentIntegrationInstructions(options: {
     "- Important immediate phone notification -> NotifyUser.",
     "- Device reminder -> ScheduleReminder.",
     "- Deferred or recurring agent work -> ScheduleTask.",
+    "- Independent delegated work that should run in a full Claude or Codex session -> AgentSession. Use action=start, retain the returned session_id/delegation_id, use action=message for follow-ups, and use status/list/stop when needed. The child runs independently and reports its completed turn back automatically.",
     monitorRouting,
     "- Spoken output -> Speak only when TTS is enabled or explicitly requested.",
     "- Skill discovery/loading -> SearchSkills, then ReadSkill.",

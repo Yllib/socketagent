@@ -25,6 +25,8 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /Never request secrets in normal chat/);
   assert.match(prompt, /absolute file_path/);
   assert.match(prompt, /discover tools for socketagent_app/);
+  assert.match(prompt, /Independent delegated work.*AgentSession/);
+  assert.match(prompt, /reports its completed turn back automatically/);
   assert.match(prompt, /socketagent:\/\/file\/download/);
   assert.match(prompt, /<secret_inventory>\n\[\]\n<\/secret_inventory>/);
 });

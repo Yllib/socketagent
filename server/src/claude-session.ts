@@ -21,6 +21,7 @@ import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
   AppToolContext,
+  handleAgentSessionTool,
   handleHtmlPlanTool,
   handleMonitorTool,
   handleNotifyUserTool,
@@ -31,6 +32,7 @@ import {
   stopAppMonitor,
   stopAppMonitorsForSession,
 } from "./app-tool-handlers";
+import type { AgentSessionToolExecutor } from "./delegated-agent-types";
 import { buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
@@ -716,6 +718,7 @@ export class ClaudeSession {
   public onActivity?: () => void;
   public onClose?: () => void;
   public onMonitorOutput?: (text: string) => void;
+  public onAgentSessionRequest?: AgentSessionToolExecutor;
   // When set, this fresh session replaces an old cleared session — remap the ID in the store
   public replacesSessionId?: string;
   public _resumeSessionId?: string;
@@ -2494,6 +2497,12 @@ export class ClaudeSession {
         isRunning: () => this._isRunning,
         injectMessage: (text, priority) => this.injectMessage(text, priority),
         onMonitorOutput: (text) => this.onMonitorOutput?.(text),
+        manageAgentSession: (args) => {
+          if (!this.onAgentSessionRequest) {
+            throw new Error("AgentSession runtime is not attached");
+          }
+          return this.onAgentSessionRequest(args);
+        },
       };
 
       // Build the MCP server with app-facing tools.
@@ -2622,6 +2631,23 @@ export class ClaudeSession {
               const label = task.name ? `"${task.name}"` : "Task";
               return { content: [{ type: "text" as const, text: `${label} scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
             }
+          ),
+          tool(
+            "AgentSession",
+            "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of this turn, and reports its final response back automatically.",
+            {
+              action: z.enum(["start", "message", "status", "list", "stop"]).describe("start a child; message an existing child; inspect status/list; or stop it"),
+              prompt: z.string().optional().describe("Required for start and message"),
+              session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/stop unless delegation_id is used"),
+              delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),
+              backend: z.enum(["claude", "codex"]).optional().describe("Backend for start. Defaults to the supervising agent's backend."),
+              cwd: z.string().optional().describe("Absolute working directory for start. Defaults to the supervisor's directory."),
+              label: z.string().optional().describe("Short human-readable label for the delegated work"),
+              model: z.string().optional().describe("Optional provider model ID for start"),
+              effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Optional reasoning effort for start"),
+              permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
+            },
+            async (args) => handleAgentSessionTool(appToolContext, args as any)
           ),
           tool(
             "Monitor",
@@ -2865,6 +2891,7 @@ export class ClaudeSession {
           "ScheduleReminder",
           "NotifyUser",
           "ScheduleTask",
+          "AgentSession",
           "Monitor",
           "SearchSkills",
           "ReadSkill",

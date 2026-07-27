@@ -22,6 +22,11 @@ import {
   stopDurableMonitorAndWait,
   updateDurableMonitorRecord,
 } from "./durable-monitor-store";
+import type {
+  AgentSessionToolArgs,
+  AgentSessionToolExecutor,
+  DelegatedAgentRecord,
+} from "./delegated-agent-types";
 
 export interface AppToolContext {
   getSessionId(): string;
@@ -36,6 +41,7 @@ export interface AppToolContext {
   isRunning?(): boolean;
   injectMessage?(text: string, priority?: "now" | "next" | "later"): Promise<void>;
   onMonitorOutput?(text: string): void;
+  manageAgentSession?: AgentSessionToolExecutor;
 }
 
 export interface McpTextResult {
@@ -77,6 +83,87 @@ export interface MonitorArgs {
   timeoutSeconds?: number;
   taskId?: string;
   enabled?: boolean;
+}
+
+function delegatedAgentSummary(
+  record: DelegatedAgentRecord,
+  includeResult = true,
+): Record<string, unknown> {
+  const latestRun = record.runs.at(-1);
+  const result = latestRun?.result;
+  return {
+    delegation_id: record.delegationId,
+    session_id: record.childSessionId || null,
+    backend: record.backend,
+    cwd: record.cwd,
+    label: record.label,
+    status: record.status,
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+    run_count: record.runs.length,
+    ...(latestRun ? {
+      latest_run: {
+        run_id: latestRun.runId,
+        run_number: latestRun.runNumber,
+        status: latestRun.status,
+        started_at: latestRun.startedAt,
+        completed_at: latestRun.completedAt || null,
+        result: includeResult && result
+          ? (result.length <= 12_000 ? result : `${result.slice(0, 12_000)}\n[truncated]`)
+          : null,
+        error: latestRun.error || null,
+        report_status: latestRun.reportStatus || null,
+      },
+    } : {}),
+  };
+}
+
+export async function handleAgentSessionTool(
+  ctx: AppToolContext,
+  args: AgentSessionToolArgs,
+): Promise<McpTextResult> {
+  if (!ctx.manageAgentSession) {
+    return {
+      content: [{ type: "text", text: "AgentSession is unavailable because this SocketAgent session is not attached to the delegation runtime." }],
+      isError: true,
+    };
+  }
+  try {
+    const response = await ctx.manageAgentSession(args);
+    if (response.delegations) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(
+            response.delegations.map((record) => delegatedAgentSummary(record, false)),
+            null,
+            2,
+          ),
+        }],
+      };
+    }
+    if (!response.delegation) {
+      return {
+        content: [{ type: "text", text: response.message || "AgentSession request completed." }],
+      };
+    }
+    const record = response.delegation;
+    const summary = delegatedAgentSummary(record);
+    const guidance = response.action === "start"
+      ? `\nUse action="message" with session_id="${record.childSessionId}" for follow-ups. The child will report back automatically when its turn finishes.`
+      : "";
+    return {
+      content: [{
+        type: "text",
+        text: `${response.message || "AgentSession request completed."}\n${JSON.stringify(summary, null, 2)}${guidance}`,
+      }],
+    };
+  } catch (err: any) {
+    return {
+      content: [{ type: "text", text: `AgentSession error: ${err?.message || String(err)}` }],
+      isError: true,
+    };
+  }
 }
 
 /**

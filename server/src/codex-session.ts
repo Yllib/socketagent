@@ -28,6 +28,7 @@ import {
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor, stopAppMonitorsForSession } from "./app-tool-handlers";
+import type { AgentSessionToolExecutor } from "./delegated-agent-types";
 import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
 import { buildSocketAgentIntegrationInstructions } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
@@ -365,6 +366,7 @@ export class CodexSession {
   public onClose?: () => void;
   public onSessionIdChanged?: (previousSessionId: string, nextSessionId: string) => void;
   public onMonitorOutput?: (text: string) => void;
+  public onAgentSessionRequest?: AgentSessionToolExecutor;
   public replacesSessionId?: string;
   // Mirrors the cast-accessed private on ClaudeSession; used by index.ts to
   // tell us "this is a resume of session X" before runQuery is called.
@@ -2210,6 +2212,12 @@ export class CodexSession {
       isRunning: () => this._isRunning,
       injectMessage: (text, priority) => this.injectMessage(text, priority),
       onMonitorOutput: (text) => this.onMonitorOutput?.(text),
+      manageAgentSession: (args) => {
+        if (!this.onAgentSessionRequest) {
+          throw new Error("AgentSession runtime is not attached");
+        }
+        return this.onAgentSessionRequest(args);
+      },
     };
   }
 

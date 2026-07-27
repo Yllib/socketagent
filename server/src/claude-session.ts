@@ -112,6 +112,15 @@ export function claudeAgentRunsInBackground(input: unknown): boolean {
     && (input as Record<string, unknown>).run_in_background === false);
 }
 
+/**
+ * Claude Code now ships a built-in Monitor tool whose "persistent" lifetime is
+ * only the current SDK session. SocketAgent's MCP Monitor is durable across
+ * turns and server restarts, so never expose the native name as a choice.
+ */
+export function claudeDisallowedTools(userDisallowedTools: string[]): string[] {
+  return [...new Set([...userDisallowedTools, "Monitor"])];
+}
+
 /** Background completion follow-ups are SDK-owned turns, not phone prompts. */
 export function isClaudeTaskNotificationResult(message: unknown): boolean {
   if (!message || typeof message !== "object") return false;
@@ -2861,6 +2870,7 @@ export class ClaudeSession {
           "ReadSkill",
         ],
         secureInventory: secureInputInventory,
+        monitorToolReference: "mcp__app__Monitor",
       })}${ttsInstruction}${pluginContext}`;
 
       // Handle fork: use fork source as resume target + set forkSession flag
@@ -2937,7 +2947,7 @@ export class ClaudeSession {
           ...(this._requestedModel ? { model: this._requestedModel } : {}),
           systemPrompt: { type: "preset", preset: "claude_code", append: this._appendSystemPrompt ? toolContext + '\n\n' + this._appendSystemPrompt : toolContext } as any,
           tools: { type: "preset", preset: "claude_code" },
-          ...(this._disallowedTools.length ? { disallowedTools: this._disallowedTools } : {}),
+          disallowedTools: claudeDisallowedTools(this._disallowedTools),
           settings: this.claudeFlagSettings(),
           enableFileCheckpointing: true,
           promptSuggestions: true,

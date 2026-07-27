@@ -28,3 +28,16 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /socketagent:\/\/file\/download/);
   assert.match(prompt, /<secret_inventory>\n\[\]\n<\/secret_inventory>/);
 });
+
+test("can route Claude to the durable qualified Monitor without name ambiguity", () => {
+  const prompt = buildSocketAgentIntegrationInstructions({
+    mcpServerName: "app",
+    toolNames: ["Monitor"],
+    secureInventory: "<secret_inventory>\n[]\n</secret_inventory>",
+    monitorToolReference: "mcp__app__Monitor",
+  });
+
+  assert.match(prompt, /Background command monitoring -> mcp__app__Monitor/);
+  assert.match(prompt, /not Claude's built-in Monitor/);
+  assert.match(prompt, /not durable across SocketAgent turns or server restarts/);
+});

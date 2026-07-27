@@ -79,6 +79,27 @@ export interface MonitorArgs {
   enabled?: boolean;
 }
 
+/**
+ * A `pgrep -f 'literal'` watcher sees the literal in its own parent shell's
+ * argv and therefore never finishes. Bracketed patterns such as `[f]oo` are
+ * safe because the regex matches the target argv but not its own source text.
+ */
+export function monitorCommandHasSelfMatchingPgrep(command: string): boolean {
+  const pgrepPattern = /\bpgrep\s+((?:(?:-[A-Za-z]+|--full)\s+)*)(["'])(.*?)\2/g;
+  for (const match of command.matchAll(pgrepPattern)) {
+    const flags = match[1] || "";
+    if (!flags.includes("--full") && !/(?:^|\s)-[A-Za-z]*f[A-Za-z]*(?:\s|$)/.test(flags)) {
+      continue;
+    }
+    try {
+      if (new RegExp(match[3]).test(match[3])) return true;
+    } catch {
+      // Let the shell report malformed regex syntax rather than guessing.
+    }
+  }
+  return false;
+}
+
 export interface SearchSkillsArgs {
   query?: string;
   limit?: number;
@@ -856,6 +877,16 @@ export async function handleMonitorTool(
 
     if (!args.command) {
       return { content: [{ type: "text", text: "Monitor requires either 'command' to start a monitored process or 'taskId' with enabled=false to stop monitoring." }], isError: true };
+    }
+
+    if (monitorCommandHasSelfMatchingPgrep(args.command)) {
+      return {
+        content: [{
+          type: "text",
+          text: "Monitor refused a self-matching `pgrep -f` command: the watcher shell contains the same pattern, so it would run forever. Monitor an exact PID/pidfile, or use a non-self-matching regex such as `pgrep -f '[f]etch_music.py --only'`.",
+        }],
+        isError: true,
+      };
     }
 
     const sessionId = ctx.getSessionId();

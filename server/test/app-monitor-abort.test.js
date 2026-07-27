@@ -12,10 +12,39 @@ test.after(() => fs.rmSync(monitorDataDir, { recursive: true, force: true }));
 
 const {
   handleMonitorTool,
+  monitorCommandHasSelfMatchingPgrep,
   rebindAppMonitorsForSession,
   stopAppMonitor,
   stopAppMonitorsForSession,
 } = require("../dist/app-tool-handlers");
+
+test("rejects pgrep -f patterns that match their own watcher shell", async () => {
+  assert.equal(
+    monitorCommandHasSelfMatchingPgrep("until ! pgrep -f 'fetch_music.py --only'; do sleep 20; done"),
+    true,
+  );
+  assert.equal(
+    monitorCommandHasSelfMatchingPgrep("until ! pgrep -f '[f]etch_music.py --only'; do sleep 20; done"),
+    false,
+  );
+
+  const result = await handleMonitorTool(
+    {
+      getSessionId: () => "monitor-self-match",
+      getCwd: () => process.cwd(),
+      send: () => {},
+      getTtsEngine: () => "system",
+      getKokoroVoice: () => "",
+      getKokoroSpeed: () => 1,
+    },
+    {
+      command: "until ! pgrep -f 'fetch_music.py --only'; do sleep 20; done",
+      description: "broken watcher",
+    },
+  );
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /self-matching/);
+});
 
 function waitFor(predicate, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {

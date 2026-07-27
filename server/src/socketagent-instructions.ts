@@ -17,7 +17,12 @@ export function buildSocketAgentIntegrationInstructions(options: {
   toolNames: string[];
   secureInventory: string;
   discoverMissingTools?: boolean;
+  monitorToolReference?: string;
 }): string {
+  const monitorToolReference = options.monitorToolReference || "Monitor";
+  const monitorRouting = monitorToolReference === "Monitor"
+    ? "- Background command monitoring -> Monitor."
+    : `- Background command monitoring -> ${monitorToolReference}. Use this SocketAgent MCP tool, not Claude's built-in Monitor; the built-in monitor ends with the SDK session and is not durable across SocketAgent turns or server restarts.`;
   const routingRules = [
     "Routing rules:",
     ...(options.discoverMissingTools
@@ -29,7 +34,7 @@ export function buildSocketAgentIntegrationInstructions(options: {
     "- Important immediate phone notification -> NotifyUser.",
     "- Device reminder -> ScheduleReminder.",
     "- Deferred or recurring agent work -> ScheduleTask.",
-    "- Background command monitoring -> Monitor.",
+    monitorRouting,
     "- Spoken output -> Speak only when TTS is enabled or explicitly requested.",
     "- Skill discovery/loading -> SearchSkills, then ReadSkill.",
   ].join("\n");

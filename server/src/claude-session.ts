@@ -15,6 +15,7 @@ import {
   SessionInfo,
   AgentSessionSettings,
   Backend,
+  WorkflowStatePayload,
 } from "./protocol";
 import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, assignUserUuid, cacheToolImage, positionSessionMessage, clearSessionPendingHandoffContext } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
@@ -90,6 +91,20 @@ interface ClaudeSdkBackgroundTask {
   description: string;
 }
 
+interface ClaudeWorkflowRun {
+  taskId: string;
+  toolUseId: string;
+  runId?: string;
+  workflowName?: string;
+  summary: string;
+  scriptPath?: string;
+  transcriptDir?: string;
+  statePath?: string;
+  lastSnapshot?: WorkflowStatePayload;
+  lastSignature?: string;
+  interval?: NodeJS.Timeout;
+}
+
 const CLAUDE_AVAILABILITY_CACHE_MS = 5000;
 
 /**
@@ -135,6 +150,129 @@ export function isClaudeAgentLaunchOutput(output: unknown): boolean {
   if (!output || typeof output !== "object") return false;
   const status = (output as Record<string, unknown>).status;
   return status === "async_launched" || status === "remote_launched";
+}
+
+/** Structured Workflow launch acknowledgements are non-terminal tool results. */
+export function isClaudeWorkflowLaunchOutput(output: unknown): boolean {
+  if (!output || typeof output !== "object") return false;
+  const value = output as Record<string, unknown>;
+  return (value.status === "async_launched" || value.status === "remote_launched")
+    && value.taskType === "local_workflow";
+}
+
+export function workflowStatePathForLaunch(output: unknown): string | undefined {
+  if (!output || typeof output !== "object") return undefined;
+  const value = output as Record<string, unknown>;
+  const runId = String(value.runId || "");
+  const scriptPath = String(value.scriptPath || "");
+  if (!runId || !scriptPath || path.basename(runId) !== runId) return undefined;
+  const scriptsDir = path.dirname(scriptPath);
+  if (path.basename(scriptsDir) !== "scripts") return undefined;
+  return path.join(path.dirname(scriptsDir), `${runId}.json`);
+}
+
+function boundedWorkflowString(value: unknown, max = 4_000): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const text = String(value);
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function boundedWorkflowNumber(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function workflowResultPreview(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return boundedWorkflowString(
+      typeof value === "string" ? value : JSON.stringify(value, null, 2),
+      20_000,
+    );
+  } catch {
+    return boundedWorkflowString(value, 20_000);
+  }
+}
+
+/** Convert Claude Code's on-disk workflow state into a bounded wire snapshot. */
+export function sanitizeClaudeWorkflowState(
+  raw: unknown,
+  fallback: {
+    taskId: string;
+    toolUseId?: string;
+    runId?: string;
+    workflowName?: string;
+    summary?: string;
+    status?: string;
+    scriptPath?: string;
+    transcriptDir?: string;
+    statePath?: string;
+  },
+): WorkflowStatePayload {
+  const value = raw && typeof raw === "object"
+    ? raw as Record<string, any>
+    : {};
+  const phases = Array.isArray(value.phases)
+    ? value.phases.slice(0, 100).map((phase: any) => ({
+      title: boundedWorkflowString(phase?.title, 500) || "Phase",
+      ...(boundedWorkflowString(phase?.detail, 2_000)
+        ? { detail: boundedWorkflowString(phase?.detail, 2_000) }
+        : {}),
+    }))
+    : [];
+  const progress = Array.isArray(value.workflowProgress)
+    ? value.workflowProgress.slice(0, 1_000).map((entry: any) => ({
+      type: boundedWorkflowString(entry?.type, 100) || "workflow_agent",
+      ...(boundedWorkflowNumber(entry?.index) !== undefined ? { index: boundedWorkflowNumber(entry.index) } : {}),
+      ...(boundedWorkflowString(entry?.title, 500) ? { title: boundedWorkflowString(entry.title, 500) } : {}),
+      ...(boundedWorkflowString(entry?.label, 500) ? { label: boundedWorkflowString(entry.label, 500) } : {}),
+      ...(boundedWorkflowNumber(entry?.phaseIndex) !== undefined ? { phaseIndex: boundedWorkflowNumber(entry.phaseIndex) } : {}),
+      ...(boundedWorkflowString(entry?.phaseTitle, 500) ? { phaseTitle: boundedWorkflowString(entry.phaseTitle, 500) } : {}),
+      ...(boundedWorkflowString(entry?.agentId, 200) ? { agentId: boundedWorkflowString(entry.agentId, 200) } : {}),
+      ...(boundedWorkflowString(entry?.model, 200) ? { model: boundedWorkflowString(entry.model, 200) } : {}),
+      ...(boundedWorkflowString(entry?.state, 100) ? { state: boundedWorkflowString(entry.state, 100) } : {}),
+      ...(boundedWorkflowNumber(entry?.startedAt) !== undefined ? { startedAt: boundedWorkflowNumber(entry.startedAt) } : {}),
+      ...(boundedWorkflowNumber(entry?.queuedAt) !== undefined ? { queuedAt: boundedWorkflowNumber(entry.queuedAt) } : {}),
+      ...(boundedWorkflowNumber(entry?.lastProgressAt) !== undefined ? { lastProgressAt: boundedWorkflowNumber(entry.lastProgressAt) } : {}),
+      ...(boundedWorkflowNumber(entry?.tokens) !== undefined ? { tokens: boundedWorkflowNumber(entry.tokens) } : {}),
+      ...(boundedWorkflowNumber(entry?.toolCalls) !== undefined ? { toolCalls: boundedWorkflowNumber(entry.toolCalls) } : {}),
+      ...(boundedWorkflowNumber(entry?.durationMs) !== undefined ? { durationMs: boundedWorkflowNumber(entry.durationMs) } : {}),
+      ...(boundedWorkflowNumber(entry?.attempt) !== undefined ? { attempt: boundedWorkflowNumber(entry.attempt) } : {}),
+      ...(boundedWorkflowString(entry?.promptPreview, 4_000) ? { promptPreview: boundedWorkflowString(entry.promptPreview, 4_000) } : {}),
+      ...(boundedWorkflowString(entry?.resultPreview, 8_000) ? { resultPreview: boundedWorkflowString(entry.resultPreview, 8_000) } : {}),
+      ...(boundedWorkflowString(entry?.error, 4_000) ? { error: boundedWorkflowString(entry.error, 4_000) } : {}),
+    }))
+    : [];
+  const logs = Array.isArray(value.logs)
+    ? value.logs.slice(-200)
+      .map((entry: unknown) => boundedWorkflowString(entry, 2_000))
+      .filter((entry: string | undefined): entry is string => Boolean(entry))
+    : [];
+  return {
+    taskId: fallback.taskId,
+    ...(fallback.toolUseId ? { toolUseId: fallback.toolUseId } : {}),
+    ...(boundedWorkflowString(value.runId || fallback.runId, 200)
+      ? { runId: boundedWorkflowString(value.runId || fallback.runId, 200) }
+      : {}),
+    ...(boundedWorkflowString(value.workflowName || fallback.workflowName, 500)
+      ? { workflowName: boundedWorkflowString(value.workflowName || fallback.workflowName, 500) }
+      : {}),
+    summary: boundedWorkflowString(value.summary || fallback.summary, 2_000) || "Workflow",
+    status: boundedWorkflowString(value.status || fallback.status, 100) || "running",
+    ...(fallback.scriptPath ? { scriptPath: fallback.scriptPath } : {}),
+    ...(fallback.transcriptDir ? { transcriptDir: fallback.transcriptDir } : {}),
+    ...(fallback.statePath ? { statePath: fallback.statePath } : {}),
+    ...(boundedWorkflowNumber(value.startTime) !== undefined ? { startTime: boundedWorkflowNumber(value.startTime) } : {}),
+    ...(boundedWorkflowNumber(value.durationMs) !== undefined ? { durationMs: boundedWorkflowNumber(value.durationMs) } : {}),
+    ...(boundedWorkflowNumber(value.agentCount) !== undefined ? { agentCount: boundedWorkflowNumber(value.agentCount) } : {}),
+    ...(boundedWorkflowNumber(value.totalTokens) !== undefined ? { totalTokens: boundedWorkflowNumber(value.totalTokens) } : {}),
+    ...(boundedWorkflowNumber(value.totalToolCalls) !== undefined ? { totalToolCalls: boundedWorkflowNumber(value.totalToolCalls) } : {}),
+    ...(boundedWorkflowString(value.defaultModel, 200) ? { defaultModel: boundedWorkflowString(value.defaultModel, 200) } : {}),
+    phases,
+    progress,
+    logs,
+    ...(workflowResultPreview(value.result) ? { resultPreview: workflowResultPreview(value.result) } : {}),
+  };
 }
 
 export interface ClaudeTaskStateUpdate {
@@ -563,6 +701,7 @@ type ClaudeQueuedUserMessage = {
     content: string;
   };
   parent_tool_use_id: null;
+  origin: { kind: "human" };
   priority?: "now" | "next" | "later";
   shouldQuery?: boolean;
 };
@@ -596,6 +735,7 @@ export function createClaudeContinuationMessages(
     session_id: sessionId,
     message: { role: "user", content: entry.text },
     parent_tool_use_id: null,
+    origin: { kind: "human" },
     ...(index < pending.length - 1 ? { shouldQuery: false } : {}),
   }));
 }
@@ -681,6 +821,7 @@ export class ClaudeSession {
   private _taskIdToToolUseId: Map<string, string> = new Map();  // agentId → toolUseId mapping
   private _sdkTaskIds: Set<string> = new Set();
   private _sdkBackgroundTasks: Map<string, ClaudeSdkBackgroundTask> = new Map();
+  private _workflowRuns: Map<string, ClaudeWorkflowRun> = new Map();
   private _taskStatePersistedAt: Map<string, number> = new Map();
   private _monitoredTasks: Map<string, MonitorState> = new Map();
   private _taskOutputFiles: Map<string, string> = new Map();  // taskId → outputFile path
@@ -1253,6 +1394,7 @@ export class ClaudeSession {
       session_id: sessionId,
       message: { role: "user", content: text },
       parent_tool_use_id: null,
+      origin: { kind: "human" },
       ...(priority ? { priority } : {}),
       ...(shouldQuery === undefined ? {} : { shouldQuery }),
     };
@@ -1378,6 +1520,119 @@ export class ClaudeSession {
     });
   }
 
+  private _publishWorkflowRun(
+    run: ClaudeWorkflowRun,
+    force = false,
+    statusOverride?: string,
+    summaryOverride?: string,
+  ): WorkflowStatePayload {
+    let raw: unknown;
+    if (run.statePath) {
+      try {
+        if (fs.existsSync(run.statePath)) {
+          raw = JSON.parse(fs.readFileSync(run.statePath, "utf8"));
+        }
+      } catch (error) {
+        console.warn(
+          `[Workflow] Failed to read ${run.statePath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const snapshot = sanitizeClaudeWorkflowState(raw, {
+      taskId: run.taskId,
+      toolUseId: run.toolUseId,
+      runId: run.runId,
+      workflowName: run.workflowName,
+      summary: summaryOverride || run.summary,
+      status: statusOverride || run.lastSnapshot?.status || "running",
+      scriptPath: run.scriptPath,
+      transcriptDir: run.transcriptDir,
+      statePath: run.statePath,
+    });
+    if (statusOverride) snapshot.status = statusOverride;
+    if (summaryOverride) {
+      snapshot.summary = boundedWorkflowString(summaryOverride, 2_000)
+        || snapshot.summary;
+    }
+    const signature = JSON.stringify(snapshot);
+    if (!force && signature === run.lastSignature) return run.lastSnapshot || snapshot;
+    run.lastSignature = signature;
+    run.lastSnapshot = snapshot;
+    this.send({
+      type: "workflow_state",
+      ...snapshot,
+      sessionId: this.sessionId || "",
+    });
+    const active = snapshot.status === "running"
+      || snapshot.status === "pending"
+      || snapshot.status === "paused";
+    this._persistTaskState({
+      taskId: run.taskId,
+      taskKind: "workflow",
+      status: snapshot.status,
+      content: snapshot.resultPreview || snapshot.summary,
+      taskDescription: snapshot.summary,
+      originToolUseId: run.toolUseId,
+      taskType: "local_workflow",
+      isBackgrounded: active,
+      workflowState: snapshot,
+    }, active ? 1_500 : 0);
+    this.onActivity?.();
+    return snapshot;
+  }
+
+  private _trackWorkflowLaunch(output: Record<string, any>, toolUseId: string): void {
+    const taskId = String(output.taskId || "");
+    if (!taskId || !toolUseId) return;
+    const previous = this._workflowRuns.get(taskId);
+    if (previous?.interval) clearInterval(previous.interval);
+    const run: ClaudeWorkflowRun = {
+      taskId,
+      toolUseId,
+      runId: String(output.runId || "") || undefined,
+      workflowName: String(output.workflowName || "") || undefined,
+      summary: String(output.summary || output.workflowName || "Workflow"),
+      scriptPath: String(output.scriptPath || "") || undefined,
+      transcriptDir: String(output.transcriptDir || "") || undefined,
+      statePath: workflowStatePathForLaunch(output),
+    };
+    this._workflowRuns.set(taskId, run);
+    this._sdkTaskIds.add(taskId);
+    this._taskIdToToolUseId.set(taskId, toolUseId);
+    this._sdkBackgroundTasks.set(taskId, {
+      taskId,
+      taskType: "local_workflow",
+      description: run.summary,
+    });
+    this._publishWorkflowRun(run, true);
+    run.interval = setInterval(() => {
+      this._publishWorkflowRun(run);
+    }, 400);
+    run.interval.unref?.();
+  }
+
+  private _finishWorkflowRun(
+    taskId: string,
+    status: string,
+    summary?: string,
+  ): WorkflowStatePayload | undefined {
+    const run = this._workflowRuns.get(taskId);
+    if (!run) return undefined;
+    if (run.interval) {
+      clearInterval(run.interval);
+      run.interval = undefined;
+    }
+    const snapshot = this._publishWorkflowRun(run, true, status, summary);
+    this._workflowRuns.delete(taskId);
+    return snapshot;
+  }
+
+  private _settleWorkflowRuns(status: "stopped" | "failed", summary: string): void {
+    for (const taskId of [...this._workflowRuns.keys()]) {
+      this._finishWorkflowRun(taskId, status, summary);
+    }
+  }
+
   private _handleSdkTaskStarted(ts: any): void {
     const taskId = String(ts.task_id || "");
     const directToolUseId = String(ts.tool_use_id || "") || undefined;
@@ -1392,6 +1647,7 @@ export class ClaudeSession {
       });
     }
 
+    const isWorkflow = String(ts.task_type || "") === "local_workflow";
     const isSubagent = this._isSubagentTask(ts.task_type, ts.subagent_type);
     if (toolUseId && isSubagent) {
       const previous = this._activeSubagents.get(toolUseId);
@@ -1414,7 +1670,7 @@ export class ClaudeSession {
 
     this._persistTaskState({
       taskId,
-      taskKind: isSubagent ? "subagent" : "background",
+      taskKind: isWorkflow ? "workflow" : isSubagent ? "subagent" : "background",
       status: "running",
       content: String(ts.description || ""),
       taskDescription: String(ts.description || "") || undefined,
@@ -1424,6 +1680,16 @@ export class ClaudeSession {
       prompt: String(ts.prompt || "") || undefined,
       isBackgrounded: true,
       skipTranscript: ts.skip_transcript === true || undefined,
+      ...(isWorkflow ? {
+        workflowState: this._workflowRuns.get(taskId)?.lastSnapshot
+          || sanitizeClaudeWorkflowState(undefined, {
+            taskId,
+            toolUseId,
+            workflowName: String(ts.workflow_name || "") || undefined,
+            summary: String(ts.description || "Workflow"),
+            status: "running",
+          }),
+      } : {}),
     });
     this.send({
       type: "task_started",
@@ -1450,6 +1716,8 @@ export class ClaudeSession {
     if (taskId) this._sdkTaskIds.add(taskId);
     if (taskId && toolUseId) this._taskIdToToolUseId.set(taskId, toolUseId);
 
+    const taskType = this._sdkBackgroundTasks.get(taskId)?.taskType;
+    const isWorkflow = taskType === "local_workflow";
     const isSubagent = Boolean(
       (toolUseId && this._activeSubagents.has(toolUseId))
       || this._isSubagentTask(undefined, tp.subagent_type),
@@ -1476,7 +1744,7 @@ export class ClaudeSession {
     const subagent = toolUseId ? this._activeSubagents.get(toolUseId) : undefined;
     this._persistTaskState({
       taskId,
-      taskKind: isSubagent ? "subagent" : "background",
+      taskKind: isWorkflow ? "workflow" : isSubagent ? "subagent" : "background",
       status: "running",
       content: String(tp.summary || tp.description || ""),
       taskDescription: String(tp.description || subagent?.description || "") || undefined,
@@ -1489,6 +1757,9 @@ export class ClaudeSession {
       lastToolName: String(tp.last_tool_name || "") || undefined,
       usage: usage || subagent?.usage,
       isBackgrounded: this._sdkBackgroundTasks.has(taskId) || subagent?.isBackgrounded,
+      ...(isWorkflow && this._workflowRuns.get(taskId)?.lastSnapshot
+        ? { workflowState: this._workflowRuns.get(taskId)!.lastSnapshot }
+        : {}),
     }, 1_500);
     this.send({
       type: "bg_task_progress",
@@ -1524,9 +1795,11 @@ export class ClaudeSession {
     }
 
     const normalizedStatus = rawStatus === "killed" ? "stopped" : rawStatus || state?.status || "running";
+    const taskType = this._sdkBackgroundTasks.get(taskId)?.taskType;
+    const isWorkflow = taskType === "local_workflow";
     this._persistTaskState({
       taskId,
-      taskKind: state ? "subagent" : "background",
+      taskKind: isWorkflow ? "workflow" : state ? "subagent" : "background",
       status: normalizedStatus,
       content: String(rawPatch.error || rawPatch.description || state?.progressSummary || state?.description || ""),
       taskDescription: String(rawPatch.description || state?.description || "") || undefined,
@@ -1541,6 +1814,9 @@ export class ClaudeSession {
       isBackgrounded: typeof rawPatch.is_backgrounded === "boolean"
         ? rawPatch.is_backgrounded
         : state?.isBackgrounded ?? this._sdkBackgroundTasks.has(taskId),
+      ...(isWorkflow && this._workflowRuns.get(taskId)?.lastSnapshot
+        ? { workflowState: this._workflowRuns.get(taskId)!.lastSnapshot }
+        : {}),
     });
     this.send({
       type: "task_updated",
@@ -1617,6 +1893,7 @@ export class ClaudeSession {
     summary: string,
     notify = true,
   ): void {
+    this._settleWorkflowRuns(status, summary);
     const states = Array.from(this._activeSubagents.entries()).filter(([, state]) =>
       state.status === "pending" || state.status === "running" || state.status === "paused"
     );
@@ -1699,7 +1976,7 @@ export class ClaudeSession {
 
   private _persistTaskState(state: {
     taskId: string;
-    taskKind: "claude_task" | "subagent" | "background";
+    taskKind: "claude_task" | "subagent" | "workflow" | "background";
     status: string;
     content?: string;
     taskSubject?: string;
@@ -1715,6 +1992,7 @@ export class ClaudeSession {
     usage?: ClaudeSubagentState["usage"];
     isBackgrounded?: boolean;
     skipTranscript?: boolean;
+    workflowState?: WorkflowStatePayload;
   }, throttleMs = 0): void {
     if (!this.sessionId || !state.taskId) return;
     const persistenceKey = `${state.taskKind}:${state.taskId}`;
@@ -1741,6 +2019,7 @@ export class ClaudeSession {
       taskUsage: state.usage,
       isBackgrounded: state.isBackgrounded,
       skipTranscript: state.skipTranscript,
+      workflowState: state.workflowState,
       timestamp: new Date(nowMs).toISOString(),
     });
     if (state.status === "completed"
@@ -1984,6 +2263,18 @@ export class ClaudeSession {
     }
     for (const pendingSecureInput of pendingSecureInputMessagesForSession(this.sessionId || "")) {
       this.sendTo(ws, pendingSecureInput as ServerMessage);
+    }
+    // Workflow snapshots are cumulative state, not append-only stream frames.
+    // Re-send the latest snapshot after history restoration so a reconnect
+    // immediately resumes the live phase/agent view.
+    for (const run of this._workflowRuns.values()) {
+      if (!run.lastSnapshot) continue;
+      this.sendTo(ws, {
+        type: "workflow_state",
+        ...run.lastSnapshot,
+        sessionId: this.sessionId || "",
+        replay: true,
+      } as ServerMessage);
     }
     // Send active subagent tasks so the app can render SubAgentCards
     const activeSubagents = this.getActiveSubagents();
@@ -3980,6 +4271,7 @@ export class ClaudeSession {
           const sdkTaskId = tn.task_id || "";
           // Prefer SDK's direct tool_use_id, fall back to our mapping
           const originToolUseId = tn.tool_use_id || this._taskIdToToolUseId.get(sdkTaskId) || undefined;
+          const workflowRun = this._workflowRuns.get(sdkTaskId);
           const parentToolUseId = originToolUseId
             ? this._toolParentIds.get(originToolUseId)
             : undefined;
@@ -4039,7 +4331,7 @@ export class ClaudeSession {
           const terminalOutput = bgOutputContent
             || String(tn.summary || "")
             || `Task ${tn.status || "completed"}`;
-          if (originToolUseId && (bgOutputContent || subagentState)) {
+          if (originToolUseId && (bgOutputContent || subagentState || workflowRun)) {
             this.send({
               type: "tool_result",
               toolUseId: originToolUseId,
@@ -4049,7 +4341,7 @@ export class ClaudeSession {
               sessionId: this.sessionId || "",
             });
           }
-          if (originToolUseId && (bgOutputContent || subagentState) && this.sessionId) {
+          if (originToolUseId && (bgOutputContent || subagentState || workflowRun) && this.sessionId) {
             appendHistory(this.sessionId, {
               role: "tool_result",
               content: "",
@@ -4061,9 +4353,20 @@ export class ClaudeSession {
             });
           }
 
+          const workflowSnapshot = workflowRun
+            ? this._finishWorkflowRun(
+              sdkTaskId,
+              tn.status || "completed",
+              String(tn.summary || workflowRun.summary),
+            )
+            : undefined;
           this._persistTaskState({
             taskId: sdkTaskId,
-            taskKind: subagentState ? "subagent" : "background",
+            taskKind: workflowSnapshot
+              ? "workflow"
+              : subagentState
+                ? "subagent"
+                : "background",
             status: tn.status || "completed",
             content: terminalOutput,
             taskDescription: subagentState?.description || String(tn.summary || "") || undefined,
@@ -4077,6 +4380,7 @@ export class ClaudeSession {
             usage: taskUsage || subagentState?.usage,
             isBackgrounded: false,
             skipTranscript: tn.skip_transcript === true || undefined,
+            workflowState: workflowSnapshot,
           });
           this.send({
             type: "task_notification",
@@ -4740,13 +5044,18 @@ export class ClaudeSession {
                           .join("\n")
                       : JSON.stringify(block.content);
                 const subagentState = this._activeSubagents.get(toolUseId);
-                const structuredAgentOutput = subagentState
-                  && (message as any).tool_use_result
+                const structuredToolOutput = (message as any).tool_use_result
                   && typeof (message as any).tool_use_result === "object"
-                    ? (message as any).tool_use_result as any
-                    : undefined;
+                  ? (message as any).tool_use_result as any
+                  : undefined;
+                const structuredAgentOutput = subagentState
+                  ? structuredToolOutput
+                  : undefined;
                 let backgroundPending = false;
-                if (subagentState && isClaudeAgentLaunchOutput(structuredAgentOutput)) {
+                if (isClaudeWorkflowLaunchOutput(structuredToolOutput)) {
+                  this._trackWorkflowLaunch(structuredToolOutput, toolUseId);
+                  backgroundPending = true;
+                } else if (subagentState && isClaudeAgentLaunchOutput(structuredAgentOutput)) {
                   const isRemote = structuredAgentOutput.status === "remote_launched";
                   const agentId = String(
                     (isRemote ? structuredAgentOutput.taskId : structuredAgentOutput.agentId)

@@ -31,6 +31,7 @@ test("a terminal continuation queries only after all queued context is appended"
   assert.equal(messages[2].shouldQuery, undefined);
   assert.deepEqual(messages.map((message) => message.uuid), ["one", "two", "three"]);
   assert.ok(messages.every((message) => message.session_id === "session-id"));
+  assert.ok(messages.every((message) => message.origin?.kind === "human"));
 });
 
 test("empty boundary context produces no SDK content", () => {

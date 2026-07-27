@@ -1441,7 +1441,7 @@ export interface HistoryEntry {
   originToolUseId?: string;
   taskType?: string;
   /** Durable lifecycle category; native checklist tasks are not subagents. */
-  taskKind?: "claude_task" | "subagent" | "background";
+  taskKind?: "claude_task" | "subagent" | "workflow" | "background";
   taskSubject?: string;
   taskDescription?: string;
   teammateName?: string;
@@ -1455,6 +1455,7 @@ export interface HistoryEntry {
     toolUses: number;
     durationMs: number;
   };
+  workflowState?: WorkflowStatePayload;
   commandName?: string;
   commandPayload?: Record<string, unknown>;
   // Permission mode fields (role === "permission_mode")
@@ -1848,6 +1849,60 @@ export interface BackgroundTasksChangedServerMessage {
   sessionId: string;
 }
 
+export interface WorkflowPhaseState {
+  title: string;
+  detail?: string;
+}
+
+export interface WorkflowProgressState {
+  type: "workflow_phase" | "workflow_agent" | string;
+  index?: number;
+  title?: string;
+  label?: string;
+  phaseIndex?: number;
+  phaseTitle?: string;
+  agentId?: string;
+  model?: string;
+  state?: string;
+  startedAt?: number;
+  queuedAt?: number;
+  lastProgressAt?: number;
+  tokens?: number;
+  toolCalls?: number;
+  durationMs?: number;
+  attempt?: number;
+  promptPreview?: string;
+  resultPreview?: string;
+  error?: string;
+}
+
+export interface WorkflowStatePayload {
+  taskId: string;
+  toolUseId?: string;
+  runId?: string;
+  workflowName?: string;
+  summary: string;
+  status: string;
+  scriptPath?: string;
+  transcriptDir?: string;
+  statePath?: string;
+  startTime?: number;
+  durationMs?: number;
+  agentCount?: number;
+  totalTokens?: number;
+  totalToolCalls?: number;
+  defaultModel?: string;
+  phases: WorkflowPhaseState[];
+  progress: WorkflowProgressState[];
+  logs: string[];
+  resultPreview?: string;
+}
+
+export interface WorkflowStateServerMessage extends WorkflowStatePayload {
+  type: "workflow_state";
+  sessionId: string;
+}
+
 export interface ApiRetryServerMessage {
   type: "api_retry";
   attempt: number;
@@ -2091,6 +2146,7 @@ export type ServerMessage =
   | BgTaskProgressServerMessage
   | TaskUpdatedServerMessage
   | BackgroundTasksChangedServerMessage
+  | WorkflowStateServerMessage
   | ApiRetryServerMessage
   | LocalCommandOutputServerMessage
   | PromptSuggestionServerMessage

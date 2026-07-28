@@ -37,6 +37,7 @@ import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, r
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
 import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
+import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, writeFileManagerText } from "./file-manager";
 import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
@@ -1207,15 +1208,16 @@ function maybeSendPushNotification(msg: {
   sessionCompletion?: boolean;
   kind?: string;
   eventId?: string;
+  finishedAt?: string;
   navigationTarget?: "scheduled_tasks";
   scheduledTaskId?: string;
 }): void {
   if (!shouldSendPushNotification()) return;
   const sessionCompletion = msg.sessionCompletion === true && Boolean(msg.sessionId);
-  const finishedAt = sessionCompletion ? new Date().toISOString() : undefined;
-  const eventId = msg.eventId || (sessionCompletion
-    ? `session_finished:${msg.sessionId}:${finishedAt}`
-    : undefined);
+  const finishedAt = sessionCompletion
+    ? (msg.finishedAt || new Date().toISOString())
+    : undefined;
+  const eventId = msg.eventId;
   sendPushNotification({
     title: msg.title,
     body: msg.body,
@@ -1277,14 +1279,14 @@ function scheduledSessionPushData(session: Session): Record<string, string> {
     : {};
 }
 
-const lastSessionStartedPush = new Map<string, string>();
+const sessionPushRuns = new SessionPushRunTracker<Session>();
 
 function sendSessionStartedPush(session: Session): boolean {
   const sessionId = session.getSessionId?.();
   if (!sessionId) return false;
   const startedAt = getSessionActiveStartedAt(session) || new Date().toISOString();
-  if (lastSessionStartedPush.get(sessionId) === startedAt) return true;
-  lastSessionStartedPush.set(sessionId, startedAt);
+  const run = sessionPushRuns.claimStarted(session, sessionId, startedAt);
+  if (!run) return true;
 
   sendPushNotification({
     title: sessionNotificationTitle(sessionId, session),
@@ -1292,7 +1294,11 @@ function sendSessionStartedPush(session: Session): boolean {
     sessionId,
     status: "running",
     kind: "session_started",
-    data: { startedAt, ...scheduledSessionPushData(session) },
+    data: {
+      startedAt,
+      eventId: sessionPushEventId("session_started", sessionId, startedAt),
+      ...scheduledSessionPushData(session),
+    },
     showNotification: false,
   }).then((result) => {
     if (result.attempted > 0) {
@@ -1344,13 +1350,18 @@ runningPushRefreshTimer.unref?.();
 function sendSessionCompletionPush(session: Session, status: "completed" | "failed", fallbackBody?: string): void {
   const sessionId = session.getSessionId?.();
   if (!sessionId) return;
+  const finishedAt = new Date().toISOString();
+  const run = sessionPushRuns.claimCompletion(session, sessionId, finishedAt);
+  if (!run) {
+    console.log(`[Push] Suppressed duplicate prompt completion session=${sessionId}`);
+    return;
+  }
   const title = sessionNotificationTitle(sessionId, session);
   const body = sessionNotificationBody(
     sessionId,
     session,
     fallbackBody || (status === "failed" ? "Prompt failed" : "Prompt complete")
   );
-  const finishedAt = new Date().toISOString();
   sendPushNotification({
     title,
     body,
@@ -1359,7 +1370,11 @@ function sendSessionCompletionPush(session: Session, status: "completed" | "fail
     kind: "session_finished",
     data: {
       finishedAt,
-      eventId: `session_finished:${sessionId}:${finishedAt}`,
+      eventId: sessionPushEventId(
+        "session_finished",
+        sessionId,
+        run.startedAt,
+      ),
       ...scheduledSessionPushData(session),
     },
     showNotification: false,
@@ -1378,7 +1393,13 @@ function broadcastScheduledTaskNotification(
   body: string,
   sessionId: string,
   status: "completed" | "failed" | "manual",
-  options: { sendPush?: boolean; sessionCompletion?: boolean; scheduledTaskId?: string } = {},
+  options: {
+    sendPush?: boolean;
+    sessionCompletion?: boolean;
+    scheduledTaskId?: string;
+    eventId?: string;
+    finishedAt?: string;
+  } = {},
 ): void {
   const payload = {
     type: "scheduled_task_notification" as const,
@@ -1386,10 +1407,12 @@ function broadcastScheduledTaskNotification(
     body,
     sessionId,
     status,
-    eventId: `scheduled_task_notification:${sessionId || "none"}:${crypto.randomUUID()}`,
+    eventId: options.eventId
+      || `scheduled_task_notification:${sessionId || "none"}:${crypto.randomUUID()}`,
     navigationTarget: "scheduled_tasks" as const,
     ...(options.scheduledTaskId ? { scheduledTaskId: options.scheduledTaskId } : {}),
     ...(options.sessionCompletion ? { sessionCompletion: true } : {}),
+    ...(options.finishedAt ? { finishedAt: options.finishedAt } : {}),
   };
   const msg = JSON.stringify(payload);
   for (const client of connectedClients) {
@@ -7664,7 +7687,18 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
           body,
           task.sessionId || "",
           "completed",
-          { sessionCompletion: Boolean(task.sessionId), scheduledTaskId: task.id },
+          {
+            sessionCompletion: Boolean(task.sessionId),
+            scheduledTaskId: task.id,
+            eventId: task.sessionId
+              ? sessionPushEventId(
+                  "session_finished",
+                  task.sessionId,
+                  currentRun.startedAt,
+                )
+              : undefined,
+            finishedAt: currentRun.completedAt,
+          },
         );
       }
       console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
@@ -7718,7 +7752,18 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
           body,
           task.sessionId || "",
           "failed",
-          { sessionCompletion: Boolean(task.sessionId), scheduledTaskId: task.id },
+          {
+            sessionCompletion: Boolean(task.sessionId),
+            scheduledTaskId: task.id,
+            eventId: task.sessionId
+              ? sessionPushEventId(
+                  "session_finished",
+                  task.sessionId,
+                  currentRun.startedAt,
+                )
+              : undefined,
+            finishedAt: currentRun.completedAt,
+          },
         );
       }
       console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);

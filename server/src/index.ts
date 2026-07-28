@@ -3280,6 +3280,7 @@ function createConnectionHandler(
           sessionId: "",
           cwd,
           title: "Untitled",
+          backend: msg.backend || "claude",
         });
         sendCachedRateLimits(sendJson, msg.backend, "");
         void activeSession.refreshSupportedModels();
@@ -3393,6 +3394,7 @@ function createConnectionHandler(
           sessionId: msg.sessionId,
           cwd: sessionInfo.cwd,
           title: sessionInfo.title,
+          backend: sessionInfo.backend || "claude",
           ...(activeSession.permissionMode ? { permissionMode: activeSession.permissionMode } : {}),
         });
         sendJson(sessionSettingsPayload(activeSession, msg.sessionId));
@@ -6030,6 +6032,7 @@ function createConnectionHandler(
             type: "session_created",
             sessionId: newSessionId,
             cwd: sessionInfo.cwd,
+            backend: sessionInfo.backend || "claude",
           });
 
           const branchPage = getHistoryPage(newSessionId, 50);
@@ -6130,6 +6133,7 @@ function createConnectionHandler(
           sessionId: "",
           cwd: sessionInfo.cwd,
           title: "Untitled",
+          backend: sessionInfo.backend || "claude",
         });
         const forkPage = getHistoryPage(sourceId, 50);
         sendJson({

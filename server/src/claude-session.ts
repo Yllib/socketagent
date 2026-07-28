@@ -4066,6 +4066,7 @@ export class ClaudeSession {
             sessionId: message.session_id,
             ...(replacesSessionId ? { replacesSessionId } : {}),
             cwd: this.cwd,
+            backend: "claude",
           });
 
           if (replacesSessionId) {

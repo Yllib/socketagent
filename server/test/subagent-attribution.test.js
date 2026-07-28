@@ -16,6 +16,7 @@ const {
   isClaudeTaskNotificationResult,
   reduceClaudeTaskTodos,
   replaceClaudeTaskTodos,
+  replaceClaudeTodoWriteTodos,
 } = require("../dist/claude-session");
 
 function testSocket(sent) {
@@ -241,6 +242,52 @@ test("keeps native Claude task state separate and durable", () => {
   });
   assert.equal(todos.some((todo) => todo.taskId === "17"), false);
   assert.equal(todos.some((todo) => todo.content === "Legacy TodoWrite item"), true);
+});
+
+test("TodoWrite replaces only its own rows and preserves every modern task source", () => {
+  const current = [
+    {
+      content: "Old TodoWrite row",
+      status: "completed",
+    },
+    {
+      content: "Current TodoWrite row",
+      status: "pending",
+      source: "claude_todos",
+    },
+    {
+      id: "native-14",
+      taskId: "native-14",
+      content: "Native Claude task",
+      status: "in_progress",
+      source: "claude_tasks",
+    },
+    {
+      id: "sa-14",
+      taskId: "sa-14",
+      content: "SocketAgent batch task",
+      status: "pending",
+      source: "socketagent_tasks",
+    },
+  ];
+
+  const replaced = replaceClaudeTodoWriteTodos(current, [{
+    content: "One new TodoWrite row",
+    activeForm: "Writing one new row",
+    status: "in_progress",
+  }]);
+
+  assert.equal(replaced.length, 3);
+  assert.equal(replaced.some((task) => task.content === "Old TodoWrite row"), false);
+  assert.equal(replaced.some((task) => task.content === "Current TodoWrite row"), false);
+  assert.equal(replaced.some((task) => task.content === "Native Claude task"), true);
+  assert.equal(replaced.some((task) => task.content === "SocketAgent batch task"), true);
+  assert.deepEqual(replaced[2], {
+    content: "One new TodoWrite row",
+    activeForm: "Writing one new row",
+    status: "in_progress",
+    source: "claude_todos",
+  });
 });
 
 test("recovers pre-fix Claude task state from durable tool history", () => {

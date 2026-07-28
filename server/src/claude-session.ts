@@ -353,6 +353,25 @@ export function replaceClaudeTaskTodos(current: any[], tasks: any[]): any[] {
   return result;
 }
 
+/**
+ * TodoWrite is a full replacement only for TodoWrite-owned rows. It must not
+ * erase modern TaskCreate/TaskUpdate rows or SocketAgent TaskBatch rows that
+ * share the visible task pane and durable store.
+ */
+export function replaceClaudeTodoWriteTodos(current: any[], todos: any[]): any[] {
+  const retained = current
+    .filter((item) => {
+      const source = String(item?.source || "");
+      return source !== "" && source !== "claude_todos";
+    })
+    .map((item) => ({ ...item }));
+  const replacement = todos.map((todo) => ({
+    ...todo,
+    source: "claude_todos",
+  }));
+  return [...retained, ...replacement];
+}
+
 function existingFile(filePath: string | undefined): string | undefined {
   if (!filePath) return undefined;
   try {
@@ -4906,16 +4925,22 @@ export class ClaudeSession {
                   const todos = (block.input as any)?.todos;
                   if (Array.isArray(todos)) {
                     const prev = this.sessionId ? getTodos(this.sessionId) : [];
-                    const changed = todos.length !== prev.length ||
-                      todos.some((t: any, i: number) =>
-                        t.content !== prev[i]?.content || t.status !== prev[i]?.status);
+                    const next = replaceClaudeTodoWriteTodos(prev, todos);
+                    const changed = JSON.stringify(next) !== JSON.stringify(prev);
                     if (this.sessionId) {
-                      saveTodos(this.sessionId, todos);
+                      saveTodos(this.sessionId, next);
+                      if (changed) {
+                        appendHistory(this.sessionId, {
+                          role: "todos_update",
+                          content: JSON.stringify(next),
+                          timestamp: now(),
+                        });
+                      }
                     }
                     if (changed) {
                       this.send({
                         type: "todos",
-                        todos,
+                        todos: next,
                         sessionId: this.sessionId || "",
                       } as any);
                     }

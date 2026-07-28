@@ -8,7 +8,7 @@ const {
 test("builds compact SocketAgent routing instructions without losing safety rules", () => {
   const prompt = buildSocketAgentIntegrationInstructions({
     mcpServerName: "socketagent_app",
-    toolNames: ["HtmlPlan", "SendFile", "RequestSecureInput"],
+    toolNames: ["HtmlPlan", "SendFile", "RequestSecureInput", "TaskBatch"],
     secureInventory: "<secret_inventory>\n[]\n</secret_inventory>",
     discoverMissingTools: true,
   });
@@ -18,7 +18,7 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /multi-component architecture/);
   assert.match(prompt, /UI\/page mockups/);
   assert.match(prompt, /Do not use HtmlPlan for checklists, TODO lists, routine status updates/);
-  assert.match(prompt, /Use your native plan\/task tool for working plans and progress tracking/);
+  assert.match(prompt, /Use your native plan\/task tool or TaskBatch for working plans and progress tracking/);
   assert.doesNotMatch(prompt, /the agent's native plan\/task tool/);
   assert.match(prompt, /normal chat for concise user-facing content, whichever is appropriate/);
   assert.match(prompt, /inline SVG\/CSS or data-image assets/);
@@ -26,6 +26,9 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /absolute file_path/);
   assert.match(prompt, /discover tools for socketagent_app/);
   assert.match(prompt, /Independent delegated work.*AgentSession/);
+  assert.match(prompt, /Two or more working-task mutations -> TaskBatch/);
+  assert.match(prompt, /instead of looping single-task tools/);
+  assert.match(prompt, /TaskBatch preserves native Claude tasks/);
   assert.match(prompt, /reports its completed turn back automatically/);
   assert.match(prompt, /socketagent:\/\/file\/download/);
   assert.match(prompt, /<secret_inventory>\n\[\]\n<\/secret_inventory>/);

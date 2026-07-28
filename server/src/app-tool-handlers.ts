@@ -8,7 +8,11 @@ import { listSkills, SkillEntry } from "./skills-manager";
 import { requestSecureInput, SecureInputRequestArgs, SecureInputRequestStatus } from "./secure-input-store";
 import { sendPushNotification } from "./push-notifications";
 import { saveHtmlPlan } from "./html-plan-store";
-import { removeHtmlPlanHistoryEntries } from "./session-store";
+import {
+  getTodos,
+  removeHtmlPlanHistoryEntries,
+  saveTodos,
+} from "./session-store";
 import { fileTransferVersion } from "./file-transfer-wire";
 import {
   createDurableMonitorRecord,
@@ -83,6 +87,238 @@ export interface MonitorArgs {
   timeoutSeconds?: number;
   taskId?: string;
   enabled?: boolean;
+}
+
+export interface TaskBatchItem {
+  task_id?: string;
+  subject?: string;
+  description?: string;
+  active_form?: string;
+  status?: "pending" | "in_progress" | "completed";
+  owner?: string;
+  blocked_by?: string[];
+  blocks?: string[];
+}
+
+export interface TaskBatchArgs {
+  mode: "replace" | "upsert" | "delete" | "clear_completed" | "list";
+  tasks?: TaskBatchItem[];
+  task_ids?: string[];
+}
+
+const SOCKETAGENT_TASK_SOURCE = "socketagent_tasks";
+const TASK_BATCH_LIMIT = 200;
+
+function batchTaskId(existingIds: Set<string>): string {
+  while (true) {
+    const candidate = `sa-${crypto.randomUUID().slice(0, 12)}`;
+    if (!existingIds.has(candidate)) return candidate;
+  }
+}
+
+function boundedTaskText(
+  value: unknown,
+  field: string,
+  max: number,
+  required = false,
+): string | undefined {
+  if (value === undefined || value === null) {
+    if (required) throw new Error(`${field} is required`);
+    return undefined;
+  }
+  const text = String(value).trim();
+  if (!text && required) throw new Error(`${field} is required`);
+  if (text.length > max) throw new Error(`${field} must be ${max} characters or fewer`);
+  return text || undefined;
+}
+
+function taskBatchView(task: Record<string, any>): Record<string, unknown> {
+  return {
+    task_id: String(task.id || task.taskId || ""),
+    subject: String(task.content || ""),
+    description: String(task.description || ""),
+    active_form: String(task.activeForm || task.content || ""),
+    status: String(task.status || "pending"),
+    ...(task.owner ? { owner: String(task.owner) } : {}),
+    blocked_by: Array.isArray(task.blockedBy) ? task.blockedBy.map(String) : [],
+    blocks: Array.isArray(task.blocks) ? task.blocks.map(String) : [],
+  };
+}
+
+function taskFromBatchItem(
+  item: TaskBatchItem,
+  id: string,
+  previous?: Record<string, any>,
+): Record<string, any> {
+  const subject = boundedTaskText(
+    item.subject ?? previous?.content,
+    "subject",
+    500,
+    true,
+  )!;
+  const description = boundedTaskText(
+    item.description ?? previous?.description,
+    "description",
+    10_000,
+  );
+  const activeForm = boundedTaskText(
+    item.active_form ?? previous?.activeForm ?? subject,
+    "active_form",
+    500,
+  ) || subject;
+  const status = item.status || previous?.status || "pending";
+  const owner = boundedTaskText(item.owner ?? previous?.owner, "owner", 500);
+  const blockedBy = (item.blocked_by ?? previous?.blockedBy ?? [])
+    .map(String)
+    .filter(Boolean)
+    .slice(0, TASK_BATCH_LIMIT);
+  const blocks = (item.blocks ?? previous?.blocks ?? [])
+    .map(String)
+    .filter(Boolean)
+    .slice(0, TASK_BATCH_LIMIT);
+  return {
+    ...(previous || {}),
+    id,
+    taskId: id,
+    content: subject,
+    activeForm,
+    status,
+    source: SOCKETAGENT_TASK_SOURCE,
+    ...(description ? { description } : {}),
+    ...(owner ? { owner } : {}),
+    blockedBy,
+    blocks,
+  };
+}
+
+export async function handleTaskBatchTool(
+  ctx: AppToolContext,
+  args: TaskBatchArgs,
+): Promise<McpTextResult> {
+  const sessionId = ctx.getSessionId();
+  if (!sessionId) {
+    return {
+      content: [{ type: "text", text: "TaskBatch requires an active SocketAgent session." }],
+      isError: true,
+    };
+  }
+  try {
+    const current = getTodos(sessionId);
+    const otherTasks = current.filter(
+      (task) => task?.source !== SOCKETAGENT_TASK_SOURCE,
+    );
+    let managed = current
+      .filter((task) => task?.source === SOCKETAGENT_TASK_SOURCE)
+      .map((task) => ({ ...task }));
+    const existingIds = new Set(
+      managed.map((task) => String(task.id || task.taskId || "")).filter(Boolean),
+    );
+    const items = args.tasks || [];
+    if (items.length > TASK_BATCH_LIMIT) {
+      throw new Error(`TaskBatch accepts at most ${TASK_BATCH_LIMIT} tasks per call`);
+    }
+
+    switch (args.mode) {
+      case "replace":
+      {
+        const requestedIds = new Set<string>();
+        managed = items.map((item) => {
+          const requestedId = boundedTaskText(item.task_id, "task_id", 200);
+          if (requestedId && requestedIds.has(requestedId)) {
+            throw new Error(`Duplicate SocketAgent task id: ${requestedId}`);
+          }
+          if (requestedId) requestedIds.add(requestedId);
+          const id = requestedId || batchTaskId(existingIds);
+          if (existingIds.has(id) && !requestedId) {
+            throw new Error("Could not allocate a unique task id");
+          }
+          existingIds.add(id);
+          return taskFromBatchItem(item, id);
+        });
+        break;
+      }
+      case "upsert":
+      {
+        const requestedIds = new Set<string>();
+        for (const item of items) {
+          const requestedId = boundedTaskText(item.task_id, "task_id", 200);
+          if (requestedId && requestedIds.has(requestedId)) {
+            throw new Error(`Duplicate SocketAgent task id: ${requestedId}`);
+          }
+          if (requestedId) requestedIds.add(requestedId);
+          const index = requestedId
+            ? managed.findIndex(
+                (task) => String(task.id || task.taskId || "") === requestedId,
+              )
+            : -1;
+          if (requestedId && index < 0) {
+            throw new Error(`Unknown SocketAgent task id: ${requestedId}`);
+          }
+          const id = requestedId || batchTaskId(existingIds);
+          existingIds.add(id);
+          const updated = taskFromBatchItem(
+            item,
+            id,
+            index >= 0 ? managed[index] : undefined,
+          );
+          if (index >= 0) managed[index] = updated;
+          else managed.push(updated);
+        }
+        break;
+      }
+      case "delete": {
+        const ids = new Set((args.task_ids || []).map(String).filter(Boolean));
+        if (ids.size > TASK_BATCH_LIMIT) {
+          throw new Error(`TaskBatch accepts at most ${TASK_BATCH_LIMIT} task_ids per call`);
+        }
+        managed = managed.filter(
+          (task) => !ids.has(String(task.id || task.taskId || "")),
+        );
+        break;
+      }
+      case "clear_completed":
+        managed = managed.filter((task) => task.status !== "completed");
+        break;
+      case "list":
+        break;
+      default:
+        throw new Error(`Unsupported TaskBatch mode: ${String(args.mode)}`);
+    }
+
+    const next = [...otherTasks, ...managed];
+    if (args.mode !== "list" && JSON.stringify(next) !== JSON.stringify(current)) {
+      saveTodos(sessionId, next);
+      ctx.appendHistory?.({
+        role: "todos_update",
+        content: JSON.stringify(next),
+        timestamp: new Date().toISOString(),
+      });
+      ctx.send({
+        type: "todos",
+        todos: next,
+        sessionId,
+      });
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          mode: args.mode,
+          count: managed.length,
+          tasks: managed.map(taskBatchView),
+        }, null, 2),
+      }],
+    };
+  } catch (error: any) {
+    return {
+      content: [{
+        type: "text",
+        text: `TaskBatch error: ${error?.message || String(error)}`,
+      }],
+      isError: true,
+    };
+  }
 }
 
 function delegatedAgentSummary(

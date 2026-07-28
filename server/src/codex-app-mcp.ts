@@ -17,6 +17,7 @@ import {
   handleSearchSkillsTool,
   handleSendFileTool,
   handleSpeakTool,
+  handleTaskBatchTool,
 } from "./app-tool-handlers";
 import { HTML_PLAN_TOOL_DESCRIPTION } from "./socketagent-instructions";
 
@@ -53,6 +54,10 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "ScheduleTask",
     description: "Schedule a Claude or Codex prompt to run later or recur.",
+  },
+  {
+    name: "TaskBatch",
+    description: "Create, update, delete, clear, or list many session working tasks in one call.",
   },
   {
     name: "Monitor",
@@ -240,6 +245,29 @@ function createServer(context: AppToolContext): McpServer {
       },
     },
     async (args) => handleScheduleTaskTool(context, args as any),
+  );
+
+  server.registerTool(
+    "TaskBatch",
+    {
+      title: "Task Batch",
+      description: "Manage SocketAgent session working tasks in bulk. Use one call for two or more task changes instead of repeatedly calling single-task tools. Native Claude tasks remain untouched.",
+      inputSchema: {
+        mode: z.enum(["replace", "upsert", "delete", "clear_completed", "list"]).describe("replace the managed set; create/update several tasks; delete several IDs; clear completed tasks; or inspect the managed set"),
+        tasks: z.array(z.object({
+          task_id: z.string().optional().describe("Existing SocketAgent task ID for updates; omit when creating"),
+          subject: z.string().optional().describe("Short imperative task title; required when creating"),
+          description: z.string().optional().describe("Detailed task description"),
+          active_form: z.string().optional().describe("Present-continuous label shown while in progress"),
+          status: z.enum(["pending", "in_progress", "completed"]).optional(),
+          owner: z.string().optional(),
+          blocked_by: z.array(z.string()).optional(),
+          blocks: z.array(z.string()).optional(),
+        })).max(200).optional().describe("Tasks for replace or upsert"),
+        task_ids: z.array(z.string()).max(200).optional().describe("Task IDs for delete"),
+      },
+    },
+    async (args) => handleTaskBatchTool(context, args as any),
   );
 
   server.registerTool(

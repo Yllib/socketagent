@@ -30,6 +30,7 @@ import {
   handleScheduleReminderTool,
   handleSendFileTool,
   handleSpeakTool,
+  handleTaskBatchTool,
   stopAppMonitor,
   stopAppMonitorsForSession,
 } from "./app-tool-handlers";
@@ -2924,6 +2925,25 @@ export class ClaudeSession {
             }
           ),
           tool(
+            "TaskBatch",
+            "Manage SocketAgent session working tasks in bulk. Use one call for two or more task changes instead of repeatedly calling TaskCreate or TaskUpdate. Modes: replace the managed task set, upsert several tasks, delete several IDs, clear completed tasks, or list the managed set. Native Claude tasks remain untouched.",
+            {
+              mode: z.enum(["replace", "upsert", "delete", "clear_completed", "list"]).describe("Bulk operation to perform"),
+              tasks: z.array(z.object({
+                task_id: z.string().optional().describe("Existing SocketAgent task ID for updates; omit when creating"),
+                subject: z.string().optional().describe("Short imperative task title; required when creating"),
+                description: z.string().optional().describe("Detailed task description"),
+                active_form: z.string().optional().describe("Present-continuous label shown while in progress"),
+                status: z.enum(["pending", "in_progress", "completed"]).optional(),
+                owner: z.string().optional(),
+                blocked_by: z.array(z.string()).optional(),
+                blocks: z.array(z.string()).optional(),
+              })).max(200).optional().describe("Tasks for replace or upsert"),
+              task_ids: z.array(z.string()).max(200).optional().describe("Task IDs for delete"),
+            },
+            async (args) => handleTaskBatchTool(appToolContext, args as any)
+          ),
+          tool(
             "AgentSession",
             "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of this turn, and reports its final response back automatically.",
             {
@@ -3182,6 +3202,7 @@ export class ClaudeSession {
           "ScheduleReminder",
           "NotifyUser",
           "ScheduleTask",
+          "TaskBatch",
           "AgentSession",
           "Monitor",
           "SearchSkills",

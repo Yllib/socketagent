@@ -44,6 +44,10 @@ import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } fr
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { createInteractiveRequestId } from "./interactive-request-id";
+import {
+  buildClaudeRateLimitEvent,
+  buildClaudeUsageRateLimitEvents,
+} from "./rate-limit-events";
 
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
@@ -1370,6 +1374,25 @@ export class ClaudeSession {
       return starts[0] || this._runStartedAt;
     }
     return null;
+  }
+
+  private _refreshPlanRateLimits(): void {
+    const activeQuery = this.activeQuery as any;
+    const getUsage =
+      activeQuery?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (typeof getUsage !== "function") return;
+    Promise.resolve(getUsage.call(activeQuery))
+      .then((usage: any) => {
+        for (const event of buildClaudeUsageRateLimitEvents(
+          usage,
+          this.sessionId || "",
+        )) {
+          this.send(event as any);
+        }
+      })
+      .catch(() => {
+        // Usage limits are optional for API/provider sessions and older SDKs.
+      });
   }
 
   get permissionMode(): string | null {
@@ -4162,6 +4185,7 @@ export class ClaudeSession {
                 if (this.sessionId) updateSessionContextUsage(this.sessionId, ctx);
               }
             }).catch(() => {});
+            this._refreshPlanRateLimits();
           }
 
           // Log user prompt now that we have the session ID (for new sessions)
@@ -4492,14 +4516,9 @@ export class ClaudeSession {
         if (message.type === "rate_limit_event") {
           const info = (message as any).rate_limit_info || {};
           console.log(`[SDK] Rate limit raw: ${JSON.stringify((message as any).rate_limit_info)}`);
-          this.send({
-            type: "rate_limit_event",
-            status: info.status || "allowed",
-            resetsAt: info.resetsAt || undefined,
-            utilization: info.utilization || undefined,
-            rateLimitType: info.rateLimitType || undefined,
-            sessionId: this.sessionId || "",
-          } as any);
+          this.send(
+            buildClaudeRateLimitEvent(info, this.sessionId || "") as any,
+          );
         }
 
         // Forward background task lifecycle events (#8, #9)
@@ -5461,6 +5480,7 @@ export class ClaudeSession {
                 if (this.sessionId) updateSessionContextUsage(this.sessionId, ctx);
               }
             }).catch(() => {});
+            this._refreshPlanRateLimits();
           }
 
           if (continuationPending) {

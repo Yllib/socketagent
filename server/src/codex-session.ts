@@ -48,6 +48,7 @@ import { getClaudeAvailability } from "./claude-session";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { createInteractiveRequestId } from "./interactive-request-id";
+import { buildCodexRateLimitEvents } from "./rate-limit-events";
 
 const TRANSIENT_CODEX_RAW_EVENT_METHODS = new Set([
   "item/agentMessage/delta",
@@ -2955,17 +2956,10 @@ export class CodexSession {
 
       case "account/rateLimits/updated": {
         const sid = this.sessionId;
-        const primary = p?.rateLimits?.primary;
-        if (!sid || !primary) return;
-        const utilization = Number(primary.usedPercent ?? 0);
-        this.send({
-          type: "rate_limit_event",
-          status: utilization >= 100 ? "rejected" : utilization >= 85 ? "allowed_warning" : "allowed",
-          utilization,
-          resetsAt: primary.resetsAt ? new Date(Number(primary.resetsAt) * 1000).toISOString() : undefined,
-          rateLimitType: p?.rateLimits?.limitName || p?.rateLimits?.limitId || undefined,
-          sessionId: sid,
-        } as any);
+        if (!sid) return;
+        for (const event of buildCodexRateLimitEvents(p?.rateLimits, sid)) {
+          this.send(event as any);
+        }
         return;
       }
 

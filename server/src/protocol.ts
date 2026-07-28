@@ -1793,6 +1793,7 @@ export interface RateLimitEventServerMessage {
   status: string;
   resetsAt?: string;
   utilization?: number;
+  utilizationPercent?: number;
   rateLimitType?: string;
   sessionId: string;
 }

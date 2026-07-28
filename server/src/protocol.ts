@@ -1790,6 +1790,7 @@ export interface ScheduledTaskNotificationServerMessage {
 
 export interface RateLimitEventServerMessage {
   type: "rate_limit_event";
+  backend: Backend;
   status: string;
   resetsAt?: string;
   utilization?: number;

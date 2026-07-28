@@ -9,6 +9,7 @@ export type HarnessRateLimitType =
 
 export interface RateLimitEventPayload {
   type: "rate_limit_event";
+  backend: "claude" | "codex";
   status: "allowed" | "allowed_warning" | "rejected";
   resetsAt?: string;
   utilization?: number;
@@ -52,6 +53,7 @@ export function buildClaudeRateLimitEvent(
   const utilizationPercent = normalizeUtilizationPercent(info.utilization);
   return {
     type: "rate_limit_event",
+    backend: "claude",
     status:
       info.status === "rejected" || info.status === "allowed_warning"
         ? info.status
@@ -103,6 +105,7 @@ export function buildClaudeUsageRateLimitEvents(
     const utilizationPercent = normalizeUtilizationPercent(value.utilization);
     return {
       type: "rate_limit_event",
+      backend: "claude",
       status: statusForUtilization(utilizationPercent),
       resetsAt: normalizeResetTime(value.resets_at),
       ...(utilizationPercent === undefined
@@ -144,6 +147,7 @@ export function buildCodexRateLimitEvents(
     const rateLimitType = codexWindowType(value, fallback);
     return [{
       type: "rate_limit_event" as const,
+      backend: "codex" as const,
       status: statusForUtilization(utilizationPercent),
       resetsAt: normalizeResetTime(value.resetsAt),
       ...(utilizationPercent === undefined

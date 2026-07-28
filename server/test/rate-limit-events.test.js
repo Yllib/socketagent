@@ -17,6 +17,7 @@ test("Claude rate-limit events preserve window identity and reset time", () => {
     }, "session-1"),
     {
       type: "rate_limit_event",
+      backend: "claude",
       status: "allowed_warning",
       resetsAt: "2026-07-28T17:00:00.000Z",
       utilization: 0.91,
@@ -48,17 +49,20 @@ test("Claude usage snapshots independently surface five-hour and weekly windows"
 
   assert.deepEqual(
     events.map((event) => ({
+      backend: event.backend,
       type: event.rateLimitType,
       status: event.status,
       utilizationPercent: event.utilizationPercent,
     })),
     [
       {
+        backend: "claude",
         type: "five_hour",
         status: "allowed_warning",
         utilizationPercent: 86,
       },
       {
+        backend: "claude",
         type: "seven_day_opus",
         status: "allowed_warning",
         utilizationPercent: 97,
@@ -84,6 +88,7 @@ test("Codex emits independent five-hour and weekly windows", () => {
   assert.equal(events.length, 2);
   assert.deepEqual(
     events.map((event) => ({
+      backend: event.backend,
       type: event.rateLimitType,
       status: event.status,
       utilizationPercent: event.utilizationPercent,
@@ -91,12 +96,14 @@ test("Codex emits independent five-hour and weekly windows", () => {
     })),
     [
       {
+        backend: "codex",
         type: "five_hour",
         status: "allowed_warning",
         utilizationPercent: 88,
         resetsAt: "2026-07-28T17:00:00.000Z",
       },
       {
+        backend: "codex",
         type: "seven_day",
         status: "rejected",
         utilizationPercent: 100,

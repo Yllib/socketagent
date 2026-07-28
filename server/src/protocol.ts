@@ -453,6 +453,8 @@ export interface UploadStartMessage {
   fileSize: number;
   totalChunks: number;
   chunkSize?: number;
+  sessionId?: string;
+  cwd?: string;
 }
 
 export interface UploadChunkMessage {

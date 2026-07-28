@@ -6652,7 +6652,22 @@ function createConnectionHandler(
         const totalChunks = msg.totalChunks;
         const chunkSize = (msg as any).chunkSize || 512 * 1024;
 
-        const cwd = activeSession?.getCwd() || getDefaultCwd();
+        const requestedSessionId =
+          typeof (msg as any).sessionId === "string"
+            ? String((msg as any).sessionId).trim()
+            : "";
+        const requestedCwd =
+          typeof (msg as any).cwd === "string"
+            ? String((msg as any).cwd).trim()
+            : "";
+        const storedSessionCwd = requestedSessionId
+          ? getSession(requestedSessionId)?.cwd
+          : undefined;
+        const cwd =
+          storedSessionCwd ||
+          requestedCwd ||
+          activeSession?.getCwd() ||
+          getDefaultCwd();
         const uploadDir = path.join(cwd, ".uploads");
         if (!fs.existsSync(uploadDir)) {
           fs.mkdirSync(uploadDir, { recursive: true });

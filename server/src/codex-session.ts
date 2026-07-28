@@ -49,6 +49,7 @@ import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { buildCodexRateLimitEvents } from "./rate-limit-events";
+import { recordRateLimitEvent } from "./rate-limit-cache";
 
 const TRANSIENT_CODEX_RAW_EVENT_METHODS = new Set([
   "item/agentMessage/delta",
@@ -2958,6 +2959,7 @@ export class CodexSession {
         const sid = this.sessionId;
         if (!sid) return;
         for (const event of buildCodexRateLimitEvents(p?.rateLimits, sid)) {
+          recordRateLimitEvent(event);
           this.send(event as any);
         }
         return;

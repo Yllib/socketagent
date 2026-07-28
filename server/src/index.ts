@@ -51,6 +51,7 @@ import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHt
 import { HardAbortCoordinator } from "./hard-abort";
 import { backendsForManagedBackendSpecs, MANAGED_BACKEND_PACKAGES, managedBackendSpecsNeedingUpdate, parseNpmVersionOutput } from "./managed-backend-update";
 import { invalidateCachedModelCatalog } from "./model-catalog-store";
+import { getCachedRateLimitEvents } from "./rate-limit-cache";
 import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings } from "./initial-session-settings";
@@ -2294,6 +2295,16 @@ function sessionSettingsPayload(session: Session, sessionId: string): Record<str
   };
 }
 
+function sendCachedRateLimits(
+  sendJson: (payload: Record<string, unknown>) => void,
+  backend: Backend | undefined,
+  sessionId: string,
+): void {
+  for (const event of getCachedRateLimitEvents(backend || "claude", sessionId)) {
+    sendJson({ ...event });
+  }
+}
+
 /**
  * Per-connection state and message handler.
  * Used for both direct WebSocket connections and relay connections.
@@ -3232,6 +3243,7 @@ function createConnectionHandler(transport: ClientTransport) {
           cwd,
           title: "Untitled",
         });
+        sendCachedRateLimits(sendJson, msg.backend, "");
         void activeSession.refreshSupportedModels();
         break;
       }
@@ -3346,6 +3358,11 @@ function createConnectionHandler(transport: ClientTransport) {
           ...(activeSession.permissionMode ? { permissionMode: activeSession.permissionMode } : {}),
         });
         sendJson(sessionSettingsPayload(activeSession, msg.sessionId));
+        sendCachedRateLimits(
+          sendJson,
+          sessionInfo.backend || "claude",
+          msg.sessionId,
+        );
         if (!existing) void activeSession.refreshSupportedModels();
 
         // First paint is deliberately bounded. If the client has an authoritative
@@ -7456,6 +7473,7 @@ function buildStatusSyncMessage(): string {
     scheduledTaskRevision: getScheduledTaskRevision(),
     backgroundTaskIds,
     durableMonitors,
+    rateLimits: getCachedRateLimitEvents(),
     ...(Object.keys(sessionActiveStartedAt).length > 0 ? { sessionActiveStartedAt } : {}),
     ...(Object.keys(sessionTitles).length > 0 ? { sessionTitles } : {}),
     ...(Object.keys(sessionModels).length > 0 ? { sessionModels } : {}),

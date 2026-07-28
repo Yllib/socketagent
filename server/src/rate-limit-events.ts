@@ -18,6 +18,18 @@ export interface RateLimitEventPayload {
   sessionId: string;
 }
 
+export function rateLimitWindowForType(
+  value: HarnessRateLimitType | undefined,
+): "five_hour" | "weekly" {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized.includes("seven_day")
+    || normalized.includes("seven-day")
+    || normalized.includes("weekly")
+    || normalized.includes("week")
+    ? "weekly"
+    : "five_hour";
+}
+
 export function normalizeUtilizationPercent(value: unknown): number | undefined {
   const raw = Number(value);
   if (!Number.isFinite(raw)) return undefined;

@@ -48,6 +48,7 @@ import {
   buildClaudeRateLimitEvent,
   buildClaudeUsageRateLimitEvents,
 } from "./rate-limit-events";
+import { recordRateLimitEvent } from "./rate-limit-cache";
 
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
@@ -1387,6 +1388,7 @@ export class ClaudeSession {
           usage,
           this.sessionId || "",
         )) {
+          recordRateLimitEvent(event);
           this.send(event as any);
         }
       })
@@ -4516,9 +4518,9 @@ export class ClaudeSession {
         if (message.type === "rate_limit_event") {
           const info = (message as any).rate_limit_info || {};
           console.log(`[SDK] Rate limit raw: ${JSON.stringify((message as any).rate_limit_info)}`);
-          this.send(
-            buildClaudeRateLimitEvent(info, this.sessionId || "") as any,
-          );
+          const event = buildClaudeRateLimitEvent(info, this.sessionId || "");
+          recordRateLimitEvent(event);
+          this.send(event as any);
         }
 
         // Forward background task lifecycle events (#8, #9)

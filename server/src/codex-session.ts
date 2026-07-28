@@ -314,6 +314,7 @@ export class CodexSession {
   private appServerSeenUserMessageItems = new Set<string>();
   private appServerStreamParents = new Map<string, string>();
   private codexSubagents = new Map<string, CodexSubagentState>();
+  private lastSubagentSnapshotFingerprint: string | null = null;
   private _isCompacting = false;
   private _compactStartedAt: string | null = null;
   private _compactBoundaryEmitted = false;
@@ -589,24 +590,28 @@ export class CodexSession {
     const activeAgents = [...this.codexSubagents.values()].filter(
       (agent) => agent.status === "pending" || agent.status === "running",
     );
+    const tasks = activeAgents.map((agent) => ({
+      agentId: agent.agentId,
+      toolUseId: agent.toolUseId,
+      description: agent.description,
+      subagentType: agent.subagentType,
+      startedAt: agent.startedAt,
+      status: agent.status,
+      ...(agent.prompt ? { prompt: agent.prompt } : {}),
+      ...(agent.model ? { model: agent.model } : {}),
+      ...(agent.reasoningEffort ? { reasoningEffort: agent.reasoningEffort } : {}),
+      ...(agent.agentPath ? { agentPath: agent.agentPath } : {}),
+      ...(agent.parentToolUseId ? { parentToolUseId: agent.parentToolUseId } : {}),
+    }));
+    const fingerprint = JSON.stringify(tasks);
+    if (!ws && fingerprint === this.lastSubagentSnapshotFingerprint) return;
+    if (!ws) this.lastSubagentSnapshotFingerprint = fingerprint;
     const message = {
       type: "active_subagents",
       sessionId,
       backend: "codex",
       replace: true,
-      tasks: activeAgents.map((agent) => ({
-        agentId: agent.agentId,
-        toolUseId: agent.toolUseId,
-        description: agent.description,
-        subagentType: agent.subagentType,
-        startedAt: agent.startedAt,
-        status: agent.status,
-        ...(agent.prompt ? { prompt: agent.prompt } : {}),
-        ...(agent.model ? { model: agent.model } : {}),
-        ...(agent.reasoningEffort ? { reasoningEffort: agent.reasoningEffort } : {}),
-        ...(agent.agentPath ? { agentPath: agent.agentPath } : {}),
-        ...(agent.parentToolUseId ? { parentToolUseId: agent.parentToolUseId } : {}),
-      })),
+      tasks,
     } as any;
     if (ws) this.sendTo(ws, message);
     else this.send(message);
@@ -752,6 +757,7 @@ export class CodexSession {
       status = "shutdown";
     }
     if (!status) return;
+    if (agent.status === status) return;
     agent.status = status;
     this.onActivity?.();
 

@@ -198,6 +198,62 @@ test("attaches Codex v2 subagent assignments to the live card and durable histor
   }
 });
 
+test("deduplicates unchanged Codex subagent snapshots but replays one on reconnect", () => {
+  const sent = [];
+  const rootId = `test-root-${crypto.randomUUID()}`;
+  const childId = `test-child-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: {
+        id: "spawn-child",
+        type: "subAgentActivity",
+        kind: "started",
+        agentThreadId: childId,
+        agentPath: "/root/performance_audit",
+      },
+    });
+    session.handleAppServerNotification("thread/status/changed", {
+      threadId: childId,
+      status: { type: "active" },
+    });
+
+    const snapshotsAfterStart = sent.filter(
+      (message) => message.type === "active_subagents",
+    ).length;
+
+    session.handleAppServerNotification("thread/status/changed", {
+      threadId: childId,
+      status: { type: "active" },
+    });
+    session.handleAppServerNotification("turn/started", {
+      threadId: childId,
+      turn: { id: "child-turn-1" },
+    });
+    assert.equal(
+      sent.filter((message) => message.type === "active_subagents").length,
+      snapshotsAfterStart,
+    );
+
+    const reconnectMessages = [];
+    session.replayLiveState(testSocket(reconnectMessages));
+    const reconnectSnapshots = reconnectMessages.filter(
+      (message) => message.type === "active_subagents",
+    );
+    assert.equal(reconnectSnapshots.length, 1);
+    assert.equal(reconnectSnapshots[0].tasks[0].status, "running");
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
+});
+
 test("replays concurrent Claude streams with their original parents", () => {
   const sent = [];
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);

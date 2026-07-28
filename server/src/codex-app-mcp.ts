@@ -12,6 +12,7 @@ import {
   handleNotifyUserTool,
   handleRequestSecureInputTool,
   handleReadSkillTool,
+  handleReportSubagentAssignmentTool,
   handleScheduleReminderTool,
   handleScheduleTaskTool,
   handleSearchSkillsTool,
@@ -58,6 +59,10 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "TaskBatch",
     description: "Create, update, delete, clear, or list many session working tasks in one call.",
+  },
+  {
+    name: "ReportSubagentAssignment",
+    description: "Internal SocketAgent metadata handshake for spawned Codex subagents.",
   },
   {
     name: "Monitor",
@@ -268,6 +273,19 @@ function createServer(context: AppToolContext): McpServer {
       },
     },
     async (args) => handleTaskBatchTool(context, args as any),
+  );
+
+  server.registerTool(
+    "ReportSubagentAssignment",
+    {
+      title: "Report Subagent Assignment",
+      description: "Internal SocketAgent UI metadata tool. Spawned Codex subagents must call this once, before any visible response or other tool, with their canonical agent path and complete assigned prompt. Root agents must not call it.",
+      inputSchema: {
+        agent_path: z.string().describe("Canonical task path from the NEW_TASK envelope, for example /root/reviewer"),
+        prompt: z.string().describe("The complete readable assignment from the NEW_TASK payload"),
+      },
+    },
+    async (args) => handleReportSubagentAssignmentTool(context, args as any),
   );
 
   server.registerTool(

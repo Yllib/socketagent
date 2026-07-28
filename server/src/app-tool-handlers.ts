@@ -46,6 +46,7 @@ export interface AppToolContext {
   injectMessage?(text: string, priority?: "now" | "next" | "later"): Promise<void>;
   onMonitorOutput?(text: string): void;
   manageAgentSession?: AgentSessionToolExecutor;
+  reportSubagentAssignment?(agentPath: string, prompt: string): boolean;
 }
 
 export interface McpTextResult {
@@ -106,8 +107,42 @@ export interface TaskBatchArgs {
   task_ids?: string[];
 }
 
+export interface ReportSubagentAssignmentArgs {
+  agent_path: string;
+  prompt: string;
+}
+
 const SOCKETAGENT_TASK_SOURCE = "socketagent_tasks";
 const TASK_BATCH_LIMIT = 200;
+
+export async function handleReportSubagentAssignmentTool(
+  ctx: AppToolContext,
+  args: ReportSubagentAssignmentArgs,
+): Promise<McpTextResult> {
+  const agentPath = String(args.agent_path || "").trim();
+  const prompt = String(args.prompt || "").trim();
+  if (!agentPath || !prompt) {
+    return {
+      content: [{ type: "text", text: "Both agent_path and prompt are required." }],
+      isError: true,
+    };
+  }
+  if (!ctx.reportSubagentAssignment) {
+    return {
+      content: [{ type: "text", text: "Subagent assignment reporting is unavailable in this session." }],
+      isError: true,
+    };
+  }
+  if (!ctx.reportSubagentAssignment(agentPath, prompt)) {
+    return {
+      content: [{ type: "text", text: `No active SocketAgent subagent matches ${agentPath}.` }],
+      isError: true,
+    };
+  }
+  return {
+    content: [{ type: "text", text: "Assignment attached to the subagent card." }],
+  };
+}
 
 function batchTaskId(existingIds: Set<string>): string {
   while (true) {

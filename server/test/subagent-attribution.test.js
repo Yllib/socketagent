@@ -8,7 +8,11 @@ const path = require("node:path");
 const { CodexSession } = require("../dist/codex-session");
 const {
   deriveClaudeTasksFromHistoryEntries,
+  getHistory,
 } = require("../dist/session-store");
+const {
+  handleReportSubagentAssignmentTool,
+} = require("../dist/app-tool-handlers");
 const {
   ClaudeSession,
   claudeAgentRunsInBackground,
@@ -104,6 +108,88 @@ test("keeps Codex subagent threads attached to the root session", () => {
     const grandchildCall = sent.find((message) =>
       message.type === "tool_call" && message.toolUseId === grandchildToolUseId);
     assert.equal(grandchildCall.parentToolUseId, childToolUseId);
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
+});
+
+test("attaches Codex v2 subagent assignments to the live card and durable history", async () => {
+  const sent = [];
+  const rootId = `test-root-${crypto.randomUUID()}`;
+  const childId = `test-child-${crypto.randomUUID()}`;
+  const childPath = "/root/history_reviewer";
+  const childToolUseId = `codex-subagent:${childId}`;
+  const prompt = "Audit transcript ordering and report the exact failure boundary.";
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: {
+        id: "spawn-child",
+        type: "subAgentActivity",
+        kind: "started",
+        agentThreadId: childId,
+        agentPath: childPath,
+      },
+    });
+
+    const initialCall = sent.find((message) =>
+      message.type === "tool_call" && message.toolUseId === childToolUseId);
+    assert.equal(initialCall.input.prompt, "");
+
+    const result = await handleReportSubagentAssignmentTool(
+      session.createAppToolContext(),
+      { agent_path: childPath, prompt },
+    );
+    assert.equal(result.isError, undefined);
+
+    const calls = sent.filter((message) =>
+      message.type === "tool_call" && message.toolUseId === childToolUseId);
+    assert.equal(calls.length, 2);
+    assert.equal(calls.at(-1).input.prompt, prompt);
+
+    const persistedCalls = getHistory(rootId).filter((entry) =>
+      entry.role === "tool_call" && entry.toolUseId === childToolUseId);
+    assert.equal(persistedCalls.length, 1);
+    assert.equal(persistedCalls[0].toolInput.prompt, prompt);
+    assert.equal(persistedCalls[0].content, prompt);
+
+    const snapshot = sent.filter((message) =>
+      message.type === "active_subagents").at(-1);
+    assert.equal(snapshot.tasks[0].prompt, prompt);
+
+    const visibleCount = sent.length;
+    session.handleAppServerNotification("item/started", {
+      threadId: childId,
+      item: {
+        id: "report-assignment-call",
+        type: "mcpToolCall",
+        server: "socketagent_app",
+        tool: "ReportSubagentAssignment",
+        arguments: { agent_path: childPath, prompt },
+      },
+    });
+    session.handleAppServerNotification("item/completed", {
+      threadId: childId,
+      item: {
+        id: "report-assignment-call",
+        type: "mcpToolCall",
+        server: "socketagent_app",
+        tool: "ReportSubagentAssignment",
+        result: { content: [{ type: "text", text: "attached" }] },
+      },
+    });
+    assert.equal(sent.length, visibleCount);
+    assert.equal(
+      getHistory(rootId).some((entry) => entry.toolName === "ReportSubagentAssignment"),
+      false,
+    );
   } finally {
     fs.rmSync(
       path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),

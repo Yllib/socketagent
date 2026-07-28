@@ -628,7 +628,7 @@ export class CodexSession {
     const existing = this.codexSubagents.get(agentId);
     if (existing) {
       let changed = false;
-      if (options.agentPath) {
+      if (options.agentPath && options.agentPath !== existing.agentPath) {
         existing.agentPath = options.agentPath;
         existing.subagentType = options.agentPath.split(/[\\/]/).filter(Boolean).pop() || existing.subagentType;
         if (!existing.prompt) {
@@ -636,24 +636,24 @@ export class CodexSession {
         }
         changed = true;
       }
-      if (options.prompt) {
+      if (options.prompt && options.prompt !== existing.prompt) {
         existing.prompt = options.prompt;
         existing.description = options.prompt.trim().slice(0, 160);
         changed = true;
       }
-      if (options.model) {
+      if (options.model && options.model !== existing.model) {
         existing.model = options.model;
         changed = true;
       }
-      if (options.reasoningEffort) {
+      if (options.reasoningEffort && options.reasoningEffort !== existing.reasoningEffort) {
         existing.reasoningEffort = options.reasoningEffort;
         changed = true;
       }
-      if (options.parentToolUseId) {
+      if (options.parentToolUseId && options.parentToolUseId !== existing.parentToolUseId) {
         existing.parentToolUseId = options.parentToolUseId;
         changed = true;
       }
-      if (changed) this.sendSubagentSnapshot();
+      if (changed) this.publishCodexSubagent(existing);
       return existing;
     }
 
@@ -678,15 +678,26 @@ export class CodexSession {
     this.codexSubagents.set(agentId, state);
     this.onActivity?.();
 
-    const input = {
+    this.publishCodexSubagent(state);
+    return state;
+  }
+
+  private codexSubagentInput(state: CodexSubagentState): Record<string, unknown> {
+    return {
       description: state.description,
       prompt: state.prompt || "",
       subagent_type: state.subagentType,
-      agentId,
+      agentId: state.agentId,
       ...(state.model ? { model: state.model } : {}),
       ...(state.reasoningEffort ? { reasoningEffort: state.reasoningEffort } : {}),
       ...(state.agentPath ? { agentPath: state.agentPath } : {}),
     };
+  }
+
+  private publishCodexSubagent(state: CodexSubagentState): void {
+    const sessionId = this.sessionId;
+    if (!sessionId) return;
+    const input = this.codexSubagentInput(state);
     this.send({
       type: "tool_call",
       tool: "Agent",
@@ -705,7 +716,21 @@ export class CodexSession {
       timestamp: state.startedAt,
     });
     this.sendSubagentSnapshot();
-    return state;
+  }
+
+  private reportCodexSubagentAssignment(agentPath: string, prompt: string): boolean {
+    const normalizedPath = agentPath.trim().replace(/\/+$/, "");
+    const normalizedPrompt = prompt.trim();
+    if (!normalizedPath || !normalizedPrompt) return false;
+    const agent = [...this.codexSubagents.values()].find(
+      (candidate) => candidate.agentPath?.trim().replace(/\/+$/, "") === normalizedPath,
+    );
+    if (!agent) return false;
+    this.registerCodexSubagent(agent.agentId, {
+      agentPath: normalizedPath,
+      prompt: normalizedPrompt,
+    });
+    return true;
   }
 
   private updateCodexSubagentStatus(agentId: string, rawStatus: string, message?: string): void {
@@ -2220,6 +2245,8 @@ export class CodexSession {
         }
         return this.onAgentSessionRequest(args);
       },
+      reportSubagentAssignment: (agentPath, prompt) =>
+        this.reportCodexSubagentAssignment(agentPath, prompt),
     };
   }
 
@@ -3314,6 +3341,7 @@ export class CodexSession {
 
     if (item.type === "mcpToolCall") {
       const isSocketAgentApp = item.server === "socketagent_app" || item.server === "socketagent-app";
+      if (isSocketAgentApp && item.tool === "ReportSubagentAssignment") return;
       const toolName = isSocketAgentApp ? item.tool : `mcp:${item.server}/${item.tool}`;
       if (method === "item/started") {
         const input = (item.arguments && typeof item.arguments === "object") ? item.arguments : {};

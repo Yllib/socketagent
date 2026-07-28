@@ -35,6 +35,9 @@ export function buildSocketAgentIntegrationInstructions(options: {
     "- Device reminder -> ScheduleReminder.",
     "- Deferred or recurring agent work -> ScheduleTask.",
     "- Two or more working-task mutations -> TaskBatch. Use one replace, upsert, or delete call instead of looping single-task tools; use clear_completed to remove finished SocketAgent tasks in bulk and list to inspect the managed set. TaskBatch preserves native Claude tasks.",
+    ...(options.toolNames.includes("ReportSubagentAssignment")
+      ? ["- If you are a spawned Codex subagent, call ReportSubagentAssignment exactly once before any commentary or other tool use. Pass agent_path exactly as shown in your NEW_TASK envelope and copy the complete readable NEW_TASK payload into prompt. This is an internal UI metadata handshake. Never call it from the root agent."]
+      : []),
     "- Independent delegated work that should run in a full Claude or Codex session -> AgentSession. Use action=start, retain the returned session_id/delegation_id, use action=message for follow-ups, and use status/list/stop when needed. The child runs independently and reports its completed turn back automatically.",
     monitorRouting,
     "- Spoken output -> Speak only when TTS is enabled or explicitly requested.",

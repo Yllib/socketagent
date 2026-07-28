@@ -28,7 +28,19 @@ import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getBoundedHistoryTail, getBoundedHistoryDelta, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
-import { AgentEffort, AgentSessionSettings, Backend, ClientMessage, CodexDriver, SessionInfo, supportsSessionEventAcknowledgement } from "./protocol";
+import {
+  AgentEffort,
+  AgentSessionSettings,
+  Backend,
+  BULK_RELAY_PAIRING_SUFFIX,
+  ClientMessage,
+  CodexDriver,
+  SessionInfo,
+  TRANSPORT_LANE_VERSION,
+  TransportLane,
+  UPLOAD_ACK_VERSION,
+  supportsSessionEventAcknowledgement,
+} from "./protocol";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
@@ -1161,12 +1173,21 @@ function publicRelayUrl(relayUrl: string): string {
   return relayUrl;
 }
 
-function serverCapabilitiesPayload(binaryEnvelope = true): Record<string, unknown> {
+function serverCapabilitiesPayload(
+  binaryEnvelope = true,
+  transportLane: TransportLane = "control",
+): Record<string, unknown> {
   const settings = getAdvertisedServerSettings();
   return {
     type: "server_capabilities",
     binaryEnvelope,
     binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
+    transportLane,
+    transportLanes: {
+      version: TRANSPORT_LANE_VERSION,
+      bulk: true,
+    },
+    uploadAckVersion: UPLOAD_ACK_VERSION,
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 2 },
@@ -2309,7 +2330,10 @@ function sendCachedRateLimits(
  * Per-connection state and message handler.
  * Used for both direct WebSocket connections and relay connections.
  */
-function createConnectionHandler(transport: ClientTransport) {
+function createConnectionHandler(
+  transport: ClientTransport,
+  transportLane: TransportLane = "control",
+) {
   let activeSession: Session | null = null;
   let activeSessionId: string | null = null;
   let pendingTtsEnabled = false;
@@ -2353,6 +2377,20 @@ function createConnectionHandler(transport: ClientTransport) {
       totalBytes: upload.totalBytes,
       receivedChunks: upload.receivedChunks,
       totalChunks: upload.totalChunks,
+    });
+  }
+
+  function acknowledgeUploadChunk(
+    uploadId: string,
+    chunkIndex: number,
+    upload: { receivedChunks: number; bytesReceived: number },
+  ): void {
+    sendJson({
+      type: "upload_chunk_ack",
+      uploadId,
+      chunkIndex,
+      receivedChunks: upload.receivedChunks,
+      bytesReceived: upload.bytesReceived,
     });
   }
 
@@ -2734,7 +2772,7 @@ function createConnectionHandler(transport: ClientTransport) {
       (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       (transport as any).setClientCapabilities?.(msg);
       sendJson({
-        ...serverCapabilitiesPayload(true),
+        ...serverCapabilitiesPayload(true, transportLane),
         codexCollaborationMode: "default",
       });
       return;
@@ -6662,6 +6700,7 @@ function createConnectionHandler(transport: ClientTransport) {
         upload.receivedChunks++;
         upload.bytesReceived += bytes.length;
         console.log(`[Upload] chunk ${upload.receivedChunks}/${upload.totalChunks} (legacy base64) ${(upload.bytesReceived / 1024 / 1024).toFixed(1)} MB`);
+        acknowledgeUploadChunk(uploadId, chunkIndex, upload);
         maybeEmitUploadProgress(uploadId);
 
         if (upload.receivedChunks >= upload.totalChunks) {
@@ -6693,6 +6732,7 @@ function createConnectionHandler(transport: ClientTransport) {
         upload.receivedChunks++;
         upload.bytesReceived += bytes.length;
         console.log(`[Upload] chunk ${upload.receivedChunks}/${upload.totalChunks} (binary) ${(upload.bytesReceived / 1024 / 1024).toFixed(1)} MB`);
+        acknowledgeUploadChunk(uploadId, chunkIndex, upload);
         maybeEmitUploadProgress(uploadId);
 
         if (upload.receivedChunks >= upload.totalChunks) {
@@ -7250,6 +7290,30 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ noServer: true });
 
+const BULK_LANE_CLIENT_MESSAGE_TYPES = new Set<string>([
+  "client_capabilities",
+  "request_file",
+  "file_download_ack",
+  "file_manager_download",
+  "file_manager_read_text",
+  "file_manager_write_text",
+  "file_manager_upload_start",
+  "upload_start",
+  "upload_chunk",
+  "upload_chunk_bin",
+  "load_more_history",
+  "get_archive_history",
+  "get_sdk_event_history",
+]);
+
+function isBulkLaneClientMessage(msg: ClientMessage): boolean {
+  return BULK_LANE_CLIENT_MESSAGE_TYPES.has(String((msg as any)?.type || ""));
+}
+
+function isSafetyCriticalControlMessage(msg: ClientMessage): boolean {
+  return (msg as any)?.type === "abort";
+}
+
 function getBearerToken(req: http.IncomingMessage): string | null {
   const header = req.headers.authorization;
   const value = Array.isArray(header) ? header[0] : header;
@@ -7263,6 +7327,8 @@ httpServer.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", `ws://localhost:${PORT}`);
   const token = getBearerToken(req) || url.searchParams.get("token");
   const wantsEncryptedDirectAuth = url.searchParams.get("e2e") === "1";
+  const transportLane: TransportLane =
+    url.searchParams.get("lane") === "bulk" ? "bulk" : "control";
   if (token && token !== AUTH_TOKEN) {
     console.log("Rejected connection: invalid token");
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
@@ -7277,6 +7343,7 @@ httpServer.on("upgrade", (req, socket, head) => {
   }
   (req as any).socketAgentAuthenticated = token === AUTH_TOKEN;
   (req as any).socketAgentWantsEncryptedDirectAuth = wantsEncryptedDirectAuth;
+  (req as any).socketAgentTransportLane = transportLane;
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req);
   });
@@ -7286,6 +7353,9 @@ httpServer.on("upgrade", (req, socket, head) => {
 let relayClient: RelayClient | null = null;
 let relayConnectionHandler: ReturnType<typeof createConnectionHandler> | null = null;
 let relayMessageQueue = Promise.resolve();
+let relayBulkClient: RelayClient | null = null;
+let relayBulkConnectionHandler: ReturnType<typeof createConnectionHandler> | null = null;
+let relayBulkMessageQueue = Promise.resolve();
 
 repairStoredTranscriptIdentitiesOnce();
 httpServer.listen(PORT, BIND_HOST, async () => {
@@ -7820,20 +7890,24 @@ setTimeout(checkScheduledTasks, 5000);
 // ── Direct WebSocket connections ──
 wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
   const wantsEncryptedDirectAuth = (req as any).socketAgentWantsEncryptedDirectAuth === true;
+  const transportLane: TransportLane =
+    (req as any).socketAgentTransportLane === "bulk" ? "bulk" : "control";
   const transport = new DirectClientTransport(ws, loadServerKeyPair(), {
     authenticated: (req as any).socketAgentAuthenticated === true,
     requireEncryptedAuth: wantsEncryptedDirectAuth,
   });
-  console.log(wantsEncryptedDirectAuth ? "Client connected (direct E2E pending auth)" : "Client connected (authenticated)");
+  console.log(
+    `${wantsEncryptedDirectAuth ? "Client connected (direct E2E pending auth)" : "Client connected (authenticated)"} lane=${transportLane}`,
+  );
 
   // Legacy direct clients are already authenticated by the upgrade request.
   // Direct E2E clients get status only after encrypted direct_auth succeeds.
-  if (transport.isAuthenticated) {
+  if (transport.isAuthenticated && transportLane === "control") {
     connectedClients.add(transport);
     sendStatusSyncTo(transport);
   }
 
-  const handler = createConnectionHandler(transport);
+  const handler = createConnectionHandler(transport, transportLane);
   let messageQueue = Promise.resolve();
 
   ws.on("message", (data: Buffer, isBinary: boolean) => {
@@ -7901,10 +7975,16 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       transport.authenticate((msg as any).binaryEnvelope === true);
       transport.setClientCapabilities(msg);
       (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
-      console.log(`[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope})`);
-      connectedClients.add(transport);
-      sendStatusSyncTo(transport);
-      transport.send(JSON.stringify(serverCapabilitiesPayload(transport.usesBinaryEnvelope)));
+      console.log(
+        `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane})`,
+      );
+      if (transportLane === "control") {
+        connectedClients.add(transport);
+        sendStatusSyncTo(transport);
+      }
+      transport.send(JSON.stringify(
+        serverCapabilitiesPayload(transport.usesBinaryEnvelope, transportLane),
+      ));
       return;
     }
 
@@ -7916,11 +7996,28 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
 
     const receivedAt = Date.now();
     const msgType = (msg as any)?.type || "unknown";
+    if (transportLane === "control" && isSafetyCriticalControlMessage(msg)) {
+      const startedAt = Date.now();
+      void handler.handleMessage(msg)
+        .catch((err: any) => {
+          transport.send(JSON.stringify({
+            type: "error",
+            message: err.message || "Hard stop failed",
+          }));
+        })
+        .finally(() => {
+          logSlowWs("ws_priority_handler", startedAt, { type: msgType });
+        });
+      return;
+    }
     messageQueue = messageQueue
       .then(async () => {
         const startedAt = Date.now();
         logSlowWs("ws_queue_wait", receivedAt, { type: msgType });
         try {
+          if (transportLane === "bulk" && !isBulkLaneClientMessage(msg)) {
+            throw new Error(`Message type ${msgType} is not allowed on the bulk transport lane`);
+          }
           await handler.handleMessage(msg);
         } finally {
           logSlowWs("ws_handler", startedAt, { type: msgType });
@@ -7937,7 +8034,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
   });
 
   ws.on("close", () => {
-    console.log("Client disconnected");
+    console.log(`Client disconnected lane=${transportLane}`);
     handler.close();
     transport.close();
     connectedClients.delete(transport);
@@ -7992,6 +8089,7 @@ function startRelayClient(): void {
     relayUrl: RELAY_URL,
     pairingToken: PAIRING_TOKEN,
     keyPair,
+    lane: "control",
     onMessage: (msg: ClientMessage) => {
       if (!relayConnectionHandler) {
         // Create handler on first message (phone just paired)
@@ -8001,6 +8099,20 @@ function startRelayClient(): void {
       const handler = relayConnectionHandler;
       const receivedAt = Date.now();
       const msgType = (msg as any)?.type || "unknown";
+      if (isSafetyCriticalControlMessage(msg)) {
+        const startedAt = Date.now();
+        void handler.handleMessage(msg)
+          .catch((err: any) => {
+            handler.sendJson({
+              type: "error",
+              message: err.message || "Hard stop failed",
+            });
+          })
+          .finally(() => {
+            logSlowWs("relay_priority_handler", startedAt, { type: msgType });
+          });
+        return;
+      }
       relayMessageQueue = relayMessageQueue
         .then(async () => {
           const startedAt = Date.now();
@@ -8037,6 +8149,63 @@ function startRelayClient(): void {
   });
 
   relayClient.connect();
+
+  relayBulkClient = new RelayClient({
+    relayUrl: RELAY_URL,
+    pairingToken: `${PAIRING_TOKEN}${BULK_RELAY_PAIRING_SUFFIX}`,
+    keyPair,
+    lane: "bulk",
+    onMessage: (msg: ClientMessage) => {
+      if (!relayBulkConnectionHandler) {
+        relayBulkConnectionHandler = createConnectionHandler(
+          relayBulkClient!.getVirtualSocket() as any,
+          "bulk",
+        );
+        console.log("[Relay:bulk] Created bulk connection handler");
+      }
+      const handler = relayBulkConnectionHandler;
+      const receivedAt = Date.now();
+      const msgType = String((msg as any)?.type || "unknown");
+      relayBulkMessageQueue = relayBulkMessageQueue
+        .then(async () => {
+          const startedAt = Date.now();
+          logSlowWs("relay_bulk_queue_wait", receivedAt, { type: msgType });
+          try {
+            if (!isBulkLaneClientMessage(msg)) {
+              throw new Error(`Message type ${msgType} is not allowed on the bulk transport lane`);
+            }
+            await handler.handleMessage(msg);
+          } finally {
+            logSlowWs("relay_bulk_handler", startedAt, { type: msgType });
+          }
+        })
+        .catch((err: any) => {
+          console.error(`[Relay:bulk] Message handler error: ${err.message}`);
+          handler.sendJson({
+            type: "error",
+            message: err.message || "Bulk transport error",
+          });
+        });
+    },
+    onStatusChange: (status: RelayStatus) => {
+      console.log(`[Relay:bulk] Status: ${status}`);
+      if (status === "paired") {
+        relayBulkConnectionHandler?.close();
+        relayBulkConnectionHandler = createConnectionHandler(
+          relayBulkClient!.getVirtualSocket() as any,
+          "bulk",
+        );
+        relayBulkMessageQueue = Promise.resolve();
+        console.log("[Relay:bulk] Phone paired — bulk lane ready");
+      }
+      if (status === "waiting_for_peer" || status === "disconnected") {
+        relayBulkConnectionHandler?.close();
+        relayBulkConnectionHandler = null;
+        relayBulkMessageQueue = Promise.resolve();
+      }
+    },
+  });
+  relayBulkClient.connect();
 }
 
 // ── Auto-update from git ──

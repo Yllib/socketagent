@@ -1,6 +1,12 @@
 import WebSocket from "ws";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
-import { ClientMessage, supportsSessionEventAcknowledgement } from "./protocol";
+import {
+  ClientMessage,
+  TRANSPORT_LANE_VERSION,
+  TransportLane,
+  UPLOAD_ACK_VERSION,
+  supportsSessionEventAcknowledgement,
+} from "./protocol";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { detectAvailableBackends } from "./codex-session";
 import { getAdvertisedServerSettings } from "./server-settings";
@@ -116,6 +122,7 @@ export interface RelayClientOptions {
   relayUrl: string;
   pairingToken: string;
   keyPair: KeyPair;
+  lane?: TransportLane;
   onMessage: (msg: ClientMessage) => void;
   onStatusChange: (status: RelayStatus) => void;
 }
@@ -528,6 +535,12 @@ export class RelayClient {
         type: "server_capabilities",
         binaryEnvelope: peer.binaryEnabled,
         binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
+        transportLane: this.opts.lane || "control",
+        transportLanes: {
+          version: TRANSPORT_LANE_VERSION,
+          bulk: true,
+        },
+        uploadAckVersion: UPLOAD_ACK_VERSION,
         secretManagement: { version: 1 },
         backends: detectAvailableBackends(),
         codexDriver: settings.codexDriver,

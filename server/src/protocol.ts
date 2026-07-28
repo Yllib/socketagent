@@ -10,6 +10,13 @@ export type Backend = "claude" | "codex";
 
 export type CodexDriver = "app-server";
 
+// ── Transport capabilities ──
+
+export const TRANSPORT_LANE_VERSION = 1;
+export const UPLOAD_ACK_VERSION = 1;
+export const BULK_RELAY_PAIRING_SUFFIX = ":bulk:v1";
+export type TransportLane = "control" | "bulk";
+
 // ── Client → Server messages ──
 
 export interface PromptMessage {
@@ -445,6 +452,7 @@ export interface UploadStartMessage {
   fileName: string;
   fileSize: number;
   totalChunks: number;
+  chunkSize?: number;
 }
 
 export interface UploadChunkMessage {
@@ -465,6 +473,9 @@ export interface UploadChunkBinMessage {
 /** Phone announces its wire-format support after key exchange. */
 export interface ClientCapabilitiesMessage {
   type: "client_capabilities";
+  lane?: TransportLane;
+  transportLaneVersion?: number;
+  uploadAckVersion?: number;
   binaryEnvelope?: boolean;
   binaryFileDownloadVersion?: number;
   /**
@@ -487,6 +498,9 @@ export interface SetRawModeMessage {
 export interface DirectAuthMessage {
   type: "direct_auth";
   token: string;
+  lane?: TransportLane;
+  transportLaneVersion?: number;
+  uploadAckVersion?: number;
   binaryEnvelope?: boolean;
   binaryFileDownloadVersion?: number;
   sessionEventAckVersion?: number;
@@ -1310,6 +1324,12 @@ export interface ServerCapabilitiesMessage {
   type: "server_capabilities";
   binaryEnvelope?: boolean;
   binaryFileDownloadVersion?: number;
+  transportLane?: TransportLane;
+  transportLanes?: {
+    version: number;
+    bulk: boolean;
+  };
+  uploadAckVersion?: number;
   secretManagement?: {
     version: number;
   };
@@ -1332,6 +1352,14 @@ export interface ServerCapabilitiesMessage {
     pairingToken: string;
     serverPubkey: string;
   };
+}
+
+export interface UploadChunkAckServerMessage {
+  type: "upload_chunk_ack";
+  uploadId: string;
+  chunkIndex: number;
+  receivedChunks: number;
+  bytesReceived: number;
 }
 
 export interface BackendHealthInfo {
@@ -2117,6 +2145,7 @@ export type ServerMessage =
   | StatusServerMessage
   | AbortAckServerMessage
   | CompactingServerMessage
+  | UploadChunkAckServerMessage
   | FileChunkServerMessage
   | FileCompleteServerMessage
   | FileErrorServerMessage

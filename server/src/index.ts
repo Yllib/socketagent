@@ -41,7 +41,7 @@ import {
   UPLOAD_ACK_VERSION,
   supportsSessionEventAcknowledgement,
 } from "./protocol";
-import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
+import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferPeerId, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
@@ -6369,9 +6369,7 @@ function createConnectionHandler(
           typeof (msg as any).expectedFileVersion === "string"
             ? (msg as any).expectedFileVersion
             : undefined;
-        const peerId = typeof (msg as any).__relayPeerId === "string"
-          ? (msg as any).__relayPeerId
-          : undefined;
+        const peerId = fileTransferPeerId(msg);
         try {
           const { resolvedPath } = resolveAllowedDownloadFile(filePath);
           void sendFileChunks(
@@ -6405,9 +6403,7 @@ function createConnectionHandler(
         const transferToken = typeof (msg as any).transferToken === "string"
           ? (msg as any).transferToken
           : undefined;
-        const peerId = typeof (msg as any).__relayPeerId === "string"
-          ? (msg as any).__relayPeerId
-          : undefined;
+        const peerId = fileTransferPeerId(msg);
         const receivedBytes = Number((msg as any).receivedBytes);
         if (fileId && Number.isSafeInteger(receivedBytes) && receivedBytes >= 0) {
           const state = activeFileDownloadAcks.get(
@@ -6424,6 +6420,7 @@ function createConnectionHandler(
         const requestId = (msg as any).requestId as string | undefined;
         const filePath = String((msg as any).path || "");
         const fileId = (msg as any).fileId as string || `fm_${crypto.randomUUID()}`;
+        const peerId = fileTransferPeerId(msg);
         try {
           const { resolvedPath } = resolveAllowedDownloadFile(filePath);
           sendJson({
@@ -6448,7 +6445,7 @@ function createConnectionHandler(
             fileId,
             Number.isFinite(offsetBytes) ? offsetBytes : 0,
             transferToken,
-            undefined,
+            peerId,
             expectedFileVersion,
           ).catch((e: any) => {
             sendJson({

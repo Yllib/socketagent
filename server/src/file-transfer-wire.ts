@@ -10,6 +10,12 @@ export interface BinaryFileDownloadChunkMetadata {
   totalChunks: number;
 }
 
+export function fileTransferPeerId(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  const peerId = (message as Record<string, unknown>).__relayPeerId;
+  return typeof peerId === "string" && peerId.length > 0 ? peerId : undefined;
+}
+
 export function fileTransferVersion(stat: {
   size: number;
   mtimeMs: number;

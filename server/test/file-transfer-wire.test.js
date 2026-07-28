@@ -5,6 +5,7 @@ const {
   BINARY_FILE_DOWNLOAD_VERSION,
   BIN_MARKER_FILE_DOWNLOAD_CHUNK,
   encodeBinaryFileDownloadChunk,
+  fileTransferPeerId,
   fileTransferVersion,
   resolveFileResumeOffset,
   supportsBinaryFileDownload,
@@ -51,6 +52,17 @@ test("binary file downloads require the explicit versioned capability", () => {
   assert.equal(supportsBinaryFileDownload({ binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION }), true);
   assert.equal(supportsBinaryFileDownload({ binaryEnvelope: true }), false);
   assert.equal(supportsBinaryFileDownload({ binaryFileDownloadVersion: 0 }), false);
+});
+
+test("file-manager transfers retain their originating relay peer", () => {
+  const message = { type: "file_manager_download" };
+  Object.defineProperty(message, "__relayPeerId", {
+    value: "phone-peer-1",
+    enumerable: false,
+  });
+
+  assert.equal(fileTransferPeerId(message), "phone-peer-1");
+  assert.equal(fileTransferPeerId({ type: "file_manager_download" }), undefined);
 });
 
 test("raw download frames remain opaque inside the existing NaCl envelope", () => {

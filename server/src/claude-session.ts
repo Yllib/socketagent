@@ -2431,7 +2431,7 @@ export class ClaudeSession {
       this.pendingQuestions.delete(questionId);
       // Mark as answered in persisted history
       if (this.sessionId) {
-        markQuestionAnswered(this.sessionId, questionId);
+        markQuestionAnswered(this.sessionId, questionId, answers);
       }
       return true;
     }

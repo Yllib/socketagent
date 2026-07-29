@@ -1517,23 +1517,36 @@ export function assignUserUuid(sessionId: string, uuid: string): void {
   } catch {}
 }
 
-/** Mark a question entry as answered in the history file */
-export function markQuestionAnswered(sessionId: string, questionId: string): void {
+/** Persist the terminal state of a user-visible interaction.
+ *
+ * Answers are intentionally supported only for ordinary question/elicitation
+ * cards. Secure-input values have a separate status-only lifecycle and must
+ * never pass through this function.
+ */
+export function markQuestionAnswered(
+  sessionId: string,
+  questionId: string,
+  answers: Record<string, string> = {},
+): void {
   try {
     const entries = readHistoryEntries(sessionId);
     if (entries.length === 0) return;
-    let entry: HistoryEntry | undefined;
-    for (let index = entries.length - 1; index >= 0; index--) {
-      const candidate = entries[index];
-      if (candidate.role === "question" && candidate.questionId === questionId) {
-        entry = candidate;
-        break;
+    let changed = false;
+    for (const entry of entries) {
+      if (
+        (entry.role !== "question" && entry.role !== "elicitation_url")
+        || entry.questionId !== questionId
+      ) {
+        continue;
       }
-    }
-    if (entry) {
+      const answersChanged = JSON.stringify(entry.answers || {}) !== JSON.stringify(answers);
+      if (entry.answered && !answersChanged) continue;
       entry.answered = true;
-      writeHistoryEntries(sessionId, entries);
+      entry.answers = { ...answers };
+      entry.revision = (positiveInteger(entry.revision) || 1) + 1;
+      changed = true;
     }
+    if (changed) writeHistoryEntries(sessionId, entries);
   } catch (e) {
     console.error(`[History] Error marking question answered: ${e}`);
   }
@@ -1582,9 +1595,19 @@ export function markSecureInputRequestResolved(
     let changed = false;
     for (const entry of entries) {
       if (entry.role !== "secure_input" || entry.questionId !== requestId) continue;
+      if (
+        entry.answered
+        && entry.status === status
+        && entry.toolInput?.status === status
+      ) {
+        continue;
+      }
       entry.status = status;
       entry.answered = true;
       entry.toolInput = { ...(entry.toolInput || {}), status };
+      // Terminal state is a new canonical card revision. Without this, a
+      // reconnect cache can legitimately retain an older pending snapshot.
+      entry.revision = (positiveInteger(entry.revision) || 1) + 1;
       changed = true;
     }
     if (changed) writeHistoryEntries(sessionId, entries);

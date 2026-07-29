@@ -3887,8 +3887,13 @@ function createConnectionHandler(
             const result = await plugin.answerMiddleware(qId, msg.answers, sessionCtx);
             if (result.handled) {
               answerHandled = true;
-              sendJson({ type: "question_answered", questionId: qId });
-              if (answerSid) markQuestionAnswered(answerSid, qId);
+              sendJson({
+                type: "question_answered",
+                questionId: qId,
+                sessionId: answerSid,
+                answers: msg.answers,
+              });
+              if (answerSid) markQuestionAnswered(answerSid, qId, msg.answers);
               break;
             }
           }
@@ -3905,12 +3910,17 @@ function createConnectionHandler(
             const injectedText = `[You previously asked me a question. Here is my answer:]\n\n${parts.join("\n\n")}`;
             console.log(`[Answer] No pending promise for ${qId}, injecting as prompt`);
             // Confirm to app that the question was handled (so card marks as answered)
-            sendJson({ type: "question_answered", questionId: qId });
+            sendJson({
+              type: "question_answered",
+              questionId: qId,
+              sessionId: answerSid,
+              answers: msg.answers,
+            });
             // Resolve the session ID — check all sources (same as prompt handler)
             const sid = answerSid;
             // Mark as answered in history even though promise is gone
             if (sid) {
-              markQuestionAnswered(sid, qId);
+              markQuestionAnswered(sid, qId, msg.answers);
             }
             // If a query is running, inject mid-conversation; otherwise resume with answer
             if (answerSession.isRunning) {

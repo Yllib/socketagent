@@ -924,7 +924,7 @@ export class CodexSession {
     this.pendingQuestions.delete(questionId);
     pending.resolve(answers);
     const sid = this.sessionId || this._resumeSessionId;
-    if (sid) markQuestionAnswered(sid, questionId);
+    if (sid) markQuestionAnswered(sid, questionId, answers);
     return true;
   }
   submitAuthCode(_code: string): void {}
@@ -2700,8 +2700,8 @@ export class CodexSession {
       if (Number.isFinite(autoResolutionMs) && autoResolutionMs > 0) {
         timer = setTimeout(() => {
           if (!this.pendingQuestions.delete(questionId)) return;
-          if (sessionId) markQuestionAnswered(sessionId, questionId);
-          this.send({ type: "question_answered", questionId, sessionId } as any);
+          if (sessionId) markQuestionAnswered(sessionId, questionId, {});
+          this.send({ type: "question_answered", questionId, sessionId, answers: {} } as any);
           resolve({});
         }, autoResolutionMs);
         timer.unref?.();

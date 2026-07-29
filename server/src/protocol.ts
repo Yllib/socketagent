@@ -1024,6 +1024,14 @@ export interface QuestionServerMessage {
   mcpServerName?: string;
 }
 
+export interface QuestionAnsweredServerMessage {
+  type: "question_answered";
+  questionId: string;
+  sessionId?: string;
+  /** Safe, user-visible answers. Secure-input values never use this message. */
+  answers?: Record<string, string>;
+}
+
 export interface SecureInputRequestServerMessage {
   type: "secure_input_request";
   requestId: string;
@@ -1445,6 +1453,8 @@ export interface HistoryEntry {
   questions?: QuestionItem[];
   emailPreview?: EmailPreview;
   answered?: boolean;
+  /** Safe, user-visible answers. Never used for secure-input values. */
+  answers?: Record<string, string>;
   // Subagent hierarchy and message tracking
   parentToolUseId?: string | null;
   uuid?: string;
@@ -2121,6 +2131,7 @@ export type ServerMessage =
   | ToolCallServerMessage
   | ToolResultServerMessage
   | QuestionServerMessage
+  | QuestionAnsweredServerMessage
   | SecureInputRequestServerMessage
   | SecureInputSavedServerMessage
   | SecretInventoryServerMessage

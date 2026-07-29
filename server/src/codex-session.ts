@@ -3474,28 +3474,30 @@ export class CodexSession {
       return;
     }
 
-    if (item.type === "agentMessage" && method === "item/completed") {
-      const text = item.text || this.appServerAgentText.get(item.id) || "";
-      if (text) {
-        this.send({
-          type: "text",
-          content: text,
-          sessionId: sid,
-          streamId: String(item.id),
-          snapshot: true,
-          finalSnapshot: true,
-          ...(parentToolUseId ? { parentToolUseId } : {}),
-        } as any);
-        if (!parentToolUseId) this._lastAssistantText = text;
-        appendItem({
-          role: "assistant",
-          content: text,
-          streamId: String(item.id),
-          timestamp: now(),
-        });
+    if (item.type === "agentMessage") {
+      if (method === "item/completed") {
+        const text = item.text || this.appServerAgentText.get(item.id) || "";
+        if (text) {
+          this.send({
+            type: "text",
+            content: text,
+            sessionId: sid,
+            streamId: String(item.id),
+            snapshot: true,
+            finalSnapshot: true,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          } as any);
+          if (!parentToolUseId) this._lastAssistantText = text;
+          appendItem({
+            role: "assistant",
+            content: text,
+            streamId: String(item.id),
+            timestamp: now(),
+          });
+        }
+        this.appServerAgentText.delete(item.id);
+        this.appServerStreamParents.delete(item.id);
       }
-      this.appServerAgentText.delete(item.id);
-      this.appServerStreamParents.delete(item.id);
       return;
     }
 
@@ -3534,24 +3536,26 @@ export class CodexSession {
       return;
     }
 
-    if (item.type === "plan" && method === "item/completed") {
-      const turnId = String(event?.turnId || item.id);
-      const explanation = String(item.text || this.appServerPlanText.get(String(item.id)) || "");
-      this.send({
-        type: "codex_plan",
-        turnId,
-        explanation,
-        plan: [],
-        sessionId: sid,
-      } as any);
-      appendHistory(sid, {
-        role: "codex_plan",
-        content: explanation,
-        toolUseId: turnId,
-        toolInput: { explanation, steps: [] },
-        timestamp: now(),
-      } as HistoryEntry);
-      this.appServerPlanText.delete(String(item.id));
+    if (item.type === "plan") {
+      if (method === "item/completed") {
+        const turnId = String(event?.turnId || item.id);
+        const explanation = String(item.text || this.appServerPlanText.get(String(item.id)) || "");
+        this.send({
+          type: "codex_plan",
+          turnId,
+          explanation,
+          plan: [],
+          sessionId: sid,
+        } as any);
+        appendHistory(sid, {
+          role: "codex_plan",
+          content: explanation,
+          toolUseId: turnId,
+          toolInput: { explanation, steps: [] },
+          timestamp: now(),
+        } as HistoryEntry);
+        this.appServerPlanText.delete(String(item.id));
+      }
       return;
     }
 

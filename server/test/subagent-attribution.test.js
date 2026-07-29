@@ -12,6 +12,7 @@ const {
 const {
   deriveClaudeTasksFromHistoryEntries,
   getHistory,
+  normalizeMisclassifiedCodexItemEntries,
 } = require("../dist/session-store");
 const {
   handleReportSubagentAssignmentTool,
@@ -747,6 +748,16 @@ test("translates every user-visible Codex item family into durable tailored card
   session.threadId = rootId;
 
   try {
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      turnId: "turn-agent",
+      item: { id: "agent-1", type: "agentMessage", text: "", phase: "commentary" },
+    });
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      turnId: "turn-plan",
+      item: { id: "plan-1", type: "plan", text: "" },
+    });
     session.handleAppServerNotification("item/plan/delta", {
       threadId: rootId,
       turnId: "turn-plan",
@@ -802,6 +813,8 @@ test("translates every user-visible Codex item family into durable tailored card
     assert.equal(calls.get("hook-prompt-1").input._codexItemType, "hookPrompt");
     assert.equal(calls.get("review-1").input._codexItemType, "reviewMode");
     assert.equal(calls.get("future-1").input._codexItemType, "unrecognized");
+    assert.equal(calls.has("agent-1"), false);
+    assert.equal(calls.has("plan-1"), false);
     assert.ok(sent.some((message) =>
       message.type === "codex_plan"
       && message.turnId === "turn-plan"
@@ -827,6 +840,37 @@ test("translates every user-visible Codex item family into durable tailored card
       { force: true },
     );
   }
+});
+
+test("filters the 1.0.198 known-item diagnostics without hiding future items", () => {
+  const normalized = normalizeMisclassifiedCodexItemEntries([
+    {
+      role: "tool_call",
+      toolName: "CodexItem",
+      toolUseId: "agent-1",
+      toolInput: {
+        _codexItemType: "unrecognized",
+        itemType: "agentMessage",
+      },
+    },
+    {
+      role: "tool_result",
+      toolUseId: "agent-1",
+      toolOutput: "unexpected",
+    },
+    {
+      role: "tool_call",
+      toolName: "CodexItem",
+      toolUseId: "future-1",
+      toolInput: {
+        _codexItemType: "unrecognized",
+        itemType: "futureProtocolItem",
+      },
+    },
+  ]);
+
+  assert.equal(normalized.some((entry) => entry.toolUseId === "agent-1"), false);
+  assert.equal(normalized.some((entry) => entry.toolUseId === "future-1"), true);
 });
 
 test("preserves structured Codex web results for the tailored search card", () => {

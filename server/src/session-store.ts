@@ -814,6 +814,35 @@ export function normalizeSendFileHistoryEntries(entries: HistoryEntry[]): Histor
   );
 }
 
+/**
+ * SocketAgent 1.0.198 briefly classified the start frame of ordinary
+ * agentMessage and plan items as future schema items. Remove those diagnostic
+ * calls (and any matching result) while reading history. The real assistant
+ * message/plan entry remains authoritative.
+ */
+export function normalizeMisclassifiedCodexItemEntries(
+  entries: HistoryEntry[],
+): HistoryEntry[] {
+  const removedToolUseIds = new Set<string>();
+  for (const entry of entries) {
+    const itemType = String(entry.toolInput?.itemType || "");
+    if (entry.role === "tool_call"
+      && entry.toolName === "CodexItem"
+      && entry.toolInput?._codexItemType === "unrecognized"
+      && (itemType === "agentMessage" || itemType === "plan")) {
+      const toolUseId = String(entry.toolUseId || "");
+      if (toolUseId) removedToolUseIds.add(toolUseId);
+    }
+  }
+  return entries
+    .filter((entry) =>
+      !(entry.role === "tool_call"
+        && removedToolUseIds.has(String(entry.toolUseId || "")))
+      && !(entry.role === "tool_result"
+        && removedToolUseIds.has(String(entry.toolUseId || ""))))
+    .map(cloneHistoryEntry);
+}
+
 function assistantDuplicateTimestampsMatch(first: HistoryEntry, second: HistoryEntry): boolean {
   const firstMs = Date.parse(first.timestamp || "");
   const secondMs = Date.parse(second.timestamp || "");
@@ -860,7 +889,9 @@ function parseHistorySnapshot(file: string): HistoryEntry[] {
     throw new Error(`History snapshot is not an array: ${file}`);
   }
   return normalizeClaudeResultFallbackHistoryEntries(
-    normalizeSendFileHistoryEntries(parsed as HistoryEntry[]),
+    normalizeMisclassifiedCodexItemEntries(
+      normalizeSendFileHistoryEntries(parsed as HistoryEntry[]),
+    ),
   );
 }
 

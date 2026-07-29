@@ -1159,24 +1159,34 @@ export class ClaudeSession {
           const newContent = buf.toString("utf8");
           const lines = newContent.split("\n").filter(l => l.length > 0);
           if (lines.length > 0) {
-            // Send to app immediately for live display in task pane
             const lineContent = lines.join("\n");
+            // Persist one cumulative, revisioned card snapshot so a retry or
+            // reconnect can replace state instead of duplicating chunks.
+            let positioned;
+            if (this.sessionId) {
+              positioned = appendHistory(this.sessionId, {
+                role: "monitor",
+                content: fs.readFileSync(state.outputFile, "utf8"),
+                taskId,
+                description: state.description,
+                toolInput: { snapshot: true },
+                timestamp: new Date().toISOString(),
+              });
+            }
             this.send({
               type: "monitor_output",
               taskId,
               content: lineContent,
+              snapshotContent: positioned?.content || fs.readFileSync(state.outputFile, "utf8"),
+              description: state.description,
+              snapshot: true,
               sessionId: this.sessionId || "",
+              ...(positioned ? {
+                entryId: positioned.entryId,
+                sessionSeq: positioned.sessionSeq,
+                revision: positioned.revision,
+              } : {}),
             } as any);
-            // Persist to history so monitor cards restore on session load
-            if (this.sessionId) {
-              appendHistory(this.sessionId, {
-                role: "monitor",
-                content: lineContent,
-                taskId,
-                description: state.description,
-                timestamp: new Date().toISOString(),
-              });
-            }
             // Accumulate for Claude injection (5s debounce)
             state.outputBuffer.push(...lines);
             if (state.debounceTimer) clearTimeout(state.debounceTimer);
@@ -2381,7 +2391,12 @@ export class ClaudeSession {
     const deliveryAware = [...this.clientSockets].some(
       (socket) => (socket as any).supportsSessionEventAck === true,
     );
-    const outgoing = deliveryAware
+    const monitorDeliveryAware = this.clientSockets.size > 0 && [...this.clientSockets].every(
+      (socket) => (socket as any).supportsMonitorOutputAck === true,
+    );
+    const shouldPrepare = deliveryAware
+      && ((msg as any).type !== "monitor_output" || monitorDeliveryAware);
+    const outgoing = shouldPrepare
       ? this.sessionEventDelivery.prepare(msg as any)
       : msg;
     this.dispatchToClients(outgoing as ServerMessage);

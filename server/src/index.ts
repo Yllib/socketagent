@@ -40,6 +40,7 @@ import {
   TransportLane,
   UPLOAD_ACK_VERSION,
   supportsSessionEventAcknowledgement,
+  supportsMonitorOutputAcknowledgement,
 } from "./protocol";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferPeerId, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
@@ -67,6 +68,7 @@ import { getCachedRateLimitEvents } from "./rate-limit-cache";
 import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings } from "./initial-session-settings";
+import { SessionEventDelivery } from "./session-event-delivery";
 import {
   discardSessionTransfer,
   exportSessionTransfer,
@@ -1507,12 +1509,31 @@ function attachSessionLifecycleCallbacks(session: Session): void {
 
 const durableMonitorPromptQueues = new Map<string, Promise<void>>();
 
-function broadcastDurableMonitorMessage(message: Record<string, any>): void {
+const durableSessionEventDeliveries = new Map<string, SessionEventDelivery>();
+
+function dispatchDurableSessionMessage(message: Record<string, any>): void {
   const raw = JSON.stringify(redactSecretsDeep(message));
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(raw);
   }
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
+}
+
+function broadcastDurableMonitorMessage(message: Record<string, any>): void {
+  const sessionId = String(message.sessionId || "");
+  const deliveryAware = connectedClients.size > 0 && [...connectedClients].every(
+    (client) => (client as any).supportsMonitorOutputAck === true,
+  );
+  if (!sessionId || !deliveryAware) {
+    dispatchDurableSessionMessage(message);
+    return;
+  }
+  let delivery = durableSessionEventDeliveries.get(sessionId);
+  if (!delivery) {
+    delivery = new SessionEventDelivery(dispatchDurableSessionMessage);
+    durableSessionEventDeliveries.set(sessionId, delivery);
+  }
+  dispatchDurableSessionMessage(delivery.prepare(message));
 }
 
 async function runDurableMonitorPrompt(record: DurableMonitorRecord, text: string): Promise<void> {
@@ -2770,6 +2791,7 @@ function createConnectionHandler(
     // app knows binary uploads are supported.
     if ((msg as any).type === "client_capabilities") {
       (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
+      (transport as any).supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       (transport as any).setClientCapabilities?.(msg);
       sendJson({
         ...serverCapabilitiesPayload(true, transportLane),
@@ -3535,6 +3557,9 @@ function createConnectionHandler(
         if (existing) {
           existing.replayLiveState?.(transport as any);
         }
+        durableSessionEventDeliveries.get(msg.sessionId)?.replayTo((message) => {
+          sendJson(message);
+        });
 
         // Re-send accumulated bash output so the reconnecting client sees live output
         if (resumeRunning && existing) {
@@ -3565,7 +3590,13 @@ function createConnectionHandler(
         const session = activeSessions.get(msg.sessionId)
           || (localSessionId === msg.sessionId ? activeSession : undefined);
         const acknowledged = session?.acknowledgeSessionEvent?.(msg.deliveryId) === true;
-        if (!acknowledged) {
+        const durableDelivery = durableSessionEventDeliveries.get(msg.sessionId);
+        const durableAcknowledged = durableDelivery?.acknowledge(msg.deliveryId) === true;
+        if (durableDelivery && durableDelivery.pendingCount === 0) {
+          durableSessionEventDeliveries.delete(msg.sessionId);
+          durableDelivery.dispose();
+        }
+        if (!acknowledged && !durableAcknowledged) {
           console.warn(`[SessionDelivery] Unmatched acknowledgement session=${msg.sessionId} delivery=${msg.deliveryId}`);
         }
         break;
@@ -8001,6 +8032,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       transport.authenticate((msg as any).binaryEnvelope === true);
       transport.setClientCapabilities(msg);
       (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
+      (transport as any).supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       console.log(
         `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane})`,
       );

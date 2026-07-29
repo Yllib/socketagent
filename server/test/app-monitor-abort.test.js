@@ -71,7 +71,15 @@ test("Monitor streams output, persists it, and emits a terminal lifecycle", asyn
       getSessionId: () => sessionId,
       getCwd: () => process.cwd(),
       send: (message) => sent.push(message),
-      appendHistory: (entry) => history.push(entry),
+      appendHistory: (entry) => {
+        history.push(entry);
+        return {
+          ...entry,
+          entryId: "monitor-entry",
+          sessionSeq: 1,
+          revision: history.length,
+        };
+      },
       getTtsEngine: () => "system",
       getKokoroVoice: () => "",
       getKokoroSpeed: () => 1,
@@ -92,10 +100,17 @@ test("Monitor streams output, persists it, and emits a terminal lifecycle", asyn
   assert.match(output, /first/);
   assert.match(output, /last/);
   assert.match(output, /Process exited with code 0/);
+  const outputEvents = sent.filter((message) => message.type === "monitor_output");
+  assert.ok(outputEvents.length > 0);
+  assert.ok(outputEvents.every((message) => message.snapshot === true));
+  assert.ok(outputEvents.every((message) => message.description === "lifecycle test"));
+  assert.ok(outputEvents.every((message) => message.entryId));
+  assert.match(outputEvents.at(-1).snapshotContent, /first[\s\S]*last/);
   const persisted = history.at(-1)?.content || "";
   assert.match(persisted, /first/);
   assert.match(persisted, /last/);
   assert.match(persisted, /Process exited with code 0/);
+  assert.ok(history.every((entry) => entry.toolInput?.snapshot === true));
   assert.ok(sent.some((message) =>
     message.type === "monitor_started" && message.monitoring === false,
   ));

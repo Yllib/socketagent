@@ -13,6 +13,7 @@ function requiresAcknowledgement(message: SessionEvent): boolean {
   return type === "tool_call"
     || type === "tool_result"
     || type === "html_plan"
+    || type === "monitor_output"
     || ((type === "text" || type === "thinking") && message.finalSnapshot === true);
 }
 

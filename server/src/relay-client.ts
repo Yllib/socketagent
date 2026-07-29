@@ -6,6 +6,7 @@ import {
   TransportLane,
   UPLOAD_ACK_VERSION,
   supportsSessionEventAcknowledgement,
+  supportsMonitorOutputAcknowledgement,
 } from "./protocol";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { detectAvailableBackends } from "./codex-session";
@@ -20,6 +21,7 @@ interface RelayPeer {
   publicKey: Uint8Array | null;
   binaryEnabled: boolean;
   supportsSessionEventAck: boolean;
+  supportsMonitorOutputAck: boolean;
   supportsBinaryFileDownload: boolean;
 }
 
@@ -214,6 +216,7 @@ export class RelayClient {
       this.ws = null;
       this.peers.clear();
       this.virtualWs.supportsSessionEventAck = false;
+      this.virtualWs.supportsMonitorOutputAck = false;
       this.virtualWs.supportsRawSdkEvents = false;
       this.relaySupportsMultiDevice = false;
       this.virtualWs._noteTransportReset();
@@ -264,6 +267,7 @@ export class RelayClient {
     this.ws = null;
     this.peers.clear();
     this.virtualWs.supportsSessionEventAck = false;
+    this.virtualWs.supportsMonitorOutputAck = false;
     this.virtualWs.supportsRawSdkEvents = false;
     this.relaySupportsMultiDevice = false;
     this.virtualWs._setOpen(false);
@@ -277,6 +281,7 @@ export class RelayClient {
         publicKey: null,
         binaryEnabled: false,
         supportsSessionEventAck: false,
+        supportsMonitorOutputAck: false,
         supportsBinaryFileDownload: false,
       };
       this.peers.set(peerId, peer);
@@ -383,6 +388,9 @@ export class RelayClient {
       const stillPaired = this.hasPairedPeer();
       this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
         .some((connectedPeer) => connectedPeer.supportsSessionEventAck);
+      this.virtualWs.supportsMonitorOutputAck = this.peers.size > 0
+        && Array.from(this.peers.values())
+          .every((connectedPeer) => connectedPeer.supportsMonitorOutputAck);
       if (!stillPaired) {
         this.virtualWs.supportsRawSdkEvents = false;
         this.virtualWs._noteTransportReset();
@@ -521,9 +529,13 @@ export class RelayClient {
       const wantsBinary = !!(msg as any).binaryEnvelope;
       const peer = this.getPeer(peerId);
       peer.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
+      peer.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       peer.supportsBinaryFileDownload = supportsBinaryFileDownload(msg);
       this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
         .some((connectedPeer) => connectedPeer.supportsSessionEventAck);
+      this.virtualWs.supportsMonitorOutputAck = this.peers.size > 0
+        && Array.from(this.peers.values())
+          .every((connectedPeer) => connectedPeer.supportsMonitorOutputAck);
       if (wantsBinary && !peer.binaryEnabled) {
         peer.binaryEnabled = true;
         console.log(`[Relay] Phone announced binary envelope support — flipping outbound to binary${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
@@ -632,6 +644,7 @@ export class VirtualRelaySocket {
   readyState: number = WebSocket.OPEN;
   connectionGeneration = 0;
   supportsSessionEventAck = false;
+  supportsMonitorOutputAck = false;
   supportsRawSdkEvents = false;
   private _onMessageCallbacks: ((data: Buffer) => void)[] = [];
   private _onCloseCallbacks: (() => void)[] = [];

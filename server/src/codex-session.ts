@@ -1724,7 +1724,12 @@ export class CodexSession {
     const deliveryAware = [...this.clientSockets].some(
       (socket) => (socket as any).supportsSessionEventAck === true,
     );
-    const outgoing = deliveryAware
+    const monitorDeliveryAware = this.clientSockets.size > 0 && [...this.clientSockets].every(
+      (socket) => (socket as any).supportsMonitorOutputAck === true,
+    );
+    const shouldPrepare = deliveryAware
+      && ((msg as any).type !== "monitor_output" || monitorDeliveryAware);
+    const outgoing = shouldPrepare
       ? this.sessionEventDelivery.prepare(msg as any)
       : msg;
     this.dispatchToClients(outgoing as ServerMessage);

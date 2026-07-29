@@ -511,6 +511,7 @@ export interface DirectAuthMessage {
 }
 
 export const SESSION_EVENT_ACK_VERSION = 1;
+export const MONITOR_OUTPUT_ACK_VERSION = 2;
 
 export function supportsSessionEventAcknowledgement(message: unknown): boolean {
   if (!message || typeof message !== "object") return false;
@@ -518,6 +519,14 @@ export function supportsSessionEventAcknowledgement(message: unknown): boolean {
   return typeof version === "number"
     && Number.isInteger(version)
     && version >= SESSION_EVENT_ACK_VERSION;
+}
+
+export function supportsMonitorOutputAcknowledgement(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const version = (message as Record<string, unknown>).sessionEventAckVersion;
+  return typeof version === "number"
+    && Number.isInteger(version)
+    && version >= MONITOR_OUTPUT_ACK_VERSION;
 }
 
 export interface FileDownloadAckMessage {
@@ -2005,7 +2014,16 @@ export interface MonitorOutputServerMessage {
   type: "monitor_output";
   taskId: string;
   content: string;
+  /** Cumulative state for snapshot-aware clients; content remains a legacy chunk. */
+  snapshotContent?: string;
   sessionId: string;
+  description?: string;
+  /** Cumulative card state. Legacy servers may still send append-only chunks. */
+  snapshot?: boolean;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
+  deliveryId?: string;
 }
 
 export interface TaskCompletedHookServerMessage {

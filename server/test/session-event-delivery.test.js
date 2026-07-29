@@ -102,3 +102,19 @@ test("HTML plan cards use acknowledged delivery", () => {
   assert.equal(delivery.acknowledge(prepared.deliveryId), true);
   delivery.dispose();
 });
+
+test("Monitor output cards use acknowledged delivery", () => {
+  const delivery = new SessionEventDelivery(() => {});
+  const prepared = delivery.prepare({
+    type: "monitor_output",
+    sessionId: "monitor-session",
+    taskId: "monitor-1",
+    content: "build complete",
+    snapshot: true,
+    revision: 2,
+  });
+  assert.ok(prepared.deliveryId);
+  assert.equal(delivery.pendingCount, 1);
+  assert.equal(delivery.acknowledge(prepared.deliveryId), true);
+  delivery.dispose();
+});

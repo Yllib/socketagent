@@ -947,12 +947,16 @@ function publishMonitorOutput(taskId: string, content: string): void {
     content: cumulative,
     taskId,
     description: state.description,
+    toolInput: { snapshot: true },
     timestamp: new Date().toISOString(),
   });
   state.ctx.send({
     type: "monitor_output",
     taskId,
     content,
+    snapshotContent: cumulative,
+    description: state.description,
+    snapshot: true,
     sessionId,
     ...((positioned && typeof positioned === "object") ? {
       entryId: (positioned as any).entryId,

@@ -3,13 +3,27 @@ const assert = require("node:assert/strict");
 
 const {
   SESSION_EVENT_ACK_VERSION,
+  MONITOR_OUTPUT_ACK_VERSION,
   supportsSessionEventAcknowledgement,
+  supportsMonitorOutputAcknowledgement,
 } = require("../dist/protocol");
 
 test("legacy boolean does not enable tracked session-event delivery", () => {
   assert.equal(
     supportsSessionEventAcknowledgement({ sessionEventAck: true }),
     false,
+  );
+});
+
+test("Monitor output acknowledgement requires the cumulative-card protocol", () => {
+  assert.equal(MONITOR_OUTPUT_ACK_VERSION, 2);
+  assert.equal(
+    supportsMonitorOutputAcknowledgement({ sessionEventAckVersion: 1 }),
+    false,
+  );
+  assert.equal(
+    supportsMonitorOutputAcknowledgement({ sessionEventAckVersion: 2 }),
+    true,
   );
 });
 

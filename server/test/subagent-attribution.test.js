@@ -898,6 +898,18 @@ test("keeps SocketAgent app tools on their native card path", () => {
     assert.equal(call.tool, "SendFile");
     assert.deepEqual(call.input, { file_path: "/tmp/app.apk" });
 
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      item: {
+        id: "notify-1",
+        type: "mcpToolCall",
+        server: "socketagent_app",
+        tool: "NotifyUser",
+        arguments: { title: "Alert", body: "Details" },
+      },
+    });
+    assert.equal(sent.some((message) => message.toolUseId === "notify-1"), false);
+
     const repaired = normalizeSocketAgentAppToolEntries([
       {
         role: "tool_call",
@@ -910,8 +922,26 @@ test("keeps SocketAgent app tools on their native card path", () => {
           _codexTool: "SendFile",
         },
       },
+      {
+        role: "tool_call",
+        toolName: "NotifyUser",
+        toolUseId: "legacy-notify",
+        toolInput: { title: "Alert", body: "Details" },
+      },
+      {
+        role: "tool_result",
+        toolUseId: "legacy-notify",
+        toolOutput: "Notification sent",
+      },
+      {
+        role: "notification",
+        status: "manual",
+        content: "Alert\nDetails",
+      },
     ]);
     assert.deepEqual(repaired[0].toolInput, { file_path: "/tmp/app.apk" });
+    assert.equal(repaired.some((entry) => entry.toolUseId === "legacy-notify"), false);
+    assert.equal(repaired.some((entry) => entry.role === "notification"), true);
   } finally {
     fs.rmSync(
       path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),

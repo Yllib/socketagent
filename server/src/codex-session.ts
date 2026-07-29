@@ -3686,7 +3686,8 @@ export class CodexSession {
 
     if (item.type === "mcpToolCall") {
       const isSocketAgentApp = item.server === "socketagent_app" || item.server === "socketagent-app";
-      if (isSocketAgentApp && item.tool === "ReportSubagentAssignment") return;
+      if (isSocketAgentApp
+        && (item.tool === "ReportSubagentAssignment" || item.tool === "NotifyUser")) return;
       const toolName = isSocketAgentApp ? item.tool : `mcp:${item.server}/${item.tool}`;
       if (method === "item/started") {
         const args = (item.arguments && typeof item.arguments === "object")

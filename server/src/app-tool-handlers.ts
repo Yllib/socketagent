@@ -795,8 +795,14 @@ export async function handleNotifyUserTool(
   });
   ctx.appendHistory?.({
     role: "notification",
+    entryId: eventId,
     content: body ? `${title}\n${body}` : title,
     status: "manual",
+    toolInput: {
+      kind: "notify_user",
+      title,
+      body,
+    },
     timestamp: new Date().toISOString(),
   });
 

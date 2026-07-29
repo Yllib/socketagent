@@ -852,10 +852,22 @@ export function normalizeMisclassifiedCodexItemEntries(
 export function normalizeSocketAgentAppToolEntries(
   entries: HistoryEntry[],
 ): HistoryEntry[] {
-  return entries.map((rawEntry) => {
+  const removedToolUseIds = new Set<string>();
+  const normalized = entries.map((rawEntry) => {
     const entry = cloneHistoryEntry(rawEntry);
     const input = entry.toolInput;
     const server = String(input?._codexServer || "");
+    const rawName = String(entry.toolName || "");
+    const appTool = String(input?._codexTool || "")
+      || (rawName.endsWith("__NotifyUser")
+        || rawName.endsWith("/NotifyUser")
+        || rawName === "NotifyUser"
+        ? "NotifyUser"
+        : "");
+    if (entry.role === "tool_call" && appTool === "NotifyUser") {
+      const toolUseId = String(entry.toolUseId || "");
+      if (toolUseId) removedToolUseIds.add(toolUseId);
+    }
     if (entry.role === "tool_call"
       && (server === "socketagent_app" || server === "socketagent-app")
       && input?._codexItemType === "mcpToolCall") {
@@ -867,6 +879,9 @@ export function normalizeSocketAgentAppToolEntries(
     }
     return entry;
   });
+  return normalized.filter((entry) =>
+    !removedToolUseIds.has(String(entry.toolUseId || "")),
+  );
 }
 
 function assistantDuplicateTimestampsMatch(first: HistoryEntry, second: HistoryEntry): boolean {

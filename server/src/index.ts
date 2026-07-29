@@ -69,6 +69,7 @@ import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, r
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings } from "./initial-session-settings";
 import { SessionEventDelivery } from "./session-event-delivery";
+import { routeMonitorOutputToSession } from "./monitor-output-route";
 import {
   discardSessionTransfer,
   exportSessionTransfer,
@@ -3754,25 +3755,30 @@ function createConnectionHandler(
           });
         }
 
-        // Set up monitor output callback — starts a new query when session is idle
-        activeSession.onMonitorOutput = (text: string) => {
-          if (!activeSession) return;
-          if (activeSession.isRunning) {
-            // Race: session started running between debounce and callback
-            activeSession.injectMessage(text, 'next').catch(e => console.error(`[Monitor] Inject race: ${e}`));
-            return;
-          }
-          const monitorSid = activeSession.getSessionId() || undefined;
-          console.log(`[Monitor] Starting query for idle session ${monitorSid}`);
-          attachSessionLifecycleCallbacks(activeSession);
-          activeSession.runQuery(text, monitorSid).then(() => {
-            const s = activeSession?.getSessionId();
-            if (s && activeSessions.get(s) === activeSession && !sessionShouldRemainPooled(activeSession)) {
-              activeSessions.delete(s);
-            }
-            broadcastSessionList();
-          }).catch((err) => {
-            console.error(`[Monitor] Query error: ${err.message || err}`);
+        // Bind delivery to this exact session object. The connection's
+        // activeSession variable changes whenever the phone opens another
+        // session and must never determine a Monitor's destination.
+        const monitorOwner = activeSession;
+        monitorOwner.onMonitorOutput = (text: string) => {
+          void routeMonitorOutputToSession(monitorOwner, text, {
+            beforeIdleRun: (monitorSid) => {
+              console.log(`[Monitor] Starting query for owning session ${monitorSid}`);
+              attachSessionLifecycleCallbacks(monitorOwner);
+            },
+            afterIdleRun: () => {
+              const sid = monitorOwner.getSessionId();
+              if (
+                sid
+                && activeSessions.get(sid) === monitorOwner
+                && !sessionShouldRemainPooled(monitorOwner)
+              ) {
+                activeSessions.delete(sid);
+              }
+              broadcastSessionList();
+            },
+            onError: (error: any) => {
+              console.error(`[Monitor] Owning-session delivery failed: ${error?.message || error}`);
+            },
           });
         };
 

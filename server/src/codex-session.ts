@@ -3692,14 +3692,16 @@ export class CodexSession {
         const args = (item.arguments && typeof item.arguments === "object")
           ? item.arguments
           : {};
-        const input = {
-          ...args,
-          _codexItemType: "mcpToolCall",
-          _codexServer: item.server || "",
-          _codexTool: item.tool || "",
-          _codexAppContext: item.appContext || null,
-          _codexPluginId: item.pluginId || null,
-        };
+        const input = isSocketAgentApp
+          ? { ...args }
+          : {
+            ...args,
+            _codexItemType: "mcpToolCall",
+            _codexServer: item.server || "",
+            _codexTool: item.tool || "",
+            _codexAppContext: item.appContext || null,
+            _codexPluginId: item.pluginId || null,
+          };
         sendItem({
           type: "tool_call",
           tool: toolName,

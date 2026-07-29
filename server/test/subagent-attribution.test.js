@@ -13,6 +13,7 @@ const {
   deriveClaudeTasksFromHistoryEntries,
   getHistory,
   normalizeMisclassifiedCodexItemEntries,
+  normalizeSocketAgentAppToolEntries,
 } = require("../dist/session-store");
 const {
   handleReportSubagentAssignmentTool,
@@ -871,6 +872,52 @@ test("filters the 1.0.198 known-item diagnostics without hiding future items", (
 
   assert.equal(normalized.some((entry) => entry.toolUseId === "agent-1"), false);
   assert.equal(normalized.some((entry) => entry.toolUseId === "future-1"), true);
+});
+
+test("keeps SocketAgent app tools on their native card path", () => {
+  const sent = [];
+  const rootId = `test-codex-native-tool-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      item: {
+        id: "send-file-1",
+        type: "mcpToolCall",
+        server: "socketagent_app",
+        tool: "SendFile",
+        arguments: { file_path: "/tmp/app.apk" },
+      },
+    });
+
+    const call = sent.find((message) =>
+      message.type === "tool_call" && message.toolUseId === "send-file-1");
+    assert.equal(call.tool, "SendFile");
+    assert.deepEqual(call.input, { file_path: "/tmp/app.apk" });
+
+    const repaired = normalizeSocketAgentAppToolEntries([
+      {
+        role: "tool_call",
+        toolName: "SendFile",
+        toolUseId: "legacy-send",
+        toolInput: {
+          file_path: "/tmp/app.apk",
+          _codexItemType: "mcpToolCall",
+          _codexServer: "socketagent_app",
+          _codexTool: "SendFile",
+        },
+      },
+    ]);
+    assert.deepEqual(repaired[0].toolInput, { file_path: "/tmp/app.apk" });
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
 });
 
 test("preserves structured Codex web results for the tailored search card", () => {

@@ -843,6 +843,32 @@ export function normalizeMisclassifiedCodexItemEntries(
     .map(cloneHistoryEntry);
 }
 
+/**
+ * SocketAgent-native tools already have dedicated app cards. Version 1.0.198
+ * attached generic Codex MCP metadata to them, which could take precedence
+ * over FileCard, SpeakCard, ReminderCard, and MonitorToolCard. Strip only that
+ * presentation metadata while preserving the tool arguments and result.
+ */
+export function normalizeSocketAgentAppToolEntries(
+  entries: HistoryEntry[],
+): HistoryEntry[] {
+  return entries.map((rawEntry) => {
+    const entry = cloneHistoryEntry(rawEntry);
+    const input = entry.toolInput;
+    const server = String(input?._codexServer || "");
+    if (entry.role === "tool_call"
+      && (server === "socketagent_app" || server === "socketagent-app")
+      && input?._codexItemType === "mcpToolCall") {
+      delete input._codexItemType;
+      delete input._codexServer;
+      delete input._codexTool;
+      delete input._codexAppContext;
+      delete input._codexPluginId;
+    }
+    return entry;
+  });
+}
+
 function assistantDuplicateTimestampsMatch(first: HistoryEntry, second: HistoryEntry): boolean {
   const firstMs = Date.parse(first.timestamp || "");
   const secondMs = Date.parse(second.timestamp || "");
@@ -889,8 +915,10 @@ function parseHistorySnapshot(file: string): HistoryEntry[] {
     throw new Error(`History snapshot is not an array: ${file}`);
   }
   return normalizeClaudeResultFallbackHistoryEntries(
-    normalizeMisclassifiedCodexItemEntries(
-      normalizeSendFileHistoryEntries(parsed as HistoryEntry[]),
+    normalizeSocketAgentAppToolEntries(
+      normalizeMisclassifiedCodexItemEntries(
+        normalizeSendFileHistoryEntries(parsed as HistoryEntry[]),
+      ),
     ),
   );
 }

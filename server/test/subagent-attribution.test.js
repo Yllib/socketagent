@@ -5,7 +5,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { CodexSession } = require("../dist/codex-session");
+const {
+  CodexSession,
+  summarizeCodexCommandActions,
+} = require("../dist/codex-session");
 const {
   deriveClaudeTasksFromHistoryEntries,
   getHistory,
@@ -660,8 +663,25 @@ test("replays an active Codex tool call after reconnect and retires it on comple
         id: "command-1",
         type: "commandExecution",
         command: "npm test",
+        cwd: "/workspace/socketagent",
+        source: "agent",
+        commandActions: [
+          {
+            type: "search",
+            command: "rg -n test server",
+            query: "test",
+            path: "server",
+          },
+        ],
       },
     });
+
+    const liveCall = sent.find((message) =>
+      message.type === "tool_call" && message.toolUseId === "command-1");
+    assert.equal(liveCall.input.description, "Search server for test");
+    assert.equal(liveCall.input.cwd, "/workspace/socketagent");
+    assert.equal(liveCall.input._codexItemType, "commandExecution");
+    assert.equal(liveCall.input.commandActions[0].type, "search");
 
     assert.deepEqual(session.getActiveToolCall(), {
       toolUseId: "command-1",
@@ -693,6 +713,229 @@ test("replays an active Codex tool call after reconnect and retires it on comple
       replayed.some((message) => message.toolUseId === "command-1"),
       false,
     );
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
+});
+
+test("summarizes structured Codex command actions with a bounded command fallback", () => {
+  assert.equal(
+    summarizeCodexCommandActions(
+      [
+        { type: "read", name: "protocol.ts", path: "/repo/protocol.ts" },
+        { type: "listFiles", path: "/repo/server" },
+        { type: "search", query: "ThreadItem", path: "/repo/server" },
+      ],
+      "ignored",
+    ),
+    "Read protocol.ts · List files in /repo/server · +1 more",
+  );
+  assert.equal(
+    summarizeCodexCommandActions([], "npm test && npm run build"),
+    "npm test",
+  );
+});
+
+test("translates every user-visible Codex item family into durable tailored cards", () => {
+  const sent = [];
+  const rootId = `test-codex-items-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("item/plan/delta", {
+      threadId: rootId,
+      turnId: "turn-plan",
+      itemId: "plan-1",
+      delta: "Inspect the protocol",
+    });
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      turnId: "turn-plan",
+      item: { id: "plan-1", type: "plan", text: "Inspect, map, and test." },
+    });
+
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      item: { id: "sleep-1", type: "sleep", durationMs: 2500 },
+    });
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: { id: "sleep-1", type: "sleep", durationMs: 2500 },
+    });
+
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: {
+        id: "hook-prompt-1",
+        type: "hookPrompt",
+        fragments: [{ hookRunId: "hook-1", text: "Run the focused test." }],
+      },
+    });
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: {
+        id: "review-1",
+        type: "exitedReviewMode",
+        review: "No blocking findings.",
+      },
+    });
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      item: { id: "future-1", type: "futureProtocolItem", value: 7 },
+    });
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: { id: "future-1", type: "futureProtocolItem", value: 7 },
+    });
+
+    const calls = new Map(
+      sent
+        .filter((message) => message.type === "tool_call")
+        .map((message) => [message.toolUseId, message]),
+    );
+    assert.equal(calls.get("sleep-1").input._codexItemType, "sleep");
+    assert.equal(calls.get("hook-prompt-1").input._codexItemType, "hookPrompt");
+    assert.equal(calls.get("review-1").input._codexItemType, "reviewMode");
+    assert.equal(calls.get("future-1").input._codexItemType, "unrecognized");
+    assert.ok(sent.some((message) =>
+      message.type === "codex_plan"
+      && message.turnId === "turn-plan"
+      && message.explanation === "Inspect, map, and test."));
+
+    const history = getHistory(rootId);
+    for (const toolUseId of [
+      "sleep-1",
+      "hook-prompt-1",
+      "review-1",
+      "future-1",
+    ]) {
+      assert.ok(history.some((entry) =>
+        entry.role === "tool_call" && entry.toolUseId === toolUseId));
+      assert.ok(history.some((entry) =>
+        entry.role === "tool_result" && entry.toolUseId === toolUseId));
+    }
+    assert.ok(history.some((entry) =>
+      entry.role === "codex_plan" && entry.toolUseId === "turn-plan"));
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
+});
+
+test("preserves structured Codex web results for the tailored search card", () => {
+  const sent = [];
+  const rootId = `test-codex-web-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("item/started", {
+      threadId: rootId,
+      item: {
+        id: "web-1",
+        type: "webSearch",
+        query: "Codex app-server",
+        action: { type: "search", query: "Codex app-server" },
+      },
+    });
+    session.handleAppServerNotification("item/completed", {
+      threadId: rootId,
+      item: {
+        id: "web-1",
+        type: "webSearch",
+        query: "Codex app-server",
+        results: [
+          {
+            title: "Codex App Server",
+            url: "https://developers.openai.com/codex/app-server",
+            snippet: "Build rich Codex clients.",
+          },
+        ],
+      },
+    });
+
+    const call = sent.find((message) =>
+      message.type === "tool_call" && message.toolUseId === "web-1");
+    const result = sent.find((message) =>
+      message.type === "tool_result" && message.toolUseId === "web-1");
+    assert.equal(call.input._codexItemType, "webSearch");
+    assert.deepEqual(JSON.parse(result.output)[0], {
+      title: "Codex App Server",
+      url: "https://developers.openai.com/codex/app-server",
+      snippet: "Build rich Codex clients.",
+    });
+  } finally {
+    fs.rmSync(
+      path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
+      { force: true },
+    );
+  }
+});
+
+test("preserves Codex reroutes, reasoning sections, and structured warnings", () => {
+  const sent = [];
+  const rootId = `test-codex-metadata-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+
+  try {
+    session.handleAppServerNotification("item/reasoning/summaryTextDelta", {
+      threadId: rootId,
+      itemId: "reasoning-1",
+      summaryIndex: 0,
+      delta: "First section.",
+    });
+    session.handleAppServerNotification("item/reasoning/summaryPartAdded", {
+      threadId: rootId,
+      itemId: "reasoning-1",
+      summaryIndex: 1,
+    });
+    session.handleAppServerNotification("item/reasoning/summaryTextDelta", {
+      threadId: rootId,
+      itemId: "reasoning-1",
+      summaryIndex: 1,
+      delta: "Second section.",
+    });
+    session.handleAppServerNotification("model/rerouted", {
+      threadId: rootId,
+      turnId: "turn-1",
+      fromModel: "gpt-5.6-codex",
+      toModel: "gpt-5.6",
+      reason: "highRiskCyberActivity",
+    });
+    session.handleAppServerNotification("configWarning", {
+      summary: "Invalid config option",
+      details: "Remove the obsolete setting.",
+      path: "/tmp/config.toml",
+    });
+
+    const thinking = sent.filter((message) =>
+      message.type === "thinking" && message.streamId === "reasoning-1").at(-1);
+    assert.equal(thinking.content, "First section.\n\nSecond section.");
+
+    const reroute = sent.find((message) =>
+      message.type === "tool_call"
+      && message.toolUseId === "codex-reroute:turn-1");
+    assert.equal(reroute.input._codexItemType, "modelRerouted");
+    assert.equal(reroute.input.reason, "highRiskCyberActivity");
+    assert.ok(getHistory(rootId).some((entry) =>
+      entry.role === "tool_call"
+      && entry.toolUseId === "codex-reroute:turn-1"));
+
+    const warning = sent.find((message) =>
+      message.type === "error"
+      && message.message.includes("Invalid config option"));
+    assert.match(warning.message, /Remove the obsolete setting/);
+    assert.match(warning.message, /Config: \/tmp\/config\.toml/);
   } finally {
     fs.rmSync(
       path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),

@@ -138,6 +138,55 @@ function dynamicToolDisplayName(item: any): string {
   }
   return namespace ? `${namespace}/${tool}` : tool;
 }
+
+function shortPath(value: unknown): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const home = os.homedir().replace(/\/+$/, "");
+  return raw === home ? "~" : raw.startsWith(`${home}/`) ? `~/${raw.slice(home.length + 1)}` : raw;
+}
+
+export function summarizeCodexCommandActions(
+  actions: unknown,
+  command: unknown,
+): string {
+  const summaries = (Array.isArray(actions) ? actions : [])
+    .map((raw): string => {
+      const action = raw && typeof raw === "object"
+        ? raw as Record<string, unknown>
+        : {};
+      const type = String(action.type || "");
+      if (type === "read") {
+        const name = String(action.name || "").trim()
+          || path.basename(String(action.path || ""));
+        return name ? `Read ${name}` : "Read a file";
+      }
+      if (type === "listFiles") {
+        const target = shortPath(action.path);
+        return target ? `List files in ${target}` : "List files";
+      }
+      if (type === "search") {
+        const query = String(action.query || "").trim();
+        const target = shortPath(action.path);
+        if (query && target) return `Search ${target} for ${query}`;
+        if (query) return `Search for ${query}`;
+        return target ? `Search ${target}` : "Search files";
+      }
+      return "";
+    })
+    .filter(Boolean);
+  if (summaries.length > 0) {
+    const visible = summaries.slice(0, 2).join(" · ");
+    return summaries.length > 2 ? `${visible} · +${summaries.length - 2} more` : visible;
+  }
+
+  const rawCommand = String(command || "").trim();
+  if (!rawCommand) return "Run command";
+  const firstLine = rawCommand.split(/\r?\n/, 1)[0]
+    .split(/\s*(?:&&|;|\|\|)\s*/, 1)[0]
+    .trim();
+  return firstLine.length > 96 ? `${firstLine.slice(0, 93)}…` : firstLine;
+}
 import {
   prepareCodexMcpElicitation,
   resolveCodexMcpElicitation,
@@ -303,6 +352,7 @@ export class CodexSession {
   private appServerReasoningText = new Map<string, string>();
   private appServerReasoningParents = new Map<string, string>();
   private appServerReasoningStartedAt = new Map<string, number>();
+  private appServerPlanText = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
   private appServerActiveToolCalls = new Map<string, {
     tool: string;
@@ -2818,6 +2868,31 @@ export class CodexSession {
         return;
       }
 
+      case "thread/settings/updated": {
+        const sid = String(p?.threadId || "");
+        if (!sid || (this.threadId && sid !== this.threadId)) return;
+        const settings = p?.threadSettings || {};
+        const model = String(settings.model || "").trim();
+        if (model) this._model = model;
+        const effort = String(settings.effort || "");
+        if (effort === "minimal" || effort === "low" || effort === "medium"
+          || effort === "high" || effort === "max" || effort === "xhigh"
+          || effort === "ultra") {
+          this._effort = effort;
+        }
+        const collaborationMode = String(settings?.collaborationMode?.mode || "").trim();
+        if (collaborationMode) this._collaborationMode = collaborationMode;
+        const cwd = String(settings.cwd || "").trim();
+        if (cwd) this.cwd = cwd;
+        this.persistAgentSettings(this.getAgentSettings());
+        this.send({
+          type: "session_settings",
+          sessionId: sid,
+          settings: this.getAgentSettings(),
+        } as any);
+        return;
+      }
+
       case "item/agentMessage/delta": {
         const sid = this.sessionId;
         if (!sid) return;
@@ -2860,6 +2935,34 @@ export class CodexSession {
           snapshot: true,
           ...(parentToolUseId ? { parentToolUseId } : {}),
         } as ServerMessage);
+        return;
+      }
+
+      case "item/reasoning/summaryPartAdded": {
+        const itemId = String(p?.itemId || "");
+        if (!itemId || Number(p?.summaryIndex || 0) <= 0) return;
+        const accumulated = this.appServerReasoningText.get(itemId) || "";
+        if (accumulated && !accumulated.endsWith("\n\n")) {
+          this.appServerReasoningText.set(itemId, `${accumulated}\n\n`);
+        }
+        return;
+      }
+
+      case "item/plan/delta": {
+        const sid = this.sessionId;
+        const itemId = String(p?.itemId || p?.item?.id || p?.turnId || "plan");
+        const turnId = String(p?.turnId || itemId);
+        const delta = String(p?.delta ?? "");
+        if (!sid || !delta) return;
+        const accumulated = (this.appServerPlanText.get(itemId) || "") + delta;
+        this.appServerPlanText.set(itemId, accumulated);
+        this.send({
+          type: "codex_plan",
+          turnId,
+          explanation: accumulated,
+          plan: [],
+          sessionId: sid,
+        } as any);
         return;
       }
 
@@ -3000,24 +3103,210 @@ export class CodexSession {
 
       case "model/rerouted": {
         const sid = this.sessionId;
-        if (!sid) return;
+        if (!sid || (p?.threadId && p.threadId !== this.threadId)) return;
         const fromModel = String(p?.fromModel || "unknown");
         const toModel = String(p?.toModel || "unknown");
+        const reason = String(p?.reason || "");
+        const toolUseId = `codex-reroute:${String(p?.turnId || Date.now())}`;
+        const input = {
+          fromModel,
+          toModel,
+          reason,
+          _codexItemType: "modelRerouted",
+        };
         this.send({
-          type: "task_notification",
-          taskId: String(p?.turnId || "model-rerouted"),
-          status: "completed",
-          summary: `Model rerouted: ${fromModel} -> ${toModel}`,
+          type: "tool_call",
+          tool: "ModelRerouted",
+          input,
+          toolUseId,
           sessionId: sid,
         } as any);
+        const output = reason
+          ? `Codex switched from ${fromModel} to ${toModel}: ${reason}`
+          : `Codex switched from ${fromModel} to ${toModel}`;
+        this.send({
+          type: "tool_result",
+          toolUseId,
+          output,
+          sessionId: sid,
+        } as any);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: "Codex model changed",
+          toolName: "ModelRerouted",
+          toolInput: input,
+          toolUseId,
+          timestamp: now(),
+        });
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId,
+          toolOutput: output,
+          timestamp: now(),
+        });
+        return;
+      }
+
+      case "model/safetyBuffering/updated": {
+        const sid = this.sessionId;
+        if (!sid || (p?.threadId && p.threadId !== this.threadId)) return;
+        const toolUseId = `codex-safety:${String(p?.turnId || "turn")}`;
+        const parentToolUseId = this.parentToolUseIdForThread(p?.threadId);
+        if (p?.showBufferingUi === true) {
+          const input = {
+            model: p?.model || "",
+            useCases: Array.isArray(p?.useCases) ? p.useCases : [],
+            reasons: Array.isArray(p?.reasons) ? p.reasons : [],
+            fasterModel: p?.fasterModel || null,
+            _codexItemType: "safetyBuffering",
+          };
+          this.send({
+            type: "tool_call",
+            tool: "SafetyBuffering",
+            input,
+            toolUseId,
+            sessionId: sid,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          } as any);
+          appendHistory(sid, {
+            role: "tool_call",
+            content: "Response safety check",
+            toolName: "SafetyBuffering",
+            toolInput: input,
+            toolUseId,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+            timestamp: now(),
+          });
+        } else {
+          this.send({
+            type: "tool_result",
+            toolUseId,
+            output: "Safety check completed",
+            sessionId: sid,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          } as any);
+          appendHistory(sid, {
+            role: "tool_result",
+            content: "Safety check completed",
+            toolUseId,
+            toolOutput: "Safety check completed",
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+            timestamp: now(),
+          });
+        }
+        return;
+      }
+
+      case "model/verification": {
+        const sid = this.sessionId;
+        if (!sid || (p?.threadId && p.threadId !== this.threadId)) return;
+        const toolUseId = `codex-verification:${String(p?.turnId || Date.now())}`;
+        const input = {
+          verifications: Array.isArray(p?.verifications) ? p.verifications : [],
+          _codexItemType: "modelVerification",
+        };
+        this.send({
+          type: "tool_call",
+          tool: "ModelVerification",
+          input,
+          toolUseId,
+          sessionId: sid,
+        } as any);
+        const output = input.verifications.length > 0
+          ? JSON.stringify(input.verifications, null, 2)
+          : "Additional account verification is required";
+        this.send({
+          type: "tool_result",
+          toolUseId,
+          output,
+          sessionId: sid,
+        } as any);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: "Account verification required",
+          toolName: "ModelVerification",
+          toolInput: input,
+          toolUseId,
+          timestamp: now(),
+        });
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId,
+          toolOutput: output,
+          timestamp: now(),
+        });
+        return;
+      }
+
+      case "item/autoApprovalReview/started": {
+        const sid = this.sessionId;
+        if (!sid) return;
+        const toolUseId = `codex-auto-review:${String(p?.reviewId || Date.now())}`;
+        const input = {
+          action: p?.action || null,
+          review: p?.review || null,
+          targetItemId: p?.targetItemId || null,
+          _codexItemType: "autoApprovalReview",
+        };
+        this.send({
+          type: "tool_call",
+          tool: "ApprovalReview",
+          input,
+          toolUseId,
+          sessionId: sid,
+        } as any);
+        appendHistory(sid, {
+          role: "tool_call",
+          content: "Reviewing tool approval",
+          toolName: "ApprovalReview",
+          toolInput: input,
+          toolUseId,
+          timestamp: now(),
+        });
+        return;
+      }
+
+      case "item/autoApprovalReview/completed": {
+        const sid = this.sessionId;
+        if (!sid) return;
+        const toolUseId = `codex-auto-review:${String(p?.reviewId || "")}`;
+        const output = JSON.stringify({
+          review: p?.review || null,
+          decisionSource: p?.decisionSource || null,
+        }, null, 2);
+        this.send({
+          type: "tool_result",
+          toolUseId,
+          output,
+          sessionId: sid,
+        } as any);
+        appendHistory(sid, {
+          role: "tool_result",
+          content: output,
+          toolUseId,
+          toolOutput: output,
+          timestamp: now(),
+        });
         return;
       }
 
       case "guardianWarning":
-      case "deprecationNotice":
       case "windows/worldWritableWarning": {
         const message = String(p?.message || p?.warning || method);
         this.send({ type: "error", message } as ServerMessage);
+        return;
+      }
+
+      case "deprecationNotice": {
+        const summary = String(p?.summary || "Codex deprecation notice");
+        const details = String(p?.details || "").trim();
+        this.send({
+          type: "error",
+          message: details ? `${summary}\n${details}` : summary,
+          sessionId: this.sessionId || undefined,
+        } as any);
         return;
       }
 
@@ -3118,11 +3407,28 @@ export class CodexSession {
 
       case "error":
       case "warning":
-      case "configWarning":
-        if (p?.message) {
-          this.send({ type: "error", message: String(p.message) } as ServerMessage);
+        if (p?.message || p?.summary) {
+          const summary = String(p?.message || p?.summary);
+          const details = String(p?.details || "").trim();
+          this.send({
+            type: "error",
+            message: details ? `${summary}\n${details}` : summary,
+            sessionId: this.sessionId || undefined,
+          } as any);
         }
         return;
+
+      case "configWarning": {
+        const summary = String(p?.summary || "Codex configuration warning");
+        const details = String(p?.details || "").trim();
+        const path = String(p?.path || "").trim();
+        this.send({
+          type: "error",
+          message: `${summary}${details ? `\n${details}` : ""}${path ? `\nConfig: ${path}` : ""}`,
+          sessionId: this.sessionId || undefined,
+        } as any);
+        return;
+      }
     }
   }
 
@@ -3228,6 +3534,27 @@ export class CodexSession {
       return;
     }
 
+    if (item.type === "plan" && method === "item/completed") {
+      const turnId = String(event?.turnId || item.id);
+      const explanation = String(item.text || this.appServerPlanText.get(String(item.id)) || "");
+      this.send({
+        type: "codex_plan",
+        turnId,
+        explanation,
+        plan: [],
+        sessionId: sid,
+      } as any);
+      appendHistory(sid, {
+        role: "codex_plan",
+        content: explanation,
+        toolUseId: turnId,
+        toolInput: { explanation, steps: [] },
+        timestamp: now(),
+      } as HistoryEntry);
+      this.appServerPlanText.delete(String(item.id));
+      return;
+    }
+
     if (item.type === "contextCompaction") {
       if (parentToolUseId) return;
       if (method === "item/started") {
@@ -3250,18 +3577,26 @@ export class CodexSession {
 
     if (item.type === "commandExecution") {
       if (method === "item/started") {
+        const input = {
+          command: item.command || "",
+          description: summarizeCodexCommandActions(item.commandActions, item.command),
+          cwd: item.cwd || "",
+          commandActions: Array.isArray(item.commandActions) ? item.commandActions : [],
+          source: item.source || "",
+          _codexItemType: "commandExecution",
+        };
         sendItem({
           type: "tool_call",
           tool: "Bash",
-          input: { command: item.command || "" },
+          input,
           toolUseId: item.id,
           sessionId: sid,
         });
         appendItem({
           role: "tool_call",
-          content: item.command || "",
+          content: input.description,
           toolName: "Bash",
-          toolInput: { command: item.command || "" },
+          toolInput: input,
           toolUseId: item.id,
           timestamp: now(),
         });
@@ -3350,7 +3685,17 @@ export class CodexSession {
       if (isSocketAgentApp && item.tool === "ReportSubagentAssignment") return;
       const toolName = isSocketAgentApp ? item.tool : `mcp:${item.server}/${item.tool}`;
       if (method === "item/started") {
-        const input = (item.arguments && typeof item.arguments === "object") ? item.arguments : {};
+        const args = (item.arguments && typeof item.arguments === "object")
+          ? item.arguments
+          : {};
+        const input = {
+          ...args,
+          _codexItemType: "mcpToolCall",
+          _codexServer: item.server || "",
+          _codexTool: item.tool || "",
+          _codexAppContext: item.appContext || null,
+          _codexPluginId: item.pluginId || null,
+        };
         sendItem({
           type: "tool_call",
           tool: toolName,
@@ -3426,7 +3771,15 @@ export class CodexSession {
     if (item.type === "dynamicToolCall") {
       const toolName = dynamicToolDisplayName(item);
       if (method === "item/started") {
-        const input = (item.arguments && typeof item.arguments === "object") ? item.arguments : {};
+        const args = (item.arguments && typeof item.arguments === "object")
+          ? item.arguments
+          : {};
+        const input = {
+          ...args,
+          _codexItemType: "dynamicToolCall",
+          _codexNamespace: item.namespace || "",
+          _codexTool: item.tool || "",
+        };
         sendItem({
           type: "tool_call",
           tool: toolName,
@@ -3463,7 +3816,11 @@ export class CodexSession {
 
     if (item.type === "webSearch") {
       if (method === "item/started") {
-        const input = { query: item.query, action: item.action ?? null };
+        const input = {
+          query: item.query,
+          action: item.action ?? null,
+          _codexItemType: "webSearch",
+        };
         sendItem({
           type: "tool_call",
           tool: "WebSearch",
@@ -3480,7 +3837,11 @@ export class CodexSession {
           timestamp: now(),
         });
       } else {
-        const output = item.action ? JSON.stringify(item.action, null, 2) : "Search completed";
+        const output = Array.isArray(item.results) && item.results.length > 0
+          ? JSON.stringify(item.results, null, 2)
+          : item.action
+            ? JSON.stringify(item.action, null, 2)
+            : "Search completed";
         sendItem({
           type: "tool_result",
           toolUseId: item.id,
@@ -3500,7 +3861,10 @@ export class CodexSession {
 
     if (item.type === "imageView") {
       if (method === "item/started") {
-        const input = { path: item.path };
+        const input = {
+          path: item.path,
+          _codexItemType: "imageView",
+        };
         sendItem({
           type: "tool_call",
           tool: "ViewImage",
@@ -3541,6 +3905,7 @@ export class CodexSession {
         const input = {
           status: item.status,
           revisedPrompt: item.revisedPrompt ?? null,
+          _codexItemType: "imageGeneration",
         };
         sendItem({
           type: "tool_call",
@@ -3591,19 +3956,168 @@ export class CodexSession {
       return;
     }
 
-    if (item.type === "enteredReviewMode" || item.type === "exitedReviewMode") {
-      if (method === "item/completed") {
-        this.send({
-          type: "task_notification",
-          taskId: item.id,
-          status: "completed",
-          summary: item.type === "enteredReviewMode"
-            ? `Entered review mode: ${item.review || ""}`
-            : `Exited review mode: ${item.review || ""}`,
+    if (item.type === "hookPrompt") {
+      if (method !== "item/completed") return;
+      const fragments = Array.isArray(item.fragments) ? item.fragments : [];
+      const input = {
+        fragments,
+        _codexItemType: "hookPrompt",
+      };
+      const output = fragments
+        .map((fragment: any) => String(fragment?.text || "").trim())
+        .filter(Boolean)
+        .join("\n\n");
+      sendItem({
+        type: "tool_call",
+        tool: "HookPrompt",
+        input,
+        toolUseId: item.id,
+        sessionId: sid,
+      });
+      sendItem({
+        type: "tool_result",
+        toolUseId: item.id,
+        output,
+        sessionId: sid,
+      });
+      appendItem({
+        role: "tool_call",
+        content: "Hook supplied additional context",
+        toolName: "HookPrompt",
+        toolInput: input,
+        toolUseId: item.id,
+        timestamp: now(),
+      });
+      appendItem({
+        role: "tool_result",
+        content: output,
+        toolUseId: item.id,
+        toolOutput: output,
+        timestamp: now(),
+      });
+      return;
+    }
+
+    if (item.type === "sleep") {
+      if (method === "item/started") {
+        const input = {
+          durationMs: Number(item.durationMs) || 0,
+          _codexItemType: "sleep",
+        };
+        sendItem({
+          type: "tool_call",
+          tool: "Sleep",
+          input,
+          toolUseId: item.id,
           sessionId: sid,
-        } as any);
+        });
+        appendItem({
+          role: "tool_call",
+          content: `Wait ${Math.max(0, Number(item.durationMs) || 0)} ms`,
+          toolName: "Sleep",
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp: now(),
+        });
+      } else {
+        sendItem({
+          type: "tool_result",
+          toolUseId: item.id,
+          output: "Wait completed",
+          sessionId: sid,
+        });
+        appendItem({
+          role: "tool_result",
+          content: "Wait completed",
+          toolUseId: item.id,
+          toolOutput: "Wait completed",
+          timestamp: now(),
+        });
       }
       return;
+    }
+
+    if (item.type === "enteredReviewMode" || item.type === "exitedReviewMode") {
+      if (method === "item/completed") {
+        const input = {
+          review: item.review || "",
+          phase: item.type === "enteredReviewMode" ? "entered" : "exited",
+          _codexItemType: "reviewMode",
+        };
+        sendItem({
+          type: "tool_call",
+          tool: "ReviewMode",
+          input,
+          toolUseId: item.id,
+          sessionId: sid,
+        });
+        sendItem({
+          type: "tool_result",
+          toolUseId: item.id,
+          output: item.review || (item.type === "enteredReviewMode"
+            ? "Entered review mode"
+            : "Review completed"),
+          sessionId: sid,
+        });
+        appendItem({
+          role: "tool_call",
+          content: item.type === "enteredReviewMode"
+            ? "Entered review mode"
+            : "Exited review mode",
+          toolName: "ReviewMode",
+          toolInput: input,
+          toolUseId: item.id,
+          timestamp: now(),
+        });
+        appendItem({
+          role: "tool_result",
+          content: item.review || "",
+          toolUseId: item.id,
+          toolOutput: item.review || "",
+          timestamp: now(),
+        });
+      }
+      return;
+    }
+
+    // Never silently drop a newly-added app-server item type. Known items above
+    // receive tailored translations; this diagnostic card makes schema drift
+    // visible without dumping an unlabelled raw "Tool" card into chat.
+    const input = {
+      itemType: String(item.type),
+      payload: redactSecretsDeep(item),
+      _codexItemType: "unrecognized",
+    };
+    sendItem({
+      type: "tool_call",
+      tool: "CodexItem",
+      input,
+      toolUseId: item.id,
+      sessionId: sid,
+    });
+    appendItem({
+      role: "tool_call",
+      content: `Unsupported Codex item: ${String(item.type)}`,
+      toolName: "CodexItem",
+      toolInput: input,
+      toolUseId: item.id,
+      timestamp: now(),
+    });
+    if (method === "item/completed") {
+      const output = `Codex item '${String(item.type)}' completed`;
+      sendItem({
+        type: "tool_result",
+        toolUseId: item.id,
+        output,
+        sessionId: sid,
+      });
+      appendItem({
+        role: "tool_result",
+        content: output,
+        toolUseId: item.id,
+        toolOutput: output,
+        timestamp: now(),
+      });
     }
   }
 

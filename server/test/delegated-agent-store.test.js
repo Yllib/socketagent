@@ -111,6 +111,68 @@ test("AgentSession handler returns stable child IDs and follow-up guidance", asy
   assert.match(result.content[0].text, /next safe boundary/);
 });
 
+test("AgentSession handler returns cursor-based child activity tails", async () => {
+  const calls = [];
+  const result = await handleAgentSessionTool(
+    {
+      getSessionId: () => "supervisor-1",
+      getCwd: () => process.cwd(),
+      getBackend: () => "claude",
+      send: () => {},
+      getTtsEngine: () => "system",
+      getKokoroVoice: () => "",
+      getKokoroSpeed: () => 1,
+      manageAgentSession: async (args) => {
+        calls.push(args);
+        return {
+          action: "tail",
+          delegation: record(),
+          message: "Recent delegated agent activity.",
+          tail: {
+            session_id: "child-1",
+            status: "running",
+            entries: [
+              {
+                session_seq: 42,
+                timestamp: "2026-07-30T12:00:00.000Z",
+                type: "tool_call",
+                tool: "Bash",
+              },
+            ],
+            after_session_seq: 41,
+            next_session_seq: 42,
+            latest_session_seq: 42,
+            has_more: false,
+            live: {
+              running: true,
+              assistant_text: [
+                { stream_id: "answer-1", content: "Still checking..." },
+              ],
+            },
+          },
+        };
+      },
+    },
+    {
+      action: "tail",
+      session_id: "child-1",
+      after_session_seq: 41,
+      limit: 10,
+    },
+  );
+
+  assert.deepEqual(calls[0], {
+    action: "tail",
+    session_id: "child-1",
+    after_session_seq: 41,
+    limit: 10,
+  });
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /"next_session_seq": 42/);
+  assert.match(result.content[0].text, /"tool": "Bash"/);
+  assert.match(result.content[0].text, /Still checking/);
+});
+
 test("scheduled continuations retain the canonical delegation supervisor", async () => {
   let savedTaskId;
   const result = await handleScheduleTaskTool(

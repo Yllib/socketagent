@@ -81,8 +81,11 @@ import {
 import type {
   AgentSessionToolArgs,
   AgentSessionToolResponse,
+  DelegatedAgentLiveActivity,
   DelegatedAgentRecord,
   DelegatedAgentRun,
+  DelegatedAgentTail,
+  DelegatedAgentTailEntry,
 } from "./delegated-agent-types";
 import {
   addDelegatedAgentRun,
@@ -2333,6 +2336,142 @@ async function stopDelegatedAgent(record: DelegatedAgentRecord): Promise<Delegat
   return stopped;
 }
 
+function boundedDelegationText(value: unknown, maxChars = 4_000): string {
+  const redacted = redactSecretsDeep(value);
+  const text = typeof redacted === "string"
+    ? redacted
+    : JSON.stringify(redacted);
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n[truncated]`;
+}
+
+function boundedDelegationInput(
+  value: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  const redacted = redactSecretsDeep(value) as Record<string, unknown>;
+  const serialized = JSON.stringify(redacted);
+  if (serialized.length <= 4_000) return redacted;
+  return {
+    preview: `${serialized.slice(0, 4_000)}…`,
+    truncated: true,
+  };
+}
+
+function delegatedTailEntry(entry: ReturnType<typeof getHistory>[number]): DelegatedAgentTailEntry {
+  const base: DelegatedAgentTailEntry = {
+    session_seq: Number(entry.sessionSeq),
+    ...(entry.entryId ? { entry_id: entry.entryId } : {}),
+    ...(entry.revision ? { revision: entry.revision } : {}),
+    timestamp: entry.timestamp,
+    type: entry.thinking ? "reasoning" : entry.role,
+    ...(entry.parentToolUseId !== undefined
+      ? { parent_tool_use_id: entry.parentToolUseId }
+      : {}),
+  };
+  if (entry.thinking) {
+    return {
+      ...base,
+      content: [
+        "Reasoning completed.",
+        entry.thinkingDurationMs
+          ? `Duration: ${entry.thinkingDurationMs} ms.`
+          : "",
+        entry.thinkingTokens
+          ? `Estimated tokens: ${entry.thinkingTokens}.`
+          : "",
+      ].filter(Boolean).join(" "),
+    };
+  }
+  if (entry.role === "tool_call") {
+    const input = boundedDelegationInput(entry.toolInput);
+    return {
+      ...base,
+      tool: entry.toolName || "Tool",
+      ...(input ? { input } : {}),
+    };
+  }
+  if (entry.role === "tool_result") {
+    return {
+      ...base,
+      ...(entry.toolName ? { tool: entry.toolName } : {}),
+      output: boundedDelegationText(
+        entry.toolOutput || entry.content || "",
+      ),
+    };
+  }
+  if (entry.role === "secure_input") {
+    return {
+      ...base,
+      content: entry.answered
+        ? "Secure input resolved."
+        : "Secure input requested.",
+      ...(entry.status ? { status: entry.status } : {}),
+    };
+  }
+  return {
+    ...base,
+    ...(entry.content
+      ? { content: boundedDelegationText(entry.content) }
+      : {}),
+    ...(entry.toolName ? { tool: entry.toolName } : {}),
+    ...(entry.status ? { status: entry.status } : {}),
+  };
+}
+
+function delegatedAgentTail(
+  record: DelegatedAgentRecord,
+  args: AgentSessionToolArgs,
+): DelegatedAgentTail {
+  const sessionId = record.childSessionId;
+  if (!sessionId) {
+    throw new Error("The delegated agent does not have a child session ID yet");
+  }
+  const after = args.after_session_seq;
+  if (
+    after !== undefined
+    && (!Number.isSafeInteger(after) || after < 0)
+  ) {
+    throw new Error("after_session_seq must be a non-negative integer");
+  }
+  const requestedLimit = args.limit ?? 20;
+  if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+    throw new Error("limit must be a positive integer");
+  }
+  const limit = Math.min(requestedLimit, 50);
+  const history = getHistory(sessionId)
+    .filter((entry) =>
+      Number.isSafeInteger(entry.sessionSeq) && Number(entry.sessionSeq) > 0,
+    )
+    .sort((left, right) => Number(left.sessionSeq) - Number(right.sessionSeq));
+  const latestSessionSeq = Number(history.at(-1)?.sessionSeq || 0);
+  const candidates = after === undefined
+    ? history.slice(-limit)
+    : history.filter((entry) => Number(entry.sessionSeq) > after);
+  const selected = after === undefined
+    ? candidates
+    : candidates.slice(0, limit);
+  const entries = selected.map(delegatedTailEntry);
+  const nextSessionSeq = entries.at(-1)?.session_seq
+    ?? after
+    ?? latestSessionSeq;
+  const activeChild = activeSessions.get(sessionId);
+  const rawLive = activeChild?.getDelegatedLiveActivity();
+  const live = rawLive
+    ? redactSecretsDeep(rawLive) as DelegatedAgentLiveActivity
+    : undefined;
+  return {
+    session_id: sessionId,
+    status: activeChild?.isBusy ? "running" : record.status,
+    entries,
+    after_session_seq: after ?? null,
+    next_session_seq: nextSessionSeq,
+    latest_session_seq: latestSessionSeq,
+    has_more: nextSessionSeq < latestSessionSeq,
+    ...(live ? { live } : {}),
+  };
+}
+
 async function manageAgentSession(
   supervisor: Session,
   args: AgentSessionToolArgs,
@@ -2395,6 +2534,14 @@ async function manageAgentSession(
 
   if (action === "status") {
     return { action, delegation: record, message: "Delegated agent status." };
+  }
+  if (action === "tail") {
+    return {
+      action,
+      delegation: record,
+      tail: delegatedAgentTail(record, args),
+      message: "Recent delegated agent activity.",
+    };
   }
   if (action === "stop") {
     return {

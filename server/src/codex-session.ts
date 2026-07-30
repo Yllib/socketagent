@@ -28,7 +28,10 @@ import {
 } from "./session-store";
 import type { ClaudeSession } from "./claude-session";
 import { AppToolContext, stopAppMonitor, stopAppMonitorsForSession } from "./app-tool-handlers";
-import type { AgentSessionToolExecutor } from "./delegated-agent-types";
+import type {
+  AgentSessionToolExecutor,
+  DelegatedAgentLiveActivity,
+} from "./delegated-agent-types";
 import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
 import { buildSocketAgentIntegrationInstructions } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
@@ -437,6 +440,38 @@ export class CodexSession {
 
   get isRunning(): boolean { return this._isRunning; }
   get isCompacting(): boolean { return this._isCompacting; }
+  getDelegatedLiveActivity(): DelegatedAgentLiveActivity {
+    const assistantText = [...this.appServerAgentText.entries()]
+      .slice(-5)
+      .map(([streamId, content]) => ({
+        stream_id: streamId,
+        content: content.slice(-6_000),
+        ...(this.appServerStreamParents.get(streamId)
+          ? {
+              parent_tool_use_id:
+                this.appServerStreamParents.get(streamId),
+            }
+          : {}),
+      }));
+    const activeTools = [...this.appServerActiveToolCalls.entries()]
+      .slice(-10)
+      .map(([toolUseId, call]) => ({
+        tool_use_id: toolUseId,
+        tool: call.tool,
+        input: call.input,
+        ...(call.parentToolUseId
+          ? { parent_tool_use_id: call.parentToolUseId }
+          : {}),
+      }));
+    return {
+      running: this.isBusy,
+      ...(assistantText.length > 0 ? { assistant_text: assistantText } : {}),
+      ...(activeTools.length > 0 ? { active_tools: activeTools } : {}),
+      ...(this.appServerReasoningText.size > 0
+        ? { reasoning: { in_progress: true } }
+        : {}),
+    };
+  }
   get isWarmIdle(): boolean {
     return !!this.appServer && !this.isBusy;
   }

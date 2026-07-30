@@ -35,7 +35,10 @@ import {
   stopAppMonitor,
   stopAppMonitorsForSession,
 } from "./app-tool-handlers";
-import type { AgentSessionToolExecutor } from "./delegated-agent-types";
+import type {
+  AgentSessionToolExecutor,
+  DelegatedAgentLiveActivity,
+} from "./delegated-agent-types";
 import { buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, WORK_REVIEW_TOOL_DESCRIPTION } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
@@ -1354,6 +1357,54 @@ export class ClaudeSession {
 
   get isRunning(): boolean {
     return this._isRunning;
+  }
+
+  getDelegatedLiveActivity(): DelegatedAgentLiveActivity {
+    const assistantText = [...this._streamingText.entries()]
+      .slice(-5)
+      .map(([streamId, stream]) => ({
+        stream_id: streamId,
+        content: stream.content.slice(-6_000),
+        ...(stream.parentToolUseId
+          ? { parent_tool_use_id: stream.parentToolUseId }
+          : {}),
+      }));
+    const activeTools =
+      this._activeToolUseId && this._activeToolName
+        ? [
+            {
+              tool_use_id: this._activeToolUseId,
+              tool: this._activeToolName,
+              ...(this._toolParentIds.get(this._activeToolUseId)
+                ? {
+                    parent_tool_use_id: this._toolParentIds.get(
+                      this._activeToolUseId,
+                    ),
+                  }
+                : {}),
+            },
+          ]
+        : [];
+    const reasoningInProgress =
+      this._streamingThinking.size > 0 || this._thinkingProgress !== null;
+    return {
+      running: this.isBusy,
+      ...(assistantText.length > 0 ? { assistant_text: assistantText } : {}),
+      ...(activeTools.length > 0 ? { active_tools: activeTools } : {}),
+      ...(reasoningInProgress
+        ? {
+            reasoning: {
+              in_progress: true,
+              ...(this._thinkingProgress?.estimatedTokens
+                ? {
+                    estimated_tokens:
+                      this._thinkingProgress.estimatedTokens,
+                  }
+                : {}),
+            },
+          }
+        : {}),
+    };
   }
 
   get isWarmIdle(): boolean {
@@ -3065,12 +3116,14 @@ export class ClaudeSession {
           ),
           tool(
             "AgentSession",
-            "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of this turn, accepts action=message while running by injecting it at the next safe boundary, and reports its final response back automatically.",
+            "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of this turn, accepts action=message while running by injecting it at the next safe boundary, supports bounded cursor-based activity reads with action=tail, and reports its final response back automatically.",
             {
-              action: z.enum(["start", "message", "status", "list", "stop"]).describe("start a child; message an existing child; inspect status/list; or stop it"),
+              action: z.enum(["start", "message", "status", "tail", "list", "stop"]).describe("start a child; message an existing child; inspect status or recent activity; list children; or stop one"),
               prompt: z.string().optional().describe("Required for start and message. A message to a running child is queued at its next safe boundary."),
-              session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/stop unless delegation_id is used"),
+              session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/tail/stop unless delegation_id is used"),
               delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),
+              after_session_seq: z.number().int().nonnegative().optional().describe("For tail, return durable activity after this cursor. Omit for the newest page."),
+              limit: z.number().int().min(1).max(50).optional().describe("For tail, maximum durable activity entries to return. Default 20."),
               backend: z.enum(["claude", "codex"]).optional().describe("Backend for start. Defaults to the supervising agent's backend."),
               cwd: z.string().optional().describe("Absolute working directory for start. Defaults to the supervisor's directory."),
               label: z.string().optional().describe("Short human-readable label for the delegated work"),

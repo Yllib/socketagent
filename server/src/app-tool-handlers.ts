@@ -453,6 +453,14 @@ export async function handleAgentSessionTool(
         }],
       };
     }
+    if (response.tail) {
+      return {
+        content: [{
+          type: "text",
+          text: `${response.message || "Recent delegated agent activity."}\n${JSON.stringify(response.tail, null, 2)}`,
+        }],
+      };
+    }
     if (!response.delegation) {
       return {
         content: [{ type: "text", text: response.message || "AgentSession request completed." }],

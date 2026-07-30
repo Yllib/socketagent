@@ -160,6 +160,21 @@ test("allows legitimate local/LAN/prod HTTP targets but rejects active-scheme an
       primaryTarget: { kind: "url", uri: "https://app.example.com/" },
     }],
   }));
+  const legacyExternal = await subject.create(createInput({
+    idempotencyKey: "legacy-external-primary",
+    items: [{
+      title: "Legacy external primary URL",
+      primaryTarget: {
+        kind: "url",
+        uri: "https://preview.example.com/",
+        displayMode: "external",
+      },
+    }],
+  }));
+  assert.equal(
+    legacyExternal.rounds[0].items[0].primaryTarget.displayMode,
+    "embedded",
+  );
   await assert.rejects(
     subject.create(createInput({
       idempotencyKey: "javascript",

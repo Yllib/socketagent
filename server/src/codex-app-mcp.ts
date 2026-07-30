@@ -152,12 +152,17 @@ function createServer(context: AppToolContext): McpServer {
     displayMode: z.enum(["auto", "embedded", "external"]).optional(),
     description: z.string().optional(),
   });
+  const workReviewPrimaryTargetSchema = workReviewTargetSchema.extend({
+    displayMode: z.enum(["auto", "embedded"]).optional().describe(
+      "Primary HTTP(S) targets are embedded beneath the review panel. Use auto or embedded.",
+    ),
+  });
   const workReviewItemSchema = z.object({
     item_id: z.string().optional().describe("Stable item ID; omit to generate one"),
     title: z.string(),
     description: z.string().optional(),
     instructions: z.string().optional().describe("What the reviewer should inspect or verify"),
-    primary_target: workReviewTargetSchema,
+    primary_target: workReviewPrimaryTargetSchema,
     supporting_targets: z.array(workReviewTargetSchema).optional(),
   });
   server.registerTool(

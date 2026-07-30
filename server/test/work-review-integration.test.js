@@ -252,6 +252,7 @@ test("stable result IDs collapse replayed Claude/history user messages", () => {
 test("agent instructions describe finish-only feedback and workflow-defined authorization", () => {
   assert.match(WORK_REVIEW_TOOL_DESCRIPTION, /only when they choose Finish Review/i);
   assert.match(WORK_REVIEW_TOOL_DESCRIPTION, /authorize deployment/i);
+  assert.match(WORK_REVIEW_TOOL_DESCRIPTION, /embedded inside the app/i);
   const instructions = buildSocketAgentIntegrationInstructions({
     mcpServerName: "app",
     toolNames: ["WorkReview"],
@@ -259,4 +260,5 @@ test("agent instructions describe finish-only feedback and workflow-defined auth
   });
   assert.match(instructions, /no draft decisions or notes are exposed/i);
   assert.match(instructions, /may explicitly authorize deployment/i);
+  assert.match(instructions, /embedded beneath the app's collapsible review panel/i);
 });

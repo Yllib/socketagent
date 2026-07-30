@@ -2910,7 +2910,9 @@ export class ClaudeSession {
                   uri: z.string().describe("Address or identifier the reviewer opens or inspects"),
                   label: z.string().optional(),
                   environment: z.string().optional().describe("For example production, development, sandbox, or local"),
-                  displayMode: z.enum(["auto", "embedded", "external"]).optional(),
+                  displayMode: z.enum(["auto", "embedded"]).optional().describe(
+                    "Primary HTTP(S) targets are embedded beneath the review panel. Use auto or embedded.",
+                  ),
                   description: z.string().optional(),
                 }),
                 supporting_targets: z.array(z.object({

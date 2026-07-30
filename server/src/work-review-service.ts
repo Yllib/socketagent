@@ -144,6 +144,13 @@ function cleanItem(input: WorkReviewItemInput, index: number): WorkReviewItem {
     );
   }
   const itemId = input.itemId ? cleanId(input.itemId, "Item ID") : `item-${index + 1}`;
+  const primaryTarget = cleanTarget(input.primaryTarget, `${itemId}:primary`);
+  // A primary web target is the surface being reviewed. It must stay inside
+  // the app beneath the review panel; the app provides a separate explicit
+  // action for opening it externally.
+  if (primaryTarget.kind === "url") {
+    primaryTarget.displayMode = "embedded";
+  }
   return {
     itemId,
     title: boundedString(input.title, "Item title", 300, true)!,
@@ -153,7 +160,7 @@ function cleanItem(input: WorkReviewItemInput, index: number): WorkReviewItem {
     ...(boundedString(input.instructions, "Item instructions", 20_000)
       ? { instructions: input.instructions!.trim() }
       : {}),
-    primaryTarget: cleanTarget(input.primaryTarget, `${itemId}:primary`),
+    primaryTarget,
     supportingTargets: supporting.map((target, targetIndex) =>
       cleanTarget(target, `${itemId}:supporting:${targetIndex + 1}`)),
   };

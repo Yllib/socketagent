@@ -5,9 +5,11 @@ import {
   TRANSPORT_LANE_VERSION,
   TransportLane,
   UPLOAD_ACK_VERSION,
+  WORK_REVIEW_VERSION,
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
+import { SERVER_RELEASE_VERSION } from "./server-build-info";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { detectAvailableBackends } from "./codex-session";
 import { getAdvertisedServerSettings } from "./server-settings";
@@ -545,6 +547,7 @@ export class RelayClient {
       const settings = getAdvertisedServerSettings();
       this.sendToPeer(peerId, {
         type: "server_capabilities",
+        serverReleaseVersion: SERVER_RELEASE_VERSION,
         binaryEnvelope: peer.binaryEnabled,
         binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
         transportLane: this.opts.lane || "control",
@@ -554,6 +557,11 @@ export class RelayClient {
         },
         uploadAckVersion: UPLOAD_ACK_VERSION,
         secretManagement: { version: 1 },
+        workReviews: {
+          version: WORK_REVIEW_VERSION,
+          privateDrafts: true,
+          atomicFinish: true,
+        },
         backends: detectAvailableBackends(),
         codexDriver: settings.codexDriver,
         codexDriversAvailable: settings.codexDriversAvailable,

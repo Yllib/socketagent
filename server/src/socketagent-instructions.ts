@@ -12,6 +12,9 @@ export const SOCKETAGENT_FILE_LINK_INSTRUCTIONS = [
 export const HTML_PLAN_TOOL_DESCRIPTION =
   "Create or revise a durable, full-screen HTML implementation or design plan for a large task. Use only when a rich document materially improves review, such as multi-component architecture, phased execution, tradeoffs, diagrams, embedded images, or UI/page mockups. Do not use for checklists, TODO lists, routine status updates, brief execution steps, or small tasks. Use your native plan/task tool or TaskBatch for working plans and progress tracking, or normal chat for concise user-facing content, whichever is appropriate. Reuse plan_id from the prior result when revising a plan.";
 
+export const WORK_REVIEW_TOOL_DESCRIPTION =
+  "Create and manage a durable human review handoff: describe what you did, provide one or more links or other targets where the user can inspect it, and ask for a decision. Use it for any reviewable work such as a live production environment, sandbox/dev server, file, image, diff, session, or custom target. The user reviews every item privately and you receive one consolidated result only when they choose Finish Review. Approval meaning is supplied by the workflow and may explicitly authorize deployment or another follow-up action.";
+
 export function buildSocketAgentIntegrationInstructions(options: {
   mcpServerName: string;
   toolNames: string[];
@@ -29,6 +32,7 @@ export function buildSocketAgentIntegrationInstructions(options: {
       ? [`- If a SocketAgent tool is not visible, discover tools for ${options.mcpServerName} before claiming it is unavailable.`]
       : []),
     "- HtmlPlan is reserved for detailed implementation or design plans for larger tasks where a rich full-screen document materially improves review, such as multi-component architecture, phased execution, important tradeoffs, diagrams, embedded images, or UI/page mockups. Do not use HtmlPlan for checklists, TODO lists, routine status updates, brief execution steps, or small tasks. Use your native plan/task tool or TaskBatch for working plans and progress tracking, or normal chat for concise user-facing content, whichever is appropriate. Use semantic, self-contained HTML with inline CSS only; use inline SVG/CSS or data-image assets when visuals help, never scripts or remote resources. Revisions must reuse plan_id.",
+    "- Work Review handoff -> WorkReview. Use it to say what you did and provide the target(s) where the user can inspect the result, whether production, development, sandbox, file, image, diff, session, or another kind of link. The user reviews items and writes notes privately; no draft decisions or notes are exposed to you. You receive exactly one consolidated result only after the user chooses Finish Review. A review's approval meaning is workflow-defined and may explicitly authorize deployment or another action. Use new_round with the same review_id after addressing requested changes.",
     "- User asks to send/share/transfer a file to their phone -> SendFile with an absolute file_path.",
     "- Credential, password, key, token, cookie, or other secret needed -> RequestSecureInput. Never request secrets in normal chat. The result contains metadata and a local secret-file path, not the value.",
     "- Important immediate phone notification -> NotifyUser.",

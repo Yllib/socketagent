@@ -20,6 +20,41 @@ export function sessionPushEventId(
   return `${kind}:${sessionId}:${startedAt}`;
 }
 
+export function completionTranscriptTarget(
+  entries: Array<{
+    role?: unknown;
+    entryId?: unknown;
+    sessionSeq?: unknown;
+    timestamp?: unknown;
+  }>,
+  notBefore?: string,
+): { targetEntryId?: string; targetSessionSeq?: number } {
+  const notBeforeMs = notBefore ? Date.parse(notBefore) : Number.NaN;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry?.role !== "assistant") continue;
+    if (Number.isFinite(notBeforeMs)) {
+      const timestampMs = typeof entry.timestamp === "string"
+        ? Date.parse(entry.timestamp)
+        : Number.NaN;
+      if (!Number.isFinite(timestampMs) || timestampMs < notBeforeMs) continue;
+    }
+    const entryId = typeof entry.entryId === "string"
+      ? entry.entryId.trim()
+      : "";
+    const rawSessionSeq = Number(entry.sessionSeq);
+    const sessionSeq = Number.isSafeInteger(rawSessionSeq) && rawSessionSeq > 0
+      ? rawSessionSeq
+      : undefined;
+    if (!entryId && sessionSeq === undefined) continue;
+    return {
+      ...(entryId ? { targetEntryId: entryId } : {}),
+      ...(sessionSeq !== undefined ? { targetSessionSeq: sessionSeq } : {}),
+    };
+  }
+  return {};
+}
+
 /**
  * Tracks one notification lifecycle per SDK run. Session objects are reused
  * across turns, so a new activeStartedAt replaces the object's prior run.

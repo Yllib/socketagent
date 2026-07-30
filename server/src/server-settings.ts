@@ -18,13 +18,19 @@ export interface ServerSettings {
   defaultCwd: string;
   systemPrompt: string;
   systemPromptInitialized: boolean;
-  /** Null delegates the window selection to the Claude SDK/model. */
+  /** Null explicitly delegates the window selection to the Claude SDK/model. */
   claudeAutoCompactWindow: number | null;
+  /**
+   * Internal migration marker. Older settings serialized null as the implicit
+   * default; true means the user deliberately selected the stored value.
+   */
+  claudeAutoCompactWindowConfigured?: boolean;
 }
 
 const STORE_DIR = socketAgentDataPath();
 const SETTINGS_FILE = path.join(STORE_DIR, "server-settings.json");
 const DEFAULT_CODEX_DRIVER: CodexDriver = "app-server";
+export const DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW = 250_000;
 const BOOT_DEFAULT_CWD = resolveClientPath(process.env.DEFAULT_CWD || process.cwd()).resolvedPath || path.resolve(process.cwd());
 const CODEX_DRIVER_CACHE_MS = 5000;
 const BACKEND_HEALTH_CACHE_MS = 10000;
@@ -38,12 +44,30 @@ function normalizeSystemPrompt(value: unknown): string {
 }
 
 export function normalizeClaudeAutoCompactWindow(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") return null;
+  // An absent persisted setting receives SocketAgent's bounded default. Null
+  // remains a deliberate escape hatch for users who want the SDK/model default.
+  if (value === undefined) return DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW;
+  if (value === null || value === "") return null;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 100_000 || parsed > 1_000_000) {
     throw new Error("Claude auto-compact window must be an integer from 100,000 to 1,000,000 tokens");
   }
   return parsed;
+}
+
+export function resolvePersistedClaudeAutoCompactWindow(
+  value: unknown,
+  explicitlyConfigured: unknown,
+): number | null {
+  if (explicitlyConfigured === true) {
+    return normalizeClaudeAutoCompactWindow(value);
+  }
+  // Preserve legacy numeric choices, but migrate the old implicit null/absent
+  // default to SocketAgent's bounded default.
+  if (value !== undefined && value !== null && value !== "") {
+    return normalizeClaudeAutoCompactWindow(value);
+  }
+  return DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW;
 }
 const backendHealthOverrides = new Map<Backend, BackendHealthInfo>();
 
@@ -259,19 +283,33 @@ export function loadServerSettings(): ServerSettings {
       defaultCwd: BOOT_DEFAULT_CWD,
       systemPrompt: "",
       systemPromptInitialized: false,
-      claudeAutoCompactWindow: null,
+      claudeAutoCompactWindow: DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW,
+      claudeAutoCompactWindowConfigured: false,
     };
     return cachedSettings;
   }
 
   try {
     const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")) as Partial<ServerSettings>;
+    const rawClaudeAutoCompactWindow = (
+      raw as Record<string, unknown>
+    ).claudeAutoCompactWindow;
     cachedSettings = {
       codexDriver: normalizeDriver(raw.codexDriver),
       defaultCwd: normalizeDefaultCwd(raw.defaultCwd),
       systemPrompt: normalizeSystemPrompt(raw.systemPrompt),
       systemPromptInitialized: raw.systemPromptInitialized === true,
-      claudeAutoCompactWindow: normalizeClaudeAutoCompactWindow(raw.claudeAutoCompactWindow),
+      claudeAutoCompactWindow: resolvePersistedClaudeAutoCompactWindow(
+        rawClaudeAutoCompactWindow,
+        raw.claudeAutoCompactWindowConfigured,
+      ),
+      claudeAutoCompactWindowConfigured:
+        raw.claudeAutoCompactWindowConfigured === true
+        || (
+          rawClaudeAutoCompactWindow !== undefined
+          && rawClaudeAutoCompactWindow !== null
+          && rawClaudeAutoCompactWindow !== ""
+        ),
     };
   } catch (err: any) {
     console.warn(`[settings] Failed to read server settings: ${err?.message || String(err)}`);
@@ -280,7 +318,8 @@ export function loadServerSettings(): ServerSettings {
       defaultCwd: BOOT_DEFAULT_CWD,
       systemPrompt: "",
       systemPromptInitialized: false,
-      claudeAutoCompactWindow: null,
+      claudeAutoCompactWindow: DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW,
+      claudeAutoCompactWindowConfigured: false,
     };
   }
   return cachedSettings;
@@ -297,6 +336,10 @@ export function saveServerSettings(settings: ServerSettings): ServerSettings {
     claudeAutoCompactWindow: settings.claudeAutoCompactWindow === undefined
       ? previous.claudeAutoCompactWindow
       : normalizeClaudeAutoCompactWindow(settings.claudeAutoCompactWindow),
+    claudeAutoCompactWindowConfigured:
+      settings.claudeAutoCompactWindowConfigured
+      ?? previous.claudeAutoCompactWindowConfigured
+      ?? false,
   };
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(cachedSettings, null, 2), "utf-8");
   return cachedSettings;
@@ -330,6 +373,7 @@ export function setClaudeAutoCompactWindow(window: number | null): ServerSetting
   return saveServerSettings({
     ...loadServerSettings(),
     claudeAutoCompactWindow: normalizeClaudeAutoCompactWindow(window),
+    claudeAutoCompactWindowConfigured: true,
   });
 }
 

@@ -14,6 +14,7 @@ export type CodexDriver = "app-server";
 
 export const TRANSPORT_LANE_VERSION = 1;
 export const UPLOAD_ACK_VERSION = 1;
+export const WORK_REVIEW_VERSION = 1;
 export const BULK_RELAY_PAIRING_SUFFIX = ":bulk:v1";
 export type TransportLane = "control" | "bulk";
 
@@ -137,6 +138,67 @@ export interface HtmlPlanRollbackMessage {
   revision: number;
 }
 
+export type WorkReviewDisposition =
+  | "approved"
+  | "changes_requested"
+  | "rejected"
+  | "skipped";
+
+export interface WorkReviewDraftItem {
+  itemId: string;
+  status: "pending" | WorkReviewDisposition;
+  note?: string;
+}
+
+/**
+ * Mutable, reviewer-private state. This object is returned only to app
+ * clients; agent-facing WorkReview reads intentionally omit it until finish.
+ */
+export interface WorkReviewDraft {
+  revision?: number;
+  updatedAt?: string;
+  overallNote?: string;
+  items: WorkReviewDraftItem[];
+}
+
+export interface WorkReviewListMessage {
+  type: "work_review_list";
+  requestId?: string;
+  sessionId?: string;
+  includeArchived?: boolean;
+}
+
+export interface WorkReviewGetMessage {
+  type: "work_review_get";
+  requestId: string;
+  reviewId: string;
+}
+
+export interface WorkReviewDraftUpdateMessage {
+  type: "work_review_draft_update";
+  requestId: string;
+  reviewId: string;
+  roundId: string;
+  /** Stable client-generated id used to deduplicate retries. */
+  mutationId: string;
+  /** Optional optimistic-concurrency cursor from the latest draft snapshot. */
+  baseRevision?: number;
+  /** Full private snapshot, never an incremental feedback event. */
+  draft: WorkReviewDraft;
+}
+
+export interface WorkReviewFinishMessage {
+  type: "work_review_finish";
+  requestId: string;
+  reviewId: string;
+  roundId: string;
+  /** Stable client-generated id used to make Finish Review idempotent. */
+  mutationId: string;
+  baseRevision?: number;
+  /** The complete final draft is published atomically by this operation. */
+  draft: WorkReviewDraft;
+}
+
 export interface NewSessionMessage {
   type: "new_session";
   cwd?: string;
@@ -192,8 +254,9 @@ export interface SetServerSettingsMessage {
   defaultCwd?: string;
   systemPrompt?: string;
   /**
-   * Server-wide Claude auto-compaction window in tokens. Null restores the
-   * Claude SDK/model default.
+   * Server-wide Claude auto-compaction window in tokens. SocketAgent defaults
+   * an absent setting to 250,000. Null explicitly restores the SDK/model
+   * default.
    */
   claudeAutoCompactWindow?: number | null;
   /** Migration helper: seed the server only when it has no prompt yet. */
@@ -841,6 +904,10 @@ export type ClientMessage =
   | HtmlPlanRevisionListMessage
   | HtmlPlanRevisionGetMessage
   | HtmlPlanRollbackMessage
+  | WorkReviewListMessage
+  | WorkReviewGetMessage
+  | WorkReviewDraftUpdateMessage
+  | WorkReviewFinishMessage
   | NewSessionMessage
   | ResumeSessionMessage
   | SessionEventAckMessage
@@ -1341,6 +1408,10 @@ export interface PushRegistrationStatusServerMessage {
 
 export interface ServerCapabilitiesMessage {
   type: "server_capabilities";
+  /** Human-readable SocketAgent server release version (for example 1.1.0). */
+  serverReleaseVersion?: string;
+  /** Exact running git commit when the server was started from a checkout. */
+  serverCommit?: string;
   binaryEnvelope?: boolean;
   binaryFileDownloadVersion?: number;
   transportLane?: TransportLane;
@@ -1354,6 +1425,11 @@ export interface ServerCapabilitiesMessage {
   };
   htmlPlans?: {
     version: number;
+  };
+  workReviews?: {
+    version: number;
+    privateDrafts: true;
+    atomicFinish: true;
   };
   sessionTransfer?: {
     version: number;
@@ -1400,7 +1476,7 @@ export interface ServerSettingsMessage {
   defaultCwd: string;
   systemPrompt: string;
   systemPromptInitialized?: boolean;
-  /** Null means use the Claude SDK/model default. */
+  /** Null explicitly means use the Claude SDK/model default. */
   claudeAutoCompactWindow: number | null;
   codexDriversAvailable: CodexDriver[];
   backendHealth?: BackendHealthInfo[];
@@ -1438,7 +1514,7 @@ export interface SessionArchiveFailedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "html_plan" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -1509,6 +1585,10 @@ export interface HistoryEntry {
   commandPayload?: Record<string, unknown>;
   // Permission mode fields (role === "permission_mode")
   permissionMode?: string;
+  // Work Review fields (role === "work_review"). Private drafts are never
+  // stored in chat history; workReview is the public/card projection only.
+  reviewId?: string;
+  workReview?: Record<string, unknown>;
   /** Stable transcript identity shared by live delivery and history replay. */
   entryId?: string;
   /** Monotonic position within one SocketAgent session. */
@@ -1541,6 +1621,56 @@ export interface SessionHistoryServerMessage {
   todos?: Record<string, unknown>[];
   /** Latest lifecycle revision for tasks/subagents, independent of the delta cursor. */
   taskStates?: HistoryEntry[];
+}
+
+export interface WorkReviewSnapshotServerMessage {
+  type: "work_review_snapshot";
+  requestId?: string;
+  reviewId: string;
+  /** Exact originating SocketAgent session, not the currently visible one. */
+  sessionId: string;
+  review: Record<string, unknown>;
+  /** Reviewer-private mutable state; absent once there is no open draft. */
+  draft?: WorkReviewDraft;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
+}
+
+export interface WorkReviewListResultServerMessage {
+  type: "work_review_list_result";
+  requestId?: string;
+  reviews: Record<string, unknown>[];
+}
+
+export interface WorkReviewOperationResultServerMessage {
+  type: "work_review_operation_result";
+  requestId: string;
+  operation: "get" | "draft_update" | "finish";
+  reviewId: string;
+  roundId?: string;
+  ok: boolean;
+  error?: string;
+  review?: Record<string, unknown>;
+  draft?: WorkReviewDraft;
+  resultId?: string;
+  published?: boolean;
+}
+
+/**
+ * Durable card update. All revisions for one review reuse the same entryId and
+ * sessionSeq. It contains only the public review projection.
+ */
+export interface WorkReviewCardServerMessage {
+  type: "work_review_card";
+  reviewId: string;
+  sessionId: string;
+  review: Record<string, unknown>;
+  entryId: string;
+  sessionSeq: number;
+  revision: number;
+  deliveryId?: string;
+  replay?: boolean;
 }
 
 export interface StatusServerMessage {
@@ -2159,6 +2289,10 @@ export type ServerMessage =
   | HtmlPlanOperationResultServerMessage
   | HtmlPlanRevisionListServerMessage
   | HtmlPlanRevisionServerMessage
+  | WorkReviewSnapshotServerMessage
+  | WorkReviewListResultServerMessage
+  | WorkReviewOperationResultServerMessage
+  | WorkReviewCardServerMessage
   | ResultServerMessage
   | SessionListServerMessage
   | SdkSessionListServerMessage

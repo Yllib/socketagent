@@ -39,6 +39,7 @@ import {
   TRANSPORT_LANE_VERSION,
   TransportLane,
   UPLOAD_ACK_VERSION,
+  WORK_REVIEW_VERSION,
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
@@ -50,7 +51,7 @@ import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, r
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
 import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
-import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
+import { completionTranscriptTarget, SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, writeFileManagerText } from "./file-manager";
 import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
@@ -65,11 +66,12 @@ import { HardAbortCoordinator } from "./hard-abort";
 import { backendsForManagedBackendSpecs, MANAGED_BACKEND_PACKAGES, managedBackendSpecsNeedingUpdate, parseNpmVersionOutput } from "./managed-backend-update";
 import { invalidateCachedModelCatalog } from "./model-catalog-store";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
-import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
+import { activeAppMonitorRecords, AppToolContext, publishWorkReviewCard, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings } from "./initial-session-settings";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { routeMonitorOutputToSession } from "./monitor-output-route";
+import { SERVER_RELEASE_VERSION } from "./server-build-info";
 import {
   discardSessionTransfer,
   exportSessionTransfer,
@@ -91,6 +93,20 @@ import {
   updateDelegatedAgent,
   updateDelegatedAgentRun,
 } from "./delegated-agent-store";
+import {
+  exportWorkReviews,
+  finishWorkReview,
+  getWorkReviewClientSnapshot,
+  listWorkReviews,
+  updateWorkReviewDraft,
+} from "./work-review-service";
+import {
+  WorkReviewResultDeliveryStore,
+} from "./work-review-delivery-store";
+import {
+  buildWorkReviewResultPrompt,
+  deliverWorkReviewToSession,
+} from "./work-review-result-route";
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal-guard] Uncaught exception:", err);
@@ -169,6 +185,28 @@ function readLocalAppVersionInfo(): AppVersionInfo | null {
   const file = path.join(GIT_ROOT, "app-version.json");
   if (!fs.existsSync(file)) return null;
   return parseAppVersionInfo(fs.readFileSync(file, "utf8"));
+}
+
+function parseServerReleaseVersion(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw);
+    const version = parsed?.version;
+    return typeof version === "string" && version.trim()
+      ? version.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLocalServerReleaseVersion(): string {
+  try {
+    return parseServerReleaseVersion(
+      fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
+    ) || SERVER_RELEASE_VERSION;
+  } catch {
+    return SERVER_RELEASE_VERSION;
+  }
 }
 
 function readAdbBridgeSidecarState(): AdbBridgeSidecarState | null {
@@ -579,6 +617,25 @@ function readRemoteAppVersionInfo(branch: string): AppVersionInfo | null {
       windowsHide: true,
     });
     return parseAppVersionInfo(raw);
+  } catch {
+    return null;
+  }
+}
+
+function readRemoteServerReleaseVersion(branch: string): string | null {
+  if (!GIT_ROOT) return null;
+  try {
+    const raw = execFileSync(
+      "git",
+      ["show", `origin/${branch}:server/package.json`],
+      {
+        cwd: GIT_ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
+    return parseServerReleaseVersion(raw);
   } catch {
     return null;
   }
@@ -1183,6 +1240,8 @@ function serverCapabilitiesPayload(
   const settings = getAdvertisedServerSettings();
   return {
     type: "server_capabilities",
+    serverReleaseVersion: SERVER_RELEASE_VERSION,
+    serverCommit: SERVER_GIT_HASH || undefined,
     binaryEnvelope,
     binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
     transportLane,
@@ -1194,6 +1253,11 @@ function serverCapabilitiesPayload(
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 2 },
+    workReviews: {
+      version: WORK_REVIEW_VERSION,
+      privateDrafts: true,
+      atomicFinish: true,
+    },
     sessionTransfer: { version: 1 },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
@@ -1234,6 +1298,7 @@ function maybeSendPushNotification(msg: {
   kind?: string;
   eventId?: string;
   finishedAt?: string;
+  startedAt?: string;
   navigationTarget?: "scheduled_tasks";
   scheduledTaskId?: string;
 }): void {
@@ -1252,6 +1317,9 @@ function maybeSendPushNotification(msg: {
     data: {
       ...(finishedAt ? { finishedAt } : {}),
       ...(eventId ? { eventId } : {}),
+      ...(sessionCompletion && msg.status === "completed"
+        ? sessionCompletionTranscriptData(msg.sessionId, msg.startedAt)
+        : {}),
       ...(msg.navigationTarget ? { navigationTarget: msg.navigationTarget } : {}),
       ...(msg.scheduledTaskId ? { scheduledTaskId: msg.scheduledTaskId } : {}),
     },
@@ -1302,6 +1370,13 @@ function scheduledSessionPushData(session: Session): Record<string, string> {
   return scheduledTaskId
     ? { navigationTarget: "scheduled_tasks", scheduledTaskId }
     : {};
+}
+
+function sessionCompletionTranscriptData(
+  sessionId: string,
+  notBefore?: string,
+): Record<string, string | number> {
+  return completionTranscriptTarget(getHistory(sessionId), notBefore);
 }
 
 const sessionPushRuns = new SessionPushRunTracker<Session>();
@@ -1400,6 +1475,9 @@ function sendSessionCompletionPush(session: Session, status: "completed" | "fail
         sessionId,
         run.startedAt,
       ),
+      ...(status === "completed"
+        ? sessionCompletionTranscriptData(sessionId, run.startedAt)
+        : {}),
       ...scheduledSessionPushData(session),
     },
     showNotification: false,
@@ -1424,6 +1502,7 @@ function broadcastScheduledTaskNotification(
     scheduledTaskId?: string;
     eventId?: string;
     finishedAt?: string;
+    startedAt?: string;
   } = {},
 ): void {
   const payload = {
@@ -1438,6 +1517,7 @@ function broadcastScheduledTaskNotification(
     ...(options.scheduledTaskId ? { scheduledTaskId: options.scheduledTaskId } : {}),
     ...(options.sessionCompletion ? { sessionCompletion: true } : {}),
     ...(options.finishedAt ? { finishedAt: options.finishedAt } : {}),
+    ...(options.startedAt ? { startedAt: options.startedAt } : {}),
   };
   const msg = JSON.stringify(payload);
   for (const client of connectedClients) {
@@ -1512,12 +1592,227 @@ const durableMonitorPromptQueues = new Map<string, Promise<void>>();
 
 const durableSessionEventDeliveries = new Map<string, SessionEventDelivery>();
 
+const workReviewResultQueues = new Map<string, Promise<void>>();
+const workReviewResultDeliveries = new Set<string>();
+const workReviewResultRetryAttempts = new Map<string, number>();
+const workReviewResultRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const workReviewResultDeliveryStore = new WorkReviewResultDeliveryStore();
+
 function dispatchDurableSessionMessage(message: Record<string, any>): void {
   const raw = JSON.stringify(redactSecretsDeep(message));
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(raw);
   }
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
+}
+
+function workReviewClientPayload(
+  snapshot: Record<string, any>,
+  requestId?: string,
+): Record<string, any> {
+  const { currentDraft, ...review } = snapshot;
+  const cardEntry = getHistory(String(snapshot.originSessionId || "")).find(
+    (entry) => entry.role === "work_review"
+      && String(entry.reviewId || "") === String(snapshot.reviewId || ""),
+  );
+  return {
+    type: "work_review_snapshot",
+    ...(requestId ? { requestId } : {}),
+    reviewId: String(snapshot.reviewId || ""),
+    sessionId: String(snapshot.originSessionId || ""),
+    review,
+    ...(cardEntry?.entryId ? { entryId: cardEntry.entryId } : {}),
+    ...(cardEntry?.sessionSeq ? { sessionSeq: cardEntry.sessionSeq } : {}),
+    ...(cardEntry?.revision ? { revision: cardEntry.revision } : {}),
+    ...(currentDraft ? {
+      draft: {
+        revision: currentDraft.revision,
+        updatedAt: currentDraft.updatedAt,
+        ...(currentDraft.overallNote ? { overallNote: currentDraft.overallNote } : {}),
+        items: Array.isArray(currentDraft.itemDecisions)
+          ? currentDraft.itemDecisions
+          : [],
+      },
+    } : {}),
+  };
+}
+
+function broadcastWorkReviewCard(review: Record<string, any>): void {
+  const sessionId = String(review.originSessionId || "");
+  if (!sessionId) return;
+  let delivery = durableSessionEventDeliveries.get(sessionId);
+  if (!delivery) {
+    delivery = new SessionEventDelivery(dispatchDurableSessionMessage);
+    durableSessionEventDeliveries.set(sessionId, delivery);
+  }
+  publishWorkReviewCard({
+    appendHistory: (entry) => appendHistory(sessionId, entry as any),
+    send: (message) => {
+      const outgoing = [...connectedClients].some(
+        (client) => (client as any).supportsSessionEventAck === true,
+      ) ? delivery!.prepare(message as Record<string, any>) : message;
+      dispatchDurableSessionMessage(outgoing as Record<string, any>);
+    },
+  }, review);
+}
+
+async function runWorkReviewResultDelivery(
+  sessionId: string,
+  text: string,
+  resultId: string,
+): Promise<void> {
+  const existing = activeSessions.get(sessionId);
+  if (existing) {
+    const backend = getSession(sessionId)?.backend === "codex" ? "codex" : "claude";
+    await deliverWorkReviewToSession(
+      existing,
+      backend,
+      text,
+      sessionId,
+      resultId,
+      sessionIsBusy(existing),
+    );
+    return;
+  }
+
+  const sessionInfo = getSession(sessionId);
+  if (!sessionInfo) {
+    throw new Error(`Work Review origin session ${sessionId} no longer exists`);
+  }
+  const headlessSocket = {
+    readyState: WebSocket.OPEN,
+    send: (data: string) => broadcastHeadlessSessionMessage(data, sessionId),
+  } as any;
+  const session = createSession(
+    sessionInfo.backend,
+    headlessSocket,
+    sessionInfo.cwd,
+    plugins,
+    getStoredCodexDriver(sessionInfo),
+  );
+  await restorePersistedPermissionMode(session, sessionInfo);
+  (session as any)._resumeSessionId = sessionId;
+  await restorePersistedAgentSettings(session, sessionInfo);
+  attachSessionLifecycleCallbacks(session);
+  activeSessions.set(sessionId, session);
+  try {
+    await deliverWorkReviewToSession(
+      session,
+      sessionInfo.backend === "codex" ? "codex" : "claude",
+      text,
+      sessionId,
+      resultId,
+      false,
+    );
+  } finally {
+    const sid = session.getSessionId() || sessionId;
+    if (activeSessions.get(sid) === session && !sessionShouldRemainPooled(session)) {
+      activeSessions.delete(sid);
+    }
+    broadcastSessionList();
+    broadcastStatusSync();
+  }
+}
+
+function queueWorkReviewResultDelivery(
+  review: Record<string, any>,
+  result: Record<string, any>,
+): Promise<void> {
+  const sessionId = String(review.originSessionId || "");
+  const resultId = String(result.resultId || "");
+  if (!sessionId || !resultId) {
+    return Promise.reject(new Error("Published Work Review result is missing its origin session or result ID"));
+  }
+  workReviewResultDeliveryStore.enqueue(review, result);
+  if (workReviewResultDeliveryStore.isDelivered(resultId)) return Promise.resolve();
+  if (workReviewResultDeliveries.has(resultId)) return Promise.resolve();
+  workReviewResultDeliveries.add(resultId);
+  const previous = workReviewResultQueues.get(sessionId) || Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(() => runWorkReviewResultDelivery(
+      sessionId,
+      buildWorkReviewResultPrompt(review, result),
+      resultId,
+    ));
+  workReviewResultQueues.set(sessionId, next);
+  return next
+    .then(() => {
+      // runQuery/injectMessage persist the stable resultId-backed user message
+      // before they resolve, so only then may the durable outbox be settled.
+      workReviewResultDeliveryStore.markDelivered(resultId);
+      workReviewResultRetryAttempts.delete(resultId);
+      const retryTimer = workReviewResultRetryTimers.get(resultId);
+      if (retryTimer) clearTimeout(retryTimer);
+      workReviewResultRetryTimers.delete(resultId);
+    })
+    .catch((error) => {
+      workReviewResultDeliveries.delete(resultId);
+      const attempt = (workReviewResultRetryAttempts.get(resultId) || 0) + 1;
+      workReviewResultRetryAttempts.set(resultId, attempt);
+      if (attempt <= 8 && !workReviewResultRetryTimers.has(resultId)) {
+        const delayMs = Math.min(5 * 60_000, 5_000 * (2 ** (attempt - 1)));
+        const timer = setTimeout(() => {
+          workReviewResultRetryTimers.delete(resultId);
+          void queueWorkReviewResultDelivery(review, result).catch((retryError: any) => {
+            console.error(
+              `[WorkReview] result retry failed result=${resultId}`
+              + ` attempt=${attempt}: ${retryError?.message || String(retryError)}`,
+            );
+          });
+        }, delayMs);
+        timer.unref?.();
+        workReviewResultRetryTimers.set(resultId, timer);
+      }
+      throw error;
+    })
+    .finally(() => {
+      workReviewResultDeliveries.delete(resultId);
+      if (workReviewResultQueues.get(sessionId) === next) {
+        workReviewResultQueues.delete(sessionId);
+      }
+    });
+}
+
+function restorePendingWorkReviewResultDeliveries(): void {
+  // Rebuild missing outbox records from the durable review store first. This
+  // covers a crash after atomic Finish Review but before outbox enqueue.
+  try {
+    const exported = exportWorkReviews({ includeArchived: true } as any) as any;
+    const publishedById = new Map<string, {
+      review: Record<string, any>;
+      result: Record<string, any>;
+    }>();
+    for (const review of exported.reviews || []) {
+      for (const round of review.rounds || []) {
+        if (round?.status === "completed" && round.result?.resultId) {
+          workReviewResultDeliveryStore.enqueue(review, round.result);
+          publishedById.set(String(round.result.resultId), {
+            review,
+            result: round.result,
+          });
+        }
+      }
+    }
+    for (const record of workReviewResultDeliveryStore.pending()) {
+      const published = publishedById.get(record.resultId);
+      if (!published) {
+        console.warn(`[WorkReview] pending delivery has no published result ${record.resultId}`);
+        continue;
+      }
+      void queueWorkReviewResultDelivery(
+        published.review,
+        published.result,
+      ).catch((error: any) => {
+        console.error(
+          `[WorkReview] pending result delivery failed result=${record.resultId}`
+          + ` session=${record.originSessionId || ""}: ${error?.message || String(error)}`,
+        );
+      });
+    }
+  } catch (error: any) {
+    console.warn(`[WorkReview] failed to rebuild result outbox: ${error?.message || String(error)}`);
+  }
 }
 
 function broadcastDurableMonitorMessage(message: Record<string, any>): void {
@@ -4238,6 +4533,7 @@ function createConnectionHandler(
       case "version_check": {
         const info: any = {
           type: "version_info",
+          serverReleaseVersion: SERVER_RELEASE_VERSION,
           gitAvailable: !!GIT_ROOT,
           autoUpdateError: lastAutoUpdateError,
           autoUpdate: {
@@ -4245,6 +4541,7 @@ function createConnectionHandler(
             verify: autoUpdateVerifyMode(),
           },
           running: {
+            version: SERVER_RELEASE_VERSION,
             hash: SERVER_GIT_HASH || undefined,
             startedAt: SERVER_STARTED_AT,
             pid: process.pid,
@@ -4258,7 +4555,13 @@ function createConnectionHandler(
             const branch = gitOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
             const localMsg = gitOutput(["log", "-1", "--format=%s"]);
             const localDate = gitOutput(["log", "-1", "--format=%ci"]);
-            info.local = { hash: localHash, branch, message: localMsg, date: localDate };
+            info.local = {
+              version: readLocalServerReleaseVersion(),
+              hash: localHash,
+              branch,
+              message: localMsg,
+              date: localDate,
+            };
             if (
               SERVER_GIT_HASH &&
               localHash &&
@@ -4276,7 +4579,12 @@ function createConnectionHandler(
                 const remoteMsg = gitOutput(["log", remoteRef, "-1", "--format=%s"]);
                 const remoteDate = gitOutput(["log", remoteRef, "-1", "--format=%ci"]);
                 const commitsBehind = parseInt(gitOutput(["rev-list", "--count", `HEAD..${remoteRef}`]), 10);
-                info.remote = { hash: remoteHash, message: remoteMsg, date: remoteDate };
+                info.remote = {
+                  version: readRemoteServerReleaseVersion(branch),
+                  hash: remoteHash,
+                  message: remoteMsg,
+                  date: remoteDate,
+                };
                 info.updateAvailable = localHash !== remoteHash;
                 info.commitsBehind = commitsBehind;
                 if (autoUpdateVerifyMode() === "commit") {
@@ -5151,6 +5459,178 @@ function createConnectionHandler(
             operation: "delete",
             ok: false,
             error: e.message || String(e),
+          });
+        }
+        break;
+      }
+
+      case "work_review_list": {
+        const reviews = listWorkReviews({
+          ...((msg as any).sessionId
+            ? { originSessionId: String((msg as any).sessionId) }
+            : {}),
+          includeArchived: (msg as any).includeArchived === true,
+        } as any);
+        sendJson({
+          type: "work_review_list_result",
+          requestId: (msg as any).requestId,
+          reviews,
+        });
+        break;
+      }
+
+      case "work_review_get": {
+        const reviewId = String((msg as any).reviewId || "");
+        const snapshot = getWorkReviewClientSnapshot(reviewId) as any;
+        if (!snapshot) {
+          sendJson({
+            type: "work_review_operation_result",
+            requestId: String((msg as any).requestId || ""),
+            operation: "get",
+            reviewId,
+            ok: false,
+            error: `Work review not found: ${reviewId}`,
+          });
+          break;
+        }
+        sendJson(workReviewClientPayload(
+          snapshot,
+          String((msg as any).requestId || ""),
+        ));
+        break;
+      }
+
+      case "work_review_draft_update": {
+        const requestId = String((msg as any).requestId || "");
+        const reviewId = String((msg as any).reviewId || "");
+        const roundId = String((msg as any).roundId || "");
+        try {
+          const before = getWorkReviewClientSnapshot(reviewId) as any;
+          if (!before) throw new Error(`Work review not found: ${reviewId}`);
+          const currentRound = Array.isArray(before.rounds)
+            ? before.rounds.find((round: any) => Number(round.revision) === Number(before.currentRevision))
+              || before.rounds[before.rounds.length - 1]
+            : undefined;
+          if (!currentRound || String(currentRound.roundId || "") !== roundId) {
+            throw new Error("Draft update targets a stale Work Review round");
+          }
+          const draft = (msg as any).draft || {};
+          const mutationId = String((msg as any).mutationId || "").trim();
+          if (!mutationId) throw new Error("Draft update requires mutationId");
+          const snapshot = await updateWorkReviewDraft(reviewId, {
+            mutationId,
+            expectedRevision: Number.isInteger((msg as any).baseRevision)
+              ? Number((msg as any).baseRevision)
+              : undefined,
+            itemUpdates: Array.isArray(draft.items)
+              ? draft.items.map((item: any) => ({
+                  itemId: String(item.itemId || ""),
+                  status: item.status,
+                  ...(typeof item.note === "string" ? { note: item.note } : {}),
+                }))
+              : [],
+            ...(typeof draft.overallNote === "string"
+              ? { overallNote: draft.overallNote }
+              : {}),
+          } as any) as any;
+          const payload = workReviewClientPayload(snapshot, requestId);
+          sendJson(payload);
+          sendJson({
+            type: "work_review_operation_result",
+            requestId,
+            operation: "draft_update",
+            reviewId,
+            roundId,
+            ok: true,
+            review: payload.review,
+            draft: payload.draft,
+          });
+        } catch (error: any) {
+          sendJson({
+            type: "work_review_operation_result",
+            requestId,
+            operation: "draft_update",
+            reviewId,
+            roundId,
+            ok: false,
+            error: error?.message || String(error),
+          });
+        }
+        break;
+      }
+
+      case "work_review_finish": {
+        const requestId = String((msg as any).requestId || "");
+        const reviewId = String((msg as any).reviewId || "");
+        const roundId = String((msg as any).roundId || "");
+        try {
+          const before = getWorkReviewClientSnapshot(reviewId) as any;
+          if (!before) throw new Error(`Work review not found: ${reviewId}`);
+          const currentRound = Array.isArray(before.rounds)
+            ? before.rounds.find((round: any) => Number(round.revision) === Number(before.currentRevision))
+              || before.rounds[before.rounds.length - 1]
+            : undefined;
+          if (!currentRound || String(currentRound.roundId || "") !== roundId) {
+            throw new Error("Finish Review targets a stale Work Review round");
+          }
+          const draft = (msg as any).draft || {};
+          const mutationId = String((msg as any).mutationId || "").trim();
+          if (!mutationId) throw new Error("Finish Review requires mutationId");
+          const finished = await finishWorkReview(reviewId, {
+            draft: {
+              mutationId,
+              expectedRevision: Number.isInteger((msg as any).baseRevision)
+                ? Number((msg as any).baseRevision)
+                : undefined,
+              itemUpdates: Array.isArray(draft.items)
+                ? draft.items.map((item: any) => ({
+                    itemId: String(item.itemId || ""),
+                    status: item.status,
+                    ...(typeof item.note === "string" ? { note: item.note } : {}),
+                  }))
+                : [],
+              ...(typeof draft.overallNote === "string"
+                ? { overallNote: draft.overallNote }
+                : {}),
+            },
+          } as any) as any;
+          broadcastWorkReviewCard(finished.review as any);
+          const resultDelivery = queueWorkReviewResultDelivery(
+            finished.review as any,
+            finished.result as any,
+          );
+          const snapshot = getWorkReviewClientSnapshot(reviewId) as any;
+          const payload = snapshot
+            ? workReviewClientPayload(snapshot, requestId)
+            : { review: finished.review };
+          if (snapshot) sendJson(payload);
+          sendJson({
+            type: "work_review_operation_result",
+            requestId,
+            operation: "finish",
+            reviewId,
+            roundId,
+            ok: true,
+            review: payload.review,
+            ...(payload.draft ? { draft: payload.draft } : {}),
+            resultId: finished.result.resultId,
+            published: finished.published,
+          });
+          void resultDelivery.catch((error: any) => {
+            console.error(
+              `[WorkReview] result delivery failed result=${finished.result.resultId}`
+              + ` session=${finished.review.originSessionId}: ${error?.message || String(error)}`,
+            );
+          });
+        } catch (error: any) {
+          sendJson({
+            type: "work_review_operation_result",
+            requestId,
+            operation: "finish",
+            reviewId,
+            roundId,
+            ok: false,
+            error: error?.message || String(error),
           });
         }
         break;
@@ -7469,6 +7949,7 @@ httpServer.listen(PORT, BIND_HOST, async () => {
   if (restoredMonitors > 0) {
     console.log(`[AppMonitor] Restored ${restoredMonitors} durable monitor(s)`);
   }
+  restorePendingWorkReviewResultDeliveries();
 });
 
 // Clean up any tool calls left pending from a previous server crash
@@ -7602,6 +8083,9 @@ function buildStatusSyncMessage(): string {
     compactingSessions,
     serverStartedAt: SERVER_STARTED_AT,
     serverPid: process.pid,
+    serverReleaseVersion: SERVER_RELEASE_VERSION,
+    serverCommit: SERVER_GIT_HASH || undefined,
+    // Legacy app builds interpret serverVersion as the running git hash.
     serverVersion: SERVER_GIT_HASH || undefined,
     scheduledTaskRevision: getScheduledTaskRevision(),
     backgroundTaskIds,
@@ -7849,6 +8333,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
                 )
               : undefined,
             finishedAt: currentRun.completedAt,
+            startedAt: currentRun.startedAt,
           },
         );
       }
@@ -7914,6 +8399,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
                 )
               : undefined,
             finishedAt: currentRun.completedAt,
+            startedAt: currentRun.startedAt,
           },
         );
       }

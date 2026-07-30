@@ -31,11 +31,12 @@ import {
   handleSendFileTool,
   handleSpeakTool,
   handleTaskBatchTool,
+  handleWorkReviewTool,
   stopAppMonitor,
   stopAppMonitorsForSession,
 } from "./app-tool-handlers";
 import type { AgentSessionToolExecutor } from "./delegated-agent-types";
-import { buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION } from "./socketagent-instructions";
+import { buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, WORK_REVIEW_TOOL_DESCRIPTION } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
@@ -2684,7 +2685,7 @@ export class ClaudeSession {
    *            SDK's cancellation path at that timing.
    *  'later' - priority 'later'. The backend holds it until the whole task ends.
    */
-  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'next', _messageId?: string): Promise<void> {
+  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'next', messageId?: string): Promise<void> {
     if (!this.activeQuery || !this._isRunning) return;
     const atNextBoundary = priority === 'next';
     console.log(
@@ -2693,7 +2694,9 @@ export class ClaudeSession {
     );
 
     const sessionId = this.sessionId || "";
-    const userMsgUuid = crypto.randomUUID();
+    // Stable caller IDs let durable external events (such as a completed Work
+    // Review) reuse one transcript/backend identity when delivery is replayed.
+    const userMsgUuid = messageId || crypto.randomUUID();
 
     // Log injected message to history so it persists across sessions
     if (sessionId) {
@@ -2737,7 +2740,11 @@ export class ClaudeSession {
     }
   }
 
-  private async _runWarmPrompt(prompt: string, resumeSessionId?: string): Promise<void> {
+  private async _runWarmPrompt(
+    prompt: string,
+    resumeSessionId?: string,
+    messageId?: string,
+  ): Promise<void> {
     if (!this.activeQuery || !this.activeInputQueue) {
       throw new Error("Claude warm session is not available");
     }
@@ -2752,7 +2759,7 @@ export class ClaudeSession {
     this.onActivity?.();
 
     const sid = resumeSessionId || this.sessionId || "";
-    const userMsgUuid = crypto.randomUUID();
+    const userMsgUuid = messageId || crypto.randomUUID();
     const turnPromise = this._trackPendingTurn();
 
     if (sid) {
@@ -2777,12 +2784,16 @@ export class ClaudeSession {
     return turnPromise;
   }
 
-  async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
+  async runQuery(
+    prompt: string,
+    resumeSessionId?: string,
+    messageId?: string,
+  ): Promise<void> {
     // The SDK stream also remains reusable while a completed root turn waits
     // for background work. A new phone prompt must join that process rather
     // than replacing activeQuery and orphaning its task lifecycle events.
     if (this.activeQuery && this.activeInputQueue && !this._isRunning) {
-      return this._runWarmPrompt(prompt, resumeSessionId);
+      return this._runWarmPrompt(prompt, resumeSessionId, messageId);
     }
 
     if (this._activeSubagents.size > 0 || this._sdkBackgroundTasks.size > 0) {
@@ -2869,6 +2880,44 @@ export class ClaudeSession {
               plan_id: z.string().optional().describe("Existing plan ID to update. Omit when creating a new plan."),
             },
             async (args) => handleHtmlPlanTool(appToolContext, args)
+          ),
+          tool(
+            "WorkReview",
+            WORK_REVIEW_TOOL_DESCRIPTION,
+            {
+              action: z.enum(["create", "get", "list", "export", "new_round", "archive"]),
+              review_id: z.string().optional().describe("Required for get, new_round, and archive"),
+              idempotency_key: z.string().optional().describe("Stable caller-generated key required for create and new_round; reuse it when retrying"),
+              title: z.string().optional().describe("Required for create and new_round"),
+              purpose: z.string().optional().describe("Optional workflow purpose, such as pre-deployment, QA, design review, audit, or informational"),
+              summary: z.string().optional().describe("Concise description of the work completed"),
+              instructions: z.string().optional().describe("Instructions applying to the whole review"),
+              approval_meaning: z.string().optional().describe("What approval authorizes or confirms, including deployment authorization when applicable"),
+              items: z.array(z.object({
+                item_id: z.string().optional().describe("Stable item ID; omit to generate one"),
+                title: z.string(),
+                description: z.string().optional(),
+                instructions: z.string().optional().describe("What the reviewer should inspect or verify"),
+                primary_target: z.object({
+                  kind: z.enum(["url", "file", "image", "html", "diff", "session", "custom"]),
+                  uri: z.string().describe("Address or identifier the reviewer opens or inspects"),
+                  label: z.string().optional(),
+                  environment: z.string().optional().describe("For example production, development, sandbox, or local"),
+                  displayMode: z.enum(["auto", "embedded", "external"]).optional(),
+                  description: z.string().optional(),
+                }),
+                supporting_targets: z.array(z.object({
+                  kind: z.enum(["url", "file", "image", "html", "diff", "session", "custom"]),
+                  uri: z.string(),
+                  label: z.string().optional(),
+                  environment: z.string().optional(),
+                  displayMode: z.enum(["auto", "embedded", "external"]).optional(),
+                  description: z.string().optional(),
+                })).optional(),
+              })).optional().describe("Required non-empty list for create and new_round"),
+              include_archived: z.boolean().optional().describe("Include archived reviews for list/export"),
+            },
+            async (args) => handleWorkReviewTool(appToolContext, args as any)
           ),
           tool(
             "Speak",
@@ -3255,6 +3304,7 @@ export class ClaudeSession {
         mcpServerName: "app",
         toolNames: [
           "HtmlPlan",
+          "WorkReview",
           "SendFile",
           "RequestSecureInput",
           "Speak",
@@ -3289,7 +3339,7 @@ export class ClaudeSession {
       // emitting a `user` message echo for string prompts; we control the UUID here
       // and pass it via streaming-input mode so it lands in the SDK transcript with
       // the same ID we hand to the app.)
-      const userMsgUuid = crypto.randomUUID();
+      const userMsgUuid = messageId || crypto.randomUUID();
       const promptSessionId = resumeTarget || this.sessionId || "";
       const transferContext = this._pendingTransferContext;
       const nativePrompt = transferContext

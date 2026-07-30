@@ -634,6 +634,9 @@ function historyPositionKey(entry: HistoryEntry): string | null {
   if (entry.role === "task_state" && entry.taskId) {
     return `task_state:${entry.taskKind || "background"}:${entry.taskId}`;
   }
+  if (entry.role === "work_review" && entry.reviewId) {
+    return `work_review:${entry.reviewId}`;
+  }
   return null;
 }
 
@@ -653,6 +656,9 @@ function serverMessagePositionKey(message: Record<string, any>): string | null {
     return `${role}:question:${String(questionId)}`;
   }
   if (type === "monitor_output" && message.taskId) return `monitor:${String(message.taskId)}`;
+  if (type === "work_review_card" && message.reviewId) {
+    return `work_review:${String(message.reviewId)}`;
+  }
   return null;
 }
 

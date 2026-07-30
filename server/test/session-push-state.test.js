@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  completionTranscriptTarget,
   SessionPushRunTracker,
   sessionPushEventId,
 } = require("../dist/session-push-state");
@@ -63,5 +64,44 @@ test("completion event identity is stable for a run", () => {
       "session-1",
       "2026-07-28T13:00:00.000Z",
     ),
+  );
+});
+
+test("completion notifications target the latest positioned assistant message", () => {
+  assert.deepEqual(
+    completionTranscriptTarget([
+      { role: "assistant", entryId: "assistant-1", sessionSeq: 4 },
+      { role: "user", entryId: "user-2", sessionSeq: 5 },
+      { role: "assistant", entryId: "assistant-2", sessionSeq: 6 },
+      { role: "tool_result", entryId: "tool-1", sessionSeq: 7 },
+    ]),
+    { targetEntryId: "assistant-2", targetSessionSeq: 6 },
+  );
+});
+
+test("completion targeting tolerates legacy history without positioned rows", () => {
+  assert.deepEqual(
+    completionTranscriptTarget([
+      { role: "assistant" },
+      { role: "user", entryId: "user-1", sessionSeq: 1 },
+    ]),
+    {},
+  );
+});
+
+test("completion targeting never points at an assistant message from an older run", () => {
+  assert.deepEqual(
+    completionTranscriptTarget(
+      [
+        {
+          role: "assistant",
+          entryId: "old-assistant",
+          sessionSeq: 8,
+          timestamp: "2026-07-28T11:59:00.000Z",
+        },
+      ],
+      "2026-07-28T12:00:00.000Z",
+    ),
+    {},
   );
 });

@@ -19,8 +19,12 @@ import {
   handleSendFileTool,
   handleSpeakTool,
   handleTaskBatchTool,
+  handleWorkReviewTool,
 } from "./app-tool-handlers";
-import { HTML_PLAN_TOOL_DESCRIPTION } from "./socketagent-instructions";
+import {
+  HTML_PLAN_TOOL_DESCRIPTION,
+  WORK_REVIEW_TOOL_DESCRIPTION,
+} from "./socketagent-instructions";
 
 export interface SocketAgentAppToolManifest {
   name: string;
@@ -31,6 +35,10 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "HtmlPlan",
     description: HTML_PLAN_TOOL_DESCRIPTION,
+  },
+  {
+    name: "WorkReview",
+    description: WORK_REVIEW_TOOL_DESCRIPTION,
   },
   {
     name: "SendFile",
@@ -134,6 +142,43 @@ function createServer(context: AppToolContext): McpServer {
       },
     },
     async (args) => handleHtmlPlanTool(context, args as any),
+  );
+
+  const workReviewTargetSchema = z.object({
+    kind: z.enum(["url", "file", "image", "html", "diff", "session", "custom"]),
+    uri: z.string().describe("Address or identifier the reviewer opens or inspects"),
+    label: z.string().optional(),
+    environment: z.string().optional().describe("For example production, development, sandbox, or local"),
+    displayMode: z.enum(["auto", "embedded", "external"]).optional(),
+    description: z.string().optional(),
+  });
+  const workReviewItemSchema = z.object({
+    item_id: z.string().optional().describe("Stable item ID; omit to generate one"),
+    title: z.string(),
+    description: z.string().optional(),
+    instructions: z.string().optional().describe("What the reviewer should inspect or verify"),
+    primary_target: workReviewTargetSchema,
+    supporting_targets: z.array(workReviewTargetSchema).optional(),
+  });
+  server.registerTool(
+    "WorkReview",
+    {
+      title: "Work Review",
+      description: WORK_REVIEW_TOOL_DESCRIPTION,
+      inputSchema: {
+        action: z.enum(["create", "get", "list", "export", "new_round", "archive"]),
+        review_id: z.string().optional().describe("Required for get, new_round, and archive"),
+        idempotency_key: z.string().optional().describe("Stable caller-generated key required for create and new_round; reuse it when retrying"),
+        title: z.string().optional().describe("Required for create and new_round"),
+        purpose: z.string().optional().describe("Optional workflow purpose, such as pre-deployment, QA, design review, audit, or informational"),
+        summary: z.string().optional().describe("Concise description of the work completed"),
+        instructions: z.string().optional().describe("Instructions applying to the whole review"),
+        approval_meaning: z.string().optional().describe("What approval authorizes or confirms, including deployment authorization when applicable"),
+        items: z.array(workReviewItemSchema).optional().describe("Required non-empty list for create and new_round"),
+        include_archived: z.boolean().optional().describe("Include archived reviews for list/export"),
+      },
+    },
+    async (args) => handleWorkReviewTool(context, args as any),
   );
 
   server.registerTool(

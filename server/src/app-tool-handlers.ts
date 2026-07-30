@@ -42,6 +42,7 @@ import type {
 
 export interface AppToolContext {
   getSessionId(): string;
+  getDelegationSupervisorSessionId?(): string;
   getCwd?(): string;
   getBackend?(): Backend;
   getCodexDriver?(): CodexDriver;
@@ -1074,7 +1075,10 @@ export async function handleScheduleTaskTool(
     scheduledTime: args.scheduledTime,
     createdAt: new Date().toISOString(),
     status: "pending",
-    createdBySessionId: ctx.getSessionId() || undefined,
+    createdBySessionId:
+      ctx.getDelegationSupervisorSessionId?.() ||
+      ctx.getSessionId() ||
+      undefined,
     recurrence,
     reuseSession: args.reuseSession || false,
     notificationMode: args.notificationMode === "quiet" ? "quiet" : "completion",

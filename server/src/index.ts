@@ -93,6 +93,7 @@ import {
   updateDelegatedAgent,
   updateDelegatedAgentRun,
 } from "./delegated-agent-store";
+import { resolveDelegationSupervisorSessionId } from "./delegation-lineage";
 import {
   exportWorkReviews,
   finishWorkReview,
@@ -1567,6 +1568,7 @@ function attachSessionLifecycleCallbacks(session: Session): void {
       sessionClients.delete(previousSessionId);
       sessionClients.set(nextSessionId, client);
     }
+    persistDelegationSupervisorLineage(session, nextSessionId);
     console.log(`[SessionPool] Rekeyed session ${previousSessionId} -> ${nextSessionId}`);
     notifySessionActivity();
   };
@@ -1586,6 +1588,45 @@ function attachSessionLifecycleCallbacks(session: Session): void {
     broadcastSessionList();
     broadcastStatusSync();
   };
+}
+
+function delegationSupervisorForSessionId(sessionId: string): string {
+  const cleanSessionId = sessionId.trim();
+  if (!cleanSessionId) return "";
+  return resolveDelegationSupervisorSessionId({
+    currentSessionId: cleanSessionId,
+    sessionInfo: getSession(cleanSessionId),
+    scheduledTasks: listScheduledTasks(),
+  });
+}
+
+function delegationSupervisorForSession(session: Session): string {
+  const currentSessionId = session.getSessionId() || "";
+  return resolveDelegationSupervisorSessionId({
+    currentSessionId,
+    runtimeSupervisorSessionId: (session as any)
+      ._delegationSupervisorSessionId,
+    sessionInfo: currentSessionId ? getSession(currentSessionId) : undefined,
+    scheduledTasks: listScheduledTasks(),
+  });
+}
+
+function persistDelegationSupervisorLineage(
+  session: Session,
+  sessionId = session.getSessionId() || "",
+): void {
+  const cleanSessionId = sessionId.trim();
+  if (!cleanSessionId) return;
+  const supervisorSessionId = delegationSupervisorForSession(session);
+  if (!supervisorSessionId) return;
+  (session as any)._delegationSupervisorSessionId = supervisorSessionId;
+  if (supervisorSessionId === cleanSessionId) return;
+  const info = getSession(cleanSessionId);
+  if (!info || info.delegationSupervisorSessionId === supervisorSessionId) {
+    return;
+  }
+  info.delegationSupervisorSessionId = supervisorSessionId;
+  saveSession(info);
 }
 
 const durableMonitorPromptQueues = new Map<string, Promise<void>>();
@@ -2279,7 +2320,7 @@ async function manageAgentSession(
   supervisor: Session,
   args: AgentSessionToolArgs,
 ): Promise<AgentSessionToolResponse> {
-  const supervisorSessionId = supervisor.getSessionId();
+  const supervisorSessionId = delegationSupervisorForSession(supervisor);
   if (!supervisorSessionId) throw new Error("The supervising session ID is not available yet");
   const action = args.action;
 
@@ -2596,6 +2637,19 @@ function persistedAgentSettings(sessionInfo?: SessionInfo): AgentSessionSettings
 }
 
 async function restorePersistedAgentSettings(session: Session, sessionInfo?: SessionInfo): Promise<void> {
+  if (sessionInfo?.id) {
+    const supervisorSessionId = delegationSupervisorForSessionId(sessionInfo.id);
+    if (supervisorSessionId) {
+      (session as any)._delegationSupervisorSessionId = supervisorSessionId;
+      if (
+        supervisorSessionId !== sessionInfo.id &&
+        sessionInfo.delegationSupervisorSessionId !== supervisorSessionId
+      ) {
+        sessionInfo.delegationSupervisorSessionId = supervisorSessionId;
+        saveSession(sessionInfo);
+      }
+    }
+  }
   const settings = persistedAgentSettings(sessionInfo);
   if (settings.model) await session.setModel(settings.model);
   if (settings.effort) session.setEffort(settings.effort as any);
@@ -4417,7 +4471,9 @@ function createConnectionHandler(
           scheduledTime: (msg as any).scheduledTime,
           createdAt: new Date().toISOString(),
           status: "pending",
-          createdBySessionId: activeSessionId || undefined,
+          createdBySessionId: activeSessionId
+            ? delegationSupervisorForSessionId(activeSessionId)
+            : undefined,
           recurrence: recurrence && recurrence.type !== "once" ? recurrence : undefined,
           reuseSession: (msg as any).reuseSession || false,
           notificationMode: (msg as any).notificationMode === "quiet" ? "quiet" : "completion",
@@ -8207,6 +8263,13 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       send: (data: string) => forwardHeadlessScheduledAgentMessage(data, session?.getSessionId() || task.sessionId || ""),
     } as any;
     session = createSession(backend, ws, task.cwd, plugins, codexDriver);
+    const scheduledSupervisorSessionId = task.createdBySessionId
+      ? delegationSupervisorForSessionId(task.createdBySessionId)
+      : "";
+    if (scheduledSupervisorSessionId) {
+      (session as any)._delegationSupervisorSessionId =
+        scheduledSupervisorSessionId;
+    }
     (session as any)._suppressOngoingNotification =
       !scheduledTaskUsesAutomaticNotifications(task);
     (session as any)._scheduledTaskId = task.id;
@@ -8260,6 +8323,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         activeSessions.set(sid, session);
         task.sessionId = sid;
         currentRun.sessionId = sid;
+        persistDelegationSupervisorLineage(session, sid);
         saveScheduledTask(task);
         maybeSendScheduledStartPush();
         broadcastSessionList();
@@ -8276,6 +8340,9 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       const sid = realSessionId || tempId;
       task.sessionId = realSessionId || undefined;
       currentRun.sessionId = realSessionId || "";
+      if (realSessionId) {
+        persistDelegationSupervisorLineage(session, realSessionId);
+      }
       currentRun.completedAt = new Date().toISOString();
       currentRun.status = "completed";
       currentRun.resultSummary = session.lastPreview || "Task completed";
@@ -8343,6 +8410,9 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       const sid = session.getSessionId() || tempId;
       task.sessionId = sid !== tempId ? sid : undefined;
       currentRun.sessionId = sid !== tempId ? sid : "";
+      if (sid !== tempId) {
+        persistDelegationSupervisorLineage(session, sid);
+      }
       currentRun.completedAt = new Date().toISOString();
       currentRun.status = "failed";
       currentRun.error = err.message || "Unknown error";

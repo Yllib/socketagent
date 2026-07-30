@@ -2287,6 +2287,13 @@ export class CodexSession {
   private createAppToolContext(): AppToolContext {
     return {
       getSessionId: () => this.sessionId || "",
+      getDelegationSupervisorSessionId: () =>
+        String(
+          (this as any)._delegationSupervisorSessionId ||
+            getSession(this.sessionId || "")?.delegationSupervisorSessionId ||
+            this.sessionId ||
+            "",
+        ),
       getCwd: () => this.cwd,
       getBackend: () => "codex",
       getCodexDriver: () => "app-server",

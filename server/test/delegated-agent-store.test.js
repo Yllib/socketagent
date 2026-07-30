@@ -19,7 +19,9 @@ const {
 } = require("../dist/delegated-agent-store");
 const {
   handleAgentSessionTool,
+  handleScheduleTaskTool,
 } = require("../dist/app-tool-handlers");
+const { getScheduledTask } = require("../dist/scheduled-task-store");
 
 function record(id = "delegation-1") {
   const now = new Date().toISOString();
@@ -105,4 +107,34 @@ test("AgentSession handler returns stable child IDs and follow-up guidance", asy
   assert.equal(result.isError, undefined);
   assert.match(result.content[0].text, /"session_id": "child-1"/);
   assert.match(result.content[0].text, /action="message"/);
+});
+
+test("scheduled continuations retain the canonical delegation supervisor", async () => {
+  let savedTaskId;
+  const result = await handleScheduleTaskTool(
+    {
+      getSessionId: () => "fresh-scheduled-session",
+      getDelegationSupervisorSessionId: () => "original-supervisor",
+      getBackend: () => "claude",
+      send: (message) => {
+        savedTaskId = message.task.id;
+      },
+      getTtsEngine: () => "system",
+      getKokoroVoice: () => "",
+      getKokoroSpeed: () => 1,
+    },
+    {
+      name: "Continue child review",
+      prompt: "Return to the delegated child and ask a follow-up.",
+      cwd: process.cwd(),
+      scheduledTime: new Date(Date.now() + 60_000).toISOString(),
+    },
+  );
+
+  assert.equal(result.isError, undefined);
+  assert.ok(savedTaskId);
+  assert.equal(
+    getScheduledTask(savedTaskId).createdBySessionId,
+    "original-supervisor",
+  );
 });

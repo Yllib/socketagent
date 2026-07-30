@@ -1375,6 +1375,11 @@ export interface SessionInfo {
   /** Full-session delegation lineage, distinct from provider-native subagents. */
   delegatedBySessionId?: string;
   delegationId?: string;
+  /**
+   * Canonical supervisor whose AgentSession delegation namespace this session
+   * may access. Used by scheduled continuation sessions; absent means `id`.
+   */
+  delegationSupervisorSessionId?: string;
 }
 
 export interface ErrorServerMessage {

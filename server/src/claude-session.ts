@@ -2847,6 +2847,13 @@ export class ClaudeSession {
 
       const appToolContext: AppToolContext = {
         getSessionId: () => this.sessionId || "",
+        getDelegationSupervisorSessionId: () =>
+          String(
+            (this as any)._delegationSupervisorSessionId ||
+              getSession(this.sessionId || "")?.delegationSupervisorSessionId ||
+              this.sessionId ||
+              "",
+          ),
         getCwd: () => this.cwd,
         getBackend: () => "claude",
         send: (msg) => this.send(msg as ServerMessage),
@@ -3010,7 +3017,10 @@ export class ClaudeSession {
                 scheduledTime: args.scheduledTime,
                 createdAt: new Date().toISOString(),
                 status: "pending",
-                createdBySessionId: this.sessionId || undefined,
+                createdBySessionId:
+                  appToolContext.getDelegationSupervisorSessionId?.() ||
+                  this.sessionId ||
+                  undefined,
                 recurrence,
                 reuseSession: args.reuseSession || false,
                 notificationMode: args.notificationMode === "quiet" ? "quiet" : "completion",

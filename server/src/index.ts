@@ -1117,6 +1117,18 @@ async function getEnrichedSessions(): Promise<SessionInfo[]> {
       if (stored) byId.set(sid, stored);
     }
   }
+  // The delegation registry is the durable source of truth for ancestry.
+  // Reapply it while listing so older/native-only child sessions and a rare
+  // missed initial SessionInfo write still appear beneath their parent.
+  for (const delegation of listDelegatedAgents()) {
+    const childSessionId = delegation.childSessionId?.trim();
+    if (!childSessionId) continue;
+    const child = byId.get(childSessionId);
+    if (!child) continue;
+    child.delegatedBySessionId =
+      delegation.parentSessionId || delegation.supervisorSessionId;
+    child.delegationId = delegation.delegationId;
+  }
   const taskSessionIds = getScheduledTaskSessionIds();
   return [...byId.values()]
     .filter(s => !taskSessionIds.has(s.id))
@@ -2123,7 +2135,8 @@ function registerDelegatedChildSession(
   const info = getSession(sessionId);
   if (info) {
     info.title = record.label;
-    info.delegatedBySessionId = record.supervisorSessionId;
+    info.delegatedBySessionId =
+      record.parentSessionId || record.supervisorSessionId;
     info.delegationId = record.delegationId;
     saveSession(info);
   }
@@ -2499,10 +2512,13 @@ async function manageAgentSession(
       throw new Error(`Working directory not found: ${cwd}`);
     }
     const backend = args.backend || getSession(supervisorSessionId)?.backend || "claude";
+    const parentSessionId =
+      supervisor.getSessionId()?.trim() || supervisorSessionId;
     const now = new Date().toISOString();
     const label = args.label?.trim() || delegatedAgentPromptPreview(prompt).slice(0, 100) || `${backend} agent`;
     const record = saveDelegatedAgent({
       delegationId: crypto.randomUUID(),
+      parentSessionId,
       supervisorSessionId,
       backend,
       cwd,

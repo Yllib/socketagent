@@ -27,6 +27,7 @@ function record(id = "delegation-1") {
   const now = new Date().toISOString();
   return {
     delegationId: id,
+    parentSessionId: "immediate-parent-1",
     supervisorSessionId: "supervisor-1",
     childSessionId: "child-1",
     backend: "codex",
@@ -42,6 +43,10 @@ function record(id = "delegation-1") {
 test("persists delegation lineage, runs, and pending completion reports", () => {
   saveDelegatedAgent(record());
   assert.equal(getDelegatedAgent("child-1").delegationId, "delegation-1");
+  assert.equal(
+    getDelegatedAgent("child-1").parentSessionId,
+    "immediate-parent-1",
+  );
   assert.equal(getDelegatedAgent("child-1", "another-supervisor"), undefined);
 
   addDelegatedAgentRun("delegation-1", {

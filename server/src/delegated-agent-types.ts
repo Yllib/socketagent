@@ -87,6 +87,11 @@ export interface DelegatedAgentRun {
 
 export interface DelegatedAgentRecord {
   delegationId: string;
+  /**
+   * Immediate session that invoked AgentSession action=start. This is display
+   * lineage only; supervisorSessionId remains the authorization namespace.
+   */
+  parentSessionId?: string;
   supervisorSessionId: string;
   childSessionId?: string;
   backend: Backend;

@@ -107,6 +107,8 @@ test("AgentSession handler returns stable child IDs and follow-up guidance", asy
   assert.equal(result.isError, undefined);
   assert.match(result.content[0].text, /"session_id": "child-1"/);
   assert.match(result.content[0].text, /action="message"/);
+  assert.match(result.content[0].text, /while it is running/);
+  assert.match(result.content[0].text, /next safe boundary/);
 });
 
 test("scheduled continuations retain the canonical delegation supervisor", async () => {

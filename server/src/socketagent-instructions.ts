@@ -42,7 +42,7 @@ export function buildSocketAgentIntegrationInstructions(options: {
     ...(options.toolNames.includes("ReportSubagentAssignment")
       ? ["- If you are a spawned Codex subagent, call ReportSubagentAssignment exactly once before any commentary or other tool use. Pass agent_path exactly as shown in your NEW_TASK envelope and copy the complete readable NEW_TASK payload into prompt. This is an internal UI metadata handshake. Never call it from the root agent."]
       : []),
-    "- Independent delegated work that should run in a full Claude or Codex session -> AgentSession. Use action=start, retain the returned session_id/delegation_id, use action=message for follow-ups, and use status/list/stop when needed. The child runs independently and reports its completed turn back automatically.",
+    "- Independent delegated work that should run in a full Claude or Codex session -> AgentSession. Use action=start, retain the returned session_id/delegation_id, use action=message for follow-ups or added context even while the child is running, and use status/list/stop when needed. Messages sent to a running child are injected at its next safe boundary. The child runs independently and reports its completed turn back automatically.",
     monitorRouting,
     "- Spoken output -> Speak only when TTS is enabled or explicitly requested.",
     "- Skill discovery/loading -> SearchSkills, then ReadSkill.",

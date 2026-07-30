@@ -78,7 +78,7 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   },
   {
     name: "AgentSession",
-    description: "Start and manage an independent Claude or Codex session that reports back to the supervising agent.",
+    description: "Start and manage an independent Claude or Codex session, including safe-boundary messages while it runs.",
   },
   {
     name: "SearchSkills",
@@ -342,10 +342,10 @@ function createServer(context: AppToolContext): McpServer {
     "AgentSession",
     {
       title: "Agent Session",
-      description: "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of the supervising turn, and reports its final response back automatically.",
+      description: "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of the supervising turn, accepts action=message while running by injecting it at the next safe boundary, and reports its final response back automatically.",
       inputSchema: {
         action: z.enum(["start", "message", "status", "list", "stop"]).describe("start a child; message an existing child; inspect status/list; or stop it"),
-        prompt: z.string().optional().describe("Required for start and message"),
+        prompt: z.string().optional().describe("Required for start and message. A message to a running child is queued at its next safe boundary."),
         session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/stop unless delegation_id is used"),
         delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),
         backend: z.enum(["claude", "codex"]).optional().describe("Backend for start. Defaults to the supervising agent's backend."),

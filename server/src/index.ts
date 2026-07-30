@@ -94,6 +94,7 @@ import {
   updateDelegatedAgentRun,
 } from "./delegated-agent-store";
 import { resolveDelegationSupervisorSessionId } from "./delegation-lineage";
+import { routeRunningDelegatedAgentMessage } from "./delegated-agent-message-route";
 import {
   exportWorkReviews,
   finishWorkReview,
@@ -2155,8 +2156,24 @@ async function launchDelegatedAgentTurn(
 ): Promise<DelegatedAgentRecord> {
   const childInfo = record.childSessionId ? getSession(record.childSessionId) : undefined;
   const activeChild = record.childSessionId ? activeSessions.get(record.childSessionId) : undefined;
+  const runningMessageRoute = await routeRunningDelegatedAgentMessage({
+    target: activeChild,
+    isRunning: activeChild?.isRunning === true,
+    prompt,
+    messageId: `delegated-message:${record.delegationId}:${crypto.randomUUID()}`,
+  });
+  if (runningMessageRoute === "injected") {
+    console.log(
+      `[DelegatedAgent] Queued message at next safe boundary`
+      + ` delegation=${record.delegationId} child=${record.childSessionId}`,
+    );
+    return updateDelegatedAgent(record.delegationId, { status: "running" })
+      || record;
+  }
   if (activeChild && sessionIsBusy(activeChild)) {
-    throw new Error(`Child session ${record.childSessionId} is still running. Wait for its automatic report before sending a follow-up.`);
+    throw new Error(
+      `Child session ${record.childSessionId} is temporarily busy but has no injectable running turn.`,
+    );
   }
 
   let child: Session;
@@ -2389,11 +2406,16 @@ async function manageAgentSession(
   if (action === "message") {
     const prompt = args.prompt?.trim();
     if (!prompt) throw new Error("action=message requires prompt");
+    const childWasRunning = record.childSessionId
+      ? activeSessions.get(record.childSessionId)?.isRunning === true
+      : false;
     const resumed = await launchDelegatedAgentTurn(record, prompt);
     return {
       action,
       delegation: resumed,
-      message: `Follow-up sent to ${record.backend} child session ${record.childSessionId}.`,
+      message: childWasRunning
+        ? `Message queued for the next safe boundary in the running ${record.backend} child session ${record.childSessionId}.`
+        : `Follow-up sent to ${record.backend} child session ${record.childSessionId}.`,
     };
   }
   throw new Error(`Unsupported AgentSession action: ${action}`);

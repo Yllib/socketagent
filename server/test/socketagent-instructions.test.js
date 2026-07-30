@@ -30,6 +30,7 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /instead of looping single-task tools/);
   assert.match(prompt, /TaskBatch preserves native Claude tasks/);
   assert.match(prompt, /reports its completed turn back automatically/);
+  assert.match(prompt, /Messages sent to a running child are injected at its next safe boundary/);
   assert.match(prompt, /socketagent:\/\/file\/download/);
   assert.match(prompt, /<secret_inventory>\n\[\]\n<\/secret_inventory>/);
 });

@@ -461,7 +461,7 @@ export async function handleAgentSessionTool(
     const record = response.delegation;
     const summary = delegatedAgentSummary(record);
     const guidance = response.action === "start"
-      ? `\nUse action="message" with session_id="${record.childSessionId}" for follow-ups. The child will report back automatically when its turn finishes.`
+      ? `\nUse action="message" with session_id="${record.childSessionId}" for follow-ups or added context, including while it is running; running-child messages are injected at the next safe boundary. The child will report back automatically when its turn finishes.`
       : "";
     return {
       content: [{

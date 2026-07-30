@@ -3065,10 +3065,10 @@ export class ClaudeSession {
           ),
           tool(
             "AgentSession",
-            "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of this turn, and reports its final response back automatically.",
+            "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of this turn, accepts action=message while running by injecting it at the next safe boundary, and reports its final response back automatically.",
             {
               action: z.enum(["start", "message", "status", "list", "stop"]).describe("start a child; message an existing child; inspect status/list; or stop it"),
-              prompt: z.string().optional().describe("Required for start and message"),
+              prompt: z.string().optional().describe("Required for start and message. A message to a running child is queued at its next safe boundary."),
               session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/stop unless delegation_id is used"),
               delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),
               backend: z.enum(["claude", "codex"]).optional().describe("Backend for start. Defaults to the supervising agent's backend."),

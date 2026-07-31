@@ -17,6 +17,7 @@ import {
   listWorkReviews,
 } from "./work-review-service";
 import {
+  attachSendFileDeliveryToHistory,
   getTodos,
   removeHtmlPlanHistoryEntries,
   saveTodos,
@@ -540,7 +541,6 @@ interface AppMonitorState {
   completing: boolean;
 }
 
-const recentSendFiles: Map<string, number> = new Map();
 const appMonitors: Map<string, AppMonitorState> = new Map();
 
 export async function handleHtmlPlanTool(
@@ -862,20 +862,13 @@ export async function handleSendFileTool(
     }
     const stat = fs.statSync(filePath);
     const fileName = path.basename(filePath);
-    // File availability is session-owned. Including the session in the ID
-    // prevents an identically-named/path file advertised by another running
-    // session from taking over the active card's download route in the app.
     const sessionId = ctx.getSessionId();
-    const fileId = crypto.createHash("md5")
-      .update(`${sessionId}:${filePath}:${stat.mtimeMs}:${stat.size}`)
-      .digest("hex")
-      .slice(0, 12);
-
-    const now = Date.now();
-    if (recentSendFiles.has(fileId) && now - recentSendFiles.get(fileId)! < 10000) {
-      console.log(`[MCP:SendFile] Dedup: ${fileName} was sent recently; replaying availability`);
-    }
-    recentSendFiles.set(fileId, now);
+    // This identifies one delivery, not the underlying path/content. Reusing
+    // a deterministic path hash made a later card inherit an earlier card's
+    // downloaded state whenever the file had not changed.
+    const fileId = `send_${crypto.randomUUID()}`;
+    const fileVersion = fileTransferVersion(stat);
+    const advertisedAtMs = Date.now();
 
     ctx.send({
       type: "file",
@@ -883,9 +876,38 @@ export async function handleSendFileTool(
       fileName,
       filePath,
       fileSize: stat.size,
-      fileVersion: fileTransferVersion(stat),
+      fileVersion,
       sessionId,
     });
+
+    // Tool calls are normally persisted before their handler runs. Keep a
+    // short asynchronous retry window for SDKs that deliver those events in
+    // the opposite order, without delaying the tool result.
+    const persistDelivery = (attempt = 0): void => {
+      let attached = false;
+      try {
+        attached = !!attachSendFileDeliveryToHistory(sessionId, {
+          filePath,
+          fileId,
+          fileName,
+          fileSize: stat.size,
+          fileVersion,
+          advertisedAtMs,
+        });
+      } catch (error: any) {
+        console.error(
+          `[MCP:SendFile] Could not persist delivery metadata: ${error?.message || String(error)}`,
+        );
+      }
+      if (!attached && attempt < 8) {
+        const timer = setTimeout(
+          () => persistDelivery(attempt + 1),
+          50 * (attempt + 1),
+        );
+        timer.unref?.();
+      }
+    };
+    if (sessionId) persistDelivery();
 
     const sizeStr = sizeLabel(stat.size);
     console.log(`[MCP:SendFile] Returning result for ${fileName} (${sizeStr})`);

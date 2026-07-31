@@ -1215,6 +1215,14 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
     existingIndex = -1;
   }
   if (existingIndex >= 0) {
+    if (isSendFileCall(positioned) && isSendFileCall(entries[existingIndex])) {
+      // A later SDK/native revision of the canonical tool call must not erase
+      // delivery metadata attached by the app-tool handler.
+      positioned.fileId ??= entries[existingIndex].fileId;
+      positioned.fileName ??= entries[existingIndex].fileName;
+      positioned.fileSize ??= entries[existingIndex].fileSize;
+      positioned.fileVersion ??= entries[existingIndex].fileVersion;
+    }
     positioned.revision = Math.max(
       positiveInteger(positioned.revision) || 1,
       (positiveInteger(entries[existingIndex].revision) || 1) + 1,
@@ -1225,6 +1233,49 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
   }
   writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set([positioned]) });
   return positioned;
+}
+
+export interface SendFileDeliveryMetadata {
+  filePath: string;
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  fileVersion: string;
+  advertisedAtMs: number;
+}
+
+/**
+ * Attach one app-tool delivery to its canonical SendFile history entry.
+ *
+ * The delivery ID is deliberately invocation-scoped. The content version is
+ * kept separately so two sends of the same unchanged path never share the
+ * phone's downloaded state while transfer mutation checks still work.
+ */
+export function attachSendFileDeliveryToHistory(
+  sessionId: string,
+  metadata: SendFileDeliveryMetadata,
+): HistoryEntry | undefined {
+  if (!sessionId || !metadata.filePath || !metadata.fileId) return undefined;
+  const entries = readHistoryEntries(sessionId);
+  const earliestMatch = metadata.advertisedAtMs - 5_000;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (!isSendFileCall(entry) || sendFilePath(entry) !== metadata.filePath) continue;
+    if (entry.fileId) {
+      if (entry.fileId === metadata.fileId) return hydrateHistoryEntry(entry);
+      continue;
+    }
+    const entryTime = Date.parse(entry.timestamp || "");
+    if (Number.isFinite(entryTime) && entryTime < earliestMatch) break;
+    entry.fileId = metadata.fileId;
+    entry.fileName = metadata.fileName;
+    entry.fileSize = metadata.fileSize;
+    entry.fileVersion = metadata.fileVersion;
+    entry.revision = (positiveInteger(entry.revision) || 1) + 1;
+    writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set([entry]) });
+    return hydrateHistoryEntry(entry);
+  }
+  return undefined;
 }
 
 /** Run the collision migration before accepting clients on the first fixed build. */

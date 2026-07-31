@@ -1,7 +1,17 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { randomUUID } = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
-const { normalizeSendFileHistoryEntries } = require("../dist/session-store");
+const {
+  appendHistory,
+  deleteSessionArtifacts,
+  getHistory,
+  normalizeSendFileHistoryEntries,
+} = require("../dist/session-store");
+const { handleSendFileTool } = require("../dist/app-tool-handlers");
 
 test("collapses the handler-generated SendFile pair into the canonical pair", () => {
   const normalized = normalizeSendFileHistoryEntries([
@@ -56,4 +66,58 @@ test("does not collapse distinct later sends of the same file", () => {
   ]);
 
   assert.equal(normalized.filter((entry) => entry.role === "tool_call").length, 2);
+});
+
+test("repeated sends of an unchanged path receive independent durable delivery IDs", async () => {
+  const sessionId = `test-send-file-${randomUUID()}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-send-file-"));
+  const filePath = path.join(dir, "same-name.txt");
+  fs.writeFileSync(filePath, "unchanged content");
+  const packets = [];
+  const ctx = {
+    getSessionId: () => sessionId,
+    send: (message) => packets.push(message),
+    getTtsEngine: () => "system",
+    getKokoroVoice: () => "",
+    getKokoroSpeed: () => 1,
+  };
+
+  try {
+    appendHistory(sessionId, {
+      role: "tool_call",
+      content: "",
+      toolName: "SendFile",
+      toolInput: { file_path: filePath },
+      toolUseId: "send-call-1",
+      timestamp: new Date().toISOString(),
+    });
+    await handleSendFileTool(ctx, { file_path: filePath });
+
+    appendHistory(sessionId, {
+      role: "tool_call",
+      content: "",
+      toolName: "SendFile",
+      toolInput: { file_path: filePath },
+      toolUseId: "send-call-2",
+      timestamp: new Date().toISOString(),
+    });
+    await handleSendFileTool(ctx, { file_path: filePath });
+
+    assert.equal(packets.length, 2);
+    assert.notEqual(packets[0].fileId, packets[1].fileId);
+    assert.equal(packets[0].fileVersion, packets[1].fileVersion);
+
+    const calls = getHistory(sessionId).filter(
+      (entry) => entry.role === "tool_call" && entry.toolName === "SendFile",
+    );
+    assert.deepEqual(
+      calls.map((entry) => entry.fileId),
+      packets.map((packet) => packet.fileId),
+    );
+    assert.equal(calls[0].fileVersion, packets[0].fileVersion);
+    assert.equal(calls[1].fileVersion, packets[1].fileVersion);
+  } finally {
+    deleteSessionArtifacts(sessionId);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

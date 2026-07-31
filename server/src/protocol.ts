@@ -1530,6 +1530,8 @@ export interface HistoryEntry {
   fileId?: string;
   fileName?: string;
   fileSize?: number;
+  /** Content identity at advertisement time; distinct from the delivery ID. */
+  fileVersion?: string;
   // Server-internal large-output storage. These fields may be present in
   // persisted history; the server hydrates toolOutput before sending to clients.
   toolOutputRef?: string;

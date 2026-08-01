@@ -11,6 +11,7 @@ const {
   getBoundedHistoryDelta,
   getBoundedHistoryTail,
   getHistory,
+  getResumeHistoryPage,
   positionSessionMessage,
 } = require("../dist/session-store");
 
@@ -201,6 +202,53 @@ test("default delta budget retains a large active-turn transcript", () => {
     assert.equal(delta.entries.length, 300);
     assert.equal(delta.offset, 1);
     assert.equal(delta.total, 301);
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});
+
+test("resume history returns the complete recent prompt window in one page", () => {
+  const sessionId = `test-transcript-resume-window-${randomUUID()}`;
+  try {
+    const entries = [];
+    const userIndexes = new Set([5, 40, 80, 115]);
+    for (let index = 0; index < 120; index++) {
+      entries.push(appendHistory(sessionId, {
+        role: userIndexes.has(index) ? "user" : "assistant",
+        content: `message-${index}`,
+        timestamp: new Date(Date.now() + index).toISOString(),
+      }));
+    }
+
+    const initial = getResumeHistoryPage(sessionId);
+    assert.equal(initial.historyKind, "initial");
+    assert.equal(initial.offset, 40);
+    assert.equal(initial.entries[0].content, "message-40");
+    assert.equal(initial.entries.at(-1).content, "message-119");
+    assert.equal(
+      initial.entries.filter((entry) => entry.role === "user").length,
+      3,
+    );
+
+    const incompleteCache = getResumeHistoryPage(sessionId, {
+      knownSessionSeq: entries[109].sessionSeq,
+      knownHistoryOffset: 70,
+      knownHistoryEntryCount: 40,
+    });
+    assert.equal(incompleteCache.historyKind, "initial");
+    assert.equal(incompleteCache.offset, 40);
+
+    const completeCache = getResumeHistoryPage(sessionId, {
+      knownSessionSeq: entries[109].sessionSeq,
+      knownHistoryOffset: 40,
+      knownHistoryEntryCount: 70,
+    });
+    assert.equal(completeCache.historyKind, "delta");
+    assert.equal(completeCache.offset, 110);
+    assert.deepEqual(
+      completeCache.entries.map((entry) => entry.content),
+      Array.from({ length: 10 }, (_, index) => `message-${index + 110}`),
+    );
   } finally {
     deleteSessionArtifacts(sessionId);
   }

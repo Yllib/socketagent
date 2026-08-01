@@ -1742,6 +1742,20 @@ export interface BoundedHistoryPage {
   totalUserPrompts: number;
 }
 
+export interface ResumeHistoryPage extends BoundedHistoryPage {
+  historyKind: "initial" | "delta";
+}
+
+export interface ResumeHistoryOptions {
+  knownSessionSeq?: number;
+  knownHistoryOffset?: number;
+  knownHistoryEntryCount?: number;
+  minEntries?: number;
+  recentUserPrompts?: number;
+  maxDeltaEntries?: number;
+  maxDeltaBytes?: number;
+}
+
 function hydratedTailWithinBudget(
   all: HistoryEntry[],
   endExclusive: number,
@@ -1831,6 +1845,101 @@ export function getBoundedHistoryDelta(
     offset: knownIndex + 1,
     deferredContextAvailable: false,
     totalUserPrompts,
+  };
+}
+
+/**
+ * Build the complete visible window for a session resume in one server read.
+ *
+ * The initial snapshot contains at least `minEntries` and extends backward far
+ * enough to include the requested number of recent user prompts. A delta is
+ * returned only when the client's contiguous cached window plus that delta
+ * already satisfies the same contract. The client therefore never needs to
+ * chain older-history requests merely to finish opening a session.
+ */
+export function getResumeHistoryPage(
+  sessionId: string,
+  options: ResumeHistoryOptions = {},
+): ResumeHistoryPage {
+  const startedAt = Date.now();
+  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
+  const total = all.length;
+  const minEntries = Math.max(1, options.minEntries ?? 50);
+  const recentUserPrompts = Math.max(0, options.recentUserPrompts ?? 3);
+  const maxDeltaEntries = Math.max(1, options.maxDeltaEntries ?? 500);
+  const maxDeltaBytes = Math.max(1, options.maxDeltaBytes ?? 2 * 1024 * 1024);
+  const totalUserPrompts = all.reduce(
+    (count, entry) => count + (entry.role === "user" ? 1 : 0),
+    0,
+  );
+  const targetUserPrompts = Math.min(totalUserPrompts, recentUserPrompts);
+
+  const knownSessionSeq = options.knownSessionSeq;
+  const knownHistoryOffset = options.knownHistoryOffset;
+  const knownHistoryEntryCount = options.knownHistoryEntryCount;
+  if (Number.isSafeInteger(knownSessionSeq) && knownSessionSeq! >= 0 &&
+      Number.isSafeInteger(knownHistoryOffset) && knownHistoryOffset! >= 0 &&
+      Number.isSafeInteger(knownHistoryEntryCount) && knownHistoryEntryCount! > 0) {
+    const knownIndex = all.findIndex((entry) => entry.sessionSeq === knownSessionSeq);
+    const cacheIsContiguous = knownIndex >= 0 &&
+      knownHistoryOffset! + knownHistoryEntryCount! === knownIndex + 1;
+    if (cacheIsContiguous) {
+      const deltaEntries = all.slice(knownIndex + 1);
+      const cachedAndNewUserPrompts = all
+        .slice(knownHistoryOffset!)
+        .reduce(
+          (count, entry) => count + (entry.role === "user" ? 1 : 0),
+          0,
+        );
+      if (cachedAndNewUserPrompts >= targetUserPrompts &&
+          deltaEntries.length <= maxDeltaEntries) {
+        const hydratedDelta = hydrateHistoryEntries(deltaEntries);
+        if (Buffer.byteLength(JSON.stringify(hydratedDelta), "utf8") <= maxDeltaBytes) {
+          warnIfSlow("history_resume_delta", startedAt, {
+            sessionId,
+            total,
+            entries: hydratedDelta.length,
+            offset: knownIndex + 1,
+          });
+          return {
+            entries: hydratedDelta,
+            total,
+            offset: knownIndex + 1,
+            deferredContextAvailable: false,
+            totalUserPrompts,
+            historyKind: "delta",
+          };
+        }
+      }
+    }
+  }
+
+  let start = Math.max(0, total - minEntries);
+  if (targetUserPrompts > 0) {
+    let foundUserPrompts = 0;
+    for (let index = total - 1; index >= 0; index--) {
+      if (all[index].role !== "user") continue;
+      foundUserPrompts++;
+      if (foundUserPrompts >= targetUserPrompts) {
+        start = Math.min(start, index);
+        break;
+      }
+    }
+  }
+  const entries = hydrateHistoryEntries(all.slice(start));
+  warnIfSlow("history_resume_initial", startedAt, {
+    sessionId,
+    total,
+    entries: entries.length,
+    offset: start,
+  });
+  return {
+    entries,
+    total,
+    offset: start,
+    deferredContextAvailable: false,
+    totalUserPrompts,
+    historyKind: "initial",
   };
 }
 

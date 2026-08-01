@@ -26,7 +26,7 @@ import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getBoundedHistoryTail, getBoundedHistoryDelta, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import {
   AgentEffort,
@@ -3978,18 +3978,18 @@ function createConnectionHandler(
         const rawKnownSeq = Number((msg as any).knownSessionSeq);
         const rawKnownOffset = Number((msg as any).knownHistoryOffset);
         const rawKnownEntryCount = Number((msg as any).knownHistoryEntryCount);
-        const deltaPage = Number.isSafeInteger(rawKnownSeq) && rawKnownSeq >= 0
-          ? getBoundedHistoryDelta(
-              msg.sessionId,
-              rawKnownSeq,
-              500,
-              2 * 1024 * 1024,
-              Number.isSafeInteger(rawKnownOffset) ? rawKnownOffset : undefined,
-              Number.isSafeInteger(rawKnownEntryCount) ? rawKnownEntryCount : undefined,
-            )
-          : null;
-        const page = deltaPage ?? getBoundedHistoryTail(msg.sessionId);
-        const historyKind = deltaPage ? "delta" : "initial";
+        const page = getResumeHistoryPage(msg.sessionId, {
+          knownSessionSeq: Number.isSafeInteger(rawKnownSeq) && rawKnownSeq >= 0
+            ? rawKnownSeq
+            : undefined,
+          knownHistoryOffset: Number.isSafeInteger(rawKnownOffset)
+            ? rawKnownOffset
+            : undefined,
+          knownHistoryEntryCount: Number.isSafeInteger(rawKnownEntryCount)
+            ? rawKnownEntryCount
+            : undefined,
+        });
+        const historyKind = page.historyKind;
         const todos = getTodos(msg.sessionId);
         const taskStates = getTaskStates(msg.sessionId);
         const lastSuggestion = getLastPromptSuggestion(msg.sessionId);
@@ -4009,7 +4009,7 @@ function createConnectionHandler(
           ...(lastSuggestion ? { promptSuggestion: lastSuggestion } : {}),
         });
         const historyBytes = Buffer.byteLength(JSON.stringify(page.entries), "utf8");
-        console.log(`[ResumeHistory] sent ${historyKind} for ${msg.sessionId}: entries=${page.entries.length} bytes=${historyBytes} total=${page.total} offset=${page.offset} deferred=${page.deferredContextAvailable} ms=${Date.now() - historyStartMs}${openTraceId ? ` trace=${openTraceId}` : ""}`);
+        console.log(`[ResumeHistory] sent ${historyKind} for ${msg.sessionId}: entries=${page.entries.length} bytes=${historyBytes} total=${page.total} offset=${page.offset} ms=${Date.now() - historyStartMs}${openTraceId ? ` trace=${openTraceId}` : ""}`);
 
         // Check for missed messages from Claude Code's session file
         const lastTimestamp = getLastHistoryTimestamp(msg.sessionId);

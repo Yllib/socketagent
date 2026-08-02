@@ -30,7 +30,7 @@ Usage:
   socketagent pair [--raw]        Show pairing QR or raw pairing payload
   socketagent direct [--json]     Show direct/manual IP connection settings
   socketagent token               Show direct/manual auth token only
-  socketagent install [args...]   Re-run server installer, e.g. --backends both
+  socketagent install [args...]   Re-run the SocketAgent installer
   socketagent status              Show server service status
   socketagent start               Start the server service
   socketagent stop                Stop the server service

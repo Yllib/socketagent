@@ -6,39 +6,28 @@ set -euo pipefail
 # ══════════════════════════════════════════════
 #
 # Installs everything needed to run SocketAgent server on Linux or macOS:
-# Node.js, Claude Code CLI, OpenAI Codex CLI, server dependencies,
-# configuration, and an OS-native background service.
+# Node.js, both supported agent CLIs, server dependencies, configuration, and
+# an OS-native background service. Agent sign-in happens later in the app or
+# directly through the relevant CLI.
 #
 # Usage:
-#   bash install-server.sh [--reset-pairing] [--port PORT] [--backends claude|codex|both|installed] [--non-interactive]
+#   bash install-server.sh [--reset-pairing] [--port PORT]
 #
 # Re-running is safe — existing tokens and pairings are preserved.
 
 RELAY_URL="wss://relay.jarofdirt.info"
-CODEX_DEVICE_URL="https://chatgpt.com/codex/device"
 SERVICE_NAME="socketagent"
 NODE_MIN_VERSION=22
 NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"
 PORT=8085
 RESET_PAIRING=false
-BACKENDS=""
-INSTALL_BACKENDS=""
-INSTALL_CLAUDE=false
-INSTALL_CODEX=false
 SERVER_BUILD_DONE=false
-NON_INTERACTIVE=false
-SKIP_CLAUDE_LOGIN=false
-SKIP_CODEX_LOGIN=false
 
 # Parse args
 while [[ $# -gt 0 ]]; do
   case $1 in
     --reset-pairing) RESET_PAIRING=true; shift ;;
     --port) PORT="$2"; shift 2 ;;
-    --backend|--backends) BACKENDS="$2"; shift 2 ;;
-    --non-interactive) NON_INTERACTIVE=true; shift ;;
-    --skip-claude-login) SKIP_CLAUDE_LOGIN=true; shift ;;
-    --skip-codex-login) SKIP_CODEX_LOGIN=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -85,23 +74,6 @@ ok()    { echo -e "  ${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}[!]${NC} $1"; }
 fail()  { echo -e "  ${RED}[X]${NC} $1"; }
 
-prompt_read() {
-  local prompt="$1"
-  local __resultvar="$2"
-  local value=""
-  if [[ "$NON_INTERACTIVE" == "true" ]]; then
-    fail "Non-interactive mode cannot prompt: $prompt"
-    exit 1
-  fi
-  if [[ -r /dev/tty ]]; then
-    read -r -p "$prompt" value </dev/tty
-  elif ! read -r -p "$prompt" value; then
-    fail "Interactive input is unavailable. Re-run with --backends claude, --backends codex, or --backends both."
-    exit 1
-  fi
-  printf -v "$__resultvar" '%s' "$value"
-}
-
 require_git_checkout() {
   if ! command -v git >/dev/null 2>&1; then
     fail "Git is required. SocketAgent must be installed from a git checkout."
@@ -146,64 +118,6 @@ phase "Repository Check"
 require_git_checkout
 ok "Repository checkout verified"
 
-select_backends() {
-  local value
-  value=$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-
-  if [[ -z "$value" ]]; then
-    if [[ "$NON_INTERACTIVE" == "true" ]]; then
-      value="both"
-    else
-      phase "Backend Toolchain Setup"
-      echo "  Which managed agent toolchain(s) should SocketAgent install or repair now?"
-      echo "    1) Codex only"
-      echo "    2) Claude only"
-      echo "    3) Both Claude and Codex"
-      echo ""
-      prompt_read "  Choose [3]: " value
-      value=$(echo "${value:-3}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-    fi
-  fi
-
-  case "$value" in
-    1|codex|openai)
-      INSTALL_BACKENDS="codex"
-      ;;
-    2|claude|anthropic)
-      INSTALL_BACKENDS="claude"
-      ;;
-    3|both|all|claude,codex|codex,claude)
-      INSTALL_BACKENDS="claude,codex"
-      ;;
-    auto|installed|existing)
-      INSTALL_BACKENDS="$(detect_installed_backends)"
-      ;;
-    *)
-      fail "Invalid managed toolchain selection: ${1:-$value}. Use claude, codex, both, or installed."
-      exit 1
-      ;;
-  esac
-
-  if [[ ",$INSTALL_BACKENDS," == *",claude,"* ]]; then INSTALL_CLAUDE=true; fi
-  if [[ ",$INSTALL_BACKENDS," == *",codex,"* ]]; then INSTALL_CODEX=true; fi
-}
-
-detect_installed_backends() {
-  local installed=()
-  if command -v claude &>/dev/null; then
-    installed+=("claude")
-  fi
-  if command -v codex &>/dev/null && codex app-server --help &>/dev/null; then
-    installed+=("codex")
-  fi
-  if [[ ${#installed[@]} -eq 0 ]]; then
-    fail "No installed SocketAgent backends found on PATH. Use --backends claude, --backends codex, or --backends both to install one."
-    exit 1
-  fi
-  local IFS=,
-  echo "${installed[*]}"
-}
-
 install_cli() {
   local bin_dir="$HOME/.local/bin"
   mkdir -p "$bin_dir"
@@ -246,12 +160,6 @@ install_server_dependencies_and_build() {
   SERVER_BUILD_DONE=true
 }
 
-render_qr() {
-  local payload="$1"
-  (cd "$SERVER_DIR" && node -e "const q=require('qrcode-terminal');q.generate(process.argv[1],{small:true},c=>{c.split('\n').forEach(l=>console.log('  '+l))})" "$payload" 2>/dev/null) || \
-    warn "QR code rendering failed. Open this link manually: $payload"
-}
-
 echo ""
 echo -e "  ${CYAN}SocketAgent Installer${NC}"
 echo -e "  ${CYAN}======================${NC}"
@@ -262,9 +170,6 @@ if [[ ! -d "$SERVER_DIR" ]] || [[ ! -f "$SERVER_DIR/package.json" ]]; then
   fail "Cannot find server/package.json. Run this script from the SocketAgent repo root."
   exit 1
 fi
-
-select_backends "$BACKENDS"
-ok "Selected managed toolchains: $INSTALL_BACKENDS"
 
 # ══════════════════════════════════════════════
 #  Phase 1: Node.js
@@ -358,146 +263,69 @@ ensure_shell_path "$NPM_CONFIG_PREFIX/bin" "SocketAgent npm global tools"
 
 phase "Phase 2: Claude Code CLI"
 
-if [[ "$INSTALL_CLAUDE" != "true" ]]; then
-  ok "Skipped (Claude not selected)"
+CLAUDE_BIN="$NPM_BIN_DIR/claude"
+if [[ -x "$CLAUDE_BIN" || -f "$CLAUDE_BIN" ]]; then
+  CLAUDE_VER=$("$CLAUDE_BIN" --version 2>/dev/null || echo "unknown")
+  ok "Managed Claude Code CLI already installed ($CLAUDE_VER)"
 else
-  CLAUDE_BIN="$NPM_BIN_DIR/claude"
-  if [[ -x "$CLAUDE_BIN" || -f "$CLAUDE_BIN" ]]; then
-    CLAUDE_VER=$("$CLAUDE_BIN" --version 2>/dev/null || echo "unknown")
-    ok "Managed Claude Code CLI already installed ($CLAUDE_VER)"
-  else
-    echo "  Installing managed Claude Code CLI..."
-    npm install -g --include=optional @anthropic-ai/claude-code@latest
-    hash -r 2>/dev/null
-    if [[ ! -x "$CLAUDE_BIN" && ! -f "$CLAUDE_BIN" ]]; then
-      fail "Claude Code CLI installation failed in $NPM_GLOBAL_DIR"
-      exit 1
-    fi
-    ok "Managed Claude Code CLI installed ($("$CLAUDE_BIN" --version 2>/dev/null))"
+  echo "  Installing managed Claude Code CLI..."
+  npm install -g --include=optional @anthropic-ai/claude-code@latest
+  hash -r 2>/dev/null
+  if [[ ! -x "$CLAUDE_BIN" && ! -f "$CLAUDE_BIN" ]]; then
+    fail "Claude Code CLI installation failed in $NPM_GLOBAL_DIR"
+    exit 1
   fi
+  ok "Managed Claude Code CLI installed ($("$CLAUDE_BIN" --version 2>/dev/null))"
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 3: Claude Code Authentication
+#  Phase 3: OpenAI Codex CLI
 # ══════════════════════════════════════════════
 
-phase "Phase 3: Claude Code Authentication"
+phase "Phase 3: OpenAI Codex CLI"
 
-if [[ "$INSTALL_CLAUDE" != "true" ]]; then
-  ok "Skipped (Claude not selected)"
-else
-  CLAUDE_DIR="$HOME/.claude"
-  if [[ -f "$CLAUDE_DIR/credentials.json" ]] || [[ -f "$CLAUDE_DIR/.credentials.json" ]]; then
-    ok "Claude Code credentials found"
-  elif [[ "$SKIP_CLAUDE_LOGIN" == "true" || "$NON_INTERACTIVE" == "true" ]]; then
-    warn "Claude Code is not authenticated. Skipping interactive login."
-    echo "  Run 'claude auth login' later if this server should run Claude sessions."
+NEED_CODEX_INSTALL=false
+CODEX_BIN="$NPM_BIN_DIR/codex"
+if [[ -x "$CODEX_BIN" || -f "$CODEX_BIN" ]]; then
+  CODEX_VER=$("$CODEX_BIN" --version 2>/dev/null || echo "unknown")
+  if "$CODEX_BIN" app-server --help &>/dev/null; then
+    ok "Managed OpenAI Codex CLI already installed ($CODEX_VER)"
   else
-    warn "Claude Code is not authenticated."
-    echo "  Running 'claude auth login' -- this will open your browser."
-    echo "  Complete the login, then return to this terminal."
-    echo ""
-    prompt_read "  Press Enter to start login..." _
-    claude auth login
-
-    if [[ -f "$CLAUDE_DIR/credentials.json" ]] || [[ -f "$CLAUDE_DIR/.credentials.json" ]]; then
-      ok "Authentication successful"
-    else
-      warn "Could not verify authentication. You can run 'claude login' later."
-    fi
-  fi
-fi
-
-# ══════════════════════════════════════════════
-#  Phase 4: OpenAI Codex CLI
-# ══════════════════════════════════════════════
-
-phase "Phase 4: OpenAI Codex CLI"
-
-if [[ "$INSTALL_CODEX" != "true" ]]; then
-  ok "Skipped (Codex not selected)"
-else
-  NEED_CODEX_INSTALL=false
-  CODEX_BIN="$NPM_BIN_DIR/codex"
-  if [[ -x "$CODEX_BIN" || -f "$CODEX_BIN" ]]; then
-    CODEX_VER=$("$CODEX_BIN" --version 2>/dev/null || echo "unknown")
-    if "$CODEX_BIN" app-server --help &>/dev/null; then
-      ok "Managed OpenAI Codex CLI already installed ($CODEX_VER)"
-    else
-      warn "Managed OpenAI Codex CLI found ($CODEX_VER) but app-server is unavailable. Updating..."
-      NEED_CODEX_INSTALL=true
-    fi
-  else
-    echo "  Installing managed OpenAI Codex CLI..."
+    warn "Managed OpenAI Codex CLI found ($CODEX_VER) but app-server is unavailable. Updating..."
     NEED_CODEX_INSTALL=true
   fi
-
-  if [[ "$NEED_CODEX_INSTALL" == "true" ]]; then
-    npm install -g --include=optional @openai/codex@latest
-    hash -r 2>/dev/null
-    if [[ ! -x "$CODEX_BIN" && ! -f "$CODEX_BIN" ]]; then
-      fail "OpenAI Codex CLI installation failed in $NPM_GLOBAL_DIR"
-      exit 1
-    fi
-    if ! "$CODEX_BIN" app-server --help &>/dev/null; then
-      fail "OpenAI Codex CLI installed, but 'codex app-server' is unavailable."
-      exit 1
-    fi
-    ok "Managed OpenAI Codex CLI installed ($("$CODEX_BIN" --version 2>/dev/null))"
-  fi
-fi
-
-# ══════════════════════════════════════════════
-#  Phase 5: OpenAI Codex Authentication
-# ══════════════════════════════════════════════
-
-phase "Phase 5: OpenAI Codex Authentication"
-
-if [[ "$INSTALL_CODEX" != "true" ]]; then
-  ok "Skipped (Codex not selected)"
 else
-  CODEX_AUTH_FILE="$HOME/.codex/auth.json"
-  if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
-    ok "OpenAI Codex credentials found"
-  elif [[ "$SKIP_CODEX_LOGIN" == "true" || "$NON_INTERACTIVE" == "true" ]]; then
-    warn "OpenAI Codex is not authenticated. Skipping interactive login."
-    echo "  Run 'codex login --device-auth' later if this server should run Codex sessions."
-  else
-    warn "OpenAI Codex is not authenticated."
-    echo "  Running 'codex login --device-auth'."
-    echo "  Scan this QR code with your phone, or open the link on this PC:"
-    echo "  $CODEX_DEVICE_URL"
-    echo ""
-    install_server_dependencies_and_build
-    render_qr "$CODEX_DEVICE_URL"
-    echo ""
-    echo "  The Codex CLI will print a one-time code. Enter that code on the page."
-    echo "  Complete the login, then return to this terminal."
-    echo ""
-    prompt_read "  Press Enter to start login..." _
-    codex login --device-auth || true
+  echo "  Installing managed OpenAI Codex CLI..."
+  NEED_CODEX_INSTALL=true
+fi
 
-    if codex login status &>/dev/null || [[ -f "$CODEX_AUTH_FILE" ]]; then
-      ok "Codex authentication successful"
-    else
-      warn "Could not verify Codex authentication. Codex sessions will be hidden until you run 'codex login'."
-    fi
+if [[ "$NEED_CODEX_INSTALL" == "true" ]]; then
+  npm install -g --include=optional @openai/codex@latest
+  hash -r 2>/dev/null
+  if [[ ! -x "$CODEX_BIN" && ! -f "$CODEX_BIN" ]]; then
+    fail "OpenAI Codex CLI installation failed in $NPM_GLOBAL_DIR"
+    exit 1
   fi
+  if ! "$CODEX_BIN" app-server --help &>/dev/null; then
+    fail "OpenAI Codex CLI installed, but 'codex app-server' is unavailable."
+    exit 1
+  fi
+  ok "Managed OpenAI Codex CLI installed ($("$CODEX_BIN" --version 2>/dev/null))"
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 6: Install Dependencies & Build
+#  Phase 4: Install Dependencies & Build
 # ══════════════════════════════════════════════
 
-phase "Phase 6: Install Dependencies & Build"
+phase "Phase 4: Install Dependencies & Build"
 
 install_server_dependencies_and_build
 
 # ══════════════════════════════════════════════
-#  Phase 7: Generate Configuration
+#  Phase 5: Generate Configuration
 # ══════════════════════════════════════════════
 
-phase "Phase 7: Generate Configuration"
+phase "Phase 5: Generate Configuration"
 
 if [[ "$RESET_PAIRING" == "true" ]]; then
   warn "Resetting pairing data..."
@@ -551,10 +379,10 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 8: Register Service
+#  Phase 6: Register Service
 # ══════════════════════════════════════════════
 
-phase "Phase 8: Register Service"
+phase "Phase 6: Register Service"
 
 NODE_PATH=$(command -v node)
 NPM_PATH=$(command -v npm)
@@ -698,51 +526,35 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 9: Install CLI
+#  Phase 7: Install CLI
 # ══════════════════════════════════════════════
 
-phase "Phase 9: Install CLI"
+phase "Phase 7: Install CLI"
 install_cli
 
 # ══════════════════════════════════════════════
-#  Phase 10: QR Code & Summary
+#  Phase 8: Finish & Phone Pairing
 # ══════════════════════════════════════════════
 
-phase "Phase 10: Phone Pairing"
+phase "Phase 8: Finish"
 
-echo ""
-echo -e "  ${CYAN}Scan this QR code with the SocketAgent app:${NC}"
-echo ""
-
-# Generate QR using server's qrcode-terminal package
-(cd "$SERVER_DIR" && node -e "const q=require('qrcode-terminal');q.generate(process.argv[1],{small:true},c=>{c.split('\n').forEach(l=>console.log('  '+l))})" "$QR_PAYLOAD" 2>/dev/null) || \
-  warn "QR code rendering failed. Use manual pairing below."
-
-echo ""
-echo -e "  ${YELLOW}If QR scan doesn't work, paste this in the app:${NC}"
-echo -e "  ${NC}$QR_PAYLOAD"
-echo ""
-
-# ── Success ──
 echo ""
 echo -e "  ${GREEN}===========================================${NC}"
 echo -e "  ${GREEN} Installation complete!${NC}"
 echo -e "  ${GREEN}===========================================${NC}"
 echo ""
 if [[ "$OS_NAME" == "Darwin" ]]; then
-  echo "  The server starts automatically when this macOS user logs in."
+  echo "  SocketAgent starts automatically when this macOS user logs in."
 else
-  echo "  The server starts automatically on boot."
+  echo "  SocketAgent starts automatically on boot."
 fi
 echo ""
-echo -e "  ${CYAN}Management commands:${NC}"
-echo "    CLI:       socketagent help"
-echo "    Status:    socketagent status"
-echo "    Start:     socketagent start"
-echo "    Stop:      socketagent stop"
-echo "    Logs:      socketagent logs"
-echo "    Restart:   socketagent restart"
+echo "  Claude and Codex are installed. Sign in later from the app or CLI if needed."
 echo ""
-echo "  To update, run: git pull && bash install-server.sh"
-echo "  Existing pairings are preserved."
+echo -e "  ${CYAN}Open SocketAgent, choose Add Computer, and scan this pairing code:${NC}"
+echo ""
+
+# Keep the pairing code as the installer's final primary output.
+(cd "$SERVER_DIR" && node -e "const q=require('qrcode-terminal');q.generate(process.argv[1],{small:true},c=>{c.split('\n').forEach(l=>console.log('  '+l))})" "$QR_PAYLOAD" 2>/dev/null) || \
+  warn "QR code rendering failed. Paste this pairing code into the app: $QR_PAYLOAD"
 echo ""

@@ -1262,6 +1262,10 @@ function serverCapabilitiesPayload(
     type: "server_capabilities",
     serverReleaseVersion: SERVER_RELEASE_VERSION,
     serverCommit: SERVER_GIT_HASH || undefined,
+    serverIdentity: {
+      hostname: os.hostname(),
+      platform: process.platform,
+    },
     binaryEnvelope,
     binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
     transportLane,

@@ -28,7 +28,9 @@ Open a terminal and paste this command:
 curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash
 ```
 
-Follow the installer prompts. Choose Claude, Codex, or both, then sign in when asked.
+The installer needs no choices or sign-in prompts. It installs SocketAgent plus
+both supported agent CLIs, starts SocketAgent, and then shows the pairing QR
+code. Sign in to Claude or Codex later from the app or the relevant CLI.
 
 ## Pair the App
 
@@ -51,11 +53,9 @@ The installer sets up:
 - Git if needed
 - Node.js if needed
 - The SocketAgent server
-- Claude and/or Codex support
+- Claude and Codex support
 - A background service so SocketAgent starts automatically
 - A `socketagent` command for pairing, repair, logs, and status
-
-You can choose Claude, Codex, or both during setup.
 
 ## Useful Commands
 

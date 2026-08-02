@@ -97,7 +97,6 @@ SocketAgent installer
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash -s -- --backends codex
   bash install.sh
 
 Environment:

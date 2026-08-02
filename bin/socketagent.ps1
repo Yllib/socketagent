@@ -23,7 +23,7 @@ function Show-Usage {
     Write-Host "  socketagent pair [--raw]        Show pairing QR or raw pairing payload"
     Write-Host "  socketagent direct [--json]     Show direct/manual IP connection settings"
     Write-Host "  socketagent token               Show direct/manual auth token only"
-    Write-Host "  socketagent install [args...]   Re-run installer, e.g. -Backends both"
+    Write-Host "  socketagent install [args...]   Re-run the SocketAgent installer"
     Write-Host "  socketagent status              Show scheduled task status"
     Write-Host "  socketagent logs                Follow server logs"
     Write-Host "  socketagent restart             Restart scheduled task"

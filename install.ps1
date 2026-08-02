@@ -3,45 +3,27 @@
 .SYNOPSIS
     SocketAgent Windows Installer
 .DESCRIPTION
-    Installs everything needed to run SocketAgent server on Windows:
-    Node.js, Claude Code CLI, OpenAI Codex CLI, server dependencies, configuration, and scheduled task.
+    Installs everything needed to run SocketAgent on Windows: Node.js, both
+    supported agent CLIs, server dependencies, configuration, and scheduled
+    task. Agent sign-in happens later in the app or directly through the CLI.
     Displays a QR code at the end for phone pairing.
 .PARAMETER ResetPairing
     Force regeneration of pairing token and relay keys (breaks existing phone pairings).
 .PARAMETER Port
     Server port (default: 8085).
-.PARAMETER Backends
-    Managed toolchain selection: claude, codex, both, or installed. If omitted, the installer prompts.
-.PARAMETER NonInteractive
-    Do not prompt for input. Defaults to both managed toolchains when -Backends is omitted and skips interactive auth login prompts.
-.PARAMETER SkipClaudeLogin
-    Do not run interactive Claude login if credentials are missing.
-.PARAMETER SkipCodexLogin
-    Do not run interactive Codex login if credentials are missing.
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1
-.EXAMPLE
-    powershell -ExecutionPolicy Bypass -File install.ps1 -Backends codex
-.EXAMPLE
-    powershell -ExecutionPolicy Bypass -File install.ps1 -Backends claude -NonInteractive -SkipClaudeLogin
-.EXAMPLE
-    powershell -ExecutionPolicy Bypass -File install.ps1 -Backends installed -NonInteractive -SkipClaudeLogin -SkipCodexLogin
 #>
 
 param(
     [switch]$ResetPairing,
-    [int]$Port = 8085,
-    [string]$Backends = "",
-    [switch]$NonInteractive,
-    [switch]$SkipClaudeLogin,
-    [switch]$SkipCodexLogin
+    [int]$Port = 8085
 )
 
 $ErrorActionPreference = "Stop"
 
 # ── Configuration ──
 $RELAY_URL = "wss://relay.jarofdirt.info"
-$CODEX_DEVICE_URL = "https://chatgpt.com/codex/device"
 $TASK_NAME = "SocketAgent"
 $NODE_MIN_VERSION = [version]"22.0.0"
 
@@ -266,100 +248,12 @@ function Show-QrCode($payload) {
         if ($qrResult.ExitCode -eq 0) {
             $qrResult.Output | ForEach-Object { Write-Host $_ }
         } else {
-            Write-Warn "QR code rendering failed. Open this link manually: $payload"
+            Write-Warn "QR code rendering failed. Paste this pairing code into the app:"
+            Write-Host "  $payload" -ForegroundColor Gray
         }
     } finally {
         Pop-Location
     }
-}
-
-function Test-CodexAuthenticated {
-    $authCandidates = @()
-    if ($env:CODEX_HOME) {
-        $authCandidates += (Join-Path $env:CODEX_HOME "auth.json")
-    }
-    $authCandidates += (Join-Path (Join-Path $env:USERPROFILE ".codex") "auth.json")
-
-    foreach ($authFile in $authCandidates) {
-        if ($authFile -and (Test-Path $authFile)) {
-            return $true
-        }
-    }
-
-    if (-not (Test-CommandExists "codex")) {
-        return $false
-    }
-
-    $result = Invoke-NativeCapture { codex login status }
-    $output = $result.Output
-    $exitCode = $result.ExitCode
-
-    if ($exitCode -eq 0) {
-        return $true
-    }
-
-    $text = ($output | Out-String)
-    return ($text -match "(?im)^\s*(Logged in|Authenticated)\b") -or ($text -match "ChatGPT")
-}
-
-function Invoke-CodexLogin {
-    $oldPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        & codex login --device-auth
-        return $LASTEXITCODE
-    } catch {
-        Write-Warn "codex login reported: $($_.Exception.Message)"
-        if ($null -ne $LASTEXITCODE) {
-            return $LASTEXITCODE
-        }
-        return 1
-    } finally {
-        $ErrorActionPreference = $oldPreference
-    }
-}
-
-function Invoke-ClaudeLogin {
-    $oldPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        & claude auth login
-        return $LASTEXITCODE
-    } catch {
-        Write-Warn "claude login reported: $($_.Exception.Message)"
-        if ($null -ne $LASTEXITCODE) {
-            return $LASTEXITCODE
-        }
-        return 1
-    } finally {
-        $ErrorActionPreference = $oldPreference
-    }
-}
-
-function Convert-BackendSelection($value) {
-    if ($null -eq $value) { $value = "" }
-    $normalized = $value.ToString().ToLowerInvariant().Replace(" ", "")
-    switch ($normalized) {
-        { $_ -in @("1", "codex", "openai") } { return "codex" }
-        { $_ -in @("2", "claude", "anthropic") } { return "claude" }
-        { $_ -in @("3", "both", "all", "claude,codex", "codex,claude") } { return "claude,codex" }
-        { $_ -in @("auto", "installed", "existing") } { return Get-InstalledBackendSelection }
-        default { throw "Invalid managed toolchain selection '$value'. Use claude, codex, both, or installed." }
-    }
-}
-
-function Get-InstalledBackendSelection {
-    $installed = @()
-    if (Test-CommandExists "claude") {
-        $installed += "claude"
-    }
-    if ((Test-CommandExists "codex") -and (Test-CodexAppServer)) {
-        $installed += "codex"
-    }
-    if ($installed.Count -eq 0) {
-        throw "No installed SocketAgent backends found on PATH. Use -Backends claude, -Backends codex, or -Backends both to install one."
-    }
-    return ($installed -join ",")
 }
 
 function Install-SocketAgentCli {
@@ -432,25 +326,6 @@ if ($portInUse) {
         exit 1
     }
 }
-
-Write-Phase "Backend Toolchain Setup"
-if (-not $Backends) {
-    if ($NonInteractive) {
-        $Backends = "both"
-    } else {
-        Write-Host "  Which managed agent toolchain(s) should SocketAgent install or repair now?"
-        Write-Host "    1) Codex only"
-        Write-Host "    2) Claude only"
-        Write-Host "    3) Both Claude and Codex"
-        Write-Host ""
-        $Backends = Read-Host "  Choose [3]"
-        if (-not $Backends) { $Backends = "3" }
-    }
-}
-$installBackends = Convert-BackendSelection $Backends
-$installClaude = (",$installBackends,").Contains(",claude,")
-$installCodex = (",$installBackends,").Contains(",codex,")
-Write-Ok "Selected managed toolchains: $installBackends"
 
 # ══════════════════════════════════════════════
 #  Phase 1: Node.js & Git
@@ -580,196 +455,88 @@ Ensure-NpmGlobalBinOnPath
 
 Write-Phase "Phase 2: Claude Code CLI"
 
-if (-not $installClaude) {
-    Write-Ok "Skipped (Claude not selected)"
+$claudePath = Get-ManagedCommandPath "claude"
+if ($claudePath) {
+    $claudeVer = & $claudePath --version 2>$null
+    Write-Ok "Managed Claude Code CLI already installed ($claudeVer)"
 } else {
+    Write-Host "  Installing managed Claude Code CLI..."
+    $cliResult = Invoke-NativeCapture { npm install -g --include=optional @anthropic-ai/claude-code@latest }
+    $cliOutput = $cliResult.Output
+    $cliExit = $cliResult.ExitCode
+    $cliOutput | ForEach-Object { Write-Host "    $_" }
+    if ($cliExit -ne 0) {
+        throw "managed npm install @anthropic-ai/claude-code failed (exit code $cliExit)"
+    }
+
+    Refresh-Path
+    Add-DirectoryToPath $NPM_BIN_DIR $true
+
     $claudePath = Get-ManagedCommandPath "claude"
-    if ($claudePath) {
-        $claudeVer = & $claudePath --version 2>$null
-        Write-Ok "Managed Claude Code CLI already installed ($claudeVer)"
-    } else {
-        Write-Host "  Installing managed Claude Code CLI..."
-        $cliResult = Invoke-NativeCapture { npm install -g --include=optional @anthropic-ai/claude-code@latest }
-        $cliOutput = $cliResult.Output
-        $cliExit = $cliResult.ExitCode
-        $cliOutput | ForEach-Object { Write-Host "    $_" }
-        if ($cliExit -ne 0) {
-            throw "managed npm install @anthropic-ai/claude-code failed (exit code $cliExit)"
-        }
-
-        Refresh-Path
-        Add-DirectoryToPath $NPM_BIN_DIR $true
-
-        $claudePath = Get-ManagedCommandPath "claude"
-        $claudeVer = if ($claudePath) { & $claudePath --version 2>$null } else { $null }
-        if (-not $claudeVer) {
-            throw "Claude Code CLI installation failed in $NPM_GLOBAL_DIR"
-        }
-        Write-Ok "Managed Claude Code CLI installed ($claudeVer)"
+    $claudeVer = if ($claudePath) { & $claudePath --version 2>$null } else { $null }
+    if (-not $claudeVer) {
+        throw "Claude Code CLI installation failed in $NPM_GLOBAL_DIR"
     }
+    Write-Ok "Managed Claude Code CLI installed ($claudeVer)"
+}
+Add-DirectoryToPath $NPM_BIN_DIR $true
+
+# ══════════════════════════════════════════════
+#  Phase 3: OpenAI Codex CLI
+# ══════════════════════════════════════════════
+
+Write-Phase "Phase 3: OpenAI Codex CLI"
+
+$codexInstalled = $false
+$codexPath = Get-ManagedCommandPath "codex"
+if ($codexPath) {
+    $codexVer = & $codexPath --version 2>$null
+    if (Test-CodexAppServer $codexPath) {
+        Write-Ok "Managed OpenAI Codex CLI already installed ($codexVer)"
+        $codexInstalled = $true
+    } else {
+        Write-Warn "Managed OpenAI Codex CLI found ($codexVer) but app-server is unavailable. Updating..."
+    }
+}
+
+if (-not $codexInstalled) {
+    Write-Host "  Installing managed OpenAI Codex CLI..."
+    $codexResult = Invoke-NativeCapture { npm install -g --include=optional @openai/codex@latest }
+    $codexOutput = $codexResult.Output
+    $codexExit = $codexResult.ExitCode
+    $codexOutput | ForEach-Object { Write-Host "    $_" }
+    if ($codexExit -ne 0) {
+        throw "managed npm install @openai/codex failed (exit code $codexExit)"
+    }
+
+    Refresh-Path
     Add-DirectoryToPath $NPM_BIN_DIR $true
-}
 
-# ══════════════════════════════════════════════
-#  Phase 3: Claude Code Authentication
-# ══════════════════════════════════════════════
-
-Write-Phase "Phase 3: Claude Code Authentication"
-
-if (-not $installClaude) {
-    Write-Ok "Skipped (Claude not selected)"
-} else {
-    $claudeDir = Join-Path $env:USERPROFILE ".claude"
-    $credFiles = @(
-        (Join-Path $claudeDir "credentials.json"),
-        (Join-Path $claudeDir ".credentials.json")
-    )
-
-    $isAuthenticated = $false
-    foreach ($f in $credFiles) {
-        if (Test-Path $f) {
-            $isAuthenticated = $true
-            break
-        }
-    }
-
-    if ($isAuthenticated) {
-        Write-Ok "Claude Code credentials found"
-    } elseif ($SkipClaudeLogin -or $NonInteractive) {
-        Write-Warn "Claude Code is not authenticated. Skipping interactive login."
-        Write-Host "  Run 'claude auth login' later if this server should run Claude sessions."
-    } else {
-        Write-Warn "Claude Code is not authenticated."
-        Write-Host "  Running 'claude auth login' -- this will open your browser."
-        Write-Host "  Complete the login, then return to this window."
-        Write-Host ""
-        Read-Host "  Press Enter to start login"
-
-        $claudeLoginExit = Invoke-ClaudeLogin
-        if ($claudeLoginExit -ne 0) {
-            Write-Warn "claude login exited with code $claudeLoginExit; checking for credentials anyway."
-        }
-
-        # Re-check
-        $isAuthenticated = $false
-        foreach ($f in $credFiles) {
-            if (Test-Path $f) {
-                $isAuthenticated = $true
-                break
-            }
-        }
-        if ($isAuthenticated) {
-            Write-Ok "Authentication successful"
-        } else {
-            Write-Warn "Could not verify authentication. You can run 'claude login' later."
-        }
-    }
-}
-
-# ══════════════════════════════════════════════
-#  Phase 4: OpenAI Codex CLI
-# ══════════════════════════════════════════════
-
-Write-Phase "Phase 4: OpenAI Codex CLI"
-
-if (-not $installCodex) {
-    Write-Ok "Skipped (Codex not selected)"
-} else {
-    $codexInstalled = $false
     $codexPath = Get-ManagedCommandPath "codex"
-    if ($codexPath) {
-        $codexVer = & $codexPath --version 2>$null
-        if (Test-CodexAppServer $codexPath) {
-            Write-Ok "Managed OpenAI Codex CLI already installed ($codexVer)"
-            $codexInstalled = $true
-        } else {
-            Write-Warn "Managed OpenAI Codex CLI found ($codexVer) but app-server is unavailable. Updating..."
-        }
+    if (-not $codexPath) {
+        throw "OpenAI Codex CLI installation failed in $NPM_GLOBAL_DIR"
     }
-
-    if (-not $codexInstalled) {
-        Write-Host "  Installing managed OpenAI Codex CLI..."
-        $codexResult = Invoke-NativeCapture { npm install -g --include=optional @openai/codex@latest }
-        $codexOutput = $codexResult.Output
-        $codexExit = $codexResult.ExitCode
-        $codexOutput | ForEach-Object { Write-Host "    $_" }
-        if ($codexExit -ne 0) {
-            throw "managed npm install @openai/codex failed (exit code $codexExit)"
-        }
-
-        Refresh-Path
-        Add-DirectoryToPath $NPM_BIN_DIR $true
-
-        $codexPath = Get-ManagedCommandPath "codex"
-        if (-not $codexPath) {
-            throw "OpenAI Codex CLI installation failed in $NPM_GLOBAL_DIR"
-        }
-        $codexVer = & $codexPath --version 2>$null
-        if (-not (Test-CodexAppServer $codexPath)) {
-            throw "OpenAI Codex CLI installed, but 'codex app-server' is unavailable."
-        }
-        Write-Ok "Managed OpenAI Codex CLI installed ($codexVer)"
+    $codexVer = & $codexPath --version 2>$null
+    if (-not (Test-CodexAppServer $codexPath)) {
+        throw "OpenAI Codex CLI installed, but 'codex app-server' is unavailable."
     }
-    Add-DirectoryToPath $NPM_BIN_DIR $true
+    Write-Ok "Managed OpenAI Codex CLI installed ($codexVer)"
 }
+Add-DirectoryToPath $NPM_BIN_DIR $true
 
 # ══════════════════════════════════════════════
-#  Phase 5: OpenAI Codex Authentication
+#  Phase 4: Install Dependencies & Build
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 5: OpenAI Codex Authentication"
-
-if (-not $installCodex) {
-    Write-Ok "Skipped (Codex not selected)"
-} else {
-    $codexAuthed = Test-CodexAuthenticated
-
-    if ($codexAuthed) {
-        Write-Ok "OpenAI Codex credentials found"
-    } elseif ($SkipCodexLogin -or $NonInteractive) {
-        Write-Warn "OpenAI Codex is not authenticated. Skipping interactive login."
-        Write-Host "  Run 'codex login --device-auth' later if this server should run Codex sessions."
-    } else {
-        Write-Warn "OpenAI Codex is not authenticated."
-        Write-Host "  Running 'codex login --device-auth'."
-        Write-Host "  Scan this QR code with your phone, or open the link on this PC:"
-        Write-Host "  $CODEX_DEVICE_URL"
-        Write-Host ""
-        Install-ServerDependenciesAndBuild
-        Show-QrCode $CODEX_DEVICE_URL
-        Write-Host ""
-        Write-Host "  The Codex CLI will print a one-time code. Enter that code on the page."
-        Write-Host "  Complete the login, then return to this window."
-        Write-Host ""
-        Read-Host "  Press Enter to start login"
-
-        $codexLoginExit = Invoke-CodexLogin
-        if ($codexLoginExit -ne 0) {
-            Write-Warn "codex login exited with code $codexLoginExit; checking for credentials anyway."
-        }
-
-        $codexAuthed = Test-CodexAuthenticated
-        if ($codexAuthed) {
-            Write-Ok "Codex authentication successful"
-        } else {
-            Write-Warn "Could not verify Codex authentication. Codex sessions will be hidden until you run 'codex login'."
-        }
-    }
-}
-
-# ══════════════════════════════════════════════
-#  Phase 6: Install Dependencies & Build
-# ══════════════════════════════════════════════
-
-Write-Phase "Phase 6: Install Dependencies & Build"
+Write-Phase "Phase 4: Install Dependencies & Build"
 
 Install-ServerDependenciesAndBuild
 
 # ══════════════════════════════════════════════
-#  Phase 7: Generate Configuration
+#  Phase 5: Generate Configuration
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 7: Generate Configuration"
+Write-Phase "Phase 5: Generate Configuration"
 
 # Handle --ResetPairing flag
 if ($ResetPairing) {
@@ -829,10 +596,10 @@ if ($isUpgrade) {
 }
 
 # ══════════════════════════════════════════════
-#  Phase 8: Register Scheduled Task
+#  Phase 6: Register Scheduled Task
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 8: Register Windows Service"
+Write-Phase "Phase 6: Register Windows Service"
 
 $nodeExe = (Get-Command node).Source
 $serverScript = Join-Path (Join-Path $SERVER_DIR "dist") "index.js"
@@ -1082,17 +849,17 @@ if ($taskInfo.State -eq "Running") {
 }
 
 # ══════════════════════════════════════════════
-#  Phase 9: Install CLI
+#  Phase 7: Install CLI
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 9: Install CLI"
+Write-Phase "Phase 7: Install CLI"
 Install-SocketAgentCli
 
 # ══════════════════════════════════════════════
-#  Phase 10: QR Code & Summary
+#  Phase 8: Finish & Phone Pairing
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 10: Phone Pairing"
+Write-Phase "Phase 8: Finish"
 
 # Set UTF-8 for QR code rendering in legacy terminals
 if ($null -eq $env:WT_SESSION) {
@@ -1101,39 +868,17 @@ if ($null -eq $env:WT_SESSION) {
 }
 
 Write-Host ""
-Write-Host "  Scan this QR code with the SocketAgent app:" -ForegroundColor Cyan
-Write-Host ""
-
-# Generate QR using server's qrcode-terminal package
-Push-Location $SERVER_DIR
-try {
-    $qrScript = "const q=require('qrcode-terminal');q.generate(process.argv[1],{small:true},c=>console.log(c))"
-    & node -e $qrScript $qrPayload 2>$null | ForEach-Object { Write-Host "  $_" }
-} catch {
-    Write-Warn "QR code rendering failed. Use manual pairing below."
-}
-Pop-Location
-
-Write-Host ""
-Write-Host "  If QR scan doesn't work, paste this in the app:" -ForegroundColor Yellow
-Write-Host "  $qrPayload" -ForegroundColor Gray
-Write-Host ""
-
-# ── Success ──
-Write-Host ""
 Write-Host "  ===========================================" -ForegroundColor Green
 Write-Host "   Installation complete!" -ForegroundColor Green
 Write-Host "  ===========================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  The server starts automatically when you log in."
+Write-Host "  SocketAgent starts automatically when you log in."
 Write-Host ""
-Write-Host "  Management commands:" -ForegroundColor Cyan
-Write-Host "    CLI:      socketagent help"
-Write-Host "    Status:   Get-ScheduledTask -TaskName $TASK_NAME"
-Write-Host "    Start:    Start-ScheduledTask -TaskName $TASK_NAME"
-Write-Host "    Stop:     Stop-ScheduledTask -TaskName $TASK_NAME"
-Write-Host "    Logs:     Get-Content '$LOG_FILE' -Tail 50"
-Write-Host "    Uninstall: powershell -File uninstall.ps1"
+Write-Host "  Claude and Codex are installed. Sign in later from the app or CLI if needed."
+Write-Host ""
+Write-Host "  Open SocketAgent, choose Add Computer, and scan this pairing code:" -ForegroundColor Cyan
+Write-Host ""
+Show-QrCode $qrPayload
 Write-Host ""
 
 } catch {
@@ -1159,10 +904,6 @@ Write-Host ""
         "*OpenAI Codex CLI*" {
             Write-Host "    - Check your internet connection"
             Write-Host "    - Try: npm install -g --prefix `"$NPM_GLOBAL_DIR`" --include=optional @openai/codex@latest"
-        }
-        "*Authentication*" {
-            Write-Host "    - Run 'claude login' or 'codex login' manually"
-            Write-Host "    - Then re-run this installer"
         }
         "*Dependencies*" {
             Write-Host "    - Check your internet connection"

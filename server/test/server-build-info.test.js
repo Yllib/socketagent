@@ -17,4 +17,7 @@ test("server release version is included in connection and heartbeat metadata", 
   );
   assert.match(source, /serverReleaseVersion:\s*SERVER_RELEASE_VERSION/);
   assert.match(source, /serverCommit:\s*SERVER_GIT_HASH/);
+  assert.match(source, /serverIdentity:\s*{/);
+  assert.match(source, /hostname:\s*os\.hostname\(\)/);
+  assert.match(source, /platform:\s*process\.platform/);
 });

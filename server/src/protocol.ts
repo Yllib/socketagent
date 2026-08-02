@@ -889,6 +889,12 @@ export interface DeleteScheduledTaskMessage {
   taskId: string;
 }
 
+export interface MarkScheduledTaskReadMessage {
+  type: "mark_scheduled_task_read";
+  taskId: string;
+  read: boolean;
+}
+
 export type ClientMessage =
   | PromptMessage
   | RetractQueuedPromptMessage
@@ -998,6 +1004,7 @@ export type ClientMessage =
   | ExecuteScheduledTaskMessage
   | UpdateScheduledTaskMessage
   | DeleteScheduledTaskMessage
+  | MarkScheduledTaskReadMessage
   | ListArchivesMessage
   | GetArchiveHistoryMessage
   | RestoreArchiveMessage

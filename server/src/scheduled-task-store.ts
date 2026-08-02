@@ -49,8 +49,25 @@ export interface ScheduledTask {
   notificationMode?: "completion" | "quiet";
   runCount?: number;
   lastRunAt?: string;
+  /** The newest task result the user has acknowledged in the app. */
+  lastReadAt?: string;
   // History of all runs (for recurring tasks)
   runs?: TaskRun[];
+}
+
+/** Return a copy with durable result read state updated. */
+export function setScheduledTaskReadState(
+  task: ScheduledTask,
+  read: boolean,
+  now: Date = new Date(),
+): ScheduledTask {
+  const updated = { ...task };
+  if (read) {
+    updated.lastReadAt = now.toISOString();
+  } else {
+    delete updated.lastReadAt;
+  }
+  return updated;
 }
 
 export function scheduledTaskDisplayName(task: Pick<ScheduledTask, "name" | "prompt">): string {

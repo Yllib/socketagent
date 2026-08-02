@@ -9,6 +9,7 @@ const {
   scheduledTaskDisplayName,
   scheduledTaskRevisionForPath,
   scheduledTaskUsesAutomaticNotifications,
+  setScheduledTaskReadState,
 } = require("../dist/scheduled-task-store");
 
 function scheduledTask(overrides = {}) {
@@ -60,6 +61,20 @@ test("quiet scheduled tasks disable every automatic notification path", () => {
     scheduledTaskUsesAutomaticNotifications({}),
     true,
   );
+});
+
+test("scheduled task result read state is durable and reversible", () => {
+  const task = scheduledTask({ lastReadAt: undefined });
+  const read = setScheduledTaskReadState(
+    task,
+    true,
+    new Date("2026-08-01T18:00:00.000Z"),
+  );
+  assert.equal(read.lastReadAt, "2026-08-01T18:00:00.000Z");
+  assert.equal(task.lastReadAt, undefined);
+
+  const unread = setScheduledTaskReadState(read, false);
+  assert.equal(unread.lastReadAt, undefined);
 });
 
 test("scheduled task revisions change whenever the authoritative file changes", () => {

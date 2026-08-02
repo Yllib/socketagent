@@ -9,6 +9,8 @@ const {
   scheduledTaskDisplayName,
   scheduledTaskRevisionForPath,
   scheduledTaskUsesAutomaticNotifications,
+  scheduledTaskCanArchive,
+  setScheduledTaskArchiveState,
   setScheduledTaskReadState,
 } = require("../dist/scheduled-task-store");
 
@@ -75,6 +77,30 @@ test("scheduled task result read state is durable and reversible", () => {
 
   const unread = setScheduledTaskReadState(read, false);
   assert.equal(unread.lastReadAt, undefined);
+});
+
+test("only terminal one-off tasks can be archived", () => {
+  assert.equal(scheduledTaskCanArchive(scheduledTask({ status: "completed", recurrence: undefined })), true);
+  assert.equal(scheduledTaskCanArchive(scheduledTask({ status: "failed", recurrence: undefined })), true);
+  assert.equal(scheduledTaskCanArchive(scheduledTask({ status: "cancelled", recurrence: undefined })), true);
+  assert.equal(scheduledTaskCanArchive(scheduledTask({ status: "pending", recurrence: undefined })), false);
+  assert.equal(scheduledTaskCanArchive(scheduledTask({ status: "completed" })), false);
+});
+
+test("archiving acknowledges a task and restoring preserves its history", () => {
+  const task = scheduledTask({ status: "completed", recurrence: undefined });
+  const archived = setScheduledTaskArchiveState(
+    task,
+    true,
+    new Date("2026-08-01T19:00:00.000Z"),
+  );
+  assert.equal(archived.archivedAt, "2026-08-01T19:00:00.000Z");
+  assert.equal(archived.lastReadAt, "2026-08-01T19:00:00.000Z");
+  assert.equal(archived.runs, task.runs);
+
+  const restored = setScheduledTaskArchiveState(archived, false);
+  assert.equal(restored.archivedAt, undefined);
+  assert.equal(restored.lastReadAt, archived.lastReadAt);
 });
 
 test("scheduled task revisions change whenever the authoritative file changes", () => {

@@ -27,7 +27,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
-import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
+import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
 import {
   AgentEffort,
   AgentSessionSettings,
@@ -4697,6 +4697,10 @@ function createConnectionHandler(
           sendJson({ type: "error", message: "Scheduled task not found" });
           break;
         }
+        if (task.archivedAt) {
+          sendJson({ type: "error", message: "Restore the scheduled task before executing it" });
+          break;
+        }
         if (task.status === "running") {
           sendJson({ type: "error", message: "Scheduled task is already running" });
           break;
@@ -4782,6 +4786,36 @@ function createConnectionHandler(
           (msg as any).read !== false,
         );
         saveScheduledTask(updated);
+        broadcastScheduledTaskList();
+        break;
+      }
+
+      case "archive_scheduled_task": {
+        const task = getScheduledTask((msg as any).taskId);
+        if (!task) {
+          sendJson({ type: "error", message: "Scheduled task not found" });
+          break;
+        }
+        if (!scheduledTaskCanArchive(task)) {
+          sendJson({
+            type: "error",
+            message: "Only finished, failed, or cancelled one-off tasks can be archived",
+          });
+          break;
+        }
+        saveScheduledTask(setScheduledTaskArchiveState(task, true));
+        broadcastScheduledTaskList();
+        break;
+      }
+
+      case "restore_scheduled_task": {
+        const task = getScheduledTask((msg as any).taskId);
+        if (!task) {
+          sendJson({ type: "error", message: "Scheduled task not found" });
+          break;
+        }
+        if (!task.archivedAt) break;
+        saveScheduledTask(setScheduledTaskArchiveState(task, false));
         broadcastScheduledTaskList();
         break;
       }

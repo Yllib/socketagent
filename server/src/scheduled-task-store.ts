@@ -51,6 +51,8 @@ export interface ScheduledTask {
   lastRunAt?: string;
   /** The newest task result the user has acknowledged in the app. */
   lastReadAt?: string;
+  /** Hidden from the active task list while remaining restorable. */
+  archivedAt?: string;
   // History of all runs (for recurring tasks)
   runs?: TaskRun[];
 }
@@ -66,6 +68,33 @@ export function setScheduledTaskReadState(
     updated.lastReadAt = now.toISOString();
   } else {
     delete updated.lastReadAt;
+  }
+  return updated;
+}
+
+export function scheduledTaskCanArchive(
+  task: Pick<ScheduledTask, "recurrence" | "status" | "archivedAt">,
+): boolean {
+  const oneOff = !task.recurrence || task.recurrence.type === "once";
+  const terminal = task.status === "completed"
+    || task.status === "failed"
+    || task.status === "cancelled";
+  return oneOff && terminal && !task.archivedAt;
+}
+
+/** Return a copy with durable archive state updated. Archiving acknowledges its result. */
+export function setScheduledTaskArchiveState(
+  task: ScheduledTask,
+  archived: boolean,
+  now: Date = new Date(),
+): ScheduledTask {
+  const updated = { ...task };
+  if (archived) {
+    const timestamp = now.toISOString();
+    updated.archivedAt = timestamp;
+    updated.lastReadAt = timestamp;
+  } else {
+    delete updated.archivedAt;
   }
   return updated;
 }
@@ -152,7 +181,9 @@ export function deleteScheduledTask(id: string): void {
 export function getDueTasks(): ScheduledTask[] {
   const now = Date.now();
   return readTasks().filter(
-    (t) => t.status === "pending" && new Date(t.scheduledTime).getTime() <= now
+    (t) => !t.archivedAt
+      && t.status === "pending"
+      && new Date(t.scheduledTime).getTime() <= now
   );
 }
 

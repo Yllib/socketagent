@@ -24,6 +24,14 @@ function Test-CommandExists($command) {
     $null -ne (Get-Command $command -ErrorAction SilentlyContinue)
 }
 
+function Get-CommandWithoutStoreAlias($command) {
+    $resolved = Get-Command $command -ErrorAction SilentlyContinue
+    if ($resolved -and $resolved.Source -like "*\Microsoft\WindowsApps\*") {
+        return $null
+    }
+    return $resolved
+}
+
 function Invoke-NativeCapture {
     param([Parameter(Mandatory=$true)][scriptblock]$Command)
 
@@ -74,12 +82,16 @@ function Ensure-Git {
     $installedWithWinget = $false
     if (Test-CommandExists "winget") {
         $wingetResult = Invoke-NativeCapture {
-            winget install Git.Git --accept-source-agreements --accept-package-agreements --silent
+            winget install --id Git.Git --exact --source winget --accept-source-agreements --accept-package-agreements --silent
         }
         if ($wingetResult.ExitCode -eq 0 -or $wingetResult.ExitCode -eq -1978335189) {
-            $installedWithWinget = $true
+            Refresh-Path
+            $installedWithWinget = $null -ne (Get-CommandWithoutStoreAlias "git")
+            if (-not $installedWithWinget) {
+                Write-Warn "WinGet finished, but Git is not runnable. Trying the Git for Windows installer."
+            }
         } else {
-            Write-Warn "winget could not install Git. Trying the Git for Windows installer."
+            Write-Warn "WinGet could not install Git from the community repository. Trying the Git for Windows installer."
             $wingetResult.Output | ForEach-Object { Write-Host "    $_" }
         }
     }

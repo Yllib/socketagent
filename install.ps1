@@ -184,6 +184,14 @@ function Test-CommandExists($cmd) {
     $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue)
 }
 
+function Get-CommandWithoutStoreAlias($commandName) {
+    $resolved = Get-Command $commandName -ErrorAction SilentlyContinue
+    if ($resolved -and $resolved.Source -like "*\Microsoft\WindowsApps\*") {
+        return $null
+    }
+    return $resolved
+}
+
 function Test-CodexAppServer($codexPath = "codex") {
     $result = Invoke-NativeCapture { & $codexPath app-server --help }
     return $result.ExitCode -eq 0
@@ -451,7 +459,7 @@ Write-Ok "Selected managed toolchains: $installBackends"
 Write-Phase "Phase 1: Node.js & Git"
 
 # ── Git ──
-$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+$gitCmd = Get-CommandWithoutStoreAlias "git"
 if ($gitCmd) {
     $gitVer = & git --version 2>$null
     Write-Ok "Git already installed ($gitVer)"
@@ -459,19 +467,23 @@ if ($gitCmd) {
     Write-Host "  Git is required for auto-updates. Installing..."
     $gitInstalledWithWinget = $false
     if (Test-CommandExists "winget") {
-        Write-Host "  Installing Git via winget..."
-        $wingetResult = Invoke-NativeCapture { winget install Git.Git --accept-source-agreements --accept-package-agreements --silent }
+        Write-Host "  Installing Git from the WinGet community repository..."
+        $wingetResult = Invoke-NativeCapture { winget install --id Git.Git --exact --source winget --accept-source-agreements --accept-package-agreements --silent }
         $wingetOutput = $wingetResult.Output
         $wingetExit = $wingetResult.ExitCode
         if ($wingetExit -eq 0 -or $wingetExit -eq -1978335189) {
-            $gitInstalledWithWinget = $true
+            Refresh-Path
+            $gitInstalledWithWinget = $null -ne (Get-CommandWithoutStoreAlias "git")
+            if (-not $gitInstalledWithWinget) {
+                Write-Warn "WinGet finished, but Git is not runnable. Falling back to the GitHub installer."
+            }
         } else {
-            Write-Warn "winget install Git failed (exit code $wingetExit). Falling back to direct installer."
+            Write-Warn "WinGet install Git failed (exit code $wingetExit). Falling back to the GitHub installer."
             $wingetOutput | ForEach-Object { Write-Host "    $_" }
         }
     }
     if (-not $gitInstalledWithWinget) {
-        Write-Host "  Downloading Git installer..."
+        Write-Host "  Downloading Git installer from GitHub..."
         $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/Git-2.47.1.2-64-bit.exe"
         $gitPath = Join-Path $env:TEMP "git-installer.exe"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -497,9 +509,9 @@ Assert-GitCheckout
 
 # ── Node.js ──
 $nodeInstalled = $false
-$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+$nodeCmd = Get-CommandWithoutStoreAlias "node"
 if ($nodeCmd) {
-    $rawVersion = & node --version 2>$null
+    $rawVersion = & $nodeCmd.Source --version 2>$null
     if ($rawVersion) {
         $nodeVersion = [version]($rawVersion -replace "^v", "")
         if ($nodeVersion -ge $NODE_MIN_VERSION) {
@@ -514,15 +526,27 @@ if ($nodeCmd) {
 if (-not $nodeInstalled) {
     $nodeInstalledWithWinget = $false
     if (Test-CommandExists "winget") {
-        Write-Host "  Installing Node.js via winget..."
-        $wingetResult = Invoke-NativeCapture { winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent }
+        Write-Host "  Installing Node.js from the WinGet community repository..."
+        $wingetResult = Invoke-NativeCapture { winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-source-agreements --accept-package-agreements --silent }
         $wingetOutput = $wingetResult.Output
         $wingetExit = $wingetResult.ExitCode
         if ($wingetExit -eq 0 -or $wingetExit -eq -1978335189) {
-            # -1978335189 = "already installed" in winget
-            $nodeInstalledWithWinget = $true
+            # -1978335189 = "already installed" in winget. Still verify the
+            # executable so Windows' Microsoft Store app alias cannot masquerade
+            # as a working Node.js installation.
+            Refresh-Path
+            $nodeCmd = Get-CommandWithoutStoreAlias "node"
+            if ($nodeCmd) {
+                $wingetNodeVersion = & $nodeCmd.Source --version 2>$null
+                if ($wingetNodeVersion) {
+                    $nodeInstalledWithWinget = ([version]($wingetNodeVersion -replace "^v", "")) -ge $NODE_MIN_VERSION
+                }
+            }
+            if (-not $nodeInstalledWithWinget) {
+                Write-Warn "WinGet finished, but Node.js $NODE_MIN_VERSION+ is not runnable. Falling back to the direct installer."
+            }
         } else {
-            Write-Warn "winget install Node.js failed (exit code $wingetExit). Falling back to direct installer."
+            Write-Warn "WinGet install Node.js failed (exit code $wingetExit). Falling back to the direct installer."
             $wingetOutput | ForEach-Object { Write-Host "    $_" }
         }
     }
@@ -541,7 +565,8 @@ if (-not $nodeInstalled) {
 
     Refresh-Path
 
-    $rawVersion = & node --version 2>$null
+    $nodeCmd = Get-CommandWithoutStoreAlias "node"
+    $rawVersion = if ($nodeCmd) { & $nodeCmd.Source --version 2>$null } else { $null }
     if (-not $rawVersion) {
         throw "Node.js installation failed. Please install Node.js 22+ manually from https://nodejs.org/"
     }

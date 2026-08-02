@@ -21,7 +21,7 @@ export type WorkReviewItemStatus =
   | "rejected"
   | "skipped";
 export type WorkReviewDecisionStatus = Exclude<WorkReviewItemStatus, "pending">;
-export type WorkReviewRoundStatus = "in_review" | "completed";
+export type WorkReviewRoundStatus = "in_review" | "completed" | "cancelled";
 
 export interface WorkReviewTargetInput {
   kind: WorkReviewTargetKind;
@@ -205,8 +205,10 @@ export type WorkReviewEventType =
   | "created"
   | "draft_saved"
   | "finished"
+  | "cancelled"
   | "new_round"
-  | "archived";
+  | "archived"
+  | "restored";
 
 /** Audit event safe for agent-facing reads; draft content is never included. */
 export interface WorkReviewEvent {

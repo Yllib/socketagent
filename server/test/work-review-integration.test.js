@@ -12,8 +12,11 @@ const {
   publishWorkReviewCard,
 } = require("../dist/app-tool-handlers");
 const {
+  archiveWorkReview,
+  cancelWorkReview,
   finishWorkReview,
   getWorkReviewClientSnapshot,
+  restoreWorkReview,
   updateWorkReviewDraft,
 } = require("../dist/work-review-service");
 const {
@@ -141,6 +144,57 @@ test("WorkReview keeps draft feedback private and upserts one stable history car
   });
   assert.equal(repeated.published, false);
   assert.equal(repeated.result.resultId, finished.result.resultId);
+});
+
+test("silent lifecycle changes revise one durable phone card without draft content", async () => {
+  const sessionId = "review-lifecycle-session";
+  const sent = [];
+  const ctx = {
+    getSessionId: () => sessionId,
+    getBackend: () => "claude",
+    appendHistory: (entry) => appendHistory(sessionId, entry),
+    send: (message) => sent.push(message),
+  };
+  const created = parseToolResult(await handleWorkReviewTool(ctx, {
+    action: "create",
+    idempotency_key: "integration-lifecycle-1",
+    title: "Lifecycle review",
+    items: [{
+      item_id: "item-1",
+      title: "Item one",
+      primary_target: { kind: "url", uri: "https://example.com" },
+    }],
+  }));
+  const snapshot = getWorkReviewClientSnapshot(created.review.reviewId);
+  await updateWorkReviewDraft(created.review.reviewId, {
+    mutationId: "private-lifecycle-draft",
+    expectedRevision: snapshot.currentDraft.revision,
+    itemUpdates: [{
+      itemId: "item-1",
+      status: "changes_requested",
+      note: "PRIVATE-LIFECYCLE-NOTE",
+    }],
+  });
+
+  const cancelled = await cancelWorkReview(created.review.reviewId);
+  publishWorkReviewCard(ctx, cancelled);
+  let card = getHistory(sessionId).find((entry) => entry.role === "work_review");
+  assert.equal(card.entryId, created.card.entryId);
+  assert.equal(card.workReview.status, "cancelled");
+  assert.equal(JSON.stringify(card).includes("PRIVATE-LIFECYCLE-NOTE"), false);
+
+  const archived = await archiveWorkReview(created.review.reviewId);
+  publishWorkReviewCard(ctx, archived);
+  card = getHistory(sessionId).find((entry) => entry.role === "work_review");
+  assert.ok(card.workReview.archivedAt);
+
+  const restored = await restoreWorkReview(created.review.reviewId);
+  publishWorkReviewCard(ctx, restored);
+  const cards = getHistory(sessionId).filter((entry) => entry.role === "work_review");
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].entryId, created.card.entryId);
+  assert.equal(cards[0].workReview.archivedAt, undefined);
+  assert.equal(cards[0].workReview.status, "cancelled");
 });
 
 test("WorkReview embeds one same-session HTML plan for anchored item decisions", async () => {

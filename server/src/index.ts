@@ -99,10 +99,13 @@ import {
 import { resolveDelegationSupervisorSessionId } from "./delegation-lineage";
 import { routeRunningDelegatedAgentMessage } from "./delegated-agent-message-route";
 import {
+  archiveWorkReview,
+  cancelWorkReview,
   exportWorkReviews,
   finishWorkReview,
   getWorkReviewClientSnapshot,
   listWorkReviews,
+  restoreWorkReview,
   updateWorkReviewDraft,
 } from "./work-review-service";
 import {
@@ -5919,6 +5922,87 @@ function createConnectionHandler(
             operation: "finish",
             reviewId,
             roundId,
+            ok: false,
+            error: error?.message || String(error),
+          });
+        }
+        break;
+      }
+
+      case "work_review_cancel": {
+        const requestId = String((msg as any).requestId || "");
+        const reviewId = String((msg as any).reviewId || "");
+        const roundId = String((msg as any).roundId || "");
+        try {
+          const before = getWorkReviewClientSnapshot(reviewId) as any;
+          if (!before) throw new Error(`Work review not found: ${reviewId}`);
+          const currentRound = Array.isArray(before.rounds)
+            ? before.rounds.find((round: any) => Number(round.revision) === Number(before.currentRevision))
+              || before.rounds[before.rounds.length - 1]
+            : undefined;
+          if (!currentRound || String(currentRound.roundId || "") !== roundId) {
+            throw new Error("Cancel targets a stale Work Review round");
+          }
+          const review = await cancelWorkReview(reviewId) as any;
+          // Keep the durable phone card truthful without publishing a result
+          // or injecting any message into the originating agent session.
+          broadcastWorkReviewCard(review);
+          sendJson({
+            type: "work_review_operation_result",
+            requestId,
+            operation: "cancel",
+            reviewId,
+            roundId,
+            ok: true,
+            review,
+          });
+        } catch (error: any) {
+          sendJson({
+            type: "work_review_operation_result",
+            requestId,
+            operation: "cancel",
+            reviewId,
+            roundId,
+            ok: false,
+            error: error?.message || String(error),
+          });
+        }
+        break;
+      }
+
+      case "work_review_archive":
+      case "work_review_restore": {
+        const requestId = String((msg as any).requestId || "");
+        const reviewId = String((msg as any).reviewId || "");
+        const operation = (msg as any).type === "work_review_archive"
+          ? "archive"
+          : "restore";
+        try {
+          const review = operation === "archive"
+            ? await archiveWorkReview(reviewId) as any
+            : await restoreWorkReview(reviewId) as any;
+          // This revises only the stable app/history card. Lifecycle actions
+          // never enter queueWorkReviewResultDelivery or the agent session.
+          broadcastWorkReviewCard(review);
+          const snapshot = getWorkReviewClientSnapshot(reviewId) as any;
+          const payload = snapshot
+            ? workReviewClientPayload(snapshot, requestId)
+            : { review };
+          sendJson({
+            type: "work_review_operation_result",
+            requestId,
+            operation,
+            reviewId,
+            ok: true,
+            review: payload.review,
+            ...(payload.draft ? { draft: payload.draft } : {}),
+          });
+        } catch (error: any) {
+          sendJson({
+            type: "work_review_operation_result",
+            requestId,
+            operation,
+            reviewId,
             ok: false,
             error: error?.message || String(error),
           });

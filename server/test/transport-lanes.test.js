@@ -11,6 +11,6 @@ const {
 test("transport lane and upload acknowledgement capabilities are versioned", () => {
   assert.equal(TRANSPORT_LANE_VERSION, 1);
   assert.equal(UPLOAD_ACK_VERSION, 1);
-  assert.equal(WORK_REVIEW_VERSION, 1);
+  assert.equal(WORK_REVIEW_VERSION, 2);
   assert.equal(BULK_RELAY_PAIRING_SUFFIX, ":bulk:v1");
 });

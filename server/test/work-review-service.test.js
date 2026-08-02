@@ -87,6 +87,49 @@ test("keeps reviewer drafts private until finish seals one immutable result", as
   );
 });
 
+test("cancels an open review without publishing or exposing its private draft", async () => {
+  const subject = service();
+  const created = await subject.create(createInput());
+  const itemId = created.rounds[0].items[0].itemId;
+  await subject.updateDraft(created.reviewId, {
+    itemUpdates: [{ itemId, status: "changes_requested", note: "Never send this." }],
+  });
+
+  const cancelled = await subject.cancel(created.reviewId);
+  assert.equal(cancelled.rounds[0].status, "cancelled");
+  assert.equal(cancelled.rounds[0].result, undefined);
+  assert.equal(cancelled.events.at(-1).type, "cancelled");
+  assert.equal(JSON.stringify(cancelled).includes("Never send this."), false);
+  assert.equal(subject.clientSnapshot(created.reviewId).currentDraft, undefined);
+  await assert.rejects(
+    subject.finish(created.reviewId),
+    (error) => error instanceof WorkReviewError && error.code === "invalid_state",
+  );
+});
+
+test("archives and restores silently while preserving an open private draft", async () => {
+  const subject = service();
+  const created = await subject.create(createInput());
+  const itemId = created.rounds[0].items[0].itemId;
+  await subject.updateDraft(created.reviewId, {
+    itemUpdates: [{ itemId, status: "approved", note: "Keep privately." }],
+  });
+
+  const archived = await subject.archive(created.reviewId);
+  assert.ok(archived.archivedAt);
+  assert.equal(subject.list().length, 0);
+  assert.equal(subject.list({ includeArchived: true }).length, 1);
+
+  const restored = await subject.restore(created.reviewId);
+  assert.equal(restored.archivedAt, undefined);
+  assert.equal(restored.rounds[0].status, "in_review");
+  assert.equal(restored.events.at(-1).type, "restored");
+  assert.equal(
+    subject.clientSnapshot(created.reviewId).currentDraft.itemDecisions[0].note,
+    "Keep privately.",
+  );
+});
+
 test("creates linked monotonic rounds while preserving completed evidence and card identity", async () => {
   const subject = service();
   const first = await subject.create(createInput());

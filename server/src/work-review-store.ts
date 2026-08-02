@@ -44,7 +44,9 @@ function validRecord(value: unknown): value is StoredWorkReviewRecord {
       && typeof round.idempotencyKeyHash === "string"
       && typeof round.contentHash === "string"
       && Array.isArray(round.items)
-      && (round.status === "in_review" || round.status === "completed"),
+      && (round.status === "in_review"
+        || round.status === "completed"
+        || round.status === "cancelled"),
     )
     && record.currentRevision === record.rounds.length - 1;
 }

@@ -642,6 +642,28 @@ export class WorkReviewService {
     });
   }
 
+  async cancel(reviewId: string): Promise<WorkReviewAgentView> {
+    return this.serialize(reviewId, () => {
+      const record = this.store.get(reviewId);
+      if (!record) throw new WorkReviewError("not_found", "Work review not found");
+      if (record.archivedAt) {
+        throw new WorkReviewError("invalid_state", "Restore the work review before cancelling it");
+      }
+      const round = currentRound(record);
+      if (round.status === "cancelled") return agentView(record);
+      if (round.status !== "in_review") {
+        throw new WorkReviewError("invalid_state", "Only an in-progress work review can be cancelled");
+      }
+      const now = new Date().toISOString();
+      round.status = "cancelled";
+      delete round.draft;
+      delete round.draftMutations;
+      record.updatedAt = now;
+      this.appendEvent(record, "cancelled", now);
+      return agentView(this.store.save(record));
+    });
+  }
+
   async archive(reviewId: string): Promise<WorkReviewAgentView> {
     return this.serialize(reviewId, () => {
       const record = this.store.get(reviewId);
@@ -651,6 +673,21 @@ export class WorkReviewService {
         record.archivedAt = now;
         record.updatedAt = now;
         this.appendEvent(record, "archived", now);
+        this.store.save(record);
+      }
+      return agentView(record);
+    });
+  }
+
+  async restore(reviewId: string): Promise<WorkReviewAgentView> {
+    return this.serialize(reviewId, () => {
+      const record = this.store.get(reviewId);
+      if (!record) throw new WorkReviewError("not_found", "Work review not found");
+      if (record.archivedAt) {
+        const now = new Date().toISOString();
+        delete record.archivedAt;
+        record.updatedAt = now;
+        this.appendEvent(record, "restored", now);
         this.store.save(record);
       }
       return agentView(record);
@@ -709,6 +746,14 @@ export function createWorkReviewRound(
 
 export function archiveWorkReview(reviewId: string): Promise<WorkReviewAgentView> {
   return workReviewService.archive(reviewId);
+}
+
+export function cancelWorkReview(reviewId: string): Promise<WorkReviewAgentView> {
+  return workReviewService.cancel(reviewId);
+}
+
+export function restoreWorkReview(reviewId: string): Promise<WorkReviewAgentView> {
+  return workReviewService.restore(reviewId);
 }
 
 export function exportWorkReviews(filter?: WorkReviewListFilter): WorkReviewExport {

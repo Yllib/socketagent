@@ -14,7 +14,7 @@ export type CodexDriver = "app-server";
 
 export const TRANSPORT_LANE_VERSION = 1;
 export const UPLOAD_ACK_VERSION = 1;
-export const WORK_REVIEW_VERSION = 1;
+export const WORK_REVIEW_VERSION = 2;
 export const BULK_RELAY_PAIRING_SUFFIX = ":bulk:v1";
 export type TransportLane = "control" | "bulk";
 
@@ -197,6 +197,25 @@ export interface WorkReviewFinishMessage {
   baseRevision?: number;
   /** The complete final draft is published atomically by this operation. */
   draft: WorkReviewDraft;
+}
+
+export interface WorkReviewCancelMessage {
+  type: "work_review_cancel";
+  requestId: string;
+  reviewId: string;
+  roundId: string;
+}
+
+export interface WorkReviewArchiveMessage {
+  type: "work_review_archive";
+  requestId: string;
+  reviewId: string;
+}
+
+export interface WorkReviewRestoreMessage {
+  type: "work_review_restore";
+  requestId: string;
+  reviewId: string;
 }
 
 export interface NewSessionMessage {
@@ -924,6 +943,9 @@ export type ClientMessage =
   | WorkReviewGetMessage
   | WorkReviewDraftUpdateMessage
   | WorkReviewFinishMessage
+  | WorkReviewCancelMessage
+  | WorkReviewArchiveMessage
+  | WorkReviewRestoreMessage
   | NewSessionMessage
   | ResumeSessionMessage
   | SessionEventAckMessage
@@ -1672,7 +1694,7 @@ export interface WorkReviewListResultServerMessage {
 export interface WorkReviewOperationResultServerMessage {
   type: "work_review_operation_result";
   requestId: string;
-  operation: "get" | "draft_update" | "finish";
+  operation: "get" | "draft_update" | "finish" | "cancel" | "archive" | "restore";
   reviewId: string;
   roundId?: string;
   ok: boolean;

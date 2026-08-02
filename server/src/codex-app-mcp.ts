@@ -145,7 +145,7 @@ function createServer(context: AppToolContext): McpServer {
   );
 
   const workReviewTargetSchema = z.object({
-    kind: z.enum(["url", "file", "image", "html", "diff", "session", "custom"]),
+    kind: z.enum(["url", "file", "image", "html", "html_plan", "diff", "session", "custom"]),
     uri: z.string().describe("Address or identifier the reviewer opens or inspects"),
     label: z.string().optional(),
     environment: z.string().optional().describe("For example production, development, sandbox, or local"),
@@ -179,6 +179,7 @@ function createServer(context: AppToolContext): McpServer {
         summary: z.string().optional().describe("Concise description of the work completed"),
         instructions: z.string().optional().describe("Instructions applying to the whole review"),
         approval_meaning: z.string().optional().describe("What approval authorizes or confirms, including deployment authorization when applicable"),
+        linked_html_plan_id: z.string().optional().describe("Same-session HtmlPlan ID to display once for html_plan item targets"),
         items: z.array(workReviewItemSchema).optional().describe("Required non-empty list for create and new_round"),
         include_archived: z.boolean().optional().describe("Include archived reviews for list/export"),
       },

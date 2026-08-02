@@ -206,6 +206,14 @@ export function listHtmlPlans(sessionId: string): HtmlPlanRecord[] {
     .map(publicPlan);
 }
 
+/** Resolve one plan without exposing plans from any other originating session. */
+export function getHtmlPlan(sessionId: string, planId: string): HtmlPlanRecord | undefined {
+  const requested = String(planId || "").trim();
+  if (!requested) return undefined;
+  const plan = readPlans(sessionId).find((candidate) => candidate.planId === requested);
+  return plan ? publicPlan(plan) : undefined;
+}
+
 /** Complete revision-preserving representation used by encrypted session transfer. */
 export function exportHtmlPlansForSession(sessionId: string): unknown[] {
   return readPlans(sessionId).map((plan) => JSON.parse(JSON.stringify(plan)));

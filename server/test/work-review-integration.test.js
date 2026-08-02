@@ -31,6 +31,7 @@ const {
   WORK_REVIEW_TOOL_DESCRIPTION,
   buildSocketAgentIntegrationInstructions,
 } = require("../dist/socketagent-instructions");
+const { saveHtmlPlan } = require("../dist/html-plan-store");
 
 test.after(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
@@ -140,6 +141,54 @@ test("WorkReview keeps draft feedback private and upserts one stable history car
   });
   assert.equal(repeated.published, false);
   assert.equal(repeated.result.resultId, finished.result.resultId);
+});
+
+test("WorkReview embeds one same-session HTML plan for anchored item decisions", async () => {
+  const sessionId = "linked-plan-review-session";
+  const sent = [];
+  const ctx = {
+    getSessionId: () => sessionId,
+    getBackend: () => "codex",
+    appendHistory: (entry) => appendHistory(sessionId, entry),
+    send: (message) => sent.push(message),
+  };
+  const plan = saveHtmlPlan({
+    sessionId,
+    planId: "feedback-queue-plan",
+    title: "Feedback queue",
+    html: '<section id="ticket-699"><h2>Ticket 699</h2></section>',
+  });
+  const created = parseToolResult(await handleWorkReviewTool(ctx, {
+    action: "create",
+    idempotency_key: "linked-plan-review-create",
+    linked_html_plan_id: plan.planId,
+    title: "Choose ticket directions",
+    items: [{
+      item_id: "ticket-699",
+      title: "Ticket 699",
+      primary_target: { kind: "html_plan", uri: "#ticket-699" },
+    }],
+  }));
+
+  const card = getHistory(sessionId).find((entry) => entry.role === "work_review");
+  assert.equal(created.review.rounds[0].linkedHtmlPlanId, plan.planId);
+  assert.equal(card.workReview.linkedHtmlPlan.planId, plan.planId);
+  assert.match(card.workReview.linkedHtmlPlan.html, /ticket-699/);
+  assert.equal(card.workReview.items[0].primaryTarget.kind, "html_plan");
+  assert.equal(JSON.stringify(card).match(/<section/g).length, 1);
+
+  const missing = await handleWorkReviewTool(ctx, {
+    action: "create",
+    idempotency_key: "missing-linked-plan-create",
+    linked_html_plan_id: "not-in-this-session",
+    title: "Invalid plan",
+    items: [{
+      title: "Ticket",
+      primary_target: { kind: "html_plan", uri: "#ticket" },
+    }],
+  });
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0].text, /not found in this session/);
 });
 
 test("Work Review result outbox persists compact pending records and delivered tombstones", () => {

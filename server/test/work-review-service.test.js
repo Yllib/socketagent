@@ -197,6 +197,34 @@ test("allows legitimate local/LAN/prod HTTP targets but rejects active-scheme an
   );
 });
 
+test("links one HTML plan to anchored review items", async () => {
+  const subject = service();
+  await assert.rejects(
+    subject.create(createInput({
+      idempotencyKey: "missing-linked-plan",
+      items: [{
+        itemId: "ticket-699",
+        title: "Ticket 699",
+        primaryTarget: { kind: "html_plan", uri: "#ticket-699" },
+      }],
+    })),
+    (error) => error.code === "validation",
+  );
+
+  const created = await subject.create(createInput({
+    idempotencyKey: "linked-plan",
+    linkedHtmlPlanId: "queue-plan-1",
+    items: [{
+      itemId: "ticket-699",
+      title: "Ticket 699",
+      primaryTarget: { kind: "html_plan", uri: "#ticket-699" },
+    }],
+  }));
+  assert.equal(created.rounds[0].linkedHtmlPlanId, "queue-plan-1");
+  assert.equal(created.rounds[0].items[0].primaryTarget.kind, "html_plan");
+  assert.equal(created.rounds[0].items[0].primaryTarget.displayMode, "embedded");
+});
+
 test("recovers a missing/corrupt index from atomic record files", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-work-reviews-recovery-"));
   roots.push(root);

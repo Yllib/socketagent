@@ -7,7 +7,7 @@ import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, Recurrenc
 import { listSkills, SkillEntry } from "./skills-manager";
 import { requestSecureInput, SecureInputRequestArgs, SecureInputRequestStatus } from "./secure-input-store";
 import { sendPushNotification } from "./push-notifications";
-import { saveHtmlPlan } from "./html-plan-store";
+import { getHtmlPlan, saveHtmlPlan } from "./html-plan-store";
 import {
   archiveWorkReview,
   createWorkReview,
@@ -123,7 +123,7 @@ export interface ReportSubagentAssignmentArgs {
 }
 
 export interface WorkReviewTargetArgs {
-  kind: "url" | "file" | "image" | "html" | "diff" | "session" | "custom";
+  kind: "url" | "file" | "image" | "html" | "html_plan" | "diff" | "session" | "custom";
   uri: string;
   label?: string;
   environment?: string;
@@ -149,6 +149,7 @@ export interface WorkReviewArgs {
   summary?: string;
   instructions?: string;
   approval_meaning?: string;
+  linked_html_plan_id?: string;
   items?: WorkReviewItemArgs[];
   include_archived?: boolean;
 }
@@ -613,6 +614,9 @@ export function publishWorkReviewCard(
         Number(candidate?.revision) === Number(review.currentRevision))
       || review.rounds[review.rounds.length - 1]
     : undefined;
+  const linkedHtmlPlan = round?.linkedHtmlPlanId
+    ? getHtmlPlan(sessionId, round.linkedHtmlPlanId)
+    : undefined;
   const cardReview = {
     reviewId,
     cardId: review.cardId,
@@ -624,6 +628,8 @@ export function publishWorkReviewCard(
     currentRevision: review.currentRevision,
     roundId: round?.roundId,
     title: round?.title || "Work review",
+    ...(round?.linkedHtmlPlanId ? { linkedHtmlPlanId: round.linkedHtmlPlanId } : {}),
+    ...(linkedHtmlPlan ? { linkedHtmlPlan } : {}),
     ...(round?.purpose ? { purpose: round.purpose } : {}),
     ...(round?.summary ? { summary: round.summary } : {}),
     ...(round?.instructions ? { instructions: round.instructions } : {}),
@@ -674,11 +680,16 @@ export async function handleWorkReviewTool(
         if (!args.idempotency_key?.trim()) throw new Error("idempotency_key is required");
         if (!args.title?.trim()) throw new Error("title is required");
         if (!args.items?.length) throw new Error("items must contain at least one review item");
+        if (args.linked_html_plan_id?.trim()
+          && !getHtmlPlan(originSessionId, args.linked_html_plan_id.trim())) {
+          throw new Error(`HTML plan not found in this session: ${args.linked_html_plan_id.trim()}`);
+        }
         const review = await createWorkReview({
           idempotencyKey: args.idempotency_key.trim(),
           originSessionId,
           originBackend: ctx.getBackend?.(),
           title: args.title,
+          linkedHtmlPlanId: args.linked_html_plan_id?.trim(),
           purpose: args.purpose,
           summary: args.summary,
           instructions: args.instructions,
@@ -722,6 +733,10 @@ export async function handleWorkReviewTool(
         if (!args.idempotency_key?.trim()) throw new Error("idempotency_key is required");
         if (!args.title?.trim()) throw new Error("title is required");
         if (!args.items?.length) throw new Error("items must contain at least one review item");
+        if (args.linked_html_plan_id?.trim()
+          && !getHtmlPlan(originSessionId, args.linked_html_plan_id.trim())) {
+          throw new Error(`HTML plan not found in this session: ${args.linked_html_plan_id.trim()}`);
+        }
         const existing = getWorkReview(args.review_id.trim());
         if (!existing) throw new Error(`Work review not found: ${args.review_id.trim()}`);
         if (String((existing as any).originSessionId || "") !== originSessionId) {
@@ -730,6 +745,7 @@ export async function handleWorkReviewTool(
         const review = await createWorkReviewRound(args.review_id.trim(), {
           idempotencyKey: args.idempotency_key.trim(),
           title: args.title,
+          linkedHtmlPlanId: args.linked_html_plan_id?.trim(),
           purpose: args.purpose,
           summary: args.summary,
           instructions: args.instructions,

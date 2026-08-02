@@ -33,7 +33,7 @@ import {
 import { WorkReviewStore } from "./work-review-store";
 
 const targetKinds = new Set<WorkReviewTargetKind>([
-  "url", "file", "image", "html", "diff", "session", "custom",
+  "url", "file", "image", "html", "html_plan", "diff", "session", "custom",
 ]);
 const displayModes = new Set<WorkReviewDisplayMode>(["auto", "embedded", "external"]);
 const itemStatuses = new Set<WorkReviewItemStatus>([
@@ -113,6 +113,9 @@ function cleanTarget(input: WorkReviewTargetInput, generatedId?: string): WorkRe
   }
   const uri = boundedString(input.uri, "Target URI", 4096, true)!;
   if (input.kind === "url") validateUrl(uri);
+  if (input.kind === "html_plan" && !/^#?[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(uri)) {
+    throw new WorkReviewError("validation", "HTML plan target URI must be an element anchor");
+  }
   const displayMode = input.displayMode || "auto";
   if (!displayModes.has(displayMode)) {
     throw new WorkReviewError("validation", "Target display mode is invalid");
@@ -148,7 +151,7 @@ function cleanItem(input: WorkReviewItemInput, index: number): WorkReviewItem {
   // A primary web target is the surface being reviewed. It must stay inside
   // the app beneath the review panel; the app provides a separate explicit
   // action for opening it externally.
-  if (primaryTarget.kind === "url") {
+  if (primaryTarget.kind === "url" || primaryTarget.kind === "html_plan") {
     primaryTarget.displayMode = "embedded";
   }
   return {
@@ -182,8 +185,21 @@ function cleanRoundContent(input: WorkReviewRoundContentInput): Omit<
   const items = input.items.map(cleanItem);
   const ids = new Set(items.map((item) => item.itemId));
   if (ids.size !== items.length) throw new WorkReviewError("validation", "Work review item IDs must be unique");
+  const linkedHtmlPlanId = input.linkedHtmlPlanId
+    ? cleanId(input.linkedHtmlPlanId, "Linked HTML plan ID")
+    : undefined;
+  if (items.some((item) =>
+    item.primaryTarget.kind === "html_plan"
+    || item.supportingTargets.some((target) => target.kind === "html_plan"))
+    && !linkedHtmlPlanId) {
+    throw new WorkReviewError(
+      "validation",
+      "linkedHtmlPlanId is required when an item targets an HTML plan",
+    );
+  }
   const content = {
     title: boundedString(input.title, "Work review title", 300, true)!,
+    ...(linkedHtmlPlanId ? { linkedHtmlPlanId } : {}),
     ...(boundedString(input.purpose, "Work review purpose", 4_000)
       ? { purpose: input.purpose!.trim() }
       : {}),
@@ -220,6 +236,7 @@ function agentRound(round: StoredWorkReviewRound): WorkReviewAgentRoundView {
     roundId: round.roundId,
     revision: round.revision,
     title: round.title,
+    ...(round.linkedHtmlPlanId ? { linkedHtmlPlanId: round.linkedHtmlPlanId } : {}),
     ...(round.purpose ? { purpose: round.purpose } : {}),
     ...(round.summary ? { summary: round.summary } : {}),
     ...(round.instructions ? { instructions: round.instructions } : {}),

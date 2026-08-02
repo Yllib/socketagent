@@ -8,6 +8,7 @@ export type WorkReviewTargetKind =
   | "file"
   | "image"
   | "html"
+  | "html_plan"
   | "diff"
   | "session"
   | "custom";
@@ -56,6 +57,8 @@ export interface WorkReviewItem {
 
 export interface WorkReviewRoundContentInput {
   title: string;
+  /** Same-session HtmlPlan displayed once and addressed by html_plan item targets. */
+  linkedHtmlPlanId?: string;
   purpose?: string;
   summary?: string;
   instructions?: string;
@@ -137,6 +140,7 @@ export interface WorkReviewAgentRoundView {
   roundId: string;
   revision: number;
   title: string;
+  linkedHtmlPlanId?: string;
   purpose?: string;
   summary?: string;
   instructions?: string;

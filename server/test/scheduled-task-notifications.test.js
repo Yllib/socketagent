@@ -5,10 +5,28 @@ const path = require("node:path");
 const test = require("node:test");
 
 const {
+  reconcileInterruptedScheduledTask,
   scheduledTaskDisplayName,
   scheduledTaskRevisionForPath,
   scheduledTaskUsesAutomaticNotifications,
 } = require("../dist/scheduled-task-store");
+
+function scheduledTask(overrides = {}) {
+  return {
+    id: "task-1",
+    name: "Health check",
+    prompt: "Inspect health",
+    cwd: "/tmp",
+    scheduledTime: "2026-08-01T01:00:00.000Z",
+    createdAt: "2026-07-01T00:00:00.000Z",
+    status: "running",
+    recurrence: { type: "daily" },
+    runCount: 8,
+    sessionId: "session-1",
+    runs: [],
+    ...overrides,
+  };
+}
 
 test("scheduled task labels are preferred over prompt text", () => {
   assert.equal(
@@ -56,4 +74,69 @@ test("scheduled task revisions change whenever the authoritative file changes", 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("startup recovery closes an orphaned run and advances a recurring task", () => {
+  const recovered = reconcileInterruptedScheduledTask(
+    scheduledTask(),
+    new Date("2026-08-01T17:00:00.000Z"),
+  );
+
+  assert.ok(recovered);
+  assert.equal(recovered.status, "pending");
+  assert.equal(recovered.scheduledTime, "2026-08-02T01:00:00.000Z");
+  assert.equal(recovered.runCount, 9);
+  assert.equal(recovered.runs.length, 1);
+  assert.equal(recovered.runs[0].status, "failed");
+  assert.equal(recovered.runs[0].sessionId, "session-1");
+  assert.equal(recovered.runs[0].startedAt, "2026-08-01T01:00:00.000Z");
+  assert.equal(recovered.runs[0].completedAt, "2026-08-01T17:00:00.000Z");
+  assert.match(recovered.runs[0].error, /server restart/);
+});
+
+test("startup recovery finalizes the durable running record without duplicating it", () => {
+  const recovered = reconcileInterruptedScheduledTask(
+    scheduledTask({
+      runs: [{
+        sessionId: "session-1",
+        startedAt: "2026-08-01T01:00:04.000Z",
+        status: "running",
+        trigger: "scheduled",
+      }],
+    }),
+    new Date("2026-08-01T01:05:00.000Z"),
+  );
+
+  assert.ok(recovered);
+  assert.equal(recovered.runs.length, 1);
+  assert.equal(recovered.runs[0].status, "failed");
+  assert.equal(recovered.runs[0].startedAt, "2026-08-01T01:00:04.000Z");
+});
+
+test("startup recovery restores the prior state of an interrupted manual run", () => {
+  const recovered = reconcileInterruptedScheduledTask(
+    scheduledTask({
+      status: "running",
+      scheduledTime: "2026-08-03T01:00:00.000Z",
+      runs: [{
+        sessionId: "session-1",
+        startedAt: "2026-08-01T16:00:00.000Z",
+        status: "running",
+        trigger: "manual",
+        resumeTaskStatus: "pending",
+      }],
+    }),
+    new Date("2026-08-01T17:00:00.000Z"),
+  );
+
+  assert.ok(recovered);
+  assert.equal(recovered.status, "pending");
+  assert.equal(recovered.scheduledTime, "2026-08-03T01:00:00.000Z");
+});
+
+test("startup recovery leaves non-running tasks untouched", () => {
+  assert.equal(
+    reconcileInterruptedScheduledTask(scheduledTask({ status: "pending" })),
+    null,
+  );
 });

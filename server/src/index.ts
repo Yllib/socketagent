@@ -27,7 +27,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
-import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
+import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, ScheduledTask } from "./scheduled-task-store";
 import {
   AgentEffort,
   AgentSessionSettings,
@@ -8405,16 +8405,30 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
 
   const manualRun = trigger === "manual";
   const originalStatus = task.status;
+  const runNumber = (task.runCount || 0) + 1;
+  const currentRun: import("./scheduled-task-store").TaskRun = {
+    sessionId: task.sessionId || "",
+    startedAt: new Date().toISOString(),
+    status: "running",
+    trigger,
+    ...(manualRun ? { resumeTaskStatus: originalStatus } : {}),
+  };
+  if (!task.runs) task.runs = [];
+  task.runs.push(currentRun);
   task.status = "running";
   saveScheduledTask(task);
   broadcastScheduledTaskList();
 
-  const runNumber = (task.runCount || 0) + 1;
   console.log(`[Scheduler] Executing ${trigger} task ${task.id} (run #${runNumber}): ${task.prompt.slice(0, 80)}`);
 
   try {
     if (!fs.existsSync(task.cwd)) {
       task.error = `Directory not found: ${task.cwd}`;
+      currentRun.status = "failed";
+      currentRun.completedAt = new Date().toISOString();
+      currentRun.error = task.error;
+      task.runCount = runNumber;
+      task.lastRunAt = currentRun.completedAt;
       if (manualRun) finishManualScheduledTask(task, originalStatus, false);
       else task.status = "failed";
       saveScheduledTask(task);
@@ -8440,6 +8454,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
     if (codexDriver) task.codexDriver = codexDriver;
     else task.codexDriver = undefined;
+    currentRun.codexDriver = codexDriver;
     saveScheduledTask(task);
 
     let session: Session;
@@ -8493,13 +8508,6 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       scheduledStartPushSent = sendSessionStartedPush(session);
     };
 
-    const currentRun: import("./scheduled-task-store").TaskRun = {
-      sessionId: "",
-      ...(codexDriver ? { codexDriver } : {}),
-      startedAt: new Date().toISOString(),
-      status: "running",
-    };
-
     const registerInterval = setInterval(() => {
       const sid = session.getSessionId();
       if (sid && sid !== tempId) {
@@ -8535,8 +8543,6 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.resultSummary = currentRun.resultSummary;
       task.runCount = runNumber;
       task.lastRunAt = new Date().toISOString();
-      if (!task.runs) task.runs = [];
-      task.runs.push(currentRun);
       applyLatestScheduledTaskEditableFields(task);
 
       if ((session as any).isWarmIdle) {
@@ -8605,8 +8611,6 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.error = currentRun.error;
       task.runCount = runNumber;
       task.lastRunAt = new Date().toISOString();
-      if (!task.runs) task.runs = [];
-      task.runs.push(currentRun);
       applyLatestScheduledTaskEditableFields(task);
 
       if ((session as any).isWarmIdle) {
@@ -8661,6 +8665,13 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);
     });
   } catch (err: any) {
+    if (currentRun.status === "running") {
+      currentRun.status = "failed";
+      currentRun.completedAt = new Date().toISOString();
+      currentRun.error = err.message || "Unknown error";
+      task.runCount = runNumber;
+      task.lastRunAt = currentRun.completedAt;
+    }
     task.error = err.message;
     if (manualRun) finishManualScheduledTask(task, originalStatus, false);
     else task.status = "failed";
@@ -8685,6 +8696,14 @@ async function checkScheduledTasks(): Promise<void> {
       console.error(`[Scheduler] Task ${task.id} failed before launch: ${err?.message || err}`);
     });
   }
+}
+
+const recoveredScheduledTasks = reconcileInterruptedScheduledTasks();
+for (const task of recoveredScheduledTasks) {
+  console.warn(
+    `[Scheduler] Recovered interrupted task ${task.id}; ` +
+    `status=${task.status} next=${task.scheduledTime}`,
+  );
 }
 
 setInterval(checkScheduledTasks, SCHEDULER_INTERVAL);

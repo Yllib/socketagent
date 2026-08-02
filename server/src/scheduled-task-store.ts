@@ -12,12 +12,16 @@ export interface RecurrenceConfig {
   daysOfWeek?: number[]; // for "weekly" — 0=Sun, 1=Mon, ..., 6=Sat
 }
 
+export type ScheduledTaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
 export interface TaskRun {
   sessionId: string;
   codexDriver?: CodexDriver;
   startedAt: string;
   completedAt?: string;
   status: "running" | "completed" | "failed";
+  trigger?: "scheduled" | "manual";
+  resumeTaskStatus?: Exclude<ScheduledTaskStatus, "running">;
   resultSummary?: string;
   error?: string;
 }
@@ -34,7 +38,7 @@ export interface ScheduledTask {
   permissionMode?: string;
   scheduledTime: string;
   createdAt: string;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  status: ScheduledTaskStatus;
   sessionId?: string;
   resultSummary?: string;
   error?: string;
@@ -136,7 +140,7 @@ export function getDueTasks(): ScheduledTask[] {
 }
 
 /** Calculate the next scheduled time for a recurring task */
-export function getNextRunTime(task: ScheduledTask): string | null {
+export function getNextRunTime(task: ScheduledTask, nowMs: number = Date.now()): string | null {
   if (!task.recurrence || task.recurrence.type === "once") return null;
 
   const last = new Date(task.scheduledTime);
@@ -163,8 +167,7 @@ export function getNextRunTime(task: ScheduledTask): string | null {
   }
 
   // If next is still in the past, advance until it's in the future
-  const now = Date.now();
-  while (next.getTime() <= now) {
+  while (next.getTime() <= nowMs) {
     switch (task.recurrence.type) {
       case "daily":
         next = new Date(next.getTime() + 24 * 60 * 60 * 1000);
@@ -182,6 +185,88 @@ export function getNextRunTime(task: ScheduledTask): string | null {
   }
 
   return next.toISOString();
+}
+
+const INTERRUPTED_RUN_ERROR =
+  "Scheduler ownership was lost during a server restart; this run could not be finalized.";
+
+/**
+ * Reconcile a task whose in-memory executor disappeared with the old process.
+ * This is intentionally conservative: recurring scheduled runs advance to the
+ * next occurrence rather than being replayed and potentially duplicating side
+ * effects. One-shot runs become failed. Interrupted manual runs return to the
+ * task status they had before Execute Now was pressed.
+ */
+export function reconcileInterruptedScheduledTask(
+  task: ScheduledTask,
+  now: Date = new Date(),
+): ScheduledTask | null {
+  if (task.status !== "running") return null;
+
+  const recovered: ScheduledTask = {
+    ...task,
+    runs: (task.runs || []).map((run) => ({ ...run })),
+  };
+  const runs = recovered.runs!;
+  let interruptedRun: TaskRun | undefined;
+  for (let index = runs.length - 1; index >= 0; index--) {
+    if (runs[index].status === "running") {
+      interruptedRun = runs[index];
+      break;
+    }
+  }
+
+  if (!interruptedRun) {
+    interruptedRun = {
+      sessionId: recovered.sessionId || "",
+      ...(recovered.codexDriver ? { codexDriver: recovered.codexDriver } : {}),
+      startedAt: recovered.scheduledTime,
+      status: "running",
+      trigger: "scheduled",
+    };
+    runs.push(interruptedRun);
+  }
+
+  interruptedRun.status = "failed";
+  interruptedRun.completedAt = now.toISOString();
+  interruptedRun.error = INTERRUPTED_RUN_ERROR;
+  recovered.runCount = (recovered.runCount || 0) + 1;
+  recovered.lastRunAt = now.toISOString();
+  recovered.error = INTERRUPTED_RUN_ERROR;
+
+  if (interruptedRun.trigger === "manual") {
+    recovered.status = interruptedRun.resumeTaskStatus || "completed";
+  } else if (recovered.recurrence && recovered.recurrence.type !== "once") {
+    const nextTime = getNextRunTime(recovered, now.getTime());
+    if (nextTime) {
+      recovered.status = "pending";
+      recovered.scheduledTime = nextTime;
+    } else {
+      recovered.status = "failed";
+    }
+  } else {
+    recovered.status = "failed";
+  }
+
+  return recovered;
+}
+
+/** Repair every orphaned running task after a server process starts. */
+export function reconcileInterruptedScheduledTasks(
+  now: Date = new Date(),
+): ScheduledTask[] {
+  const tasks = readTasks();
+  const recovered: ScheduledTask[] = [];
+  let changed = false;
+  const reconciled = tasks.map((task) => {
+    const replacement = reconcileInterruptedScheduledTask(task, now);
+    if (!replacement) return task;
+    changed = true;
+    recovered.push(replacement);
+    return replacement;
+  });
+  if (changed) writeTasks(reconciled);
+  return recovered;
 }
 
 /** Get all session IDs that belong to scheduled tasks */

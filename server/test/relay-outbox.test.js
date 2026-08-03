@@ -3,9 +3,48 @@ const test = require("node:test");
 const WebSocket = require("ws");
 
 const {
+  RelayClient,
   RelayMessageOutbox,
   VirtualRelaySocket,
 } = require("../dist/relay-client");
+
+test("relay capability handshake uses the authoritative server payload", () => {
+  const expected = {
+    type: "server_capabilities",
+    sessionTransfer: { version: 1 },
+    htmlPlans: { version: 2 },
+    backends: ["claude", "codex"],
+  };
+  const calls = [];
+  const client = new RelayClient({
+    relayUrl: "wss://relay.invalid",
+    pairingToken: "test",
+    keyPair: {
+      publicKey: new Uint8Array(32),
+      secretKey: new Uint8Array(64),
+    },
+    lane: "control",
+    serverCapabilities(binaryEnvelope, lane) {
+      calls.push({ binaryEnvelope, lane });
+      return expected;
+    },
+    onMessage() {},
+    onStatusChange() {},
+  });
+
+  let sent;
+  client.sendToPeer = (_peerId, message) => {
+    sent = message;
+  };
+  client.dispatchClientMessage({
+    type: "client_capabilities",
+    binaryEnvelope: true,
+  });
+
+  assert.deepEqual(calls, [{ binaryEnvelope: true, lane: "control" }]);
+  assert.equal(sent, expected);
+  assert.deepEqual(sent.sessionTransfer, { version: 1 });
+});
 
 test("relay outbox preserves transient tool events in order", () => {
   const outbox = new RelayMessageOutbox();

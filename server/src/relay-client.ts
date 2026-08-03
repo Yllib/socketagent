@@ -2,17 +2,11 @@ import WebSocket from "ws";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
 import {
   ClientMessage,
-  TRANSPORT_LANE_VERSION,
   TransportLane,
-  UPLOAD_ACK_VERSION,
-  WORK_REVIEW_VERSION,
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
-import { SERVER_RELEASE_VERSION } from "./server-build-info";
-import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
-import { detectAvailableBackends } from "./codex-session";
-import { getAdvertisedServerSettings } from "./server-settings";
+import { BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
 
 // Binary envelope plaintext markers — first byte of the decrypted payload.
 const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
@@ -127,6 +121,15 @@ export interface RelayClientOptions {
   pairingToken: string;
   keyPair: KeyPair;
   lane?: TransportLane;
+  /**
+   * Build the authoritative capability payload for this server. Keeping this
+   * in index.ts ensures direct and relay handshakes cannot advertise different
+   * feature sets as new capabilities are added.
+   */
+  serverCapabilities: (
+    binaryEnvelope: boolean,
+    lane: TransportLane,
+  ) => Record<string, unknown>;
   onMessage: (msg: ClientMessage) => void;
   onStatusChange: (status: RelayStatus) => void;
 }
@@ -542,31 +545,18 @@ export class RelayClient {
         peer.binaryEnabled = true;
         console.log(`[Relay] Phone announced binary envelope support — flipping outbound to binary${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
       }
-      // Ack so the phone knows the server is now sending binary, and tell it
-      // which agent backends this server supports plus current health state.
-      const settings = getAdvertisedServerSettings();
-      this.sendToPeer(peerId, {
-        type: "server_capabilities",
-        serverReleaseVersion: SERVER_RELEASE_VERSION,
-        binaryEnvelope: peer.binaryEnabled,
-        binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
-        transportLane: this.opts.lane || "control",
-        transportLanes: {
-          version: TRANSPORT_LANE_VERSION,
-          bulk: true,
-        },
-        uploadAckVersion: UPLOAD_ACK_VERSION,
-        secretManagement: { version: 1 },
-        workReviews: {
-          version: WORK_REVIEW_VERSION,
-          privateDrafts: true,
-          atomicFinish: true,
-        },
-        backends: detectAvailableBackends(),
-        codexDriver: settings.codexDriver,
-        codexDriversAvailable: settings.codexDriversAvailable,
-        backendHealth: settings.backendHealth,
-      }, peer);
+      // Ack so the phone knows the server is now sending binary. Use the same
+      // authoritative payload as direct WebSocket clients; a separately
+      // maintained relay payload previously omitted sessionTransfer and made
+      // fully updated relay-connected servers appear too old to teleport.
+      this.sendToPeer(
+        peerId,
+        this.opts.serverCapabilities(
+          peer.binaryEnabled,
+          this.opts.lane || "control",
+        ),
+        peer,
+      );
       return;
     }
     Object.defineProperty(msg, "__relayPeerId", {

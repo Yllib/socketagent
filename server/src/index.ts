@@ -9051,6 +9051,7 @@ function startRelayClient(): void {
     pairingToken: PAIRING_TOKEN,
     keyPair,
     lane: "control",
+    serverCapabilities: serverCapabilitiesPayload,
     onMessage: (msg: ClientMessage) => {
       if (!relayConnectionHandler) {
         // Create handler on first message (phone just paired)
@@ -9116,6 +9117,7 @@ function startRelayClient(): void {
     pairingToken: `${PAIRING_TOKEN}${BULK_RELAY_PAIRING_SUFFIX}`,
     keyPair,
     lane: "bulk",
+    serverCapabilities: serverCapabilitiesPayload,
     onMessage: (msg: ClientMessage) => {
       if (!relayBulkConnectionHandler) {
         relayBulkConnectionHandler = createConnectionHandler(

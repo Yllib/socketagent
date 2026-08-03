@@ -9993,6 +9993,47 @@ function ensureStartupPreflightService(): void {
   }
 }
 
+const CODEX_LINUX_SANDBOX_REPAIR_INTERVAL_MS = 6 * 60 * 60 * 1000;
+let codexLinuxSandboxRepairInProgress = false;
+
+function codexLinuxSandboxAutoRepairEnabled(): boolean {
+  const value = (process.env.SOCKETAGENT_AUTO_REPAIR_CODEX_SANDBOX || "1").trim().toLowerCase();
+  return value !== "0" && value !== "false" && value !== "off";
+}
+
+function ensureCodexLinuxSandboxDependency(reason: string): void {
+  if (process.platform !== "linux" || !codexLinuxSandboxAutoRepairEnabled()) return;
+  if (codexLinuxSandboxRepairInProgress) return;
+
+  const script = path.join(SERVER_DIR, "scripts", "ensure-codex-linux-sandbox.sh");
+  if (!fs.existsSync(script)) {
+    console.warn(`[Codex sandbox] Repair script is missing: ${script}`);
+    return;
+  }
+
+  codexLinuxSandboxRepairInProgress = true;
+  execFile("bash", [script, "--auto"], {
+    cwd: SERVER_DIR,
+    env: process.env,
+    timeout: 300000,
+    windowsHide: true,
+  }, (err, stdout, stderr) => {
+    codexLinuxSandboxRepairInProgress = false;
+    invalidateBackendHealthCache();
+
+    const output = `${stdout || ""}\n${stderr || ""}`
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join(" ");
+    if (err) {
+      console.warn(`[Codex sandbox] Automatic repair did not complete (${reason}): ${output || err.message}`);
+      return;
+    }
+    console.log(`[Codex sandbox] ${output || `Dependency check completed (${reason})`}`);
+  });
+}
+
 function armUnixRecoveryGuard(reason: string, delaySeconds = 180): string | null {
   if (process.platform === "win32") return null;
   const script = path.join(SERVER_DIR, "scripts", "recovery-guard.sh");
@@ -10168,6 +10209,14 @@ async function checkForUpdates(): Promise<void> {
 installSocketAgentCliFromRepo(GIT_ROOT);
 ensureStartupPreflightService();
 ensureWindowsServiceWrapper();
+ensureCodexLinuxSandboxDependency("startup");
+if (process.platform === "linux" && codexLinuxSandboxAutoRepairEnabled()) {
+  const codexSandboxRepairTimer = setInterval(
+    () => ensureCodexLinuxSandboxDependency("periodic retry"),
+    CODEX_LINUX_SANDBOX_REPAIR_INTERVAL_MS,
+  );
+  codexSandboxRepairTimer.unref();
+}
 if (autoUpdateEnabled()) {
   void ensureManagedBackendsUpdatedForCurrentHash("startup");
   console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s, verify=${autoUpdateVerifyMode()})`);

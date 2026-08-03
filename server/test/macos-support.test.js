@@ -19,6 +19,7 @@ test("server shell entrypoints pass bash syntax validation", () => {
     "server/scripts/restart-server.sh",
     "server/scripts/recovery-guard.sh",
     "server/scripts/install-macos-helper.sh",
+    "server/scripts/ensure-codex-linux-sandbox.sh",
     "server/scripts/service-control.sh",
   ];
   const result = spawnSync("bash", ["-n", ...scripts], {

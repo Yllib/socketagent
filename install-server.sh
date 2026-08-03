@@ -258,6 +258,21 @@ fi
 ensure_shell_path "$NPM_CONFIG_PREFIX/bin" "SocketAgent npm global tools"
 
 # ══════════════════════════════════════════════
+#  Linux Sandbox Dependency
+# ══════════════════════════════════════════════
+
+if [[ "$OS_NAME" == "Linux" ]]; then
+  phase "Codex Linux Sandbox"
+  CODEX_SANDBOX_REPAIR="$SERVER_DIR/scripts/ensure-codex-linux-sandbox.sh"
+  if bash "$CODEX_SANDBOX_REPAIR" --interactive; then
+    ok "Codex Linux sandbox dependency is ready"
+  else
+    warn "Codex can still run unrestricted sessions, but restricted sandbox modes may fail."
+    warn "SocketAgent will retry the Bubblewrap repair automatically after the server starts."
+  fi
+fi
+
+# ══════════════════════════════════════════════
 #  Phase 2: Claude Code CLI
 # ══════════════════════════════════════════════
 
@@ -389,7 +404,8 @@ NPM_PATH=$(command -v npm)
 NPX_PATH=$(command -v npx)
 SERVICE_CONTROL="$SERVER_DIR/scripts/service-control.sh"
 chmod +x "$SERVER_DIR/scripts/start-server.sh" "$SERVER_DIR/scripts/restart-server.sh" \
-  "$SERVER_DIR/scripts/recovery-guard.sh" "$SERVER_DIR/scripts/install-macos-helper.sh" "$SERVICE_CONTROL"
+  "$SERVER_DIR/scripts/recovery-guard.sh" "$SERVER_DIR/scripts/install-macos-helper.sh" \
+  "$SERVER_DIR/scripts/ensure-codex-linux-sandbox.sh" "$SERVICE_CONTROL"
 
 NODE_DIR=$(dirname "$NODE_PATH")
 SERVICE_PATH="$NODE_DIR"

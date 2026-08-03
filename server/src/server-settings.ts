@@ -4,6 +4,7 @@ import * as path from "path";
 import { spawnSync } from "child_process";
 import type { Backend, BackendHealthInfo, CodexDriver } from "./protocol";
 import { buildCodexSpawn } from "./codex-env";
+import { getCodexLinuxSandboxHealth } from "./codex-linux-sandbox";
 import { resolveClientPath } from "./path-utils";
 import { getClaudeAvailability, getClaudeExecutableInfo } from "./claude-session";
 import {
@@ -222,12 +223,16 @@ function codexHealth(): BackendHealthInfo {
   }
 
   const warning = managedSourceWarning("codex", source);
+  const sandboxHealth = getCodexLinuxSandboxHealth();
+  const warnings = [warning, sandboxHealth?.available === false ? sandboxHealth.reason : undefined]
+    .filter((value): value is string => !!value);
   return {
     ...base,
     available: true,
-    severity: warning ? "warning" : "ok",
+    severity: warnings.length > 0 ? "warning" : "ok",
     version: firstOutputLine(versionProbe.stdout, versionProbe.stderr),
-    reason: warning,
+    reason: warnings.length > 0 ? warnings.join(" ") : undefined,
+    detail: sandboxHealth?.available === false ? sandboxHealth.detail : undefined,
   };
 }
 

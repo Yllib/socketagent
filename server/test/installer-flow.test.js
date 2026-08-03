@@ -55,3 +55,21 @@ test("public install entrypoints expose one-command setup only", () => {
     /irm https:\/\/raw\.githubusercontent\.com\/Yllib\/socketagent\/master\/install-windows\.ps1 \| iex/,
   );
 });
+
+test("Linux installs and repairs Codex's Bubblewrap sandbox dependency", () => {
+  const installer = read("install-server.sh");
+  const repair = read("server/scripts/ensure-codex-linux-sandbox.sh");
+  const startup = read("server/src/index.ts");
+
+  assert.match(installer, /ensure-codex-linux-sandbox\.sh/);
+  assert.match(installer, /CODEX_SANDBOX_REPAIR" --interactive/);
+  assert.match(repair, /apt-get install -y bubblewrap/);
+  assert.match(repair, /dnf install -y bubblewrap/);
+  assert.match(repair, /pacman -Sy --noconfirm bubblewrap/);
+  assert.match(repair, /--unshare-all/);
+  assert.match(repair, /bwrap-userns-restrict/);
+  assert.match(repair, /sudo -n true/);
+  assert.match(startup, /ensureCodexLinuxSandboxDependency\("startup"\)/);
+  assert.match(startup, /periodic retry/);
+  assert.match(startup, /SOCKETAGENT_AUTO_REPAIR_CODEX_SANDBOX/);
+});

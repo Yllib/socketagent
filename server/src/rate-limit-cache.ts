@@ -9,7 +9,9 @@ type BackendWindows = Partial<Record<CachedWindow, RateLimitEventPayload>>;
 type StoredRateLimits = Partial<Record<Backend, BackendWindows>>;
 
 const RATE_LIMIT_CACHE_FILE = socketAgentDataPath("rate-limits.json");
-const RATE_LIMIT_CACHE_SCHEMA_VERSION = 1;
+// v1 may contain Codex usedPercent=1 mis-normalized and persisted as 100%.
+// Discard it once so corrected fresh harness events become authoritative.
+const RATE_LIMIT_CACHE_SCHEMA_VERSION = 2;
 let memoryCache: StoredRateLimits | null = null;
 
 function cloneEvent(event: RateLimitEventPayload): RateLimitEventPayload {

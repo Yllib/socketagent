@@ -37,6 +37,13 @@ export function normalizeUtilizationPercent(value: unknown): number | undefined 
   return Math.max(0, Math.min(100, percent));
 }
 
+/** Normalize a field whose wire contract is already percentage points. */
+export function normalizeExplicitPercent(value: unknown): number | undefined {
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return undefined;
+  return Math.max(0, Math.min(100, raw));
+}
+
 export function normalizeResetTime(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) {
     const parsed = Date.parse(value);
@@ -155,7 +162,9 @@ export function buildCodexRateLimitEvents(
   ];
   return windows.flatMap(({ value, fallback }) => {
     if (!value) return [];
-    const utilizationPercent = normalizeUtilizationPercent(value.usedPercent);
+    // Codex names this field usedPercent and reports percentage points. In
+    // particular, 1 means 1%, not a fractional ratio meaning 100%.
+    const utilizationPercent = normalizeExplicitPercent(value.usedPercent);
     const rateLimitType = codexWindowType(value, fallback);
     return [{
       type: "rate_limit_event" as const,

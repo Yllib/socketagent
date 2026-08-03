@@ -105,3 +105,28 @@ test("cache survives a server process reload", () => {
   assert.equal(restored[0].sessionId, "session-6");
   assert.equal(restored[0].rateLimitType, "seven_day_opus");
 });
+
+test("legacy cache is discarded after Codex percentage normalization changed", () => {
+  fs.writeFileSync(path.join(testDir, "rate-limits.json"), JSON.stringify({
+    schemaVersion: 1,
+    backends: {
+      codex: {
+        weekly: {
+          type: "rate_limit_event",
+          backend: "codex",
+          status: "rejected",
+          rateLimitType: "seven_day",
+          utilizationPercent: 100,
+          resetsAt: "2026-08-10T11:41:48.000Z",
+          sessionId: "",
+        },
+      },
+    },
+  }));
+  resetRateLimitCacheForTests();
+
+  assert.deepEqual(
+    getCachedRateLimitEvents("codex", "session-after-upgrade", Date.parse("2026-08-03T12:00:00.000Z")),
+    [],
+  );
+});

@@ -112,3 +112,29 @@ test("Codex emits independent five-hour and weekly windows", () => {
     ],
   );
 });
+
+test("Codex treats usedPercent as percentage points at the one-percent boundary", () => {
+  const events = buildCodexRateLimitEvents({
+    primary: {
+      usedPercent: 0.5,
+      windowDurationMins: 300,
+      resetsAt: 1785768000,
+    },
+    secondary: {
+      usedPercent: 1,
+      windowDurationMins: 10080,
+      resetsAt: 1786362108,
+    },
+  }, "session-1");
+
+  assert.deepEqual(
+    events.map((event) => ({
+      status: event.status,
+      utilizationPercent: event.utilizationPercent,
+    })),
+    [
+      { status: "allowed", utilizationPercent: 0.5 },
+      { status: "allowed", utilizationPercent: 1 },
+    ],
+  );
+});

@@ -4553,33 +4553,93 @@ function createConnectionHandler(
       }
 
       case "list_sdk_sessions": {
-        const cwd = (msg as any).cwd as string;
+        const cwd = String((msg as any).cwd || "").trim();
+        const recursive = (msg as any).recursive === true;
+        const all = (msg as any).all === true;
+        const query = String((msg as any).query || "").trim();
         const requestId = (msg as any).requestId as string | undefined;
         const requestedLimit = Math.max(1, Math.min(2000, Math.floor(Number((msg as any).limit ?? 30))));
         const discoveryLimit = 2000;
-        console.log(`[SdkSessions] Request for cwd=${cwd}`);
-        if (!cwd) {
+        console.log(`[SdkSessions] Request cwd=${cwd || "*"} recursive=${recursive} all=${all} query=${query ? "yes" : "no"}`);
+        if (!cwd && !all) {
           sendJson({ type: "error", message: "No cwd provided for list_sdk_sessions" });
           break;
         }
-        const claudeSessions = await listSdkSessions(cwd, discoveryLimit);
-        let codexSessions;
-        try {
-          codexSessions = await listCodexNativeSdkSessions(cwd, discoveryLimit);
-        } catch (err: any) {
-          console.warn(`[SdkSessions] Codex native thread/list failed for ${cwd}: ${err?.message || err}`);
-          codexSessions = listCodexSessions(cwd, discoveryLimit);
+        let allSessions: Array<{
+          sessionId: string;
+          firstMessage: string;
+          cwd?: string;
+          title?: string;
+          createdAt: string;
+          lastActive: string;
+          tracked: boolean;
+          backend?: "claude" | "codex";
+        }>;
+        if (all || recursive || query) {
+          const nativeSessions = await listSessionsWithNativeBackends(true);
+          const root = cwd ? path.resolve(cwd) : "";
+          const needle = query.toLowerCase();
+          allSessions = nativeSessions.flatMap((session) => {
+            const sessionCwd = String(session.cwd || "").trim();
+            if (!sessionCwd) return [];
+            if (root) {
+              const resolved = path.resolve(sessionCwd);
+              const relative = path.relative(root, resolved);
+              const exact = resolved === root;
+              const descendant = relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+              if (!(exact || (recursive && descendant))) return [];
+            }
+            const backend = (session.backend ?? "claude") as "claude" | "codex";
+            const preview = session.messagePreview || session.title || "Untitled";
+            if (needle && ![
+              session.title,
+              preview,
+              sessionCwd,
+              backend,
+            ].some((value) => String(value || "").toLowerCase().includes(needle))) {
+              return [];
+            }
+            return [{
+              sessionId: session.id,
+              firstMessage: preview.slice(0, 200),
+              cwd: sessionCwd,
+              title: session.title,
+              createdAt: session.createdAt,
+              lastActive: session.lastActive,
+              tracked: !!getSession(session.id),
+              backend,
+            }];
+          }).sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
+        } else {
+          const claudeSessions = (await listSdkSessions(cwd, discoveryLimit)).map((session) => ({
+            ...session,
+            cwd,
+          }));
+          let codexSessions;
+          try {
+            codexSessions = (await listCodexNativeSdkSessions(cwd, discoveryLimit)).map((session) => ({
+              ...session,
+              cwd,
+            }));
+          } catch (err: any) {
+            console.warn(`[SdkSessions] Codex native thread/list failed for ${cwd}: ${err?.message || err}`);
+            codexSessions = listCodexSessions(cwd, discoveryLimit).map((session) => ({
+              ...session,
+              cwd,
+            }));
+          }
+          allSessions = [...claudeSessions, ...codexSessions].sort((a, b) =>
+            new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime()
+          );
         }
-        // Merge and sort by lastActive desc so the most recent is on top
-        // regardless of which backend produced it.
-        const allSessions = [...claudeSessions, ...codexSessions].sort((a, b) =>
-          new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime()
-        );
         const sessions = allSessions.slice(0, requestedLimit);
-        console.log(`[SdkSessions] Found ${claudeSessions.length} claude + ${codexSessions.length} codex sessions for ${cwd}; returning ${sessions.length}/${allSessions.length}`);
+        console.log(`[SdkSessions] Returning ${sessions.length}/${allSessions.length}`);
         sendJson({
           type: "sdk_session_list",
           cwd,
+          recursive,
+          all,
+          query,
           requestId,
           sessions,
           total: allSessions.length,
@@ -7105,6 +7165,7 @@ function createConnectionHandler(
 
       case "list_directory" as any: {
         const listPath = (msg as any).path as string || getDefaultCwd();
+        const requestId = (msg as any).requestId as string | undefined;
         try {
           const resolvedPath = path.resolve(listPath);
           if (isMacosProtectedUserPath(resolvedPath)) {
@@ -7125,6 +7186,7 @@ function createConnectionHandler(
           dirs.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
           sendJson({
             type: "directory_listing",
+            ...(requestId ? { requestId } : {}),
             path: resolvedPath,
             directories: dirs,
           });
@@ -7132,6 +7194,7 @@ function createConnectionHandler(
           const permission = macosPrivacyErrorDetails(listPath, e);
           sendJson({
             type: "directory_listing",
+            ...(requestId ? { requestId } : {}),
             path: listPath,
             directories: [],
             error: e.message,

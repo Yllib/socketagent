@@ -3087,7 +3087,6 @@ async function listCodexNativeSessionsFromAppServer(useCache = true): Promise<Se
   if (useCache && codexNativeSessionsCache && nowMs - codexNativeSessionsCache.at < CODEX_NATIVE_LIST_CACHE_MS) {
     return codexNativeSessionsCache.sessions;
   }
-  if (useCache) return [];
 
   const stored = readStore();
   const storedById = new Map(stored.map((s) => [s.id, s]));
@@ -3171,22 +3170,27 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
   const storedById = new Map(stored.map((s) => [s.id, s]));
   const cwdCandidates = claudeNativeCwdCandidates();
   const deduped = new Map<string, SessionInfo>();
-  for (const cwd of cwdCandidates) {
-    try {
-      const sdkSessions = await sdkListSessions({
-        dir: cwd,
-        limit: CLAUDE_NATIVE_SESSIONS_PER_CWD,
-        includeWorktrees: true,
-      });
-      for (const info of sdkSessions) {
-        if (archivedIds.has(info.sessionId)) continue;
-        const session = sdkSessionInfoToSessionInfo(info, storedById.get(info.sessionId));
-        if (session) deduped.set(session.id, session);
+  let nextCwd = 0;
+  const workerCount = Math.min(8, cwdCandidates.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextCwd < cwdCandidates.length) {
+      const cwd = cwdCandidates[nextCwd++];
+      try {
+        const sdkSessions = await sdkListSessions({
+          dir: cwd,
+          limit: CLAUDE_NATIVE_SESSIONS_PER_CWD,
+          includeWorktrees: true,
+        });
+        for (const info of sdkSessions) {
+          if (archivedIds.has(info.sessionId)) continue;
+          const session = sdkSessionInfoToSessionInfo(info, storedById.get(info.sessionId));
+          if (session) deduped.set(session.id, session);
+        }
+      } catch (err: any) {
+        console.warn(`[SdkSessions] Native Claude listSessions failed for ${cwd}: ${err?.message || err}`);
       }
-    } catch (err: any) {
-      console.warn(`[SdkSessions] Native Claude listSessions failed for ${cwd}: ${err?.message || err}`);
     }
-  }
+  }));
   const sessions = [...deduped.values()]
     .sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
   claudeNativeSessionsCache = { at: nowMs, sessions };
@@ -3206,8 +3210,74 @@ function claudeNativeCwdCandidates(): string[] {
     seen.add(path.resolve(cwd.trim()));
   };
   for (const cwd of getRecentCwds()) add(cwd);
+  for (const session of readStore()) {
+    if ((session.backend ?? "claude") === "claude") add(session.cwd);
+  }
+  // Claude's prompt history provides the machine-wide project inventory that
+  // the SDK's directory-scoped listSessions API does not expose by itself.
+  const historyPath = path.join(
+    process.env.HOME || require("os").homedir(),
+    ".claude",
+    "history.jsonl",
+  );
+  try {
+    for (const line of fs.readFileSync(historyPath, "utf8").split("\n")) {
+      if (!line) continue;
+      try {
+        add(JSON.parse(line)?.project);
+      } catch {}
+    }
+  } catch {}
+  // Newer/cleaner Claude installs may not retain history.jsonl. Recover each
+  // native project's real cwd from the transcript metadata instead of trying
+  // to reverse Claude's lossy encoded directory name.
+  const projectsRoot = path.join(
+    process.env.HOME || require("os").homedir(),
+    ".claude",
+    "projects",
+  );
+  try {
+    for (const project of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+      if (!project.isDirectory()) continue;
+      const projectPath = path.join(projectsRoot, project.name);
+      let files: string[] = [];
+      try {
+        files = fs.readdirSync(projectPath)
+          .filter((file) => file.endsWith(".jsonl") && !file.startsWith("agent-"))
+          .sort((left, right) => {
+            try {
+              return fs.statSync(path.join(projectPath, right)).mtimeMs
+                - fs.statSync(path.join(projectPath, left)).mtimeMs;
+            } catch {
+              return 0;
+            }
+          });
+      } catch {}
+      for (const file of files.slice(0, 3)) {
+        try {
+          const filePath = path.join(projectPath, file);
+          const stat = fs.statSync(filePath);
+          const fd = fs.openSync(filePath, "r");
+          const buffer = Buffer.alloc(Math.min(stat.size, 64 * 1024));
+          fs.readSync(fd, buffer, 0, buffer.length, 0);
+          fs.closeSync(fd);
+          for (const line of buffer.toString("utf8").split("\n")) {
+            if (!line) continue;
+            try {
+              const entry = JSON.parse(line);
+              const candidate = entry?.cwd || entry?.project || entry?.message?.cwd;
+              if (candidate) {
+                add(candidate);
+                break;
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    }
+  } catch {}
   add(getDefaultProcessCwd());
-  return [...seen].slice(0, CLAUDE_NATIVE_CWD_LIMIT);
+  return [...seen].slice(0, Math.max(CLAUDE_NATIVE_CWD_LIMIT, 2000));
 }
 
 function mergeClaudeNativeSession(existing: SessionInfo, nativeSession: SessionInfo): SessionInfo {
@@ -3540,6 +3610,8 @@ export function compactHistoryStorage(options: { minBytes?: number } = {}): Hist
 export interface SdkSessionEntry {
   sessionId: string;
   firstMessage: string;
+  cwd?: string;
+  title?: string;
   createdAt: string;
   lastActive: string;
   tracked: boolean; // true if already in SocketAgent store

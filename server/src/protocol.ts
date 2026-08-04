@@ -848,7 +848,14 @@ export interface SyncDesktopMessage {
 
 export interface ListSdkSessionsMessage {
   type: "list_sdk_sessions";
-  cwd: string;
+  /** Exact folder to inspect. Omit with all=true for machine-wide search. */
+  cwd?: string;
+  /** Include sessions whose working directory is below cwd. */
+  recursive?: boolean;
+  /** Search title, prompt preview, cwd, and backend. */
+  query?: string;
+  /** Search all indexed native and tracked sessions on this computer. */
+  all?: boolean;
   requestId?: string;
   limit?: number;
 }
@@ -1366,12 +1373,18 @@ export interface SessionListServerMessage {
 export interface SdkSessionListServerMessage {
   type: "sdk_session_list";
   cwd: string;
+  recursive?: boolean;
+  query?: string;
+  all?: boolean;
   requestId?: string;
   total: number;
   hasMore: boolean;
   sessions: Array<{
     sessionId: string;
     firstMessage: string;
+    cwd?: string;
+    tracked?: boolean;
+    title?: string;
     lastActive: string;
     backend?: Backend;
   }>;

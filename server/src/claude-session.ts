@@ -39,7 +39,7 @@ import type {
   AgentSessionToolExecutor,
   DelegatedAgentLiveActivity,
 } from "./delegated-agent-types";
-import { buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, WORK_REVIEW_TOOL_DESCRIPTION } from "./socketagent-instructions";
+import { AGENT_SESSION_TOOL_DESCRIPTION, buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, WORK_REVIEW_TOOL_DESCRIPTION } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
@@ -3117,9 +3117,9 @@ export class ClaudeSession {
           ),
           tool(
             "AgentSession",
-            "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of this turn, accepts action=message while running by injecting it at the next safe boundary, supports bounded cursor-based activity reads with action=tail, and reports its final response back automatically.",
+            AGENT_SESSION_TOOL_DESCRIPTION,
             {
-              action: z.enum(["start", "message", "status", "tail", "list", "stop"]).describe("start a child; message an existing child; inspect status or recent activity; list children; or stop one"),
+              action: z.enum(["start", "message", "status", "tail", "list", "stop"]).describe("start a child; message an existing child; optionally inspect status or interim activity; list children; or stop one. Completion is delivered automatically; do not poll merely to wait"),
               prompt: z.string().optional().describe("Required for start and message. A message to a running child is queued at its next safe boundary."),
               session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/tail/stop unless delegation_id is used"),
               delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),

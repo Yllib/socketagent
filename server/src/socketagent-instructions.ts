@@ -15,6 +15,9 @@ export const HTML_PLAN_TOOL_DESCRIPTION =
 export const WORK_REVIEW_TOOL_DESCRIPTION =
   "Create and manage a durable Work Review handoff. A review contains a title, summary, instructions, workflow-defined approval meaning, and one or more items with inspectable URL, file, image, HTML, HTML plan, diff, session, or custom targets. Primary HTTP(S) targets are embedded inside the app beneath a collapsible review panel. A same-session HtmlPlan can be linked once for a rich multi-item dossier, with html_plan target URIs identifying element anchors. The user's draft notes and decisions remain private; you receive one consolidated result only after the user chooses Finish Review. Use new_round with the existing review_id to present revisions, and archive to hide a review without deleting it.";
 
+export const AGENT_SESSION_TOOL_DESCRIPTION =
+  "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history and a real session ID for follow-ups. It runs independently, and SocketAgent automatically delivers its completed result back by continuing the supervising session even if the supervisor's current turn has already ended. The supervisor does not need to remain running, poll status, or repeatedly tail while waiting; continue other useful work or finish the turn. Use action=tail only when interim progress is actually needed, action=message for follow-ups or added context (including while running at the next safe boundary), and status/list/stop when explicitly useful.";
+
 export function buildSocketAgentIntegrationInstructions(options: {
   mcpServerName: string;
   toolNames: string[];
@@ -42,7 +45,7 @@ export function buildSocketAgentIntegrationInstructions(options: {
     ...(options.toolNames.includes("ReportSubagentAssignment")
       ? ["- If you are a spawned Codex subagent, call ReportSubagentAssignment exactly once before any commentary or other tool use. Pass agent_path exactly as shown in your NEW_TASK envelope and copy the complete readable NEW_TASK payload into prompt. This is an internal UI metadata handshake. Never call it from the root agent."]
       : []),
-    "- Independent delegated work that should run in a full Claude or Codex session -> AgentSession. Use action=start and retain the returned session_id/delegation_id. Use action=tail with its next_session_seq cursor to inspect bounded recent child text/tool activity while it runs. Use action=message for follow-ups or added context even while the child is running, and use status/list/stop when needed. Messages sent to a running child are injected at its next safe boundary. The child runs independently and reports its completed turn back automatically.",
+    "- Independent delegated work that should run in a full Claude or Codex session -> AgentSession. Use action=start and retain the returned session_id/delegation_id. The child runs independently; when it finishes, SocketAgent automatically continues the supervising session with its result even if your current turn has already ended. You do not need to keep the turn open, poll status, or repeatedly call tail while waiting—continue other useful work or finish your turn. Use action=tail with its next_session_seq cursor only when you actually need interim progress. Use action=message for follow-ups or added context even while the child is running, and status/list/stop when explicitly useful. Messages sent to a running child are injected at its next safe boundary.",
     monitorRouting,
     "- Spoken output -> Speak only when TTS is enabled or explicitly requested.",
     "- Skill discovery/loading -> SearchSkills, then ReadSkill.",

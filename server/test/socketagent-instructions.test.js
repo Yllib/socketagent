@@ -29,8 +29,10 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /Two or more working-task mutations -> TaskBatch/);
   assert.match(prompt, /instead of looping single-task tools/);
   assert.match(prompt, /TaskBatch preserves native Claude tasks/);
-  assert.match(prompt, /reports its completed turn back automatically/);
-  assert.match(prompt, /action=tail with its next_session_seq cursor/);
+  assert.match(prompt, /automatically continues the supervising session with its result/);
+  assert.match(prompt, /even if your current turn has already ended/);
+  assert.match(prompt, /do not need to keep the turn open, poll status, or repeatedly call tail/);
+  assert.match(prompt, /action=tail with its next_session_seq cursor only when you actually need interim progress/);
   assert.match(prompt, /Messages sent to a running child are injected at its next safe boundary/);
   assert.match(prompt, /socketagent:\/\/file\/download/);
   assert.match(prompt, /<secret_inventory>\n\[\]\n<\/secret_inventory>/);

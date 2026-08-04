@@ -114,6 +114,10 @@ test("AgentSession handler returns stable child IDs and follow-up guidance", asy
   assert.match(result.content[0].text, /action="message"/);
   assert.match(result.content[0].text, /while it is running/);
   assert.match(result.content[0].text, /next safe boundary/);
+  assert.match(result.content[0].text, /automatically continue this supervising session/);
+  assert.match(result.content[0].text, /even if this turn has already ended/);
+  assert.match(result.content[0].text, /Do not poll or keep this turn open merely to wait/);
+  assert.match(result.content[0].text, /action="tail" only when you actually need interim progress/);
 });
 
 test("AgentSession handler returns cursor-based child activity tails", async () => {

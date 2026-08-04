@@ -471,7 +471,7 @@ export async function handleAgentSessionTool(
     const record = response.delegation;
     const summary = delegatedAgentSummary(record);
     const guidance = response.action === "start"
-      ? `\nUse action="message" with session_id="${record.childSessionId}" for follow-ups or added context, including while it is running; running-child messages are injected at the next safe boundary. The child will report back automatically when its turn finishes.`
+      ? `\nUse action="message" with session_id="${record.childSessionId}" for follow-ups or added context, including while it is running; running-child messages are injected at the next safe boundary. SocketAgent will automatically continue this supervising session with the child's result when it finishes, even if this turn has already ended. Do not poll or keep this turn open merely to wait; continue other useful work or finish the turn. Use action="tail" only when you actually need interim progress.`
       : "";
     return {
       content: [{

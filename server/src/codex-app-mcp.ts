@@ -22,6 +22,7 @@ import {
   handleWorkReviewTool,
 } from "./app-tool-handlers";
 import {
+  AGENT_SESSION_TOOL_DESCRIPTION,
   HTML_PLAN_TOOL_DESCRIPTION,
   WORK_REVIEW_TOOL_DESCRIPTION,
 } from "./socketagent-instructions";
@@ -78,7 +79,7 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   },
   {
     name: "AgentSession",
-    description: "Start and manage an independent Claude or Codex session, including safe-boundary messages and cursor-based activity tails while it runs.",
+    description: AGENT_SESSION_TOOL_DESCRIPTION,
   },
   {
     name: "SearchSkills",
@@ -343,9 +344,9 @@ function createServer(context: AppToolContext): McpServer {
     "AgentSession",
     {
       title: "Agent Session",
-      description: "Start or manage a full independent Claude/Codex SocketAgent session. The child has durable history, returns a real session ID for follow-ups, runs independently of the supervising turn, accepts action=message while running by injecting it at the next safe boundary, supports bounded cursor-based activity reads with action=tail, and reports its final response back automatically.",
+      description: AGENT_SESSION_TOOL_DESCRIPTION,
       inputSchema: {
-        action: z.enum(["start", "message", "status", "tail", "list", "stop"]).describe("start a child; message an existing child; inspect status or recent activity; list children; or stop one"),
+        action: z.enum(["start", "message", "status", "tail", "list", "stop"]).describe("start a child; message an existing child; optionally inspect status or interim activity; list children; or stop one. Completion is delivered automatically; do not poll merely to wait"),
         prompt: z.string().optional().describe("Required for start and message. A message to a running child is queued at its next safe boundary."),
         session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/tail/stop unless delegation_id is used"),
         delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),

@@ -101,6 +101,10 @@ import {
 import { resolveDelegationSupervisorSessionId } from "./delegation-lineage";
 import { routeRunningDelegatedAgentMessage } from "./delegated-agent-message-route";
 import {
+  delegatedAgentResultHistoryEntries,
+  delegatedAgentResultToolUseId,
+} from "./delegated-agent-result-card";
+import {
   backfillSessionRunStats,
   beginSessionRun,
   finishSessionRun,
@@ -2220,10 +2224,66 @@ function delegatedReportAlreadyPersisted(record: DelegatedAgentRecord, run: Dele
   );
 }
 
+function publishDelegatedAgentResultCard(
+  record: DelegatedAgentRecord,
+  run: DelegatedAgentRun,
+): void {
+  const sessionId = record.supervisorSessionId;
+  const toolUseId = delegatedAgentResultToolUseId(record, run);
+  const existing = getHistory(sessionId);
+  const existingCall = existing.find((entry) =>
+    entry.role === "tool_call"
+    && entry.toolUseId === toolUseId
+    && entry.toolName === "DelegatedAgentResult",
+  );
+  const existingResult = existing.find((entry) =>
+    entry.role === "tool_result" && entry.toolUseId === toolUseId,
+  );
+  if (existingCall && existingResult) return;
+
+  const entries = delegatedAgentResultHistoryEntries(record, run);
+  const call = existingCall || appendHistory(sessionId, entries.call);
+  const result = existingResult || appendHistory(sessionId, entries.result);
+  let delivery = durableSessionEventDeliveries.get(sessionId);
+  if (!delivery) {
+    delivery = new SessionEventDelivery(dispatchDurableSessionMessage);
+    durableSessionEventDeliveries.set(sessionId, delivery);
+  }
+  const deliveryAware = [...connectedClients].some(
+    (client) => (client as any).supportsSessionEventAck === true,
+  );
+  const dispatch = (message: Record<string, any>) => {
+    dispatchDurableSessionMessage(
+      deliveryAware ? delivery!.prepare(message) : message,
+    );
+  };
+  dispatch({
+    type: "tool_call",
+    sessionId,
+    tool: call.toolName,
+    input: call.toolInput,
+    toolUseId,
+    entryId: call.entryId,
+    sessionSeq: call.sessionSeq,
+    revision: call.revision,
+  });
+  dispatch({
+    type: "tool_result",
+    sessionId,
+    toolUseId,
+    output: result.toolOutput || result.content,
+    backgroundPending: false,
+    entryId: result.entryId,
+    sessionSeq: result.sessionSeq,
+    revision: result.revision,
+  });
+}
+
 async function runDelegatedSupervisorReport(
   record: DelegatedAgentRecord,
   run: DelegatedAgentRun,
 ): Promise<void> {
+  publishDelegatedAgentResultCard(record, run);
   if (delegatedReportAlreadyPersisted(record, run)) return;
   assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
   reactivateLogicalRun(record.supervisorSessionId);

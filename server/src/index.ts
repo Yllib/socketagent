@@ -1338,7 +1338,13 @@ async function getEnrichedSessions(): Promise<SessionInfo[]> {
     .map(s => {
       const active = activeSessions.get(s.id);
       const logicalRun = s.runStats?.current;
-      if ((active && sessionIsBusy(active)) || logicalRun) {
+      // A persisted logical run alone is not proof of live work: a server
+      // restart from an older build may have left `current` behind. Only a
+      // live harness or outstanding delegated work may keep the list running.
+      const delegatedWorkActive = logicalRun
+        ? delegatedWorkOutstanding(s.id, logicalRun.startedAt)
+        : false;
+      if ((active && sessionIsBusy(active)) || delegatedWorkActive) {
         const activeStartedAt = logicalRun?.startedAt
           || (active ? getSessionActiveStartedAt(active) : undefined);
         return {
@@ -1542,6 +1548,7 @@ function maybeSendPushNotification(msg: {
     kind: sessionCompletion ? "session_finished" : msg.kind,
     data: {
       ...(finishedAt ? { finishedAt } : {}),
+      ...(msg.startedAt ? { startedAt: msg.startedAt } : {}),
       ...(eventId ? { eventId } : {}),
       ...(sessionCompletion && msg.status === "completed"
         ? sessionCompletionTranscriptData(msg.sessionId, msg.startedAt)
@@ -1672,49 +1679,6 @@ const runningPushRefreshTimer = setInterval(() => {
     });
 }, RUNNING_PUSH_REFRESH_INTERVAL_MS);
 runningPushRefreshTimer.unref?.();
-
-function sendSessionCompletionPush(session: Session, status: "completed" | "failed", fallbackBody?: string): void {
-  const sessionId = session.getSessionId?.();
-  if (!sessionId) return;
-  const finishedAt = new Date().toISOString();
-  const run = sessionPushRuns.claimCompletion(session, sessionId, finishedAt);
-  if (!run) {
-    console.log(`[Push] Suppressed duplicate prompt completion session=${sessionId}`);
-    return;
-  }
-  const title = sessionNotificationTitle(sessionId, session);
-  const body = sessionNotificationBody(
-    sessionId,
-    session,
-    fallbackBody || (status === "failed" ? "Prompt failed" : "Prompt complete")
-  );
-  sendPushNotification({
-    title,
-    body,
-    sessionId,
-    status,
-    kind: "session_finished",
-    data: {
-      finishedAt,
-      eventId: sessionPushEventId(
-        "session_finished",
-        sessionId,
-        run.startedAt,
-      ),
-      ...(status === "completed"
-        ? sessionCompletionTranscriptData(sessionId, run.startedAt)
-        : {}),
-      ...scheduledSessionPushData(session),
-    },
-    showNotification: false,
-  }).then((result) => {
-    if (result.attempted > 0) {
-      console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for prompt ${status} session=${sessionId}`);
-    }
-  }).catch((err) => {
-    console.warn(`[Push] Prompt completion push error: ${err?.message || err}`);
-  });
-}
 
 /** Broadcast a scheduled task notification to all connected clients */
 function broadcastScheduledTaskNotification(
@@ -8235,6 +8199,7 @@ const httpServer = http.createServer((req, res) => {
 
         // Register immediately so the app can find it when it reconnects
         activeSessions.set(sessionId, session);
+        beginLogicalRun(session, sessionId);
 
         // Update the connection handler's active session so future messages
         // (prompts, answers, abort) from the app go to this running session
@@ -8252,14 +8217,14 @@ const httpServer = http.createServer((req, res) => {
             activeSessions.delete(sid);
           }
           if (!hardAbortedSessions.delete(session)) {
-            sendSessionCompletionPush(session, "completed");
+            settleLogicalRun(session, "completed", sessionId);
           }
           broadcastSessionList();
         }).catch((err) => {
           console.error(`[Continue] Query error: ${err.message}`);
           if (!sessionShouldRemainPooled(session)) activeSessions.delete(sessionId);
           if (!hardAbortedSessions.delete(session)) {
-            sendSessionCompletionPush(session, "failed", err.message || "Query failed");
+            settleLogicalRun(session, "failed", sessionId);
           }
         });
 
@@ -8895,6 +8860,15 @@ function buildStatusSyncMessage(): string {
     const current = getSessionRunStats(sid)?.current;
     if (!current) {
       logicalRunSessionIds.delete(sid);
+      continue;
+    }
+    const active = activeSessions.get(sid);
+    const liveHarness = !!active && sessionIsBusy(active);
+    const delegatedWorkActive = delegatedWorkOutstanding(sid, current.startedAt);
+    if (!liveHarness && !delegatedWorkActive) {
+      // Do not expose a stale persisted run as live. /continue and ordinary
+      // prompts settle the record; this guard also self-heals list state from
+      // older builds that omitted that lifecycle transition.
       continue;
     }
     anyRunning = true;

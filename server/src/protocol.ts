@@ -1680,6 +1680,7 @@ export interface SessionRunRecord {
   finishedAt: string;
   durationMs: number;
   outcome: SessionRunOutcome;
+  source?: "observed" | "sdk_backfill" | "transcript_estimate";
 }
 
 export interface SessionRunCurrent {
@@ -1701,6 +1702,8 @@ export interface SessionRunStats {
   lastCompletedAt?: string;
   /** Newest 500 runs for Analytics; lifetime aggregates remain exact. */
   recentRuns?: SessionRunRecord[];
+  /** Versioned lazy migration marker for historical transcript reconstruction. */
+  backfillVersion?: number;
 }
 
 export interface SessionHistoryServerMessage {

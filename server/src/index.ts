@@ -99,10 +99,12 @@ import {
 import { resolveDelegationSupervisorSessionId } from "./delegation-lineage";
 import { routeRunningDelegatedAgentMessage } from "./delegated-agent-message-route";
 import {
+  backfillSessionRunStats,
   beginSessionRun,
   finishSessionRun,
   getSessionRunStats,
   hasOutstandingDelegatedRuns,
+  SESSION_RUN_BACKFILL_VERSION,
   setSessionRunSupervisorSettled,
 } from "./session-run-store";
 import type { SessionRunOutcome } from "./protocol";
@@ -1098,7 +1100,9 @@ function persistPendingLogicalRun(session: Session, fallbackSessionId?: string):
 function beginLogicalRun(session: Session, fallbackSessionId?: string): void {
   const sessionId = session.getSessionId() || fallbackSessionId;
   if (sessionId && getSession(sessionId)) {
-    if (!getSessionRunStats(sessionId)?.current) beginSessionRun(sessionId);
+    const startedAt = new Date().toISOString();
+    backfillSessionRunStats(sessionId, listDelegatedAgents(sessionId));
+    if (!getSessionRunStats(sessionId)?.current) beginSessionRun(sessionId, startedAt);
     else setSessionRunSupervisorSettled(sessionId, false);
     logicalRunSessionIds.add(sessionId);
     return;
@@ -4103,6 +4107,12 @@ function createConnectionHandler(
           }
           backfillClaudeTasksFromHistory(msg.sessionId);
         }
+        if (getHistoryCount(msg.sessionId) > 0) {
+          backfillSessionRunStats(
+            msg.sessionId,
+            listDelegatedAgents(msg.sessionId),
+          );
+        }
         const rawKnownSeq = Number((msg as any).knownSessionSeq);
         const rawKnownOffset = Number((msg as any).knownHistoryOffset);
         const rawKnownEntryCount = Number((msg as any).knownHistoryEntryCount);
@@ -4155,6 +4165,11 @@ function createConnectionHandler(
           if (missed.length > 0) {
             console.log(`[Resume] Found ${missed.length} missed messages from JSONL`);
             appendHistoryBulk(msg.sessionId, missed);
+            const runStats = backfillSessionRunStats(
+              msg.sessionId,
+              listDelegatedAgents(msg.sessionId),
+              true,
+            );
             sendJson({
               type: "session_history",
               sessionId: msg.sessionId,
@@ -4163,6 +4178,7 @@ function createConnectionHandler(
               offset: page.total || 0,
               append: true,
               historyKind: "append",
+              ...(runStats ? { runStats } : {}),
             });
           }
         }
@@ -8476,6 +8492,51 @@ let relayBulkConnectionHandler: ReturnType<typeof createConnectionHandler> | nul
 let relayBulkMessageQueue = Promise.resolve();
 
 repairStoredTranscriptIdentitiesOnce();
+
+async function backfillDiscoveredSessionRunStatsInBackground(): Promise<void> {
+  const discovered = await listSessionsWithNativeBackends();
+  const pending = discovered.filter((session) =>
+    (session.runStats?.backfillVersion || 0) < SESSION_RUN_BACKFILL_VERSION,
+  );
+  if (pending.length === 0) return;
+  console.log(`[RunBackfill] queued ${pending.length} discovered sessions`);
+  let completed = 0;
+  for (const session of pending) {
+    // Historical reconstruction is intentionally low priority. Never parse a
+    // large transcript while an agent is actively trying to stream a turn.
+    while (
+      [...activeSessions.values()].some((active) => sessionIsBusy(active))
+      || hasExternalNativeActivity()
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+    const startedAt = Date.now();
+    try {
+      if (!getSession(session.id)) saveSession(session);
+      syncExternalNativeHistory(session);
+      const stats = backfillSessionRunStats(
+        session.id,
+        listDelegatedAgents(session.id),
+      );
+      completed += 1;
+      console.log(
+        `[RunBackfill] ${completed}/${pending.length} session=${session.id} `
+        + `runs=${stats?.completedCount || 0} ms=${Date.now() - startedAt}`,
+      );
+    } catch (error: any) {
+      console.warn(
+        `[RunBackfill] failed session=${session.id}: ${error?.message || String(error)}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  broadcastSessionList();
+}
+
+setTimeout(() => {
+  void backfillDiscoveredSessionRunStatsInBackground();
+}, 30_000).unref();
+
 httpServer.listen(PORT, BIND_HOST, async () => {
   console.log(`Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)`);
   cancelWindowsRecoveryGuard();

@@ -2487,6 +2487,50 @@ export function getSdkEventCount(sessionId: string): number {
   }
 }
 
+/**
+ * Read only the compact lifecycle subset needed to reconstruct historical
+ * run durations. This intentionally avoids retaining multi-megabyte deltas,
+ * tool payloads, and assistant content from the raw SDK event log.
+ */
+export function getSdkRunLifecycleEvents(sessionId: string): Record<string, any>[] {
+  flushSdkEventQueue(sessionId);
+  const file = sdkEventsFile(sessionId);
+  if (!fs.existsSync(file)) return [];
+  const lifecycle: Record<string, any>[] = [];
+  const inspectLine = (line: string) => {
+    if (!line || (!line.includes('"sdkType":"result"')
+      && !line.includes('"method":"turn/started"')
+      && !line.includes('"method":"turn/completed"'))) {
+      return;
+    }
+    try {
+      lifecycle.push(JSON.parse(line));
+    } catch {}
+  };
+  let fd: number | undefined;
+  try {
+    // SDK event logs can be very large. Scan in bounded chunks rather than
+    // loading an entire multi-gigabyte transcript-adjacent log into memory.
+    fd = fs.openSync(file, "r");
+    const chunk = Buffer.allocUnsafe(256 * 1024);
+    let carry = "";
+    for (;;) {
+      const bytes = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (bytes <= 0) break;
+      const text = carry + chunk.toString("utf8", 0, bytes);
+      const lines = text.split("\n");
+      carry = lines.pop() || "";
+      for (const line of lines) inspectLine(line);
+    }
+    inspectLine(carry);
+    return lifecycle;
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 const ARCHIVE_DIR = path.join(STORE_DIR, "archive");
 
 function ensureArchiveDir(): void {

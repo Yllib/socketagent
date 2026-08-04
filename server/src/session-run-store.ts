@@ -1,10 +1,20 @@
 import * as crypto from "crypto";
 import type {
+  SessionRunRecord,
   SessionRunOutcome,
   SessionRunStats,
 } from "./protocol";
-import { appendHistory, getSession, saveSession } from "./session-store";
+import {
+  appendHistory,
+  getHistory,
+  getSdkRunLifecycleEvents,
+  getSession,
+  saveSession,
+} from "./session-store";
 import type { DelegatedAgentRecord } from "./delegated-agent-types";
+import { deriveHistoricalRuns } from "./session-run-backfill";
+
+export const SESSION_RUN_BACKFILL_VERSION = 1;
 
 function emptyStats(): SessionRunStats {
   return {
@@ -44,6 +54,94 @@ export function hasOutstandingDelegatedRuns(
 export function getSessionRunStats(sessionId: string): SessionRunStats | undefined {
   const stats = getSession(sessionId)?.runStats;
   return stats ? normalizedStats(stats) : undefined;
+}
+
+function recordTime(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sameLogicalRun(left: SessionRunRecord, right: SessionRunRecord): boolean {
+  const leftStart = recordTime(left.startedAt);
+  const rightStart = recordTime(right.startedAt);
+  if (Math.abs(leftStart - rightStart) <= 30_000) return true;
+  const overlapStart = Math.max(leftStart, rightStart);
+  const overlapEnd = Math.min(recordTime(left.finishedAt), recordTime(right.finishedAt));
+  const shorter = Math.min(left.durationMs, right.durationMs);
+  return overlapEnd > overlapStart && shorter > 0
+    && (overlapEnd - overlapStart) / shorter >= 0.8;
+}
+
+/**
+ * Reconstruct all completed historical runs for one session. Exact observed
+ * records always win over SDK reconstruction, which in turn wins over the
+ * transcript-only fallback. The migration is versioned and therefore cheap on
+ * every subsequent resume/status read.
+ */
+export function backfillSessionRunStats(
+  sessionId: string,
+  delegations: DelegatedAgentRecord[] = [],
+  force = false,
+): SessionRunStats | undefined {
+  const session = getSession(sessionId);
+  if (!session) return undefined;
+  const existing = normalizedStats(session.runStats);
+  if (!force && (existing.backfillVersion || 0) >= SESSION_RUN_BACKFILL_VERSION) {
+    return existing;
+  }
+
+  const derived = deriveHistoricalRuns(
+    getHistory(sessionId),
+    getSdkRunLifecycleEvents(sessionId),
+    delegations,
+  );
+  const currentStartedMs = existing.current
+    ? recordTime(existing.current.startedAt)
+    : Number.POSITIVE_INFINITY;
+  const completedDerived = derived.filter((run) =>
+    recordTime(run.finishedAt) < currentStartedMs,
+  );
+  const observed = (existing.recentRuns || []).map((run) => ({
+    ...run,
+    source: run.source || "observed" as const,
+  }));
+  const combined = completedDerived.filter((candidate) =>
+    !observed.some((run) => sameLogicalRun(candidate, run)),
+  );
+  combined.push(...observed);
+  combined.sort((left, right) =>
+    recordTime(left.startedAt) - recordTime(right.startedAt),
+  );
+
+  const numbered = combined.map((run, index) => ({
+    ...run,
+    runNumber: index + 1,
+  }));
+  const totalDurationMs = numbered.reduce((sum, run) => sum + run.durationMs, 0);
+  const longestDurationMs = numbered.reduce(
+    (longest, run) => Math.max(longest, run.durationMs),
+    0,
+  );
+  const shortestDurationMs = numbered.reduce(
+    (shortest, run) => Math.min(shortest, run.durationMs),
+    Number.POSITIVE_INFINITY,
+  );
+  const next: SessionRunStats = {
+    ...(existing.current ? { current: existing.current } : {}),
+    completedCount: numbered.length,
+    totalDurationMs,
+    ...(numbered.length > 0 ? {
+      averageDurationMs: Math.round(totalDurationMs / numbered.length),
+      longestDurationMs,
+      shortestDurationMs,
+      lastCompletedAt: numbered[numbered.length - 1].finishedAt,
+      recentRuns: numbered.slice(-500),
+    } : {}),
+    backfillVersion: SESSION_RUN_BACKFILL_VERSION,
+  };
+  session.runStats = next;
+  saveSession(session);
+  return normalizedStats(next);
 }
 
 export function beginSessionRun(
@@ -119,8 +217,10 @@ export function finishSessionRun(
         finishedAt,
         durationMs,
         outcome,
+        source: "observed" as const,
       },
     ].slice(-500),
+    backfillVersion: stats.backfillVersion,
   };
   session.runStats = next;
   saveSession(session);

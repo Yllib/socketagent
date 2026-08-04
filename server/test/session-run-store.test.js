@@ -82,3 +82,42 @@ test("delegated work keeps a logical run open through result delivery", () => {
   assert.equal(hasOutstandingDelegatedRuns([record], startedAt), false);
   assert.equal(hasOutstandingDelegatedRuns([record], startedAt, true), true);
 });
+
+test("historical run backfill is durable, versioned, and idempotent", () => {
+  const sessionId = `test-session-run-backfill-${randomUUID()}`;
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-run-backfill-"));
+  try {
+    const output = execFileSync(process.execPath, ["-e", `
+      const { appendHistory, appendSdkEvent, getSession, saveSession } = require('./dist/session-store');
+      const { backfillSessionRunStats } = require('./dist/session-run-store');
+      const sessionId = ${JSON.stringify(sessionId)};
+      saveSession({ id: sessionId, title: 'Backfill test', cwd: process.cwd(), createdAt: '2026-08-04T10:00:00.000Z', lastActive: '2026-08-04T11:00:20.000Z', messagePreview: '' });
+      appendHistory(sessionId, { role: 'user', content: 'First run', timestamp: '2026-08-04T10:00:00.000Z' });
+      appendHistory(sessionId, { role: 'assistant', content: 'First done', timestamp: '2026-08-04T10:00:20.000Z' });
+      appendHistory(sessionId, { role: 'user', content: 'Second run', timestamp: '2026-08-04T11:00:00.000Z' });
+      appendHistory(sessionId, { role: 'assistant', content: 'Second done', timestamp: '2026-08-04T11:00:20.000Z' });
+      appendSdkEvent(sessionId, { sdkType: 'result', ts: '2026-08-04T10:00:20.000Z', durationMs: 20000 });
+      appendSdkEvent(sessionId, { sdkType: 'result', ts: '2026-08-04T11:00:20.000Z', durationMs: 20000 });
+      const first = backfillSessionRunStats(sessionId);
+      const second = backfillSessionRunStats(sessionId);
+      const forced = backfillSessionRunStats(sessionId, [], true);
+      process.stdout.write(JSON.stringify({ first, second, forced, stored: getSession(sessionId).runStats }));
+    `], {
+      cwd: path.join(__dirname, ".."),
+      env: { ...process.env, SOCKET_AGENT_DATA_DIR: dataDir },
+      encoding: "utf8",
+    });
+    const result = JSON.parse(output);
+    for (const stats of [result.first, result.second, result.forced, result.stored]) {
+      assert.equal(stats.backfillVersion, 1);
+      assert.equal(stats.completedCount, 2);
+      assert.equal(stats.totalDurationMs, 40_000);
+      assert.deepEqual(stats.recentRuns.map((run) => run.source), [
+        "sdk_backfill",
+        "sdk_backfill",
+      ]);
+    }
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

@@ -1406,6 +1406,8 @@ export interface SessionInfo {
   running?: boolean;
   /** Server-owned ISO timestamp for the current active turn/compaction. */
   activeStartedAt?: string;
+  /** Durable user-visible logical-run statistics for this session. */
+  runStats?: SessionRunStats;
   lastUsage?: UsageInfo & { costUsd?: number; numTurns?: number };
   scheduledTaskId?: string;
   /** Backend that drives this session. Absent on legacy sessions = "claude". */
@@ -1575,7 +1577,7 @@ export interface SessionArchiveFailedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "run_boundary";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -1648,6 +1650,13 @@ export interface HistoryEntry {
   commandPayload?: Record<string, unknown>;
   // Permission mode fields (role === "permission_mode")
   permissionMode?: string;
+  // Logical run boundary fields (role === "run_boundary")
+  runId?: string;
+  runNumber?: number;
+  runStartedAt?: string;
+  runFinishedAt?: string;
+  runDurationMs?: number;
+  runOutcome?: SessionRunOutcome;
   // Work Review fields (role === "work_review"). Private drafts are never
   // stored in chat history; workReview is the public/card projection only.
   reviewId?: string;
@@ -1660,6 +1669,38 @@ export interface HistoryEntry {
   revision?: number;
   /** Stable backend stream identity used to join live frames to history. */
   streamId?: string;
+}
+
+export type SessionRunOutcome = "completed" | "stopped" | "failed";
+
+export interface SessionRunRecord {
+  runId: string;
+  runNumber: number;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  outcome: SessionRunOutcome;
+}
+
+export interface SessionRunCurrent {
+  runId: string;
+  startedAt: string;
+  /** False while the supervisor is executing or expecting a continuation. */
+  supervisorSettled?: boolean;
+  /** Outcome to use once all delegated continuations have been delivered. */
+  pendingOutcome?: SessionRunOutcome;
+}
+
+export interface SessionRunStats {
+  current?: SessionRunCurrent;
+  completedCount: number;
+  totalDurationMs: number;
+  averageDurationMs?: number;
+  longestDurationMs?: number;
+  shortestDurationMs?: number;
+  lastCompletedAt?: string;
+  /** Newest 500 runs for Analytics; lifetime aggregates remain exact. */
+  recentRuns?: SessionRunRecord[];
 }
 
 export interface SessionHistoryServerMessage {
@@ -1684,6 +1725,15 @@ export interface SessionHistoryServerMessage {
   todos?: Record<string, unknown>[];
   /** Latest lifecycle revision for tasks/subagents, independent of the delta cursor. */
   taskStates?: HistoryEntry[];
+  /** Authoritative logical-run aggregates, including a current run if active. */
+  runStats?: SessionRunStats;
+}
+
+export interface SessionRunCompletedServerMessage {
+  type: "session_run_completed";
+  sessionId: string;
+  runStats: SessionRunStats;
+  boundary: HistoryEntry;
 }
 
 export interface WorkReviewSnapshotServerMessage {
@@ -2370,6 +2420,7 @@ export type ServerMessage =
   | SessionCreatedServerMessage
   | SessionArchiveFailedServerMessage
   | SessionHistoryServerMessage
+  | SessionRunCompletedServerMessage
   | StatusServerMessage
   | AbortAckServerMessage
   | CompactingServerMessage

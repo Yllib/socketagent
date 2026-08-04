@@ -26,7 +26,7 @@ import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
 import {
   AgentEffort,
@@ -98,6 +98,14 @@ import {
 } from "./delegated-agent-store";
 import { resolveDelegationSupervisorSessionId } from "./delegation-lineage";
 import { routeRunningDelegatedAgentMessage } from "./delegated-agent-message-route";
+import {
+  beginSessionRun,
+  finishSessionRun,
+  getSessionRunStats,
+  hasOutstandingDelegatedRuns,
+  setSessionRunSupervisorSettled,
+} from "./session-run-store";
+import type { SessionRunOutcome } from "./protocol";
 import {
   archiveWorkReview,
   cancelWorkReview,
@@ -1067,6 +1075,93 @@ function sessionIsBusy(session: Session): boolean {
   return session.isRunning || (session as any).isCompacting === true;
 }
 
+type PendingLogicalRun = { runId: string; startedAt: string };
+const pendingLogicalRuns = new WeakMap<Session, PendingLogicalRun>();
+const logicalRunSessionIds = new Set(
+  listStoredSessions()
+    .filter((session) => session.runStats?.current)
+    .map((session) => session.id),
+);
+
+function persistPendingLogicalRun(session: Session, fallbackSessionId?: string): string | undefined {
+  const sessionId = session.getSessionId() || fallbackSessionId;
+  if (!sessionId || !getSession(sessionId)) return undefined;
+  const pending = pendingLogicalRuns.get(session);
+  if (pending) {
+    beginSessionRun(sessionId, pending.startedAt, pending.runId);
+    pendingLogicalRuns.delete(session);
+  }
+  if (getSessionRunStats(sessionId)?.current) logicalRunSessionIds.add(sessionId);
+  return sessionId;
+}
+
+function beginLogicalRun(session: Session, fallbackSessionId?: string): void {
+  const sessionId = session.getSessionId() || fallbackSessionId;
+  if (sessionId && getSession(sessionId)) {
+    if (!getSessionRunStats(sessionId)?.current) beginSessionRun(sessionId);
+    else setSessionRunSupervisorSettled(sessionId, false);
+    logicalRunSessionIds.add(sessionId);
+    return;
+  }
+  if (!pendingLogicalRuns.has(session)) {
+    pendingLogicalRuns.set(session, {
+      runId: crypto.randomUUID(),
+      startedAt: new Date().toISOString(),
+    });
+  }
+}
+
+function delegatedWorkOutstanding(sessionId: string, startedAt: string): boolean {
+  return hasOutstandingDelegatedRuns(
+    listDelegatedAgents(sessionId),
+    startedAt,
+    delegatedReportQueues.has(sessionId),
+  );
+}
+
+function maybeFinalizeLogicalRun(sessionId: string): void {
+  const current = getSessionRunStats(sessionId)?.current;
+  if (!current?.supervisorSettled) return;
+  if (delegatedWorkOutstanding(sessionId, current.startedAt)) return;
+  finishLogicalRunNow(sessionId, current.pendingOutcome || "completed");
+}
+
+function finishLogicalRunNow(sessionId: string, outcome: SessionRunOutcome): void {
+  const runId = getSessionRunStats(sessionId)?.current?.runId;
+  const runStats = finishSessionRun(sessionId, outcome);
+  logicalRunSessionIds.delete(sessionId);
+  if (!runId || !runStats) return;
+  const boundary = [...getHistory(sessionId)].reverse().find((entry) =>
+    entry.role === "run_boundary" && entry.runId === runId,
+  );
+  if (!boundary) return;
+  broadcastHeadlessSessionMessage(JSON.stringify({
+    type: "session_run_completed",
+    sessionId,
+    runStats,
+    boundary,
+  }), sessionId);
+  broadcastSessionList();
+  broadcastStatusSync();
+}
+
+function settleLogicalRun(
+  session: Session,
+  outcome: SessionRunOutcome,
+  fallbackSessionId?: string,
+): void {
+  const sessionId = persistPendingLogicalRun(session, fallbackSessionId);
+  if (!sessionId) return;
+  setSessionRunSupervisorSettled(sessionId, true, outcome);
+  maybeFinalizeLogicalRun(sessionId);
+}
+
+function reactivateLogicalRun(sessionId: string): void {
+  if (!getSessionRunStats(sessionId)?.current) return;
+  setSessionRunSupervisorSettled(sessionId, false);
+  logicalRunSessionIds.add(sessionId);
+}
+
 function getSessionActiveStartedAt(session: Session): string | undefined {
   const value = (session as any).activeStartedAt;
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -1137,13 +1232,15 @@ async function getEnrichedSessions(): Promise<SessionInfo[]> {
     .filter(s => !taskSessionIds.has(s.id))
     .map(s => {
       const active = activeSessions.get(s.id);
-      if (active && sessionIsBusy(active)) {
-        const activeStartedAt = getSessionActiveStartedAt(active);
+      const logicalRun = s.runStats?.current;
+      if ((active && sessionIsBusy(active)) || logicalRun) {
+        const activeStartedAt = logicalRun?.startedAt
+          || (active ? getSessionActiveStartedAt(active) : undefined);
         return {
           ...s,
           running: true,
           ...(activeStartedAt ? { activeStartedAt } : {}),
-          messagePreview: active.lastPreview || s.messagePreview,
+          messagePreview: active?.lastPreview || s.messagePreview,
           lastActive: new Date().toISOString(),
         };
       }
@@ -2044,6 +2141,7 @@ async function runDelegatedSupervisorReport(
   run: DelegatedAgentRun,
 ): Promise<void> {
   if (delegatedReportAlreadyPersisted(record, run)) return;
+  reactivateLogicalRun(record.supervisorSessionId);
   const text = delegatedReportPrompt(record, run);
   const existing = activeSessions.get(record.supervisorSessionId);
   if (existing) {
@@ -2109,6 +2207,11 @@ function queueDelegatedAgentReport(record: DelegatedAgentRecord, run: DelegatedA
         reportStatus: "delivered",
         reportDeliveredAt: new Date().toISOString(),
       });
+      const activeSupervisor = activeSessions.get(record.supervisorSessionId);
+      if (!activeSupervisor || !sessionIsBusy(activeSupervisor)) {
+        setSessionRunSupervisorSettled(record.supervisorSessionId, true, "completed");
+      }
+      maybeFinalizeLogicalRun(record.supervisorSessionId);
       console.log(`[DelegatedAgent] Report delivered delegation=${record.delegationId} run=${run.runId} supervisor=${record.supervisorSessionId}`);
     })
     .catch((err: any) => {
@@ -2123,6 +2226,7 @@ function queueDelegatedAgentReport(record: DelegatedAgentRecord, run: DelegatedA
     if (delegatedReportQueues.get(record.supervisorSessionId) === next) {
       delegatedReportQueues.delete(record.supervisorSessionId);
     }
+    maybeFinalizeLogicalRun(record.supervisorSessionId);
   });
 }
 
@@ -4013,6 +4117,10 @@ function createConnectionHandler(
           ...(openTraceId ? { openTraceId } : {}),
           ...(todos.length > 0 ? { todos } : {}),
           taskStates,
+          runStats: getSessionRunStats(msg.sessionId) || {
+            completedCount: 0,
+            totalDurationMs: 0,
+          },
           ...(lastSuggestion ? { promptSuggestion: lastSuggestion } : {}),
         });
         const historyBytes = Buffer.byteLength(JSON.stringify(page.entries), "utf8");
@@ -4324,6 +4432,10 @@ function createConnectionHandler(
         };
 
         const sessionForRun = activeSession;
+        // This handler is reached only for an idle harness. A stored current
+        // run means the supervisor is between delegated continuations, so the
+        // prompt joins that logical run instead of creating another one.
+        beginLogicalRun(sessionForRun, resumeId);
         const runOptions = sessionForRun instanceof CodexSession
           ? {
               fastMode: promptCodexFastMode ?? sessionForRun.getCodexFastMode(),
@@ -4351,6 +4463,7 @@ function createConnectionHandler(
             }
           }
           if (!hardAbortedSessions.delete(sessionForRun)) {
+            settleLogicalRun(sessionForRun, "completed", resumeId);
             sendSessionCompletionPush(sessionForRun, "completed");
           }
           broadcastSessionList();
@@ -4362,6 +4475,7 @@ function createConnectionHandler(
           if (hardAbortedSessions.delete(sessionForRun)) {
             console.log(`[Abort] Suppressed completion handling for hard-stopped session ${sid || "(pending)"}`);
           } else if (sessionForRun instanceof CodexSession && isCodexAuthError(err)) {
+            settleLogicalRun(sessionForRun, "failed", resumeId);
             const detail = err?.message || String(err);
             markBackendAuthRequired("codex", detail);
             invalidateCodexAvailabilityCache();
@@ -4381,11 +4495,14 @@ function createConnectionHandler(
             broadcastServerCapabilities();
             sendSessionCompletionPush(sessionForRun, "failed", "Codex sign-in required");
           } else if (!(err && typeof err === "object" && err.socketAgentSurfaced === true)) {
+            settleLogicalRun(sessionForRun, "failed", resumeId);
             sendJson({
               type: "error",
               message: err.message || "Query failed",
             });
             sendSessionCompletionPush(sessionForRun, "failed", err.message || "Query failed");
+          } else {
+            settleLogicalRun(sessionForRun, "failed", resumeId);
           }
           broadcastSessionList();
         }).finally(() => {
@@ -4409,6 +4526,7 @@ function createConnectionHandler(
             activeSessions.set(sid, sessionForRun);
           }
           if (sid) {
+            persistPendingLogicalRun(sessionForRun, sid);
             maybeSendSessionStartedPush();
             activeSessionId = sid;
             sessionClients.set(sid, {
@@ -5475,6 +5593,8 @@ function createConnectionHandler(
               || (activeSession && activeSessionId === targetSid ? activeSession : null),
             (target) => {
               hardAbortedSessions.add(target as Session);
+              persistPendingLogicalRun(target as Session, targetSid);
+              finishLogicalRunNow(targetSid, "stopped");
               if (activeSessions.get(targetSid) === target) {
                 activeSessions.delete(targetSid);
               }
@@ -8495,6 +8615,23 @@ function buildStatusSyncMessage(): string {
     }
     if (session.sessionModel && exposeSession) {
       sessionModels[sid] = session.sessionModel;
+    }
+  }
+  // A supervisor remains logically active while delegated children are
+  // running or their completion reports are queued, even though its harness
+  // process may be idle between those continuations.
+  for (const sid of logicalRunSessionIds) {
+    const current = getSessionRunStats(sid)?.current;
+    if (!current) {
+      logicalRunSessionIds.delete(sid);
+      continue;
+    }
+    anyRunning = true;
+    if (!runningSessions.includes(sid)) runningSessions.push(sid);
+    sessionActiveStartedAt[sid] = current.startedAt;
+    if (!sessionTitles[sid]) {
+      const title = storedSessionNotificationTitle(sid);
+      if (title) sessionTitles[sid] = title;
     }
   }
   for (const sid of getExternalNativeRunningSessions()) {

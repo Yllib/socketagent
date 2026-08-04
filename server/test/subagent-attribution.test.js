@@ -10,6 +10,7 @@ const {
   summarizeCodexCommandActions,
 } = require("../dist/codex-session");
 const {
+  deleteSessionArtifacts,
   deriveClaudeTasksFromHistoryEntries,
   getHistory,
   normalizeMisclassifiedCodexItemEntries,
@@ -1250,4 +1251,44 @@ test("Codex immediate goal continuation preserves one running lifecycle", async 
   assert.equal(session.isBusy, false);
   assert.equal(session.isRunning, false);
   assert.equal(sent.filter((message) => message.type === "result").length, 1);
+});
+
+test("Codex injection retries immediately with the authoritative active turn id", async () => {
+  const sent = [];
+  const rootId = `test-steer-recovery-${crypto.randomUUID()}`;
+  const staleTurnId = "019fce7c-abc4-7c81-b004-9d0888edb621";
+  const activeTurnId = "38a59137-3940-4f02-a974-79d121dd6e7e";
+  const attemptedTurnIds = [];
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+  session._isRunning = true;
+  session.activeAppServerTurnId = staleTurnId;
+  session.appServerInitialized = true;
+  session.appServer = {
+    async steerTurn({ expectedTurnId }) {
+      attemptedTurnIds.push(expectedTurnId);
+      if (expectedTurnId === staleTurnId) {
+        throw new Error(
+          `turn/steer: {"code":-32600,"message":"expected active turn id \`${staleTurnId}\` but found \`${activeTurnId}\`"}`,
+        );
+      }
+      return {};
+    },
+  };
+
+  try {
+    await session.injectMessage("Use the newly supplied context", "next", "message-1");
+    assert.deepEqual(attemptedTurnIds, [staleTurnId, activeTurnId]);
+    assert.equal(session.activeAppServerTurnId, activeTurnId);
+    assert.equal(session._pendingAppServerSteers.length, 0);
+    assert.equal(session._queuedPrompts.length, 0);
+    assert.ok(sent.some((message) =>
+      message.type === "user_message_uuid"
+      && message.clientMessageId === "message-1"
+      && message.sessionId === rootId));
+  } finally {
+    session.appServer = null;
+    deleteSessionArtifacts(rootId);
+  }
 });

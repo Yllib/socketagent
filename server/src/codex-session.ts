@@ -220,7 +220,20 @@ type QueuedPrompt = {
 type PendingAppServerSteer = QueuedPrompt & {
   uuid: string;
   steerSent?: boolean;
+  steerAttempts?: number;
 };
+
+function authoritativeTurnIdFromSteerError(error: unknown): string | null {
+  const candidate = error as any;
+  const structured = candidate?.data?.activeTurnId
+    || candidate?.data?.currentTurnId
+    || candidate?.error?.data?.activeTurnId
+    || candidate?.error?.data?.currentTurnId;
+  if (typeof structured === "string" && structured.trim()) return structured.trim();
+  const message = String(candidate?.message || candidate || "");
+  const match = message.match(/expected active turn id [`'"]?[^`'"\s]+[`'"]? but found [`'"]?([^`'"\s}]+)[`'"]?/i);
+  return match?.[1]?.trim() || null;
+}
 
 interface PendingQuestion {
   questionId: string;
@@ -2583,6 +2596,7 @@ export class CodexSession {
     if (pending.steerSent) return;
     if (!this.appServer || !this.threadId || !this.activeAppServerTurnId) return;
     pending.steerSent = true;
+    pending.steerAttempts = (pending.steerAttempts || 0) + 1;
     const turnId = this.activeAppServerTurnId;
     console.log(`[codex app-server] steering message mid-turn (thread=${this.threadId}, turn=${turnId}, priority=${pending.priority}, messageId=${pending.messageId || ""})`);
     this.appServer.steerTurn({
@@ -2595,6 +2609,19 @@ export class CodexSession {
         this.acknowledgeAcceptedAppServerSteer(pending);
       })
       .catch((err: any) => {
+        const authoritativeTurnId = authoritativeTurnIdFromSteerError(err);
+        if (
+          authoritativeTurnId
+          && authoritativeTurnId !== turnId
+          && (pending.steerAttempts || 0) < 3
+          && this._pendingAppServerSteers.includes(pending)
+        ) {
+          console.warn(`[codex app-server] adopting authoritative active turn ${authoritativeTurnId} after stale steer target ${turnId}`);
+          this.activeAppServerTurnId = authoritativeTurnId;
+          pending.steerSent = false;
+          this.sendPendingAppServerSteer(pending);
+          return;
+        }
         this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
       });
   }

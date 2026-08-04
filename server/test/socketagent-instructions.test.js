@@ -2,8 +2,16 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  AGENT_SESSION_TOOL_DESCRIPTION,
   buildSocketAgentIntegrationInstructions,
 } = require("../dist/socketagent-instructions");
+
+test("AgentSession prefers SocketAgent delegation over built-in subagent tools", () => {
+  assert.match(
+    AGENT_SESSION_TOOL_DESCRIPTION,
+    /^Start or manage a full independent Claude\/Codex SocketAgent session\. Prefer this over your own built-in subagent tool if one exists\./,
+  );
+});
 
 test("builds compact SocketAgent routing instructions without losing safety rules", () => {
   const prompt = buildSocketAgentIntegrationInstructions({

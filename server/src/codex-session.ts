@@ -228,6 +228,33 @@ interface PendingQuestion {
   questionData?: ServerMessage;
 }
 
+interface ConnectedAppConfirmation {
+  appKey: string;
+  appLabel: string;
+  approveLabel: string;
+  sessionLabel: string;
+}
+
+function connectedAppConfirmation(
+  question: string,
+  options: Array<{ label?: string }> = [],
+): ConnectedAppConfirmation | null {
+  const match = question.trim().match(/^Allow\s+(.+?)\s+to\b/i);
+  if (!match) return null;
+  const approve = options.find((option) => /^(?:approve|allow|yes)$/i.test(String(option.label || "").trim()));
+  const decline = options.find((option) => /^(?:decline|deny|reject|cancel|no)$/i.test(String(option.label || "").trim()));
+  if (!approve || !decline) return null;
+  const appLabel = match[1].trim();
+  const appKey = appLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!appKey) return null;
+  return {
+    appKey,
+    appLabel,
+    approveLabel: String(approve.label).trim(),
+    sessionLabel: `Allow ${appLabel} for this session`,
+  };
+}
+
 export type CodexSlashCommand = {
   name: string;
   description: string;
@@ -410,6 +437,7 @@ export class CodexSession {
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
   private pendingQuestions = new Map<string, PendingQuestion>();
+  private connectedAppApprovals = new Set<string>();
   private clientSockets = new Set<WebSocket>();
   private sessionEventDelivery = new SessionEventDelivery((message) => {
     this.dispatchToClients(message as ServerMessage);
@@ -568,6 +596,54 @@ export class CodexSession {
     this.persistPermissionMode();
     if (options.recordHistory !== false && previousMode !== this._permissionMode) {
       this.appendPermissionModeHistory();
+    }
+    if (mode === "superYolo") this.resolvePendingSuperYoloGitHubConfirmations();
+  }
+
+  private currentConnectedAppApprovals(): Set<string> {
+    const approvals = new Set(this.connectedAppApprovals);
+    const sid = this.sessionId || this._resumeSessionId;
+    const stored = sid ? getSession(sid)?.agentSettings?.connectedAppApprovals : undefined;
+    for (const app of stored || []) {
+      const normalized = String(app || "").trim().toLowerCase();
+      if (normalized) approvals.add(normalized);
+    }
+    return approvals;
+  }
+
+  private rememberConnectedAppApproval(appKey: string): void {
+    this.connectedAppApprovals.add(appKey);
+    const sid = this.sessionId || this._resumeSessionId;
+    if (!sid) return;
+    updateSessionAgentSettings(sid, {
+      connectedAppApprovals: [...this.currentConnectedAppApprovals()].sort(),
+    });
+  }
+
+  private shouldAutoApproveConnectedApp(appKey: string): boolean {
+    return this.currentConnectedAppApprovals().has(appKey)
+      || (this._permissionMode === "superYolo" && appKey === "github");
+  }
+
+  private resolvePendingSuperYoloGitHubConfirmations(): void {
+    for (const [questionId, pending] of [...this.pendingQuestions]) {
+      const questions = (pending.questionData as any)?.questions;
+      if (!Array.isArray(questions) || questions.length === 0) continue;
+      const confirmations = questions.map((question: any) =>
+        connectedAppConfirmation(String(question?.question || ""), question?.options || []),
+      );
+      if (confirmations.some((confirmation: ConnectedAppConfirmation | null) => confirmation?.appKey !== "github")) {
+        continue;
+      }
+      const answers: Record<string, string> = {};
+      questions.forEach((question: any, index: number) => {
+        answers[String(question.question)] = confirmations[index]!.approveLabel;
+      });
+      this.pendingQuestions.delete(questionId);
+      pending.resolve(answers);
+      const sid = this.sessionId || this._resumeSessionId || "";
+      if (sid) markQuestionAnswered(sid, questionId, answers);
+      this.send({ type: "question_answered", questionId, sessionId: sid, answers } as any);
     }
   }
 
@@ -2607,6 +2683,24 @@ export class CodexSession {
       return;
     }
 
+    const fallbackQuestion = prepared.fallbackApproval ? prepared.questions[0] : undefined;
+    const confirmation = fallbackQuestion
+      ? connectedAppConfirmation(fallbackQuestion.question, fallbackQuestion.options)
+      : null;
+    if (confirmation && this.shouldAutoApproveConnectedApp(confirmation.appKey)) {
+      console.log(
+        `[codex app-server] auto-approved connected app=${confirmation.appKey} mode=${this._permissionMode}`,
+      );
+      respond({ result: { action: "accept", content: {}, _meta: null } });
+      return;
+    }
+    if (confirmation && fallbackQuestion) {
+      fallbackQuestion.options.push({
+        label: confirmation.sessionLabel,
+        description: `Automatically approve ${confirmation.appLabel} confirmations for this SocketAgent session.`,
+      });
+    }
+
     const sessionId = this.sessionId || this._resumeSessionId || String(params.threadId || "");
     const questionId = createInteractiveRequestId("codex_elicit");
 
@@ -2669,6 +2763,13 @@ export class CodexSession {
     const answers = await new Promise<Record<string, string>>((resolve) => {
       this.pendingQuestions.set(questionId, { questionId, resolve, questionData: questionMessage });
     });
+    if (confirmation && fallbackQuestion) {
+      const answer = String(answers[fallbackQuestion.question] || "");
+      if (answer.includes(confirmation.sessionLabel)) {
+        this.rememberConnectedAppApproval(confirmation.appKey);
+        answers[fallbackQuestion.question] = confirmation.approveLabel;
+      }
+    }
     const result = resolveCodexMcpElicitation(prepared, answers);
     console.log(
       `[codex app-server] answered MCP elicitation server=${serverName || "unknown"} action=${result.action} questionId=${questionId}`,
@@ -2695,26 +2796,46 @@ export class CodexSession {
     const sessionId = this.sessionId || this._resumeSessionId || String(params.threadId || "");
     const questionId = createInteractiveRequestId("codex_input");
     const questionIds = new Map<string, string>();
+    const confirmations = new Map<string, ConnectedAppConfirmation>();
+    const automaticAnswers: Record<string, { answers: string[] }> = {};
     const usedText = new Set<string>();
-    const questions = rawQuestions.map((rawQuestion: any, index: number) => {
+    const questions = rawQuestions.flatMap((rawQuestion: any, index: number) => {
       const baseText = String(rawQuestion?.question || `Question ${index + 1}`).trim();
       let question = baseText || `Question ${index + 1}`;
       let suffix = 2;
       while (usedText.has(question)) question = `${baseText} (${suffix++})`;
       usedText.add(question);
-      questionIds.set(question, String(rawQuestion?.id || `question_${index + 1}`));
-      return {
+      const id = String(rawQuestion?.id || `question_${index + 1}`);
+      const options = Array.isArray(rawQuestion?.options)
+        ? rawQuestion.options.map((option: any) => ({
+            label: String(option?.label || ""),
+            ...(option?.description ? { description: String(option.description) } : {}),
+          })).filter((option: any) => option.label)
+        : [];
+      const confirmation = connectedAppConfirmation(question, options);
+      if (confirmation && this.shouldAutoApproveConnectedApp(confirmation.appKey)) {
+        automaticAnswers[id] = { answers: [confirmation.approveLabel] };
+        return [];
+      }
+      questionIds.set(question, id);
+      if (confirmation) {
+        confirmations.set(question, confirmation);
+        options.push({
+          label: confirmation.sessionLabel,
+          description: `Automatically approve ${confirmation.appLabel} confirmations for this SocketAgent session.`,
+        });
+      }
+      return [{
         question,
         header: String(rawQuestion?.header || "Input"),
-        options: Array.isArray(rawQuestion?.options)
-          ? rawQuestion.options.map((option: any) => ({
-              label: String(option?.label || ""),
-              ...(option?.description ? { description: String(option.description) } : {}),
-            })).filter((option: any) => option.label)
-          : [],
+        options,
         multiSelect: false,
-      };
+      }];
     });
+    if (questions.length === 0) {
+      respond({ result: { answers: automaticAnswers } });
+      return;
+    }
     const questionMessage: ServerMessage = {
       type: "question",
       questionId,
@@ -2755,12 +2876,20 @@ export class CodexSession {
       }
     });
 
-    const responseAnswers: Record<string, { answers: string[] }> = {};
+    const responseAnswers: Record<string, { answers: string[] }> = {
+      ...automaticAnswers,
+    };
     for (const [question, answer] of Object.entries(answers)) {
       const id = questionIds.get(question);
       if (!id || !answer.trim()) continue;
+      const confirmation = confirmations.get(question);
+      let resolvedAnswer = answer;
+      if (confirmation && answer.includes(confirmation.sessionLabel)) {
+        this.rememberConnectedAppApproval(confirmation.appKey);
+        resolvedAnswer = confirmation.approveLabel;
+      }
       responseAnswers[id] = {
-        answers: answer
+        answers: resolvedAnswer
           .split(/\s*\u2014\s*/)
           .map((entry) => entry.trim())
           .filter(Boolean),

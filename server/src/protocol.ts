@@ -766,6 +766,8 @@ export interface AgentSessionSettings {
   claudeAutoCompactWindow?: number;
   disallowedTools?: string[];
   systemPrompt?: string;
+  /** Connected apps the user approved for the lifetime of this session. */
+  connectedAppApprovals?: string[];
 }
 
 export interface InitialSessionSettings extends AgentSessionSettings {

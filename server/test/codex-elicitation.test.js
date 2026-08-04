@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const test = require("node:test");
 
 const {
@@ -6,6 +7,12 @@ const {
   resolveCodexMcpElicitation,
 } = require("../dist/codex-elicitation");
 const { CodexSession } = require("../dist/codex-session");
+const {
+  deleteSession,
+  deleteSessionArtifacts,
+  getSession,
+  saveSession,
+} = require("../dist/session-store");
 
 test("maps current Codex form elicitations to typed MCP content", () => {
   const prepared = prepareCodexMcpElicitation({
@@ -164,4 +171,152 @@ test("routes native Codex request_user_input questions and restores question ids
   assert.deepEqual(response, {
     result: { answers: { delivery: { answers: ["Attach"] } } },
   });
+});
+
+function githubApprovalRequest() {
+  return {
+    method: "item/tool/requestUserInput",
+    params: {
+      threadId: "",
+      turnId: "turn-1",
+      itemId: "item-github",
+      questions: [{
+        id: "approval",
+        header: "Approval",
+        question: 'Allow GitHub to run tool "github.merge_pull_request"?',
+        isSecret: false,
+        options: [{ label: "Approve" }, { label: "Decline" }],
+      }],
+    },
+  };
+}
+
+test("offers and remembers connected-app approval for the SocketAgent session", async () => {
+  const sessionId = `test-connected-app-${crypto.randomUUID()}`;
+  const sent = [];
+  const socket = {
+    readyState: 1,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+  const session = new CodexSession(socket, process.cwd(), []);
+  saveSession({
+    id: sessionId,
+    title: "Connected app approval",
+    cwd: process.cwd(),
+    createdAt: new Date().toISOString(),
+    lastActive: new Date().toISOString(),
+    messagePreview: "",
+    backend: "codex",
+  });
+  try {
+  let firstResponse;
+  const first = session.handleAppServerRequest(githubApprovalRequest(), (value) => {
+    firstResponse = value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const question = sent.find((message) => message.type === "question");
+  assert.ok(question);
+  assert.deepEqual(
+    question.questions[0].options.map((option) => option.label),
+    ["Approve", "Decline", "Allow GitHub for this session"],
+  );
+  // Attach the durable session after rendering so this unit test does not
+  // dispatch a real attention push through the configured relay.
+  session._resumeSessionId = sessionId;
+  session.resolveQuestion(question.questionId, {
+    [question.questions[0].question]: "Allow GitHub for this session",
+  });
+  await first;
+  assert.deepEqual(firstResponse, {
+    result: { answers: { approval: { answers: ["Approve"] } } },
+  });
+  assert.deepEqual(getSession(sessionId).agentSettings.connectedAppApprovals, ["github"]);
+
+  let secondResponse;
+  const questionCount = sent.filter((message) => message.type === "question").length;
+  const resumed = new CodexSession(socket, process.cwd(), []);
+  resumed._resumeSessionId = sessionId;
+  await resumed.handleAppServerRequest(githubApprovalRequest(), (value) => {
+    secondResponse = value;
+  });
+  assert.deepEqual(secondResponse, {
+    result: { answers: { approval: { answers: ["Approve"] } } },
+  });
+  assert.equal(sent.filter((message) => message.type === "question").length, questionCount);
+  } finally {
+    deleteSessionArtifacts(sessionId, getSession(sessionId));
+    deleteSession(sessionId);
+  }
+});
+
+test("Super Yolo auto-accepts GitHub connected-app confirmations", async () => {
+  const sent = [];
+  const socket = {
+    readyState: 1,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+  const session = new CodexSession(socket, process.cwd(), []);
+  await session.setPermissionMode("superYolo", { recordHistory: false });
+  let response;
+  await session.handleAppServerRequest(githubApprovalRequest(), (value) => {
+    response = value;
+  });
+  assert.deepEqual(response, {
+    result: { answers: { approval: { answers: ["Approve"] } } },
+  });
+  assert.equal(sent.some((message) => message.type === "question"), false);
+});
+
+test("switching to Super Yolo accepts an already pending GitHub confirmation", async () => {
+  const sent = [];
+  const socket = {
+    readyState: 1,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+  const session = new CodexSession(socket, process.cwd(), []);
+  let response;
+  const pending = session.handleAppServerRequest(githubApprovalRequest(), (value) => {
+    response = value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(sent.find((message) => message.type === "question"));
+  await session.setPermissionMode("superYolo", { recordHistory: false });
+  await pending;
+  assert.deepEqual(response, {
+    result: { answers: { approval: { answers: ["Approve"] } } },
+  });
+  assert.ok(sent.find((message) => message.type === "question_answered"));
+});
+
+test("Super Yolo also auto-accepts GitHub MCP elicitation confirmations", async () => {
+  const sent = [];
+  const socket = {
+    readyState: 1,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+  const session = new CodexSession(socket, process.cwd(), []);
+  await session.setPermissionMode("superYolo", { recordHistory: false });
+  let response;
+  await session.handleMcpServerElicitation({
+    threadId: "",
+    turnId: "turn-github",
+    serverName: "codex_apps",
+    mode: "openai/form",
+    message: 'Allow GitHub to run tool "github.merge_pull_request"?',
+    requestedSchema: {},
+  }, (value) => {
+    response = value;
+  });
+  assert.deepEqual(response, {
+    result: { action: "accept", content: {}, _meta: null },
+  });
+  assert.equal(sent.some((message) => message.type === "question"), false);
 });

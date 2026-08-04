@@ -366,6 +366,11 @@ type CodexSubagentState = {
   resultSent: boolean;
 };
 
+// Codex can complete one app-server turn and immediately start another when
+// an active goal auto-continues. Treat that short boundary as one SocketAgent
+// run so the app never loses its running state or Stop control between turns.
+const CODEX_TURN_COMPLETION_GRACE_MS = 500;
+
 // ─── CodexSession ─────────────────────────────────────────────────────────
 
 export class CodexSession {
@@ -378,6 +383,7 @@ export class CodexSession {
   private appServerMcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
   private activeAppServerTurnId: string | null = null;
   private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
+  private pendingAppServerTurnCompletion: ReturnType<typeof setTimeout> | null = null;
   private appServerAgentText = new Map<string, string>();
   private appServerReasoningText = new Map<string, string>();
   private appServerReasoningParents = new Map<string, string>();
@@ -510,6 +516,7 @@ export class CodexSession {
   }
   get isBusy(): boolean {
     return this._isRunning
+      || this.pendingAppServerTurnCompletion !== null
       || this._isCompacting
       || this.appServerTurnSettler !== null
       || this._pendingUserPrompt !== null
@@ -517,6 +524,44 @@ export class CodexSession {
       || this._pendingAppServerSteers.length > 0
       || this.pendingQuestions.size > 0
       || this.hasRunningSubagents;
+  }
+
+  private cancelPendingAppServerTurnCompletion(): boolean {
+    if (!this.pendingAppServerTurnCompletion) return false;
+    clearTimeout(this.pendingAppServerTurnCompletion);
+    this.pendingAppServerTurnCompletion = null;
+    return true;
+  }
+
+  private scheduleAppServerTurnCompletion(): void {
+    this.cancelPendingAppServerTurnCompletion();
+    this.pendingAppServerTurnCompletion = setTimeout(() => {
+      this.pendingAppServerTurnCompletion = null;
+      const sid = this.sessionId;
+      if (sid) {
+        const usage = this._lastUsage ?? {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreateTokens: 0,
+          contextWindow: 0,
+        };
+        this.send({
+          type: "result",
+          content: this._lastAssistantText,
+          sessionId: sid,
+          usage,
+        } as ServerMessage);
+        updateSessionActivity(sid, this._lastAssistantText, usage);
+      }
+      this._isRunning = false;
+      this._runStartedAt = null;
+      this.onActivity?.();
+      const settler = this.appServerTurnSettler;
+      this.appServerTurnSettler = null;
+      settler?.resolve();
+    }, CODEX_TURN_COMPLETION_GRACE_MS);
+    this.pendingAppServerTurnCompletion.unref?.();
   }
   get activeStartedAt(): string | null {
     if (this._isCompacting) return this._compactStartedAt || this._runStartedAt;
@@ -2189,6 +2234,7 @@ export class CodexSession {
 
   async dispose(): Promise<void> {
     this.streamSnapshots.dispose(true);
+    this.cancelPendingAppServerTurnCompletion();
     await this.stopAppServerClient();
   }
 
@@ -2415,7 +2461,7 @@ export class CodexSession {
       getTtsEngine: () => this._ttsEngine,
       getKokoroVoice: () => this._kokoroVoice,
       getKokoroSpeed: () => this._kokoroSpeed,
-      isRunning: () => this._isRunning,
+      isRunning: () => this.isRunning,
       injectMessage: (text, priority) => this.injectMessage(text, priority),
       onMonitorOutput: (text) => this.onMonitorOutput?.(text),
       manageAgentSession: (args) => {
@@ -2433,6 +2479,7 @@ export class CodexSession {
   async abort(): Promise<void> {
     this.streamSnapshots.flushAll();
     this._abortRequested = true;
+    this.cancelPendingAppServerTurnCompletion();
     this.clearQueuedPrompts("Codex turn interrupted");
     this.clearPendingAppServerSteers("Codex turn interrupted");
     const client = this.appServer;
@@ -2980,8 +3027,24 @@ export class CodexSession {
           if (agent) this.updateCodexSubagentStatus(agent.agentId, "active");
           return;
         }
+        // A new root turn inside the completion grace window is Codex goal
+        // auto-continuation, not a new SocketAgent run. Keep the original run
+        // alive and cancel the intermediate completion before the app can
+        // hide its Stop control.
+        this.cancelPendingAppServerTurnCompletion();
+        this._isRunning = true;
+        this._runStartedAt ||= new Date().toISOString();
         this.activeAppServerTurnId = p?.turn?.id || p?.turnId || this.activeAppServerTurnId;
         this.flushPendingAppServerSteers();
+        if (this.sessionId) {
+          this.send({
+            type: "session_state_changed",
+            state: "running",
+            sessionId: this.sessionId,
+            ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
+          } as any);
+        }
+        this.onActivity?.();
         return;
 
       case "thread/status/changed": {
@@ -3007,7 +3070,7 @@ export class CodexSession {
             sessionId: sid,
             ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
           } as any);
-        } else if (statusType === "idle") {
+        } else if (statusType === "idle" && !this._isRunning && !this.pendingAppServerTurnCompletion) {
           this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
         } else if (statusType === "systemError") {
           const message = codexAppServerErrorMessage(p, "Codex app-server entered systemError state");
@@ -3559,25 +3622,9 @@ export class CodexSession {
           this.updateCodexSubagentStatus(String(p.threadId), "completed");
           return;
         }
-        const sid = this.sessionId;
         this.requeuePendingAppServerSteers("turn completed before steered userMessage was emitted");
-        if (sid) {
-          const usage = this._lastUsage ?? {
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            cacheCreateTokens: 0,
-            contextWindow: 0,
-          };
-          this.send({
-            type: "result",
-            content: this._lastAssistantText,
-            sessionId: sid,
-            usage,
-          } as ServerMessage);
-          updateSessionActivity(sid, this._lastAssistantText, usage);
-        }
-        this.appServerTurnSettler?.resolve();
+        this.activeAppServerTurnId = null;
+        this.scheduleAppServerTurnCompletion();
         return;
       }
 

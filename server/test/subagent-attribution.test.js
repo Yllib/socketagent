@@ -1153,7 +1153,7 @@ test("late-joining Codex clients receive the complete cached prefix before new d
   assert.equal(snapshot.sessionId, rootId);
 });
 
-test("Codex live text frames are cumulative snapshots with a durable final frame", () => {
+test("Codex live text frames are cumulative snapshots with a durable final frame", async () => {
   const sent = [];
   const rootId = `test-text-snapshot-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -1192,6 +1192,62 @@ test("Codex live text frames are cumulative snapshots with a durable final frame
   session.handleAppServerNotification("turn/completed", {
     threadId: rootId,
   });
+  await new Promise((resolve) => setTimeout(resolve, 550));
   const result = sent.find((message) => message.type === "result");
   assert.equal(result.content, "first second");
+});
+
+test("Codex immediate goal continuation preserves one running lifecycle", async () => {
+  const sent = [];
+  const rootId = `test-goal-continuation-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+  session._isRunning = true;
+  let settled = 0;
+  session.appServerTurnSettler = {
+    resolve: () => { settled += 1; },
+    reject: () => {},
+  };
+
+  session.handleAppServerNotification("turn/completed", {
+    threadId: rootId,
+    turn: { id: "turn-1" },
+  });
+  assert.equal(session.isBusy, true);
+  assert.equal(session.isRunning, true);
+  assert.equal(sent.some((message) => message.type === "result"), false);
+  session.handleAppServerNotification("thread/status/changed", {
+    threadId: rootId,
+    status: { type: "idle" },
+  });
+  assert.equal(sent.some((message) =>
+    message.type === "session_state_changed" && message.state === "idle"), false);
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  session.handleAppServerNotification("turn/started", {
+    threadId: rootId,
+    turn: { id: "turn-2" },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  assert.equal(session.isBusy, true);
+  assert.equal(session.isRunning, true);
+  assert.equal(settled, 0);
+  assert.equal(sent.some((message) => message.type === "result"), false);
+  assert.ok(sent.some((message) =>
+    message.type === "session_state_changed"
+    && message.state === "running"
+    && message.sessionId === rootId));
+
+  session.handleAppServerNotification("turn/completed", {
+    threadId: rootId,
+    turn: { id: "turn-2" },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  assert.equal(settled, 1);
+  assert.equal(session.isBusy, false);
+  assert.equal(session.isRunning, false);
+  assert.equal(sent.filter((message) => message.type === "result").length, 1);
 });

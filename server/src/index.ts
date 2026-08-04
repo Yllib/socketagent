@@ -1127,7 +1127,8 @@ function maybeFinalizeLogicalRun(sessionId: string): void {
 }
 
 function finishLogicalRunNow(sessionId: string, outcome: SessionRunOutcome): void {
-  const runId = getSessionRunStats(sessionId)?.current?.runId;
+  const current = getSessionRunStats(sessionId)?.current;
+  const runId = current?.runId;
   const runStats = finishSessionRun(sessionId, outcome);
   logicalRunSessionIds.delete(sessionId);
   if (!runId || !runStats) return;
@@ -1141,6 +1142,22 @@ function finishLogicalRunNow(sessionId: string, outcome: SessionRunOutcome): voi
     runStats,
     boundary,
   }), sessionId);
+  if (outcome !== "stopped" && current) {
+    const fallback = outcome === "failed" ? "Prompt failed" : "Prompt complete";
+    const info = getSession(sessionId);
+    maybeSendPushNotification({
+      type: "scheduled_task_notification",
+      title: storedSessionNotificationTitle(sessionId) || "SocketAgent",
+      body: notificationText(info?.messagePreview, fallback),
+      sessionId,
+      status: outcome,
+      sessionCompletion: true,
+      kind: "session_finished",
+      eventId: sessionPushEventId("session_finished", sessionId, current.startedAt),
+      finishedAt: boundary.runFinishedAt || boundary.timestamp,
+      startedAt: current.startedAt,
+    });
+  }
   broadcastSessionList();
   broadcastStatusSync();
 }
@@ -4464,7 +4481,6 @@ function createConnectionHandler(
           }
           if (!hardAbortedSessions.delete(sessionForRun)) {
             settleLogicalRun(sessionForRun, "completed", resumeId);
-            sendSessionCompletionPush(sessionForRun, "completed");
           }
           broadcastSessionList();
         }).catch((err: any) => {
@@ -4493,14 +4509,12 @@ function createConnectionHandler(
               codexCollaborationMode: "default",
             });
             broadcastServerCapabilities();
-            sendSessionCompletionPush(sessionForRun, "failed", "Codex sign-in required");
           } else if (!(err && typeof err === "object" && err.socketAgentSurfaced === true)) {
             settleLogicalRun(sessionForRun, "failed", resumeId);
             sendJson({
               type: "error",
               message: err.message || "Query failed",
             });
-            sendSessionCompletionPush(sessionForRun, "failed", err.message || "Query failed");
           } else {
             settleLogicalRun(sessionForRun, "failed", resumeId);
           }

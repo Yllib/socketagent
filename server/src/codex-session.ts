@@ -390,6 +390,7 @@ export class CodexSession {
   private sessionId: string | null = null; // SocketAgent session id (= codex thread_id)
   private threadId: string | null = null;  // codex thread_id (for resume)
   private appServer: CodexAppServerClient | null = null;
+  private appServerStopPromise: Promise<void> | null = null;
   private appServerInitialized = false;
   private appServerInitializePromise: Promise<void> | null = null;
   private appServerIdleStopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2104,6 +2105,10 @@ export class CodexSession {
   }
 
   private async ensureAppServer(): Promise<void> {
+    if (this.appServerStopPromise) await this.appServerStopPromise;
+    if (this._abortRequested) {
+      throw new Error("Codex turn interrupted");
+    }
     if (this.appServerIdleStopTimer) {
       clearTimeout(this.appServerIdleStopTimer);
       this.appServerIdleStopTimer = null;
@@ -2212,6 +2217,10 @@ export class CodexSession {
   }
 
   private async stopAppServerClient(requireConfirmedExit = false): Promise<void> {
+    if (this.appServerStopPromise) {
+      await this.appServerStopPromise;
+      return;
+    }
     if (this.appServerIdleStopTimer) {
       clearTimeout(this.appServerIdleStopTimer);
       this.appServerIdleStopTimer = null;
@@ -2226,21 +2235,35 @@ export class CodexSession {
     }
     if (!client) return;
     let stopped = false;
-    try {
-      await client.stop("SIGTERM", 3000, requireConfirmedExit);
-      stopped = true;
-    } catch (err: any) {
-      if (requireConfirmedExit) {
-        // Keep the process handle reachable so a retransmitted hard stop can
-        // attempt termination again instead of falsely treating it as absent.
-        this.appServer = client;
-        throw err;
+    const stopPromise = (async () => {
+      try {
+        await client.stop(
+          requireConfirmedExit ? "SIGKILL" : "SIGTERM",
+          requireConfirmedExit ? 250 : 3000,
+          requireConfirmedExit,
+        );
+        stopped = true;
+      } catch (err: any) {
+        if (requireConfirmedExit) {
+          // Keep the process handle reachable so a retransmitted hard stop can
+          // attempt termination again instead of falsely treating it as absent.
+          this.appServer = client;
+          throw err;
+        }
+        console.warn(`[codex app-server] cleanup failed: ${err?.message || err}`);
+      } finally {
+        if (stopped || !requireConfirmedExit) {
+          client.removeAllListeners();
+          this.onClose?.();
+        }
       }
-      console.warn(`[codex app-server] cleanup failed: ${err?.message || err}`);
+    })();
+    this.appServerStopPromise = stopPromise;
+    try {
+      await stopPromise;
     } finally {
-      if (stopped || !requireConfirmedExit) {
-        client.removeAllListeners();
-        this.onClose?.();
+      if (this.appServerStopPromise === stopPromise) {
+        this.appServerStopPromise = null;
       }
     }
   }

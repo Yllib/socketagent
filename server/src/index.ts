@@ -63,6 +63,8 @@ import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHtmlPlanRevision, listHtmlPlanRevisions, listHtmlPlans, renameHtmlPlan, rollbackHtmlPlan } from "./html-plan-store";
 import { HardAbortCoordinator } from "./hard-abort";
+import { SessionInstanceRegistry } from "./session-instance-registry";
+import { SessionAutomationLockedError, SessionAutomationLockStore } from "./session-automation-lock";
 import { backendsForManagedBackendSpecs, MANAGED_BACKEND_PACKAGES, managedBackendSpecsNeedingUpdate, parseNpmVersionOutput } from "./managed-backend-update";
 import { invalidateCachedModelCatalog } from "./model-catalog-store";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
@@ -1011,6 +1013,11 @@ function loadServerKeyPair(): KeyPair {
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
+// Safety registry: unlike activeSessions, this retains every busy runner for
+// an exact session ID. A reconnect race must never make an older runner
+// invisible to the stop button.
+const liveSessionInstances = new SessionInstanceRegistry<Session>();
+const sessionAutomationLocks = new SessionAutomationLockStore();
 const hardAbortCoordinator = new HardAbortCoordinator();
 const hardAbortedSessions = new WeakSet<Session>();
 
@@ -1077,6 +1084,84 @@ function sessionIsBusy(session: Session): boolean {
   return session.isRunning || (session as any).isCompacting === true;
 }
 
+function sessionInstanceId(session: Session): string {
+  return String(
+    session.getSessionId?.()
+      || (session as any)._resumeSessionId
+      || "",
+  ).trim();
+}
+
+function syncLiveSessionInstance(session: Session): void {
+  const sessionId = sessionInstanceId(session);
+  if (!sessionId) return;
+  // Retain idle/warm backend processes too. Stop is destructive for the exact
+  // session and must close every process that could accept another turn, not
+  // only the runner currently exposed through activeSessions. Plain dormant
+  // objects with no backend are dropped so browsing history cannot leak them.
+  const ownsLiveBackend = sessionIsBusy(session)
+    || (session as any).isWarmIdle === true
+    || !!(session as any).appServer
+    || !!(session as any).activeQuery;
+  liveSessionInstances.setActive(sessionId, session, ownsLiveBackend);
+}
+
+function abortGroupForSession(
+  sessionId: string,
+  extras: Iterable<Session | null | undefined> = [],
+): (Session & { abortTargets: Session[] }) | null {
+  const exactExtras = [...extras].filter(
+    (candidate): candidate is Session => !!candidate && sessionInstanceId(candidate) === sessionId,
+  );
+  const targets = liveSessionInstances.instances(sessionId, exactExtras);
+  if (targets.length === 0) return null;
+  // HardAbortCoordinator needs one abortable target. The group deliberately
+  // contains runners for this exact session ID only; delegated child sessions
+  // have their own IDs and remain independent.
+  return {
+    abortTargets: targets,
+    abort: async () => {
+      const results = await Promise.allSettled(
+        targets.map((target) => Promise.resolve(target.abort())),
+      );
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason);
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          `Failed to stop ${failures.length} of ${targets.length} runner(s) for ${sessionId}`,
+        );
+      }
+    },
+  } as Session & { abortTargets: Session[] };
+}
+
+function abortTargets(target: Session): Session[] {
+  return (target as Session & { abortTargets?: Session[] }).abortTargets || [target];
+}
+
+function assertSessionAutomationAllowed(sessionId: string, source: string): void {
+  if (sessionAutomationLocks.isLocked(sessionId)) {
+    throw new SessionAutomationLockedError(sessionId, source);
+  }
+}
+
+function unlockSessionForUserPrompt(sessionId: string): boolean {
+  if (!sessionAutomationLocks.unlockForUserPrompt(sessionId)) return false;
+  console.log(`[StopLock] User prompt unlocked session ${sessionId}`);
+  return true;
+}
+
+function retryDeferredAutomationAfterUserPrompt(): void {
+  // Called only after the user's message has itself been accepted by the
+  // harness. This prevents old fallback work from racing ahead of that prompt.
+  setImmediate(() => {
+    retryPendingDelegatedAgentReports();
+    restorePendingWorkReviewResultDeliveries();
+  });
+}
+
 type PendingLogicalRun = { runId: string; startedAt: string };
 const pendingLogicalRuns = new WeakMap<Session, PendingLogicalRun>();
 const logicalRunSessionIds = new Set(
@@ -1119,7 +1204,6 @@ function delegatedWorkOutstanding(sessionId: string, startedAt: string): boolean
   return hasOutstandingDelegatedRuns(
     listDelegatedAgents(sessionId),
     startedAt,
-    delegatedReportQueues.has(sessionId),
   );
 }
 
@@ -1697,9 +1781,14 @@ function notifySessionActivity(): void {
 }
 
 function attachSessionLifecycleCallbacks(session: Session): void {
-  session.onActivity = () => notifySessionActivity();
+  syncLiveSessionInstance(session);
+  session.onActivity = () => {
+    syncLiveSessionInstance(session);
+    notifySessionActivity();
+  };
   session.onAgentSessionRequest = (args) => manageAgentSession(session, args);
   (session as any).onSessionIdChanged = (previousSessionId: string, nextSessionId: string) => {
+    liveSessionInstances.rekey(session, previousSessionId, nextSessionId);
     if (activeSessions.get(previousSessionId) === session) {
       activeSessions.delete(previousSessionId);
       activeSessions.set(nextSessionId, session);
@@ -1714,6 +1803,7 @@ function attachSessionLifecycleCallbacks(session: Session): void {
     notifySessionActivity();
   };
   (session as any).onClose = () => {
+    liveSessionInstances.remove(session);
     let removed = false;
     if (!sessionShouldRemainPooled(session) && !sessionIsBusy(session)) {
       for (const [sid, active] of activeSessions.entries()) {
@@ -1843,8 +1933,10 @@ async function runWorkReviewResultDelivery(
   text: string,
   resultId: string,
 ): Promise<void> {
+  assertSessionAutomationAllowed(sessionId, "Work Review result delivery");
   const existing = activeSessions.get(sessionId);
   if (existing) {
+    assertSessionAutomationAllowed(sessionId, "Work Review result delivery");
     const backend = getSession(sessionId)?.backend === "codex" ? "codex" : "claude";
     await deliverWorkReviewToSession(
       existing,
@@ -1878,6 +1970,7 @@ async function runWorkReviewResultDelivery(
   attachSessionLifecycleCallbacks(session);
   activeSessions.set(sessionId, session);
   try {
+    assertSessionAutomationAllowed(sessionId, "Work Review result delivery");
     await deliverWorkReviewToSession(
       session,
       sessionInfo.backend === "codex" ? "codex" : "claude",
@@ -1907,6 +2000,10 @@ function queueWorkReviewResultDelivery(
   }
   workReviewResultDeliveryStore.enqueue(review, result);
   if (workReviewResultDeliveryStore.isDelivered(resultId)) return Promise.resolve();
+  if (sessionAutomationLocks.isLocked(sessionId)) {
+    console.log(`[StopLock] Work Review result remains pending for stopped session ${sessionId}`);
+    return Promise.resolve();
+  }
   if (workReviewResultDeliveries.has(resultId)) return Promise.resolve();
   workReviewResultDeliveries.add(resultId);
   const previous = workReviewResultQueues.get(sessionId) || Promise.resolve();
@@ -2015,9 +2112,11 @@ function broadcastDurableMonitorMessage(message: Record<string, any>): void {
 }
 
 async function runDurableMonitorPrompt(record: DurableMonitorRecord, text: string): Promise<void> {
+  assertSessionAutomationAllowed(record.sessionId, "Monitor output delivery");
   const existing = activeSessions.get(record.sessionId);
   if (existing) {
-    if (sessionIsBusy(existing)) {
+    assertSessionAutomationAllowed(record.sessionId, "Monitor output delivery");
+    if (existing.isRunning) {
       await existing.injectMessage(text, "next");
       return;
     }
@@ -2051,6 +2150,7 @@ async function runDurableMonitorPrompt(record: DurableMonitorRecord, text: strin
   attachSessionLifecycleCallbacks(session);
   activeSessions.set(record.sessionId, session);
   try {
+    assertSessionAutomationAllowed(record.sessionId, "Monitor output delivery");
     await session.runQuery(text, record.sessionId);
   } finally {
     const sid = session.getSessionId() || record.sessionId;
@@ -2094,7 +2194,6 @@ function durableMonitorContext(record: DurableMonitorRecord): AppToolContext {
   };
 }
 
-const delegatedReportQueues = new Map<string, Promise<void>>();
 const delegatedReportDeliveries = new Set<string>();
 const interruptedDelegationIdsAtStartup = new Set(
   listDelegatedAgents()
@@ -2162,12 +2261,25 @@ async function runDelegatedSupervisorReport(
   run: DelegatedAgentRun,
 ): Promise<void> {
   if (delegatedReportAlreadyPersisted(record, run)) return;
+  assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
   reactivateLogicalRun(record.supervisorSessionId);
   const text = delegatedReportPrompt(record, run);
   const existing = activeSessions.get(record.supervisorSessionId);
   if (existing) {
-    if (sessionIsBusy(existing)) {
-      await existing.injectMessage(text, "next");
+    const initialization = (existing as any)._socketAgentInitialization as Promise<void> | undefined;
+    if (initialization) await initialization;
+    assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
+    if (existing.isRunning) {
+      // Exactly the same safe-boundary injection used for a user's mid-run
+      // message. There is no per-parent delivery queue in front of this call.
+      await routeRunningDelegatedAgentMessage({
+        target: existing,
+        isRunning: existing.isRunning,
+        prompt: text,
+        messageId: `delegated-report:${record.delegationId}:${run.runId}`,
+      });
+    } else if ((existing as any).isCompacting === true) {
+      throw new Error(`Supervisor session ${record.supervisorSessionId} is compacting`);
     } else {
       await existing.runQuery(text, record.supervisorSessionId);
     }
@@ -2191,14 +2303,21 @@ async function runDelegatedSupervisorReport(
     plugins,
     getStoredCodexDriver(supervisorInfo),
   );
-  await restorePersistedPermissionMode(supervisor, supervisorInfo);
   (supervisor as any)._resumeSessionId = record.supervisorSessionId;
-  await restorePersistedAgentSettings(supervisor, supervisorInfo);
   attachSessionLifecycleCallbacks(supervisor);
+  const initialization = (async () => {
+    await restorePersistedPermissionMode(supervisor, supervisorInfo);
+    await restorePersistedAgentSettings(supervisor, supervisorInfo);
+  })();
+  (supervisor as any)._socketAgentInitialization = initialization;
   activeSessions.set(record.supervisorSessionId, supervisor);
   try {
+    await initialization;
+    delete (supervisor as any)._socketAgentInitialization;
+    assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
     await supervisor.runQuery(text, record.supervisorSessionId);
   } finally {
+    delete (supervisor as any)._socketAgentInitialization;
     const sid = supervisor.getSessionId() || record.supervisorSessionId;
     if ((supervisor as any).isWarmIdle) {
       await (supervisor as any).closeWarmIdle?.();
@@ -2211,14 +2330,20 @@ async function runDelegatedSupervisorReport(
   }
 }
 
-function queueDelegatedAgentReport(record: DelegatedAgentRecord, run: DelegatedAgentRun): Promise<void> {
+function deliverDelegatedAgentReport(record: DelegatedAgentRecord, run: DelegatedAgentRun): Promise<void> {
   const deliveryKey = `${record.delegationId}:${run.runId}`;
   if (delegatedReportDeliveries.has(deliveryKey)) return Promise.resolve();
+  if (sessionAutomationLocks.isLocked(record.supervisorSessionId)) {
+    console.log(
+      `[StopLock] Delegated report remains pending delegation=${record.delegationId}`
+      + ` run=${run.runId} supervisor=${record.supervisorSessionId}`,
+    );
+    return Promise.resolve();
+  }
   delegatedReportDeliveries.add(deliveryKey);
-  const previous = delegatedReportQueues.get(record.supervisorSessionId) || Promise.resolve();
-  const next = previous
-    .catch(() => {})
-    .then(async () => {
+  // Attempt delivery immediately. Durable `pending` state is the fallback only
+  // when direct safe-boundary injection/startup fails.
+  const delivery = (async () => {
       updateDelegatedAgentRun(record.delegationId, run.runId, {
         reportStatus: "delivering",
         reportAttempts: (run.reportAttempts || 0) + 1,
@@ -2234,19 +2359,15 @@ function queueDelegatedAgentReport(record: DelegatedAgentRecord, run: DelegatedA
       }
       maybeFinalizeLogicalRun(record.supervisorSessionId);
       console.log(`[DelegatedAgent] Report delivered delegation=${record.delegationId} run=${run.runId} supervisor=${record.supervisorSessionId}`);
-    })
+    })()
     .catch((err: any) => {
       updateDelegatedAgentRun(record.delegationId, run.runId, {
         reportStatus: "pending",
       });
       console.warn(`[DelegatedAgent] Report pending delegation=${record.delegationId} run=${run.runId}: ${err?.message || err}`);
     });
-  delegatedReportQueues.set(record.supervisorSessionId, next);
-  return next.finally(() => {
+  return delivery.finally(() => {
     delegatedReportDeliveries.delete(deliveryKey);
-    if (delegatedReportQueues.get(record.supervisorSessionId) === next) {
-      delegatedReportQueues.delete(record.supervisorSessionId);
-    }
     maybeFinalizeLogicalRun(record.supervisorSessionId);
   });
 }
@@ -2302,6 +2423,9 @@ async function launchDelegatedAgentTurn(
   record: DelegatedAgentRecord,
   prompt: string,
 ): Promise<DelegatedAgentRecord> {
+  if (record.childSessionId) {
+    assertSessionAutomationAllowed(record.childSessionId, "delegated agent follow-up");
+  }
   const childInfo = record.childSessionId ? getSession(record.childSessionId) : undefined;
   const activeChild = record.childSessionId ? activeSessions.get(record.childSessionId) : undefined;
   const runningMessageRoute = await routeRunningDelegatedAgentMessage({
@@ -2393,7 +2517,7 @@ async function launchDelegatedAgentTurn(
       );
       if (completed) {
         const completedRun = completed.runs.find((candidate) => candidate.runId === run.runId);
-        if (completedRun) void queueDelegatedAgentReport(completed, completedRun);
+        if (completedRun) void deliverDelegatedAgentReport(completed, completedRun);
       }
     })
     .catch((err: any) => {
@@ -2414,7 +2538,7 @@ async function launchDelegatedAgentTurn(
       );
       if (failed) {
         const failedRun = failed.runs.find((candidate) => candidate.runId === run.runId);
-        if (failedRun) void queueDelegatedAgentReport(failed, failedRun);
+        if (failedRun) void deliverDelegatedAgentReport(failed, failedRun);
       }
     })
     .finally(async () => {
@@ -2452,10 +2576,13 @@ async function stopDelegatedAgent(record: DelegatedAgentRecord): Promise<Delegat
     await hardAbortCoordinator.abort(
       `delegated-stop:${record.delegationId}:${crypto.randomUUID()}`,
       sessionId,
-      () => activeSessions.get(sessionId),
+      () => abortGroupForSession(sessionId, [activeSessions.get(sessionId)]),
       (target) => {
-        hardAbortedSessions.add(target as Session);
-        if (activeSessions.get(sessionId) === target) activeSessions.delete(sessionId);
+        for (const runner of abortTargets(target as Session)) {
+          hardAbortedSessions.add(runner);
+          liveSessionInstances.remove(runner, sessionId);
+          if (activeSessions.get(sessionId) === runner) activeSessions.delete(sessionId);
+        }
       },
     );
   }
@@ -2474,7 +2601,7 @@ async function stopDelegatedAgent(record: DelegatedAgentRecord): Promise<Delegat
       "stopped",
     ) || stopped;
     const stoppedRun = stopped.runs.find((candidate) => candidate.runId === running.runId);
-    if (stoppedRun) void queueDelegatedAgentReport(stopped, stoppedRun);
+    if (stoppedRun) void deliverDelegatedAgentReport(stopped, stoppedRun);
   }
   broadcastSessionList();
   broadcastStatusSync();
@@ -2718,7 +2845,8 @@ async function manageAgentSession(
 
 function retryPendingDelegatedAgentReports(): void {
   for (const { record, run } of pendingDelegatedAgentReports()) {
-    void queueDelegatedAgentReport(record, run);
+    if (sessionAutomationLocks.isLocked(record.supervisorSessionId)) continue;
+    void deliverDelegatedAgentReport(record, run);
   }
 }
 
@@ -2763,7 +2891,7 @@ function recoverInterruptedDelegatedAgentRuns(): void {
     );
     if (!recovered) continue;
     const recoveredRun = recovered.runs.find((candidate) => candidate.runId === run.runId);
-    if (recoveredRun) void queueDelegatedAgentReport(recovered, recoveredRun);
+    if (recoveredRun) void deliverDelegatedAgentReport(recovered, recoveredRun);
   }
 }
 
@@ -4297,6 +4425,19 @@ function createConnectionHandler(
       }
 
       case "prompt": {
+        const explicitPromptSessionId = String(
+          msg.sessionId
+            || activeSession?.getSessionId?.()
+            || (activeSession as any)?._resumeSessionId
+            || activeSessionId
+            || "",
+        ).trim();
+        const unlockedByUserPrompt = explicitPromptSessionId
+          ? unlockSessionForUserPrompt(explicitPromptSessionId)
+          : false;
+        // This is the sole operation permitted to clear a Stop latch. Card
+        // answers, monitor output, report delivery, /continue, and merely
+        // opening the session never reach unlockSessionForUserPrompt().
         // A resumed idle session may be watched for changes made by an
         // external Codex process. Once SocketAgent starts a live turn, its
         // app-server event handler must be the sole history writer. Otherwise
@@ -4372,6 +4513,7 @@ function createConnectionHandler(
           (activeSession as any).injectMessage(msg.text, priority, messageId, injectOptions).then(() => {
             // Acknowledge injection so the app can promote the pending message
             sendJson({ type: "injection_ack", messageId });
+            if (unlockedByUserPrompt) retryDeferredAutomationAfterUserPrompt();
           }).catch((e: any) => {
             if (e?.message === "Queued prompt retracted") {
               console.log(`[Inject] Queued prompt retracted (messageId=${messageId})`);
@@ -4442,6 +4584,11 @@ function createConnectionHandler(
         // session and must never determine a Monitor's destination.
         const monitorOwner = activeSession;
         monitorOwner.onMonitorOutput = (text: string) => {
+          const monitorSid = sessionInstanceId(monitorOwner);
+          if (monitorSid && sessionAutomationLocks.isLocked(monitorSid)) {
+            console.log(`[StopLock] Monitor output cannot resume stopped session ${monitorSid}`);
+            return;
+          }
           void routeMonitorOutputToSession(monitorOwner, text, {
             beforeIdleRun: (monitorSid) => {
               console.log(`[Monitor] Starting query for owning session ${monitorSid}`);
@@ -4478,6 +4625,7 @@ function createConnectionHandler(
         const runPromise = (sessionForRun as any).runQueryWithOptions
           ? (sessionForRun as any).runQueryWithOptions(msg.text, resumeId, runOptions)
           : sessionForRun.runQuery(msg.text, resumeId);
+        if (unlockedByUserPrompt) retryDeferredAutomationAfterUserPrompt();
         let sessionStartedPushSent = false;
         const maybeSendSessionStartedPush = () => {
           if (sessionStartedPushSent) return;
@@ -4597,6 +4745,17 @@ function createConnectionHandler(
           || requestedSessionId
           || activeSid
           || undefined;
+        if (answerSid && sessionAutomationLocks.isLocked(answerSid)) {
+          sendJson({
+            type: "question_answered",
+            questionId: qId,
+            sessionId: answerSid,
+            answers: msg.answers,
+          });
+          markQuestionAnswered(answerSid, qId, msg.answers);
+          console.log(`[StopLock] Stored question answer without resuming stopped session ${answerSid}`);
+          break;
+        }
         // Get session context if available, or build a minimal one for plugin-only answers
         const sessionCtx = answerSession
           ? answerSession.getSessionContext()
@@ -5616,30 +5775,48 @@ function createConnectionHandler(
           break;
         }
         try {
+          const wasAutomationLocked = sessionAutomationLocks.isLocked(targetSid);
+          let lockPersistenceError: Error | null = null;
+          try {
+            // Install the latch before touching the backend. Any simultaneous
+            // automated callback sees the lock and loses the race.
+            sessionAutomationLocks.lock(targetSid);
+          } catch (error: any) {
+            lockPersistenceError = error instanceof Error ? error : new Error(String(error));
+            console.error(`[StopLock] Durable write failed for ${targetSid}: ${lockPersistenceError.message}`);
+          }
           const result = await hardAbortCoordinator.abort(
             requestId,
             targetSid,
-            () => activeSessions.get(targetSid)
-              || (activeSession && activeSessionId === targetSid ? activeSession : null),
+            () => abortGroupForSession(targetSid, [
+              activeSessions.get(targetSid),
+              activeSession && activeSessionId === targetSid ? activeSession : null,
+            ]),
             (target) => {
-              hardAbortedSessions.add(target as Session);
-              persistPendingLogicalRun(target as Session, targetSid);
-              finishLogicalRunNow(targetSid, "stopped");
-              if (activeSessions.get(targetSid) === target) {
-                activeSessions.delete(targetSid);
-              }
-              try {
-                appendHistory(targetSid, {
-                  role: "notification",
-                  content: "Action cancelled",
-                  status: "cancelled",
-                  timestamp: new Date().toISOString(),
-                });
-              } catch (error: any) {
-                console.warn(`[Abort] Failed to persist cancellation marker for ${targetSid}: ${error?.message || error}`);
+              const runners = abortTargets(target as Session);
+              for (const runner of runners) {
+                hardAbortedSessions.add(runner);
+                liveSessionInstances.remove(runner, targetSid);
+                persistPendingLogicalRun(runner, targetSid);
+                if (activeSessions.get(targetSid) === runner) {
+                  activeSessions.delete(targetSid);
+                }
               }
             },
           );
+          finishLogicalRunNow(targetSid, "stopped");
+          if (!wasAutomationLocked) {
+            try {
+              appendHistory(targetSid, {
+                role: "notification",
+                content: "Action cancelled",
+                status: "cancelled",
+                timestamp: new Date().toISOString(),
+              });
+            } catch (error: any) {
+              console.warn(`[Abort] Failed to persist cancellation marker for ${targetSid}: ${error?.message || error}`);
+            }
+          }
           console.log(`[Abort] Hard stop completed session=${targetSid} request=${requestId} alreadyStopped=${result.alreadyStopped}`);
           broadcastStatusSync();
           sendJson({
@@ -5648,6 +5825,9 @@ function createConnectionHandler(
             sessionId: targetSid,
             stopped: true,
             alreadyStopped: result.alreadyStopped,
+            ...(lockPersistenceError
+              ? { warning: `Stopped, but durable stop-lock persistence failed: ${lockPersistenceError.message}` }
+              : {}),
           });
         } catch (error: any) {
           console.error(`[Abort] Hard stop failed session=${targetSid} request=${requestId}: ${error?.message || error}`);
@@ -5750,7 +5930,12 @@ function createConnectionHandler(
             envHint: saved.envHint,
           });
 
-          if (recoveredFromHistory && targetSessionId && sessionInfo) {
+          if (
+            recoveredFromHistory
+            && targetSessionId
+            && sessionInfo
+            && !sessionAutomationLocks.isLocked(targetSessionId)
+          ) {
             if (!targetSession) {
               targetSession = createSession(
                 sessionInfo.backend,
@@ -5793,6 +5978,8 @@ function createConnectionHandler(
                 sendJson({ type: "error", message: error.message || "Failed to resume secure input request" });
               });
             }
+          } else if (recoveredFromHistory && targetSessionId && sessionAutomationLocks.isLocked(targetSessionId)) {
+            console.log(`[StopLock] Saved secure input without resuming stopped session ${targetSessionId}`);
           }
         } catch (e: any) {
           sendJson({ type: "error", message: `Secure input failed: ${e.message || String(e)}` });
@@ -8017,6 +8204,15 @@ const httpServer = http.createServer((req, res) => {
           res.end("Missing sessionId or prompt");
           return;
         }
+        if (sessionAutomationLocks.isLocked(sessionId)) {
+          res.writeHead(423, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ok: false,
+            code: "SESSION_STOPPED_BY_USER",
+            error: "Session is stopped and can only be resumed by a user message",
+          }));
+          return;
+        }
         const sessionInfo = getSession(sessionId);
         if (!sessionInfo) {
           res.writeHead(404);
@@ -8858,6 +9054,9 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     }
 
     const shouldResume = task.reuseSession && task.sessionId;
+    if (shouldResume && task.sessionId) {
+      assertSessionAutomationAllowed(task.sessionId, "scheduled task continuation");
+    }
     const reusableSessionInfo = shouldResume && task.sessionId ? getSession(task.sessionId) : undefined;
     const backend = task.backend
       || reusableSessionInfo?.backend

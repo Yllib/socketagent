@@ -2508,6 +2508,13 @@ export class CodexSession {
       },
       reportSubagentAssignment: (agentPath, prompt) =>
         this.reportCodexSubagentAssignment(agentPath, prompt),
+      requestPluginAuthorization: async (pluginName) => {
+        const plugin = this._plugins.find((candidate) => candidate.name === pluginName);
+        if (!plugin?.requestAuthorization) {
+          throw new Error(`Private integration is not available: ${pluginName}`);
+        }
+        return await plugin.requestAuthorization(this.getSessionContext());
+      },
     };
   }
 

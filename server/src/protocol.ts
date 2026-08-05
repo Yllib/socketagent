@@ -1605,6 +1605,16 @@ export interface HistoryEntry {
   answered?: boolean;
   /** Safe, user-visible answers. Never used for secure-input values. */
   answers?: Record<string, string>;
+  /**
+   * Safe routing metadata for a resumable private-integration authorization
+   * card. Credential values are never stored here.
+   */
+  authRequest?: {
+    kind: string;
+    requestId: string;
+    startUrl: string;
+    captureOrigins: string[];
+  };
   // Subagent hierarchy and message tracking
   parentToolUseId?: string | null;
   uuid?: string;

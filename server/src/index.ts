@@ -45,6 +45,7 @@ import {
 } from "./protocol";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferPeerId, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
+import { createPluginAnswerAcknowledgement } from "./plugin-answer";
 import { RelayClient, RelayStatus } from "./relay-client";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
@@ -4846,17 +4847,6 @@ function createConnectionHandler(
           || requestedSessionId
           || activeSid
           || undefined;
-        if (answerSid && sessionAutomationLocks.isLocked(answerSid)) {
-          sendJson({
-            type: "question_answered",
-            questionId: qId,
-            sessionId: answerSid,
-            answers: msg.answers,
-          });
-          markQuestionAnswered(answerSid, qId, msg.answers);
-          console.log(`[StopLock] Stored question answer without resuming stopped session ${answerSid}`);
-          break;
-        }
         // Get session context if available, or build a minimal one for plugin-only answers
         const sessionCtx = answerSession
           ? answerSession.getSessionContext()
@@ -4873,16 +4863,29 @@ function createConnectionHandler(
             const result = await plugin.answerMiddleware(qId, msg.answers, sessionCtx);
             if (result.handled) {
               answerHandled = true;
-              sendJson({
-                type: "question_answered",
-                questionId: qId,
-                sessionId: answerSid,
-                answers: msg.answers,
-              });
-              if (answerSid) markQuestionAnswered(answerSid, qId, msg.answers);
+              // Plugin answers may contain cookies, tokens, or other private
+              // integration material. They are never echoed or written to
+              // ordinary question history unless the plugin supplies a
+              // separate, explicitly sanitized publicAnswers object.
+              sendJson(createPluginAnswerAcknowledgement(qId, answerSid, result));
+              if (answerSid && result.publicAnswers) {
+                markQuestionAnswered(answerSid, qId, result.publicAnswers);
+              }
               break;
             }
           }
+        }
+        if (answerHandled) break;
+        if (answerSid && sessionAutomationLocks.isLocked(answerSid)) {
+          sendJson({
+            type: "question_answered",
+            questionId: qId,
+            sessionId: answerSid,
+            answers: msg.answers,
+          });
+          markQuestionAnswered(answerSid, qId, msg.answers);
+          console.log(`[StopLock] Stored question answer without resuming stopped session ${answerSid}`);
+          break;
         }
         if (!answerHandled && answerSession) {
           const resolved = answerSession.resolveQuestion(qId, msg.answers);

@@ -35,7 +35,15 @@ export type CanUseToolResult =
 
 /** Answer middleware result */
 export type AnswerResult =
-  | { handled: true }
+  | {
+      handled: true;
+      /**
+       * Optional sanitized values that are safe to show in the app and retain
+       * in ordinary question history. Raw plugin answers are private by
+       * default and must never be echoed or persisted implicitly.
+       */
+      publicAnswers?: Record<string, string>;
+    }
   | { handled: false };
 
 export interface SocketAgentPlugin {
@@ -63,6 +71,13 @@ export interface SocketAgentPlugin {
     answers: Record<string, string>,
     sessionCtx: SessionContext
   ): AnswerResult | Promise<AnswerResult>;
+
+  /**
+   * Present a plugin-owned protected authorization flow for this session.
+   * This lets harnesses without in-process plugin MCP support request the
+   * same card without relying on a shell-command approval side effect.
+   */
+  requestAuthorization?(sessionCtx: SessionContext): boolean | Promise<boolean>;
 
   /** Additional MCP servers to register with the SDK */
   mcpServers?(): Record<string, any>;

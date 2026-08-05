@@ -10,6 +10,7 @@ import {
   handleAgentSessionTool,
   handleMonitorTool,
   handleNotifyUserTool,
+  handlePrivateIntegrationAuthTool,
   handleRequestSecureInputTool,
   handleReadSkillTool,
   handleReportSubagentAssignmentTool,
@@ -48,6 +49,10 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "RequestSecureInput",
     description: "Ask the user for a credential/API key/token through a secure app card and receive only a local secret file path.",
+  },
+  {
+    name: "PrivateIntegrationAuth",
+    description: "Open a protected, plugin-owned sign-in card for an installed private integration.",
   },
   {
     name: "Speak",
@@ -186,6 +191,18 @@ function createServer(context: AppToolContext): McpServer {
       },
     },
     async (args) => handleWorkReviewTool(context, args as any),
+  );
+
+  server.registerTool(
+    "PrivateIntegrationAuth",
+    {
+      title: "Private Integration Sign-In",
+      description: "Open the protected SocketAgent sign-in card for an installed private integration. Use the exact integration name supplied by that integration's instructions. Never request its cookies, tokens, passwords, or MFA values in chat.",
+      inputSchema: {
+        integration: z.string().min(1).max(100).describe("Installed private integration name, for example outlook-auth or ibs-auth"),
+      },
+    },
+    async ({ integration }) => handlePrivateIntegrationAuthTool(context, integration),
   );
 
   server.registerTool(

@@ -57,12 +57,50 @@ export interface AppToolContext {
   onMonitorOutput?(text: string): void;
   manageAgentSession?: AgentSessionToolExecutor;
   reportSubagentAssignment?(agentPath: string, prompt: string): boolean;
+  requestPluginAuthorization?(pluginName: string): Promise<boolean>;
 }
 
 export interface McpTextResult {
   [key: string]: unknown;
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
+}
+
+export async function handlePrivateIntegrationAuthTool(
+  ctx: AppToolContext,
+  integration: string,
+): Promise<McpTextResult> {
+  if (!ctx.requestPluginAuthorization) {
+    return {
+      content: [{
+        type: "text",
+        text: "Private integration authorization is unavailable in this session.",
+      }],
+      isError: true,
+    };
+  }
+  try {
+    const success = await ctx.requestPluginAuthorization(integration);
+    return {
+      content: [{
+        type: "text",
+        text: success
+          ? `${integration} authorization completed.`
+          : `${integration} authorization was cancelled, timed out, or could not be validated.`,
+      }],
+      ...(success ? {} : { isError: true }),
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: "text",
+        text: error instanceof Error
+          ? error.message
+          : "Private integration authorization failed.",
+      }],
+      isError: true,
+    };
+  }
 }
 
 export interface ReminderArgs {

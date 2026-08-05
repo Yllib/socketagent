@@ -104,6 +104,7 @@ import {
   delegatedAgentResultHistoryEntries,
   delegatedAgentResultToolUseId,
 } from "./delegated-agent-result-card";
+import { findUntrackedDelegatedRestartContinuation } from "./delegated-agent-restart-recovery";
 import {
   backfillSessionRunStats,
   beginSessionRun,
@@ -2183,14 +2184,21 @@ function broadcastHeadlessSessionMessage(data: string, fallbackSessionId = ""): 
   }
 }
 
+function isDelegatedAgentFinalReply(entry: ReturnType<typeof getHistory>[number]): boolean {
+  const content = entry.content.trim();
+  return entry.role === "assistant"
+    && !entry.thinking
+    && !entry.parentToolUseId
+    && content.length > 0
+    && !content.startsWith("[Server restart")
+    && !content.startsWith("[compact_boundary:");
+}
+
 function delegatedAgentResult(sessionId: string, startedAt: string): string {
   const entries = getHistory(sessionId);
   const started = new Date(startedAt).getTime();
   const reply = [...entries].reverse().find((entry) =>
-    entry.role === "assistant"
-    && !entry.thinking
-    && !entry.parentToolUseId
-    && entry.content.trim().length > 0
+    isDelegatedAgentFinalReply(entry)
     && new Date(entry.timestamp).getTime() >= started,
   );
   const result = reply?.content.trim() || getSession(sessionId)?.messagePreview?.trim() || "";
@@ -2198,6 +2206,54 @@ function delegatedAgentResult(sessionId: string, startedAt: string): string {
   return result.length <= 50_000
     ? result
     : `${result.slice(0, 50_000)}\n\n[Delegated result truncated by SocketAgent]`;
+}
+
+function runningDelegatedAgentTurnForChild(sessionId: string): {
+  record: DelegatedAgentRecord;
+  run: DelegatedAgentRun;
+} | undefined {
+  const record = getDelegatedAgent(sessionId);
+  if (!record || record.childSessionId !== sessionId) return undefined;
+  const run = [...record.runs].reverse().find((candidate) =>
+    candidate.status === "running" || candidate.status === "starting",
+  );
+  return run ? { record, run } : undefined;
+}
+
+function finishDelegatedAgentTurn(
+  delegationId: string,
+  runId: string,
+  childSessionId: string | undefined,
+  outcome: "completed" | "failed",
+  error?: unknown,
+): void {
+  const latest = getDelegatedAgent(delegationId);
+  const run = latest?.runs.find((candidate) => candidate.runId === runId);
+  if (!latest || !run || (run.status !== "running" && run.status !== "starting")) return;
+
+  const patch = outcome === "completed"
+    ? {
+        status: "completed" as const,
+        completedAt: new Date().toISOString(),
+        result: childSessionId
+          ? delegatedAgentResult(childSessionId, run.startedAt)
+          : "The delegated turn completed before SocketAgent received its native session ID.",
+        reportStatus: "pending" as const,
+      }
+    : {
+        status: "failed" as const,
+        completedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : String(error || "Delegated turn failed"),
+        reportStatus: "pending" as const,
+      };
+  const finished = updateDelegatedAgentRun(
+    delegationId,
+    runId,
+    patch,
+    outcome,
+  );
+  const finishedRun = finished?.runs.find((candidate) => candidate.runId === runId);
+  if (finished && finishedRun) void deliverDelegatedAgentReport(finished, finishedRun);
 }
 
 function delegatedReportPrompt(record: DelegatedAgentRecord, run: DelegatedAgentRun): string {
@@ -2520,50 +2576,24 @@ async function launchDelegatedAgentTurn(
   const resumeId = record.childSessionId || undefined;
   const runPromise = child.runQuery(prompt, resumeId);
   void runPromise
-    .then(async () => {
-      const latest = getDelegatedAgent(record.delegationId);
-      const latestRun = latest?.runs.find((candidate) => candidate.runId === run.runId);
-      if (!latest || latestRun?.status === "stopped") return;
-      const sid = child.getSessionId() || latest.childSessionId;
-      const result = sid
-        ? delegatedAgentResult(sid, run.startedAt)
-        : "The delegated turn completed before SocketAgent received its native session ID.";
-      const completed = updateDelegatedAgentRun(
+    .then(() => {
+      const sid = child.getSessionId() || childSessionId;
+      finishDelegatedAgentTurn(
         record.delegationId,
         run.runId,
-        {
-          status: "completed",
-          completedAt: new Date().toISOString(),
-          result,
-          reportStatus: "pending",
-        },
+        sid,
         "completed",
       );
-      if (completed) {
-        const completedRun = completed.runs.find((candidate) => candidate.runId === run.runId);
-        if (completedRun) void deliverDelegatedAgentReport(completed, completedRun);
-      }
     })
     .catch((err: any) => {
       launchFailure = err instanceof Error ? err : new Error(String(err));
-      const latest = getDelegatedAgent(record.delegationId);
-      const latestRun = latest?.runs.find((candidate) => candidate.runId === run.runId);
-      if (!latest || latestRun?.status === "stopped") return;
-      const failed = updateDelegatedAgentRun(
+      finishDelegatedAgentTurn(
         record.delegationId,
         run.runId,
-        {
-          status: "failed",
-          completedAt: new Date().toISOString(),
-          error: launchFailure.message,
-          reportStatus: "pending",
-        },
+        child.getSessionId() || childSessionId || temporaryId,
         "failed",
+        launchFailure,
       );
-      if (failed) {
-        const failedRun = failed.runs.find((candidate) => candidate.runId === run.runId);
-        if (failedRun) void deliverDelegatedAgentReport(failed, failedRun);
-      }
     })
     .finally(async () => {
       const sid = child.getSessionId() || childSessionId || temporaryId;
@@ -2874,6 +2904,79 @@ function retryPendingDelegatedAgentReports(): void {
   }
 }
 
+function scheduleInterruptedDelegatedAgentDeadline(
+  delegationId: string,
+  runId: string,
+  delayMs = 30_000,
+): void {
+  const timer = setTimeout(() => {
+    const latest = getDelegatedAgent(delegationId);
+    const run = latest?.runs.find((candidate) => candidate.runId === runId);
+    if (!latest || !run || (run.status !== "running" && run.status !== "starting")) return;
+    const childSessionId = latest.childSessionId;
+    const activeChild = childSessionId ? activeSessions.get(childSessionId) : undefined;
+    if (activeChild && sessionIsBusy(activeChild)) {
+      scheduleInterruptedDelegatedAgentDeadline(delegationId, runId, 15_000);
+      return;
+    }
+    finishDelegatedAgentTurn(
+      delegationId,
+      runId,
+      childSessionId || `delegated-${delegationId}`,
+      "failed",
+      new Error("SocketAgent could not resume the delegated child after restarting."),
+    );
+  }, delayMs);
+  timer.unref?.();
+}
+
+function reattachUntrackedDelegatedRestartContinuation(
+  record: DelegatedAgentRecord,
+  allowRunningRecovery: boolean,
+): { record: DelegatedAgentRecord; run: DelegatedAgentRun } | undefined {
+  if (!record.childSessionId) return undefined;
+  const recovery = findUntrackedDelegatedRestartContinuation(
+    record,
+    getHistory(record.childSessionId),
+  );
+  if (!recovery || (recovery.status === "running" && !allowRunningRecovery)) {
+    return undefined;
+  }
+  const run: DelegatedAgentRun = {
+    runId: crypto.randomUUID(),
+    runNumber: record.runs.length + 1,
+    promptPreview: "Continue delegated work after SocketAgent restart",
+    startedAt: recovery.startedAt,
+    status: recovery.status,
+    ...(recovery.completedAt ? { completedAt: recovery.completedAt } : {}),
+    ...(recovery.result ? { result: recovery.result } : {}),
+    ...(recovery.status === "completed" ? { reportStatus: "pending" as const } : {}),
+  };
+  const recovered = addDelegatedAgentRun(record.delegationId, run);
+  if (!recovered) return undefined;
+  const recoveredRun = recovered.runs.find((candidate) => candidate.runId === run.runId);
+  if (!recoveredRun) return undefined;
+  console.log(
+    `[DelegatedAgent] Reattached restart continuation delegation=${record.delegationId}`
+    + ` run=${run.runId} status=${run.status} child=${record.childSessionId}`,
+  );
+  if (run.status === "completed") {
+    void deliverDelegatedAgentReport(recovered, recoveredRun);
+  } else {
+    scheduleInterruptedDelegatedAgentDeadline(record.delegationId, run.runId);
+  }
+  return { record: recovered, run: recoveredRun };
+}
+
+function recoverUntrackedDelegatedRestartContinuations(): void {
+  for (const record of listDelegatedAgents()) {
+    reattachUntrackedDelegatedRestartContinuation(
+      record,
+      record.status === "running" || record.status === "starting",
+    );
+  }
+}
+
 function recoverInterruptedDelegatedAgentRuns(): void {
   for (const record of listDelegatedAgents()) {
     if (!interruptedDelegationIdsAtStartup.has(record.delegationId)) continue;
@@ -2884,44 +2987,18 @@ function recoverInterruptedDelegatedAgentRuns(): void {
       updateDelegatedAgent(record.delegationId, { status: "failed" });
       continue;
     }
-    const exactReply = record.childSessionId
-      ? [...getHistory(record.childSessionId)].reverse().find((entry) =>
-          entry.role === "assistant"
-          && !entry.thinking
-          && !entry.parentToolUseId
-          && entry.content.trim().length > 0
-          && new Date(entry.timestamp).getTime() >= new Date(run.startedAt).getTime(),
-        )?.content.trim()
-      : "";
-    const recovered = updateDelegatedAgentRun(
-      record.delegationId,
-      run.runId,
-      exactReply
-        ? {
-            status: "completed",
-            completedAt: new Date().toISOString(),
-            result: exactReply.length <= 50_000
-              ? exactReply
-              : `${exactReply.slice(0, 50_000)}\n\n[Delegated result truncated by SocketAgent]`,
-            reportStatus: "pending",
-          }
-        : {
-            status: "failed",
-            completedAt: new Date().toISOString(),
-            error: "SocketAgent restarted before the delegated turn reached a durable final response.",
-            reportStatus: "pending",
-          },
-      exactReply ? "completed" : "failed",
+    console.log(
+      `[DelegatedAgent] Awaiting restart continuation delegation=${record.delegationId}`
+      + ` run=${run.runId} child=${record.childSessionId || "pending"}`,
     );
-    if (!recovered) continue;
-    const recoveredRun = recovered.runs.find((candidate) => candidate.runId === run.runId);
-    if (recoveredRun) void deliverDelegatedAgentReport(recovered, recoveredRun);
+    scheduleInterruptedDelegatedAgentDeadline(record.delegationId, run.runId);
   }
 }
 
 const delegatedReportRetryTimer = setInterval(retryPendingDelegatedAgentReports, 15_000);
 delegatedReportRetryTimer.unref?.();
 setTimeout(() => {
+  recoverUntrackedDelegatedRestartContinuations();
   recoverInterruptedDelegatedAgentRuns();
   retryPendingDelegatedAgentReports();
 }, 2_000).unref?.();
@@ -8269,9 +8346,30 @@ const httpServer = http.createServer((req, res) => {
         }
         console.log(`[Continue] Starting query for session ${sessionId}`);
 
+        // A server restart must not detach a delegated child from the run that
+        // owns its eventual supervisor callback. The old process's Promise is
+        // gone, so this continuation becomes the durable completion owner.
+        let delegatedContinuation = runningDelegatedAgentTurnForChild(sessionId);
+        if (!delegatedContinuation) {
+          const detached = getDelegatedAgent(sessionId);
+          const reattached = detached
+            ? reattachUntrackedDelegatedRestartContinuation(detached, true)
+            : undefined;
+          if (reattached?.run.status === "running") {
+            delegatedContinuation = reattached;
+          }
+        }
         const continueRunPromise = session.runQuery(prompt, sessionId);
         sendSessionStartedPush(session);
         continueRunPromise.then(() => {
+          if (delegatedContinuation) {
+            finishDelegatedAgentTurn(
+              delegatedContinuation.record.delegationId,
+              delegatedContinuation.run.runId,
+              sessionId,
+              "completed",
+            );
+          }
           const sid = session.getSessionId() || sessionId;
           if (activeSessions.get(sid) === session && !sessionShouldRemainPooled(session)) {
             activeSessions.delete(sid);
@@ -8282,6 +8380,15 @@ const httpServer = http.createServer((req, res) => {
           broadcastSessionList();
         }).catch((err) => {
           console.error(`[Continue] Query error: ${err.message}`);
+          if (delegatedContinuation) {
+            finishDelegatedAgentTurn(
+              delegatedContinuation.record.delegationId,
+              delegatedContinuation.run.runId,
+              sessionId,
+              "failed",
+              err,
+            );
+          }
           if (!sessionShouldRemainPooled(session)) activeSessions.delete(sessionId);
           if (!hardAbortedSessions.delete(session)) {
             settleLogicalRun(session, "failed", sessionId);

@@ -141,9 +141,24 @@ REMOTE_APP_ID_ASSIGNMENT=""
 if [[ -n "$APP_ID_OVERRIDE" ]]; then
   REMOTE_APP_ID_ASSIGNMENT="\$env:SOCKETAGENT_APPLICATION_ID='$APP_ID_OVERRIDE'; "
 fi
-ssh "$REMOTE_HOST" "powershell -Command \"${REMOTE_APP_ID_ASSIGNMENT}\$env:ANDROID_HOME='$REMOTE_ANDROID_HOME'; Set-Location '$REMOTE_DIR'; \$apk='build/app/outputs/flutter-apk/app-release.apk'; Remove-Item \$apk -Force -ErrorAction SilentlyContinue; & '$REMOTE_FLUTTER' build apk --release 2>&1; \$code=\$LASTEXITCODE; if ((Test-Path \$apk) -and \$code -ne 0) { Write-Output \\\"Flutter exited with code \$code after producing app-release.apk; continuing.\\\"; exit 0 }; exit \$code\"" | while read -r line; do
+ssh "$REMOTE_HOST" "powershell -Command \"${REMOTE_APP_ID_ASSIGNMENT}\$env:ANDROID_HOME='$REMOTE_ANDROID_HOME'; Set-Location '$REMOTE_DIR'; \$apk='build/app/outputs/flutter-apk/app-release.apk'; \$gradleApk='build/app/outputs/apk/release/app-release.apk'; Remove-Item \$apk,\$gradleApk -Force -ErrorAction SilentlyContinue; & '$REMOTE_FLUTTER' build apk --release 2>&1; \$code=\$LASTEXITCODE; if ((Test-Path \$apk) -and \$code -ne 0) { Write-Output \\\"Flutter exited with code \$code after producing app-release.apk; continuing.\\\"; exit 0 }; exit \$code\"" | while read -r line; do
   echo "  [remote] $line"
 done
+
+# Refuse to publish a stale or mislabeled artifact. This is deliberately
+# checked on the build host with Android's own manifest parser before the APK
+# is copied, signed metadata is generated, or any release commits are made.
+echo "  Verifying embedded app version..."
+REMOTE_BADGING="$(ssh "$REMOTE_HOST" "powershell -NoProfile -Command \"\$aapt = Get-ChildItem '$REMOTE_ANDROID_HOME/build-tools' -Recurse -Filter aapt.exe | Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName; if (-not \$aapt) { throw 'aapt.exe not found' }; & \$aapt dump badging '$REMOTE_DIR/build/app/outputs/flutter-apk/app-release.apk' | Select-Object -First 1\"" | tr -d '\r')"
+echo "  [remote] $REMOTE_BADGING"
+if [[ "$REMOTE_BADGING" != *"versionName='$NEW_VERSION'"* ]]; then
+  echo "Embedded APK version name does not match release: expected $NEW_VERSION" >&2
+  exit 1
+fi
+if [[ "$REMOTE_BADGING" != *"versionCode='$BUILD'"* ]]; then
+  echo "Embedded APK version code does not match release: expected $BUILD" >&2
+  exit 1
+fi
 
 # Copy APK back
 echo "  Copying APK back..."

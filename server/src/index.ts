@@ -6664,41 +6664,13 @@ function createConnectionHandler(
         const text = (msg as any).text as string;
         const voice = (msg as any).voice as string || pendingKokoroVoice;
         const speed = (msg as any).speed as number || pendingKokoroSpeed;
-        const requestId = String((msg as any).requestId || `tts_${Date.now()}`);
-        const stream = (msg as any).stream === true;
         if (text) {
           try {
-            const { generateKokoroAudio, generateKokoroAudioStream } = require("./kokoro-tts");
-            if (stream) {
-              const generated = await generateKokoroAudioStream(
-                text,
-                voice,
-                speed,
-                (wavBuffer: Buffer, index: number) => {
-                  sendJson({
-                    type: "tts_audio_chunk",
-                    requestId,
-                    index,
-                    audioData: wavBuffer.toString("base64"),
-                    text,
-                    sessionId: activeSession?.getSessionId() || "",
-                  });
-                },
-              );
-              sendJson({
-                type: "tts_audio_complete",
-                requestId,
-                ok: generated,
-                text,
-                sessionId: activeSession?.getSessionId() || "",
-              });
-              break;
-            }
+            const { generateKokoroAudio } = require("./kokoro-tts");
             const wavBuffer = generateKokoroAudio(text, voice, speed);
             if (wavBuffer) {
               sendJson({
                 type: "tts_audio",
-                requestId,
                 audioData: wavBuffer.toString("base64"),
                 text,
                 sessionId: activeSession?.getSessionId() || "",

@@ -337,8 +337,6 @@ export interface RequestTtsAudioMessage {
   text: string;
   voice?: string;
   speed?: number;
-  requestId?: string;
-  stream?: boolean;
 }
 
 export interface RequestFileMessage {
@@ -2038,24 +2036,6 @@ export interface TtsAudioServerMessage {
   audioData: string;
   text: string;
   sessionId: string;
-  requestId?: string;
-}
-
-export interface TtsAudioChunkServerMessage {
-  type: "tts_audio_chunk";
-  requestId: string;
-  index: number;
-  audioData: string;
-  text: string;
-  sessionId: string;
-}
-
-export interface TtsAudioCompleteServerMessage {
-  type: "tts_audio_complete";
-  requestId: string;
-  ok: boolean;
-  text: string;
-  sessionId: string;
 }
 
 export interface ActiveSubagentsServerMessage {
@@ -2477,8 +2457,6 @@ export type ServerMessage =
   | RewindConversationResultServerMessage
   | BranchResultServerMessage
   | TtsAudioServerMessage
-  | TtsAudioChunkServerMessage
-  | TtsAudioCompleteServerMessage
   | ThinkingServerMessage
   | ThinkingTokensServerMessage
   | ToolImageServerMessage

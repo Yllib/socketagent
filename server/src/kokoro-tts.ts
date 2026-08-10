@@ -103,6 +103,70 @@ export function generateKokoroAudio(
   }
 }
 
+function samplesToWavBuffer(samples: Float32Array, sampleRate: number): Buffer {
+  const dataSize = samples.length * 2;
+  const wav = Buffer.alloc(44 + dataSize);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write("WAVE", 8, "ascii");
+  wav.write("fmt ", 12, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(dataSize, 40);
+  for (let i = 0; i < samples.length; i++) {
+    const sample = Math.max(-1, Math.min(1, Number(samples[i]) || 0));
+    wav.writeInt16LE(Math.round(sample * 32767), 44 + i * 2);
+  }
+  return wav;
+}
+
+/**
+ * Generate one context-aware utterance asynchronously while forwarding audio
+ * chunks as soon as Kokoro makes them available. The complete text is passed
+ * to the model once, so streaming playback does not sacrifice sentence or
+ * paragraph context.
+ */
+export async function generateKokoroAudioStream(
+  text: string,
+  voice: string = "af_heart",
+  speed: number = 1.0,
+  onChunk: (wav: Buffer, index: number) => void,
+): Promise<boolean> {
+  if (!ensureInitialized()) return false;
+
+  const sid = KOKORO_VOICES[voice] ?? 0;
+  let chunkCount = 0;
+  try {
+    const audio = await ttsInstance.generateAsync({
+      text,
+      sid,
+      speed,
+      onProgress: (info: { samples?: Float32Array }) => {
+        const samples = info?.samples;
+        if (!samples || samples.length === 0) return 1;
+        onChunk(samplesToWavBuffer(samples, ttsInstance.sampleRate), chunkCount++);
+        return 1;
+      },
+    });
+    // Older native bindings may complete asynchronously without progress
+    // callbacks. Preserve compatibility by sending the final audio once.
+    if (chunkCount === 0 && audio?.samples?.length) {
+      onChunk(samplesToWavBuffer(audio.samples, audio.sampleRate || ttsInstance.sampleRate), 0);
+      chunkCount = 1;
+    }
+    return chunkCount > 0;
+  } catch (e) {
+    console.error("[KokoroTTS] Streaming generation failed:", e);
+    return false;
+  }
+}
+
 export function freeKokoroTts(): void {
   ttsInstance = null;
 }

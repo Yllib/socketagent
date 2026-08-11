@@ -16,6 +16,7 @@ import {
   saveSession,
   getSession,
   appendHistory,
+  appendHistoryBulk,
   appendSdkEvent,
   updateSessionActivity,
   updateSessionContextUsage,
@@ -547,10 +548,42 @@ export class CodexSession {
     return true;
   }
 
+  /**
+   * A completed root turn cannot still own an active foreground tool. Codex
+   * occasionally omits item/completed after interruption or process trouble;
+   * settle those calls once so pooled-session replay cannot resurrect them.
+   */
+  private settleActiveAppServerToolCalls(output: string): void {
+    const sid = this.sessionId;
+    if (!sid || this.appServerActiveToolCalls.size === 0) return;
+    const historyEntries: HistoryEntry[] = [];
+    for (const [toolUseId, call] of this.appServerActiveToolCalls.entries()) {
+      this.send({
+        type: "tool_result",
+        toolUseId,
+        output,
+        sessionId: sid,
+        ...(call.parentToolUseId ? { parentToolUseId: call.parentToolUseId } : {}),
+      } as any);
+      historyEntries.push({
+        role: "tool_result",
+        content: output,
+        toolUseId,
+        toolOutput: output,
+        ...(call.parentToolUseId ? { parentToolUseId: call.parentToolUseId } : {}),
+        timestamp: now(),
+      });
+      this.appServerToolOutput.delete(toolUseId);
+    }
+    appendHistoryBulk(sid, historyEntries);
+    this.appServerActiveToolCalls.clear();
+  }
+
   private scheduleAppServerTurnCompletion(): void {
     this.cancelPendingAppServerTurnCompletion();
     this.pendingAppServerTurnCompletion = setTimeout(() => {
       this.pendingAppServerTurnCompletion = null;
+      this.settleActiveAppServerToolCalls("");
       const sid = this.sessionId;
       if (sid) {
         const usage = this._lastUsage ?? {
@@ -600,6 +633,7 @@ export class CodexSession {
   getSessionId(): string | null { return this.sessionId; }
   getCwd(): string { return this.cwd; }
   getActiveToolCall(): { toolUseId: string; name: string } | null {
+    if (!this._isRunning && !this.pendingAppServerTurnCompletion) return null;
     const activeCalls = [...this.appServerActiveToolCalls.entries()];
     const active = activeCalls.length > 0
       ? activeCalls[activeCalls.length - 1]
@@ -740,6 +774,10 @@ export class CodexSession {
   replayLiveState(ws: WebSocket = this.ws): void {
     const sid = this.sessionId || "";
     if (!sid) return;
+
+    if (!this._isRunning && !this.pendingAppServerTurnCompletion) {
+      this.settleActiveAppServerToolCalls("");
+    }
 
     this.sessionEventDelivery.replayTo((message) => {
       this.sendTo(ws, message as ServerMessage);
@@ -1957,6 +1995,9 @@ export class CodexSession {
 
   private async runAppServerQuery(prompt: string, resumeSessionId?: string): Promise<void> {
     if (this._isRunning) throw new Error("CodexSession already running a turn");
+    // Settle legacy/stale calls before starting a new turn. Without this, a
+    // pooled session can report a days-old command as the current active tool.
+    this.settleActiveAppServerToolCalls("");
     this._isRunning = true;
     this._runStartedAt = new Date().toISOString();
     this.onActivity?.();
@@ -2525,6 +2566,7 @@ export class CodexSession {
     this.cancelPendingAppServerTurnCompletion();
     this.clearQueuedPrompts("Codex turn interrupted");
     this.clearPendingAppServerSteers("Codex turn interrupted");
+    this.settleActiveAppServerToolCalls("(interrupted)");
     const client = this.appServer;
     if (client && this.threadId && this.activeAppServerTurnId) {
       void client.interruptTurn({

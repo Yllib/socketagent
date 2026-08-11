@@ -38,6 +38,11 @@ export interface FileManagerListing {
   parentPath?: string;
   entries: FileManagerEntry[];
   roots: FileManagerRoot[];
+  offset?: number;
+  limit?: number;
+  totalCount?: number;
+  nextOffset?: number;
+  hasMore?: boolean;
 }
 
 const TEXT_EXTENSIONS = new Set([
@@ -54,6 +59,7 @@ const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".mkv", ".webm", ".avi"]);
 const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".m4a", ".ogg", ".flac"]);
 const ARCHIVE_EXTENSIONS = new Set([".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"]);
 const DIRECTORY_READ_TIMEOUT_MS = 8_000;
+const LEGACY_DIRECTORY_ENTRY_LIMIT = 2_000;
 
 function withFilesystemTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -207,17 +213,78 @@ function mimeForExtension(ext: string): string | undefined {
   return undefined;
 }
 
-function entryKind(dirent: fs.Dirent): FileManagerEntryKind {
-  if (dirent.isDirectory()) return "directory";
-  if (dirent.isFile()) return "file";
-  if (dirent.isSymbolicLink()) return "symlink";
+function entryKind(entry: fs.Dirent | fs.Stats): FileManagerEntryKind {
+  if (entry.isDirectory()) return "directory";
+  if (entry.isFile()) return "file";
+  if (entry.isSymbolicLink()) return "symlink";
   return "other";
+}
+
+function compareDirectoryEntries(a: fs.Dirent, b: fs.Dirent): number {
+  const aDirectory = a.isDirectory();
+  const bDirectory = b.isDirectory();
+  if (aDirectory && !bDirectory) return -1;
+  if (!aDirectory && bDirectory) return 1;
+  const folded = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+  return folded !== 0 ? folded : a.name.localeCompare(b.name);
+}
+
+function fileManagerEntry(
+  fullPath: string,
+  kind: FileManagerEntryKind,
+  itemStat: fs.Stats | null,
+): FileManagerEntry {
+  const name = path.basename(fullPath);
+  const ext = kind === "directory" ? "" : path.extname(name);
+  const protectedMatch = matchProtectedPath(fullPath);
+  return {
+    name,
+    path: fullPath,
+    kind,
+    hidden: name.startsWith("."),
+    ...(itemStat ? { size: itemStat.size, modifiedAt: itemStat.mtime.toISOString() } : {}),
+    ...(ext ? { extension: ext } : {}),
+    mediaKind: ext ? classifyMedia(ext) : "other",
+    ...(ext ? { mimeType: mimeForExtension(ext) } : {}),
+    protected: protectedMatch !== null,
+    ...(protectedMatch?.entry.label ? { protectedLabel: protectedMatch.entry.label } : {}),
+  };
+}
+
+/** Returns metadata for exactly one path without enumerating its parent directory. */
+export async function statFileManagerPath(args: {
+  filePath: string;
+  defaultCwd: string;
+}): Promise<FileManagerEntry> {
+  const roots = getFileManagerRoots(args.defaultCwd);
+  const resolvedPath = resolveFileManagerPath(args.filePath, args.defaultCwd);
+  assertFileManagerPathAllowed(resolvedPath, roots);
+
+  if (isMacosProtectedUserPath(resolvedPath)) {
+    const access = await checkMacosFileAccess(resolvedPath);
+    if (access.access !== "granted") {
+      const denied = new Error(access.error || `macOS denied access to ${resolvedPath}`) as NodeJS.ErrnoException;
+      denied.code = "EPERM";
+      throw denied;
+    }
+  }
+
+  const stat = await withFilesystemTimeout(
+    fs.promises.lstat(resolvedPath),
+    `Reading ${resolvedPath}`,
+  );
+  return fileManagerEntry(resolvedPath, entryKind(stat), stat);
 }
 
 export async function listFileManagerDirectory(args: {
   dirPath?: string;
   includeHidden?: boolean;
   defaultCwd: string;
+  /** Omit for compatibility with older clients that expect a complete listing. */
+  offset?: number;
+  limit?: number;
+  /** When paginating, begin with the page containing this exact child path. */
+  anchorPath?: string;
 }): Promise<FileManagerListing> {
   const roots = getFileManagerRoots(args.defaultCwd);
   const resolvedPath = resolveFileManagerPath(args.dirPath, args.defaultCwd);
@@ -241,9 +308,32 @@ export async function listFileManagerDirectory(args: {
   }
 
   const dirEntries = (await readDirectoryEntries(resolvedPath))
-    .filter((entry) => args.includeHidden || !entry.name.startsWith("."));
+    .filter((entry) => args.includeHidden || !entry.name.startsWith("."))
+    .sort(compareDirectoryEntries);
+  const requestedLimit = Number(args.limit);
+  const paginated = Number.isSafeInteger(requestedLimit) && requestedLimit > 0;
+  if (!paginated && dirEntries.length > LEGACY_DIRECTORY_ENTRY_LIMIT) {
+    throw new Error(
+      `Directory contains ${dirEntries.length} entries; paginated listing is required`,
+    );
+  }
+  const limit = paginated ? Math.min(requestedLimit, 500) : dirEntries.length;
+  let offset = paginated && Number.isSafeInteger(args.offset) && Number(args.offset) >= 0
+    ? Number(args.offset)
+    : 0;
+  if (paginated && args.anchorPath) {
+    const resolvedAnchor = resolveFileManagerPath(args.anchorPath, args.defaultCwd);
+    if (path.dirname(resolvedAnchor) === resolvedPath) {
+      const anchorIndex = dirEntries.findIndex(
+        (entry) => path.join(resolvedPath, entry.name) === resolvedAnchor,
+      );
+      if (anchorIndex >= 0) offset = Math.floor(anchorIndex / limit) * limit;
+    }
+  }
+  offset = Math.min(offset, dirEntries.length);
+  const pageEntries = paginated ? dirEntries.slice(offset, offset + limit) : dirEntries;
   const entries = (await withFilesystemTimeout(
-    Promise.all(dirEntries.map(async (entry): Promise<FileManagerEntry> => {
+    Promise.all(pageEntries.map(async (entry): Promise<FileManagerEntry> => {
       const fullPath = path.join(resolvedPath, entry.name);
       const kind = entryKind(entry);
       let itemStat: fs.Stats | null = null;
@@ -252,26 +342,10 @@ export async function listFileManagerDirectory(args: {
       } catch {
         itemStat = null;
       }
-      const ext = kind === "directory" ? "" : path.extname(entry.name);
-      const protectedMatch = matchProtectedPath(fullPath);
-      return {
-        name: entry.name,
-        path: fullPath,
-        kind,
-        hidden: entry.name.startsWith("."),
-        ...(itemStat ? { size: itemStat.size, modifiedAt: itemStat.mtime.toISOString() } : {}),
-        ...(ext ? { extension: ext } : {}),
-        ...(ext ? { mediaKind: classifyMedia(ext), mimeType: mimeForExtension(ext) } : { mediaKind: kind === "directory" ? "other" : "other" }),
-        protected: protectedMatch !== null,
-        ...(protectedMatch?.entry.label ? { protectedLabel: protectedMatch.entry.label } : {}),
-      };
+      return fileManagerEntry(fullPath, kind, itemStat);
     })),
     `Reading entries in ${resolvedPath}`,
-  )).sort((a, b) => {
-      if (a.kind === "directory" && b.kind !== "directory") return -1;
-      if (a.kind !== "directory" && b.kind === "directory") return 1;
-      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-    });
+  ));
 
   const parent = path.dirname(resolvedPath);
   const parentAllowed = parent !== resolvedPath && roots.some((root) => isPathInside(parent, root.path));
@@ -280,5 +354,12 @@ export async function listFileManagerDirectory(args: {
     ...(parentAllowed || process.env.FILE_MANAGER_ALLOW_ABSOLUTE === "true" ? { parentPath: parent } : {}),
     entries,
     roots,
+    ...(paginated ? {
+      offset,
+      limit,
+      totalCount: dirEntries.length,
+      ...(offset + entries.length < dirEntries.length ? { nextOffset: offset + entries.length } : {}),
+      hasMore: offset + entries.length < dirEntries.length,
+    } : {}),
   };
 }

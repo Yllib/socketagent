@@ -53,7 +53,7 @@ import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp"
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
 import { isPushConfigured, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { completionTranscriptTarget, SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
-import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, writeFileManagerText } from "./file-manager";
+import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
 import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 import { runBackendInstall } from "./backend-installer";
@@ -7652,6 +7652,9 @@ function createConnectionHandler(
             dirPath: (msg as any).path as string | undefined,
             includeHidden: (msg as any).includeHidden === true,
             defaultCwd: getDefaultCwd(),
+            offset: (msg as any).offset as number | undefined,
+            limit: (msg as any).limit as number | undefined,
+            anchorPath: (msg as any).anchorPath as string | undefined,
           });
           sendJson({
             type: "file_manager_list_result",
@@ -7670,6 +7673,36 @@ function createConnectionHandler(
             path: requestedPath || getDefaultCwd(),
             entries: [],
             roots: [],
+            error: e.message || String(e),
+            ...(permission ? { errorCode: "macos_privacy_denied", permission } : {}),
+          });
+        }
+        break;
+      }
+
+      case "file_manager_stat" as any: {
+        const requestId = (msg as any).requestId as string | undefined;
+        const requestedPath = String((msg as any).path || "");
+        try {
+          const entry = await statFileManagerPath({
+            filePath: requestedPath,
+            defaultCwd: getDefaultCwd(),
+          });
+          sendJson({
+            type: "file_manager_stat_result",
+            requestId,
+            ok: true,
+            path: entry.path,
+            entry,
+          });
+        } catch (e: any) {
+          const resolvedPath = resolveFileManagerPath(requestedPath, getDefaultCwd());
+          const permission = macosPrivacyErrorDetails(resolvedPath, e);
+          sendJson({
+            type: "file_manager_stat_result",
+            requestId,
+            ok: false,
+            path: requestedPath,
             error: e.message || String(e),
             ...(permission ? { errorCode: "macos_privacy_denied", permission } : {}),
           });

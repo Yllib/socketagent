@@ -660,6 +660,10 @@ test("replays an active Codex tool call after reconnect and retires it on comple
   session.threadId = rootId;
 
   try {
+    session.handleAppServerNotification("turn/started", {
+      threadId: rootId,
+      turn: { id: "turn-1" },
+    });
     session.handleAppServerNotification("item/started", {
       threadId: rootId,
       item: {
@@ -721,6 +725,39 @@ test("replays an active Codex tool call after reconnect and retires it on comple
       path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),
       { force: true },
     );
+  }
+});
+
+test("idle Codex replay settles orphaned tools instead of moving them to the tail", () => {
+  const sent = [];
+  const replayed = [];
+  const rootId = `test-idle-tool-replay-${crypto.randomUUID()}`;
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = rootId;
+  session.threadId = rootId;
+  session.appServerActiveToolCalls.set("orphan-command", {
+    tool: "Bash",
+    input: { command: "npm test" },
+  });
+
+  try {
+    session.replayLiveState(testSocket(replayed));
+
+    assert.equal(
+      replayed.some((message) =>
+        message.type === "tool_call"
+        && message.toolUseId === "orphan-command"),
+      false,
+    );
+    assert.ok(sent.some((message) =>
+      message.type === "tool_result"
+      && message.toolUseId === "orphan-command"));
+    assert.equal(session.getActiveToolCall(), null);
+    assert.ok(getHistory(rootId).some((entry) =>
+      entry.role === "tool_result"
+      && entry.toolUseId === "orphan-command"));
+  } finally {
+    deleteSessionArtifacts(rootId);
   }
 });
 

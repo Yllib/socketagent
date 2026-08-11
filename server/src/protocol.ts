@@ -374,6 +374,15 @@ export interface FileManagerListMessage {
   requestId?: string;
   path?: string;
   includeHidden?: boolean;
+  offset?: number;
+  limit?: number;
+  anchorPath?: string;
+}
+
+export interface FileManagerStatMessage {
+  type: "file_manager_stat";
+  requestId?: string;
+  path: string;
 }
 
 export interface MacosPermissionStatusMessage {
@@ -1008,6 +1017,7 @@ export type ClientMessage =
   | CheckCwdMessage
   | CreateCwdMessage
   | FileManagerListMessage
+  | FileManagerStatMessage
   | MacosPermissionStatusMessage
   | MacosPermissionActionMessage
   | FileManagerSetProtectedMessage
@@ -1881,6 +1891,22 @@ export interface FileManagerListResultServerMessage {
   parentPath?: string;
   entries: FileManagerEntry[];
   roots: Array<{ label: string; path: string }>;
+  offset?: number;
+  limit?: number;
+  totalCount?: number;
+  nextOffset?: number;
+  hasMore?: boolean;
+  error?: string;
+  errorCode?: string;
+  permission?: Record<string, unknown>;
+}
+
+export interface FileManagerStatResultServerMessage {
+  type: "file_manager_stat_result";
+  requestId?: string;
+  ok: boolean;
+  path: string;
+  entry?: FileManagerEntry;
   error?: string;
   errorCode?: string;
   permission?: Record<string, unknown>;
@@ -2443,6 +2469,7 @@ export type ServerMessage =
   | FileErrorServerMessage
   | UploadCompleteServerMessage
   | FileManagerListResultServerMessage
+  | FileManagerStatResultServerMessage
   | MacosPermissionStatusServerMessage
   | MacosPermissionActionServerMessage
   | FileManagerProtectedResultServerMessage

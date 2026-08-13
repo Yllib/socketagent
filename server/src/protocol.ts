@@ -44,6 +44,13 @@ export interface AnswerMessage {
   type: "answer";
   questionId: string;
   answers: Record<string, string>;
+  sessionId?: string;
+}
+
+export interface PrivateIntegrationAuthRequestMessage {
+  type: "private_integration_auth_request";
+  requestId: string;
+  integration: "outlook-auth" | "ibs-auth";
 }
 
 export interface SecureInputResponseMessage {
@@ -946,6 +953,7 @@ export type ClientMessage =
   | PromptMessage
   | RetractQueuedPromptMessage
   | AnswerMessage
+  | PrivateIntegrationAuthRequestMessage
   | SecureInputResponseMessage
   | SecureInputStoreMessage
   | SecretInventoryRequestMessage

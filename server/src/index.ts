@@ -75,6 +75,7 @@ import { applyInitialSessionSettings } from "./initial-session-settings";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { routeMonitorOutputToSession } from "./monitor-output-route";
 import { SERVER_RELEASE_VERSION } from "./server-build-info";
+import { startPrivateIntegrationAuthorization } from "./private-integration-auth";
 import {
   discardSessionTransfer,
   exportSessionTransfer,
@@ -4929,6 +4930,20 @@ function createConnectionHandler(
             }
           }
         }
+        break;
+      }
+
+      case "private_integration_auth_request": {
+        const requestId = typeof msg.requestId === "string"
+          ? msg.requestId.trim().slice(0, 200)
+          : "";
+        startPrivateIntegrationAuthorization({
+          plugins,
+          integration: msg.integration,
+          requestId,
+          cwd: getDefaultCwd(),
+          send: (message) => sendJson(message),
+        });
         break;
       }
 

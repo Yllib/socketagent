@@ -362,6 +362,20 @@ function codexAppServerErrorMessage(params: any, fallback: string): string {
     || fallback;
 }
 
+/**
+ * Codex reports response-stream reconnect attempts through its generic error
+ * notification channel even though the turn is still alive. They are progress
+ * events, not terminal failures; rejecting the turn here races Codex's own
+ * successful retry and leaves late activity attached to a falsely closed run.
+ */
+export function isRecoverableCodexAppServerError(params: any): boolean {
+  const error = params?.error || params;
+  const message = String(error?.message || params?.message || "");
+  const errorInfo = error?.codexErrorInfo || params?.codexErrorInfo;
+  return /^reconnecting(?:\.{3}|…)?\s*(?:\d+\s*\/\s*\d+)?$/i.test(message.trim())
+    && errorInfo?.responseStreamDisconnected != null;
+}
+
 type CodexSubagentStatus = "pending" | "running" | "completed" | "interrupted" | "errored" | "shutdown";
 
 type CodexSubagentState = {
@@ -2204,15 +2218,7 @@ export class CodexSession {
       // arrive here on a non-reserved channel so they cannot crash the process.
       // Surface the real message to the client instead of failing silently.
       this.appServer.on("errorNotification", (params: any) => {
-        const message = codexAppServerErrorMessage(params, "Codex reported an error");
-        const sid = this.sessionId;
-        if (sid) {
-          this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
-          if (!isCodexAuthError(params) && !isCodexAuthError(message)) {
-            this.send({ type: "error", message: `Codex: ${message}`, sessionId: sid } as any);
-          }
-        }
-        this.appServerTurnSettler?.reject(new Error(message));
+        this.handleAppServerErrorNotification(params);
       });
       // Guard genuine client errors (e.g. spawn failure) so an emitted
       // "error" event never becomes an uncaught ERR_UNHANDLED_ERROR.
@@ -2248,6 +2254,30 @@ export class CodexSession {
     } finally {
       this.appServerInitializePromise = null;
     }
+  }
+
+  private handleAppServerErrorNotification(params: any): void {
+    if (isRecoverableCodexAppServerError(params)) {
+      const sid = this.sessionId;
+      if (sid) {
+        this.send({
+          type: "session_state_changed",
+          state: "running",
+          sessionId: sid,
+          ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
+        } as any);
+      }
+      return;
+    }
+    const message = codexAppServerErrorMessage(params, "Codex reported an error");
+    const sid = this.sessionId;
+    if (sid) {
+      this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
+      if (!isCodexAuthError(params) && !isCodexAuthError(message)) {
+        this.send({ type: "error", message: `Codex: ${message}`, sessionId: sid } as any);
+      }
+    }
+    this.appServerTurnSettler?.reject(new Error(message));
   }
 
   private scheduleAppServerIdleStop(delayMs = CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS): void {
@@ -3735,6 +3765,12 @@ export class CodexSession {
       }
 
       case "error":
+        // The app-server client routes this notification through the dedicated
+        // errorNotification channel immediately after this callback. That path
+        // classifies retry progress versus terminal failure and surfaces a
+        // terminal error exactly once.
+        return;
+
       case "warning":
         if (p?.message || p?.summary) {
           const summary = String(p?.message || p?.summary);

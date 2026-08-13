@@ -7,6 +7,7 @@ const path = require("node:path");
 
 const {
   CodexSession,
+  isRecoverableCodexAppServerError,
   summarizeCodexCommandActions,
 } = require("../dist/codex-session");
 const {
@@ -37,6 +38,70 @@ function testSocket(sent) {
     },
   };
 }
+
+test("keeps a Codex turn running through response-stream reconnect notices", () => {
+  const sent = [];
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = "reconnecting-session";
+  session.threadId = session.sessionId;
+  session._isRunning = true;
+  let rejected = 0;
+  session.appServerTurnSettler = {
+    resolve: () => {},
+    reject: () => { rejected += 1; },
+  };
+  const reconnect = {
+    error: {
+      message: "Reconnecting... 5/5",
+      codexErrorInfo: {
+        responseStreamDisconnected: { httpStatusCode: null },
+      },
+      additionalDetails:
+        "stream disconnected before completion: websocket closed by server before response.completed",
+    },
+  };
+
+  assert.equal(isRecoverableCodexAppServerError(reconnect), true);
+  session.handleAppServerNotification("error", reconnect);
+  session.handleAppServerErrorNotification(reconnect);
+
+  assert.equal(rejected, 0);
+  assert.equal(session.isRunning, true);
+  assert.equal(sent.some((message) => message.type === "error"), false);
+  assert.ok(sent.some((message) =>
+    message.type === "session_state_changed"
+    && message.state === "running"
+    && message.sessionId === session.sessionId));
+});
+
+test("still rejects a terminal Codex app-server error exactly once", () => {
+  const sent = [];
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = "terminal-error-session";
+  session.threadId = session.sessionId;
+  session._isRunning = true;
+  let rejected = 0;
+  session.appServerTurnSettler = {
+    resolve: () => {},
+    reject: () => { rejected += 1; },
+  };
+  const terminal = {
+    error: {
+      message: "Your usage limit has been reached",
+      codexErrorInfo: { usageLimitExceeded: {} },
+    },
+  };
+
+  assert.equal(isRecoverableCodexAppServerError(terminal), false);
+  session.handleAppServerNotification("error", terminal);
+  session.handleAppServerErrorNotification(terminal);
+
+  assert.equal(rejected, 1);
+  assert.equal(sent.filter((message) => message.type === "error").length, 1);
+  assert.ok(sent.some((message) =>
+    message.type === "session_state_changed"
+    && message.state === "idle"));
+});
 
 test("raw Codex SDK events are sent only to subscribed sockets", () => {
   const sent = [];

@@ -13,6 +13,10 @@ function requiresAcknowledgement(message: SessionEvent): boolean {
   return type === "tool_call"
     || type === "tool_result"
     || type === "user_message_uuid"
+    // SendFile's canonical tool card and its transport registration are
+    // separate events. Losing the latter leaves a live card that cannot be
+    // downloaded until history is reloaded and supplies the persisted ID.
+    || type === "file"
     || type === "html_plan"
     || type === "work_review_card"
     || type === "monitor_output"

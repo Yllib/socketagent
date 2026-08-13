@@ -154,3 +154,19 @@ test("Monitor output cards use acknowledged delivery", () => {
   assert.equal(delivery.acknowledge(prepared.deliveryId), true);
   delivery.dispose();
 });
+
+test("SendFile availability retries until the app registers it", () => {
+  const delivery = new SessionEventDelivery(() => {});
+  const prepared = delivery.prepare({
+    type: "file",
+    sessionId: "file-session",
+    fileId: "send-delivery-1",
+    fileName: "build.apk",
+    filePath: "/tmp/build.apk",
+    fileSize: 42,
+  });
+  assert.ok(prepared.deliveryId);
+  assert.equal(delivery.pendingCount, 1);
+  assert.equal(delivery.acknowledge(prepared.deliveryId), true);
+  delivery.dispose();
+});

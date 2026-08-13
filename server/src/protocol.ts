@@ -1872,6 +1872,22 @@ export interface FileChunkServerMessage {
   data: string;
 }
 
+/** Registers a server-side file for a SendFile card before transfer starts. */
+export interface FileAvailableServerMessage {
+  type: "file";
+  fileId: string;
+  fileName: string;
+  filePath: string;
+  fileSize: number;
+  fileVersion?: string;
+  sessionId: string;
+  /** Exact canonical SendFile card this transport registration belongs to. */
+  toolUseId?: string;
+  entryId?: string;
+  deliveryId?: string;
+  replay?: boolean;
+}
+
 export interface FileCompleteServerMessage {
   type: "file_complete";
   fileId: string;
@@ -2491,6 +2507,7 @@ export type ServerMessage =
   | AbortAckServerMessage
   | CompactingServerMessage
   | UploadChunkAckServerMessage
+  | FileAvailableServerMessage
   | FileChunkServerMessage
   | FileCompleteServerMessage
   | FileErrorServerMessage

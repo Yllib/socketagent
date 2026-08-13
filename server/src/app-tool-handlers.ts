@@ -950,23 +950,26 @@ export async function handleSendFileTool(
     const fileVersion = fileTransferVersion(stat);
     const advertisedAtMs = Date.now();
 
-    ctx.send({
-      type: "file",
-      fileId,
-      fileName,
-      filePath,
-      fileSize: stat.size,
-      fileVersion,
-      sessionId,
-    });
-
     // Tool calls are normally persisted before their handler runs. Keep a
     // short asynchronous retry window for SDKs that deliver those events in
     // the opposite order, without delaying the tool result.
-    const persistDelivery = (attempt = 0): void => {
-      let attached = false;
+    const sendAvailability = (entry?: HistoryEntry): void => {
+      ctx.send({
+        type: "file",
+        fileId,
+        fileName,
+        filePath,
+        fileSize: stat.size,
+        fileVersion,
+        sessionId,
+        ...(entry?.toolUseId ? { toolUseId: entry.toolUseId } : {}),
+        ...(entry?.entryId ? { entryId: entry.entryId } : {}),
+      });
+    };
+    const persistDelivery = (attempt = 0): HistoryEntry | undefined => {
+      let attachedEntry: HistoryEntry | undefined;
       try {
-        attached = !!attachSendFileDeliveryToHistory(sessionId, {
+        attachedEntry = attachSendFileDeliveryToHistory(sessionId, {
           filePath,
           fileId,
           fileName,
@@ -979,15 +982,23 @@ export async function handleSendFileTool(
           `[MCP:SendFile] Could not persist delivery metadata: ${error?.message || String(error)}`,
         );
       }
-      if (!attached && attempt < 8) {
+      if (attachedEntry) {
+        // When the first attempt raced the SDK's canonical tool event, send a
+        // second, exactly-addressed registration once that identity exists.
+        if (attempt > 0) sendAvailability(attachedEntry);
+        return attachedEntry;
+      }
+      if (attempt < 8) {
         const timer = setTimeout(
           () => persistDelivery(attempt + 1),
           50 * (attempt + 1),
         );
         timer.unref?.();
       }
+      return undefined;
     };
-    if (sessionId) persistDelivery();
+    const attachedEntry = sessionId ? persistDelivery() : undefined;
+    sendAvailability(attachedEntry);
 
     const sizeStr = sizeLabel(stat.size);
     console.log(`[MCP:SendFile] Returning result for ${fileName} (${sizeStr})`);

@@ -23,6 +23,9 @@ export type TransportLane = "control" | "bulk";
 export interface PromptMessage {
   type: "prompt";
   text: string;
+  /** Stable client identity used for acknowledgement and idempotent retry. */
+  messageId?: string;
+  priority?: string;
   sessionId?: string;
   cwd?: string;
   backend?: Backend;
@@ -33,6 +36,20 @@ export interface PromptMessage {
    * separate setting messages.
    */
   initialSettings?: InitialSessionSettings;
+}
+
+export interface PromptReceivedServerMessage {
+  type: "prompt_received";
+  messageId: string;
+  sessionId?: string;
+  duplicate?: boolean;
+}
+
+export interface PromptFailedServerMessage {
+  type: "prompt_failed";
+  messageId: string;
+  sessionId?: string;
+  message: string;
 }
 
 export interface RetractQueuedPromptMessage {
@@ -2457,6 +2474,8 @@ export type ServerMessage =
   | SessionListServerMessage
   | SdkSessionListServerMessage
   | ErrorServerMessage
+  | PromptReceivedServerMessage
+  | PromptFailedServerMessage
   | BackendAuthRequiredServerMessage
   | PushTokenRegisteredServerMessage
   | PushTokenUnregisteredServerMessage

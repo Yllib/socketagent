@@ -78,6 +78,22 @@ test("only final cumulative assistant snapshots require acknowledgement", () => 
   delivery.dispose();
 });
 
+test("user prompt positions require acknowledgement", () => {
+  const delivery = new SessionEventDelivery(() => {});
+  const prepared = delivery.prepare({
+    type: "user_message_uuid",
+    sessionId: "session-1",
+    clientMessageId: "client-message-1",
+    uuid: "user-uuid-1",
+    entryId: "history-1",
+    sessionSeq: 12,
+  });
+  assert.ok(prepared.deliveryId);
+  assert.equal(delivery.pendingCount, 1);
+  assert.equal(delivery.acknowledge(prepared.deliveryId), true);
+  delivery.dispose();
+});
+
 test("pending cards replay immediately to a reattached client", () => {
   const delivery = new SessionEventDelivery(() => {});
   const prepared = delivery.prepare({ type: "tool_result", toolUseId: "tool-1" });

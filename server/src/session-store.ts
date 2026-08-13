@@ -13,6 +13,12 @@ import { socketAgentDataPath } from "./socket-agent-paths";
 import { remapHtmlPlans } from "./html-plan-store";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
+import {
+  TranscriptDatabase,
+  type TranscriptLegacyFingerprint,
+  type TranscriptSearchHit,
+  transcriptDatabase,
+} from "./transcript-database";
 
 const STORE_DIR = socketAgentDataPath();
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
@@ -267,6 +273,10 @@ export function deleteSessionArtifacts(sessionId: string, sessionInfo?: SessionI
 
   unlinkIfExists(historyFile(sessionId), removed, "history");
   unlinkIfExists(historyBackupFile(sessionId), removed, "history-backup");
+  if (historyDatabase().hasSession(sessionId)) {
+    historyDatabase().deleteSession(sessionId);
+    removed.push(`transcript-database:${sessionId}`);
+  }
   try {
     for (const fileName of fs.readdirSync(HISTORY_DIR)) {
       if (fileName.startsWith(`${sessionId}.json.corrupt-`)
@@ -309,7 +319,11 @@ export function remapSession(oldId: string, newId: string): void {
     const oldHistory = historyFile(oldId);
     const newHistory = historyFile(newId);
     const oldHistoryBackup = historyBackupFile(oldId);
-    if (fs.existsSync(oldHistory) && !fs.existsSync(newHistory)) {
+    ensureHistoryDatabaseSession(oldId);
+    const hasOldHistory = historyDatabase().count(oldId) > 0;
+    const hasNewHistory = historyDatabase().hasSession(newId)
+      && historyDatabase().count(newId) > 0;
+    if (hasOldHistory && !hasNewHistory) {
       const oldImageDir = path.join(
         TOOL_IMAGE_CACHE_DIR,
         oldId.replace(/[^A-Za-z0-9_-]/g, "_"),
@@ -334,6 +348,7 @@ export function remapSession(oldId: string, newId: string): void {
       replaceHistory(newId, transferredHistory);
       fs.rmSync(oldHistory, { force: true });
       fs.rmSync(oldHistoryBackup, { force: true });
+      historyDatabase().deleteSession(oldId);
       fs.rmSync(toolOutputSessionDir(oldId), { recursive: true, force: true });
     }
     historyCache.delete(oldId);
@@ -593,13 +608,15 @@ function hydrateHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
 }
 
 type HistoryCacheEntry = {
-  file: string;
-  size: number;
-  mtimeMs: number;
   entries: HistoryEntry[];
 };
 
 const historyCache = new Map<string, HistoryCacheEntry>();
+
+function historyDatabase(): TranscriptDatabase {
+  ensureHistoryDir();
+  return transcriptDatabase();
+}
 
 type TranscriptPosition = {
   entryId: string;
@@ -704,7 +721,14 @@ function syncTranscriptPositionState(sessionId: string, entries: HistoryEntry[])
 function transcriptPositionState(sessionId: string): TranscriptPositionState {
   const existing = transcriptPositionStates.get(sessionId);
   if (existing) return existing;
-  return syncTranscriptPositionState(sessionId, readHistoryEntries(sessionId));
+  ensureHistoryDatabaseSession(sessionId);
+  const state: TranscriptPositionState = {
+    nextSeq: historyDatabase().maxSessionSeq(sessionId) + 1,
+    byKey: new Map(),
+    byEntryId: new Map(),
+  };
+  transcriptPositionStates.set(sessionId, state);
+  return state;
 }
 
 function reserveTranscriptPosition(
@@ -715,7 +739,21 @@ function reserveTranscriptPosition(
 ): TranscriptPosition {
   const state = transcriptPositionState(sessionId);
   const knownById = entryId ? state.byEntryId.get(entryId) : undefined;
-  const known = knownById || (key ? state.byKey.get(key) : undefined);
+  const knownInMemory = knownById || (key ? state.byKey.get(key) : undefined);
+  const stored = knownInMemory
+    ? undefined
+    : historyDatabase().findPosition(sessionId, entryId, key);
+  const known = knownInMemory || (stored
+    ? {
+        entryId: stored.entryId,
+        sessionSeq: stored.sessionSeq,
+        revision: stored.revision,
+      }
+    : undefined);
+  if (known) {
+    state.byEntryId.set(known.entryId, known);
+    if (key) state.byKey.set(key, known);
+  }
   if (known) return known;
 
   const reservedSeq = positiveInteger(sessionSeq) || state.nextSeq++;
@@ -975,12 +1013,18 @@ function recoverCorruptHistory(
     if (backupEntries) {
       const quarantined = quarantineCorruptHistoryFile(file);
       syncTranscriptPositionState(sessionId, backupEntries);
-      writeHistoryEntries(sessionId, backupEntries);
+      const safeEntries = safeHistoryEntriesForStorage(sessionId, backupEntries);
+      historyDatabase().replace(
+        sessionId,
+        safeEntries.map((entry) => ({ entry, positionKey: historyPositionKey(entry) })),
+        legacyHistoryFingerprint(backup),
+      );
+      historyCache.set(sessionId, { entries: safeEntries });
       console.warn(
         `[HistoryRecovery] Restored backup session=${sessionId}`
         + ` entries=${backupEntries.length} quarantined=${quarantined || "none"}`,
       );
-      return historyCache.get(sessionId)?.entries || backupEntries;
+      return safeEntries;
     }
   }
 
@@ -994,69 +1038,131 @@ function recoverCorruptHistory(
     if (nativeEntries.length > 0) {
       const quarantined = quarantineCorruptHistoryFile(file);
       syncTranscriptPositionState(sessionId, nativeEntries);
-      writeHistoryEntries(sessionId, nativeEntries);
+      const safeEntries = safeHistoryEntriesForStorage(sessionId, nativeEntries);
+      historyDatabase().replace(
+        sessionId,
+        safeEntries.map((entry) => ({ entry, positionKey: historyPositionKey(entry) })),
+      );
+      historyCache.set(sessionId, { entries: safeEntries });
       console.warn(
         `[HistoryRecovery] Rebuilt from Claude transcript session=${sessionId}`
         + ` entries=${nativeEntries.length} quarantined=${quarantined || "none"}`,
       );
-      return historyCache.get(sessionId)?.entries || nativeEntries;
+      return safeEntries;
     }
   }
 
   throw originalError;
 }
 
+function legacyHistoryFingerprint(file: string): TranscriptLegacyFingerprint {
+  const stat = fs.statSync(file);
+  return { path: file, size: stat.size, mtimeMs: stat.mtimeMs };
+}
+
+function safeHistoryEntriesForStorage(
+  sessionId: string,
+  entries: HistoryEntry[],
+  dirtyEntries?: Set<HistoryEntry>,
+): HistoryEntry[] {
+  const positioned = entries
+    .map((entry, originalIndex) => ({
+      entry: positionHistoryEntry(sessionId, entry),
+      originalIndex,
+    }))
+    .sort((left, right) =>
+      (left.entry.sessionSeq! - right.entry.sessionSeq!)
+      || (left.originalIndex - right.originalIndex),
+    )
+    .map(({ entry }) => entry);
+  return dirtyEntries
+    ? positioned.map((entry, index) => dirtyEntries.has(entry)
+      ? compactHistoryEntryForStorage(sessionId, redactSecretsDeep(entry), index)
+      : entry)
+    : (redactSecretsDeep(positioned) as HistoryEntry[])
+      .map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
+}
+
+/** Lazily import a legacy JSON snapshot, retaining the snapshot as a rollback backup. */
+function ensureHistoryDatabaseSession(sessionId: string): void {
+  ensureHistoryDir();
+  const database = historyDatabase();
+  const current = historyFile(sessionId);
+  const backup = historyBackupFile(sessionId);
+  const source = fs.existsSync(current) ? current : fs.existsSync(backup) ? backup : undefined;
+
+  if (!source) {
+    if (!database.hasSession(sessionId)) database.replace(sessionId, []);
+    return;
+  }
+
+  const fingerprint = legacyHistoryFingerprint(source);
+  if (database.legacyMatches(sessionId, fingerprint)) return;
+
+  let legacyEntries: HistoryEntry[];
+  try {
+    legacyEntries = parseHistorySnapshot(source);
+  } catch (error) {
+    // A successfully migrated database is authoritative if its retained JSON
+    // backup is later damaged. Only invoke legacy recovery before migration.
+    if (database.hasSession(sessionId)) {
+      console.warn(`[HistoryMigration] Ignoring damaged retained snapshot session=${sessionId}`);
+      return;
+    }
+    recoverCorruptHistory(sessionId, source, error);
+    return;
+  }
+
+  const repair = repairTranscriptIdentityCollisions(legacyEntries);
+  transcriptPositionStates.delete(sessionId);
+  let combined = repair.entries;
+  if (database.hasSession(sessionId)) {
+    // This path handles a temporary rollback to an older SocketAgent build:
+    // merge newly written JSON rows back into the WAL store without dropping
+    // database-only history.
+    const existing = database.getAll(sessionId);
+    const byEntryId = new Map(existing.map((entry) => [entry.entryId, entry]));
+    for (const legacyEntry of repair.entries) {
+      const prior = legacyEntry.entryId ? byEntryId.get(legacyEntry.entryId) : undefined;
+      if (!prior || Number(legacyEntry.revision || 1) >= Number(prior.revision || 1)) {
+        if (legacyEntry.entryId) byEntryId.set(legacyEntry.entryId, legacyEntry);
+      }
+    }
+    combined = [...byEntryId.values()];
+  }
+  syncTranscriptPositionState(sessionId, combined);
+  const safeEntries = safeHistoryEntriesForStorage(sessionId, combined);
+  database.replace(
+    sessionId,
+    safeEntries.map((entry) => ({ entry, positionKey: historyPositionKey(entry) })),
+    fingerprint,
+  );
+  historyCache.delete(sessionId);
+  transcriptPositionStates.delete(sessionId);
+  console.log(
+    `[HistoryMigration] session=${sessionId} entries=${safeEntries.length}`
+    + ` sourceMb=${(fingerprint.size / 1024 / 1024).toFixed(1)}`
+    + ` repaired=${repair.changed}`,
+  );
+}
+
 function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: boolean } = {}): HistoryEntry[] {
   const startedAt = Date.now();
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
-  if (!fs.existsSync(file)) {
-    if (fs.existsSync(historyBackupFile(sessionId))) {
-      return recoverCorruptHistory(
-        sessionId,
-        file,
-        new Error(`History snapshot missing for ${sessionId}`),
-      );
-    }
-    historyCache.delete(sessionId);
-    return [];
-  }
+  ensureHistoryDatabaseSession(sessionId);
 
   if (options.backfillUserUuids) {
     backfillUserUuids(sessionId);
   }
 
-  const stat = fs.statSync(file);
   const cached = historyCache.get(sessionId);
-  if (cached && cached.file === file && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
-    return cached.entries;
-  }
+  if (cached) return cached.entries;
 
-  let normalized: HistoryEntry[];
-  try {
-    normalized = parseHistorySnapshot(file);
-  } catch (error) {
-    return recoverCorruptHistory(sessionId, file, error);
-  }
-  const repair = repairTranscriptIdentityCollisions(normalized);
-  const entries = repair.entries;
-  if (repair.changed) {
-    // A positional repair must discard the old in-memory aliases before the
-    // repaired snapshot is positioned and persisted.
-    transcriptPositionStates.delete(sessionId);
-    syncTranscriptPositionState(sessionId, entries);
-    writeHistoryEntries(sessionId, entries);
-    console.warn(
-      `[HistoryRepair] session=${sessionId} rebased=${repair.rebased} collisions=${repair.collisions} collapsed=${repair.collapsed} rekeyedQuestions=${repair.rekeyedQuestions}`,
-    );
-    return historyCache.get(sessionId)?.entries || entries;
-  }
+  const entries = historyDatabase().getAll(sessionId);
   syncTranscriptPositionState(sessionId, entries);
-  historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries });
+  historyCache.set(sessionId, { entries });
   warnIfSlow("history_read", startedAt, {
     sessionId,
     entries: entries.length,
-    mb: (stat.size / 1024 / 1024).toFixed(1),
   });
   return entries;
 }
@@ -1112,6 +1218,25 @@ function updateSessionHistoryMetadata(sessionId: string, entries: HistoryEntry[]
   writeStore(sessions);
 }
 
+function updateSessionHistoryMetadataFromDatabase(sessionId: string): void {
+  const summary = historyDatabase().summary(sessionId);
+  if (!summary) return;
+  const sessions = readStore();
+  const session = sessions.find((entry) => entry.id === sessionId);
+  if (!session) return;
+  if (summary.messagePreview) session.messagePreview = summary.messagePreview;
+  session.turnCount = summary.userPromptCount;
+  (session as any).historyCount = summary.entryCount;
+  if (summary.latestTimestamp) {
+    const currentMs = Date.parse(session.lastActive);
+    const latestMs = Date.parse(summary.latestTimestamp);
+    if (!Number.isFinite(currentMs) || (Number.isFinite(latestMs) && latestMs > currentMs)) {
+      session.lastActive = summary.latestTimestamp;
+    }
+  }
+  writeStore(sessions);
+}
+
 function normalizedTurnCount(value: unknown): number | undefined {
   const count = Number(value);
   if (!Number.isFinite(count) || count < 0) return undefined;
@@ -1132,77 +1257,28 @@ function writeHistoryEntries(
   options: { dirtyEntries?: Set<HistoryEntry> } = {},
 ): void {
   const startedAt = Date.now();
-  ensureHistoryDir();
-  const file = historyFile(sessionId);
-  const positioned = entries
-    .map((entry, originalIndex) => ({
-      entry: positionHistoryEntry(sessionId, entry),
-      originalIndex,
-    }))
-    .sort((left, right) =>
-      (left.entry.sessionSeq! - right.entry.sessionSeq!)
-      || (left.originalIndex - right.originalIndex),
-    )
-    .map(({ entry }) => entry);
-  const safeEntries = options.dirtyEntries
-    ? positioned.map((entry, index) => options.dirtyEntries!.has(entry)
-      ? compactHistoryEntryForStorage(sessionId, redactSecretsDeep(entry), index)
-      : entry)
-    : (redactSecretsDeep(positioned) as HistoryEntry[])
-      .map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
-  // Transcripts can grow into tens of megabytes. Pretty-printing inflated
-  // every synchronous persistence pass and extended the Node event-loop stall
-  // for no runtime benefit. Write a compact, atomic snapshot instead.
-  const serialized = JSON.stringify(safeEntries);
-  const backup = historyBackupFile(sessionId);
-  const tempFile = `${file}.tmp-${process.pid}-${crypto.randomUUID()}`;
-  let tempFd: number | undefined;
-  try {
-    tempFd = fs.openSync(tempFile, "w", 0o600);
-    fs.writeFileSync(tempFd, serialized, { encoding: "utf-8" });
-    fs.fsyncSync(tempFd);
-  } catch (error) {
-    try { fs.rmSync(tempFile, { force: true }); } catch {}
-    throw error;
-  } finally {
-    if (tempFd !== undefined) fs.closeSync(tempFd);
-  }
-  try {
-    if (fs.existsSync(file)) {
-      fs.rmSync(backup, { force: true });
-      fs.renameSync(file, backup);
-    }
-    fs.renameSync(tempFile, file);
-    // Make the directory entry updates durable as well as the snapshot bytes.
-    // Some Windows filesystems do not allow opening/fsyncing a directory.
-    let directoryFd: number | undefined;
-    try {
-      directoryFd = fs.openSync(HISTORY_DIR, "r");
-      fs.fsyncSync(directoryFd);
-    } catch {
-      // The file itself was fsynced before rename, which is the portable floor.
-    } finally {
-      if (directoryFd !== undefined) fs.closeSync(directoryFd);
-    }
-  } catch (error) {
-    try { fs.rmSync(tempFile, { force: true }); } catch {}
-    throw error;
-  }
-  const stat = fs.statSync(file);
-  historyCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, entries: safeEntries });
+  ensureHistoryDatabaseSession(sessionId);
+  const safeEntries = safeHistoryEntriesForStorage(sessionId, entries, options.dirtyEntries);
+  historyDatabase().replace(
+    sessionId,
+    safeEntries.map((entry) => ({ entry, positionKey: historyPositionKey(entry) })),
+  );
+  historyCache.set(sessionId, { entries: safeEntries });
   updateSessionHistoryMetadata(sessionId, safeEntries);
   warnIfSlow("history_write", startedAt, {
     sessionId,
     entries: safeEntries.length,
-    mb: (stat.size / 1024 / 1024).toFixed(1),
   });
 }
 
 export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEntry {
-  const entries = readHistoryEntries(sessionId);
+  ensureHistoryDatabaseSession(sessionId);
+  const database = historyDatabase();
   let positioned = positionHistoryEntry(sessionId, entry);
-  let existingIndex = entries.findIndex((candidate) => candidate.entryId === positioned.entryId);
-  if (existingIndex >= 0 && !sameLogicalTranscriptEntry(entries[existingIndex], positioned)) {
+  let existing = positioned.entryId
+    ? database.getByEntryId(sessionId, positioned.entryId)
+    : undefined;
+  if (existing && !sameLogicalTranscriptEntry(existing, positioned)) {
     console.warn(
       `[History] Refusing transcript identity collision session=${sessionId} entryId=${positioned.entryId} role=${positioned.role}`,
     );
@@ -1212,27 +1288,39 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
     delete repaired.sessionSeq;
     delete repaired.revision;
     positioned = positionHistoryEntry(sessionId, repaired);
-    existingIndex = -1;
+    existing = undefined;
   }
-  if (existingIndex >= 0) {
-    if (isSendFileCall(positioned) && isSendFileCall(entries[existingIndex])) {
+  if (existing) {
+    if (isSendFileCall(positioned) && isSendFileCall(existing)) {
       // A later SDK/native revision of the canonical tool call must not erase
       // delivery metadata attached by the app-tool handler.
-      positioned.fileId ??= entries[existingIndex].fileId;
-      positioned.fileName ??= entries[existingIndex].fileName;
-      positioned.fileSize ??= entries[existingIndex].fileSize;
-      positioned.fileVersion ??= entries[existingIndex].fileVersion;
+      positioned.fileId ??= existing.fileId;
+      positioned.fileName ??= existing.fileName;
+      positioned.fileSize ??= existing.fileSize;
+      positioned.fileVersion ??= existing.fileVersion;
     }
     positioned.revision = Math.max(
       positiveInteger(positioned.revision) || 1,
-      (positiveInteger(entries[existingIndex].revision) || 1) + 1,
+      (positiveInteger(existing.revision) || 1) + 1,
     );
-    entries[existingIndex] = positioned;
-  } else {
-    entries.push(positioned);
   }
-  writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set([positioned]) });
-  return positioned;
+  const safeEntry = compactHistoryEntryForStorage(
+    sessionId,
+    redactSecretsDeep(positioned),
+    Math.max(0, Number(positioned.sessionSeq || 1) - 1),
+  );
+  database.upsert(sessionId, safeEntry, historyPositionKey(safeEntry));
+  const cached = historyCache.get(sessionId);
+  if (cached) {
+    const existingIndex = cached.entries.findIndex((candidate) => candidate.entryId === safeEntry.entryId);
+    if (existingIndex >= 0) cached.entries[existingIndex] = safeEntry;
+    else {
+      cached.entries.push(safeEntry);
+      cached.entries.sort((left, right) => Number(left.sessionSeq || 0) - Number(right.sessionSeq || 0));
+    }
+  }
+  updateSessionHistoryMetadataFromDatabase(sessionId);
+  return safeEntry;
 }
 
 export interface SendFileDeliveryMetadata {
@@ -1272,8 +1360,7 @@ export function attachSendFileDeliveryToHistory(
     entry.fileSize = metadata.fileSize;
     entry.fileVersion = metadata.fileVersion;
     entry.revision = (positiveInteger(entry.revision) || 1) + 1;
-    writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set([entry]) });
-    return hydrateHistoryEntry(entry);
+    return hydrateHistoryEntry(appendHistory(sessionId, entry));
   }
   return undefined;
 }
@@ -1282,36 +1369,22 @@ export function attachSendFileDeliveryToHistory(
 export function repairStoredTranscriptIdentitiesOnce(): void {
   if (fs.existsSync(TRANSCRIPT_IDENTITY_REPAIR_MARKER)) return;
   ensureHistoryDir();
-  let failures = 0;
-  let scanned = 0;
-  for (const fileName of fs.readdirSync(HISTORY_DIR)) {
-    if (!fileName.endsWith(".json") || fileName.startsWith("test-")) continue;
-    const sessionId = fileName.slice(0, -".json".length);
-    try {
-      readHistoryEntries(sessionId);
-      scanned++;
-    } catch (error: any) {
-      failures++;
-      console.error(`[HistoryRepair] Failed session=${sessionId}: ${error?.message || String(error)}`);
-    }
-  }
-  if (failures > 0) {
-    console.warn(`[HistoryRepair] Startup scan incomplete scanned=${scanned} failures=${failures}; retrying next start`);
-    return;
-  }
   fs.writeFileSync(TRANSCRIPT_IDENTITY_REPAIR_MARKER, `${new Date().toISOString()}\n`, { mode: 0o600 });
-  console.log(`[HistoryRepair] Startup scan complete sessions=${scanned}`);
+  // Lazy SQLite migration runs the same collision repair before importing
+  // each session. Avoid an eager startup walk across every retained history.
+  console.log("[HistoryRepair] Enabled lazy transcript identity repair");
 }
 
 export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[]): void {
   if (newEntries.length === 0) return;
-  const entries = readHistoryEntries(sessionId);
+  ensureHistoryDatabaseSession(sessionId);
+  const database = historyDatabase();
   const positioned: HistoryEntry[] = [];
   for (const newEntry of newEntries) {
     let entry = positionHistoryEntry(sessionId, newEntry);
-    let existingIndex = entries.findIndex((candidate) => candidate.entryId === entry.entryId);
-    if (existingIndex >= 0) {
-      if (!sameLogicalTranscriptEntry(entries[existingIndex], entry)) {
+    let existing = entry.entryId ? database.getByEntryId(sessionId, entry.entryId) : undefined;
+    if (existing) {
+      if (!sameLogicalTranscriptEntry(existing, entry)) {
         console.warn(`[History] Recovering colliding bulk entry session=${sessionId} entryId=${entry.entryId}`);
         const repaired = { ...newEntry };
         if (repaired.questionId) repaired.questionId = createInteractiveRequestId("recovered_question");
@@ -1319,21 +1392,36 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
         delete repaired.sessionSeq;
         delete repaired.revision;
         entry = positionHistoryEntry(sessionId, repaired);
-        existingIndex = -1;
+        existing = undefined;
       }
     }
-    if (existingIndex >= 0) {
+    if (existing) {
       entry.revision = Math.max(
         positiveInteger(entry.revision) || 1,
-        (positiveInteger(entries[existingIndex].revision) || 1) + 1,
+        (positiveInteger(existing.revision) || 1) + 1,
       );
-      entries[existingIndex] = entry;
-    } else {
-      entries.push(entry);
     }
-    positioned.push(entry);
+    positioned.push(compactHistoryEntryForStorage(
+      sessionId,
+      redactSecretsDeep(entry),
+      Math.max(0, Number(entry.sessionSeq || 1) - 1),
+    ));
   }
-  writeHistoryEntries(sessionId, entries, { dirtyEntries: new Set(positioned) });
+  database.upsertMany(
+    sessionId,
+    positioned.map((entry) => ({ entry, positionKey: historyPositionKey(entry) })),
+  );
+  const cached = historyCache.get(sessionId);
+  if (cached) {
+    const indexes = new Map(cached.entries.map((entry, index) => [entry.entryId, index]));
+    for (const entry of positioned) {
+      const index = indexes.get(entry.entryId);
+      if (index === undefined) cached.entries.push(entry);
+      else cached.entries[index] = entry;
+    }
+    cached.entries.sort((left, right) => Number(left.sessionSeq || 0) - Number(right.sessionSeq || 0));
+  }
+  updateSessionHistoryMetadataFromDatabase(sessionId);
 }
 
 /** Replace a session transcript with an already validated transfer snapshot. */
@@ -1357,16 +1445,16 @@ export function updateHtmlPlanHistoryEntry(
   plan: { planId: string; title: string; html: string; createdAt: string; updatedAt: string },
 ): void {
   const entries = readHistoryEntries(sessionId);
-  let changed = false;
+  const changedEntries: HistoryEntry[] = [];
   for (const entry of entries) {
     if (entry.role !== "html_plan" || String(entry.toolInput?.planId || "") !== plan.planId) continue;
     entry.content = plan.title;
     entry.toolInput = { ...entry.toolInput, ...plan, sessionId };
     entry.timestamp = plan.updatedAt;
     entry.revision = Math.max(1, Number(entry.revision || 1) + 1);
-    changed = true;
+    changedEntries.push(entry);
   }
-  if (changed) writeHistoryEntries(sessionId, entries);
+  if (changedEntries.length > 0) appendHistoryBulk(sessionId, changedEntries);
 }
 
 function nativeSyncTextKey(entry: HistoryEntry): string | null {
@@ -1450,8 +1538,7 @@ export function appendNativeHistorySuffix(sessionId: string, nativeEntries: Hist
   }
   if (!missing.some((entry) => nativeSyncTextKey(entry))) return [];
 
-  localEntries.push(...missing);
-  writeHistoryEntries(sessionId, localEntries);
+  appendHistoryBulk(sessionId, missing);
   return missing;
 }
 
@@ -1497,6 +1584,7 @@ function extractJsonlUserText(content: any): string {
 export function backfillUserUuids(sessionId: string): void {
   if (_backfilledSessions.has(sessionId)) return;
   _backfilledSessions.add(sessionId);
+  if (getSession(sessionId)?.backend !== "claude") return;
 
   let entries: HistoryEntry[];
   try { entries = readHistoryEntries(sessionId, { backfillUserUuids: false }); } catch { return; }
@@ -1538,7 +1626,7 @@ export function backfillUserUuids(sessionId: string): void {
   // Match in order, but a missing entry that can't be found doesn't stop the
   // rest of the run. The cursor only advances when we consume an entry.
   let cursor = 0;
-  let changed = false;
+  const changedEntries: HistoryEntry[] = [];
   for (const idx of missingIdx) {
     const histText = entries[idx].content || "";
     let found = -1;
@@ -1548,12 +1636,12 @@ export function backfillUserUuids(sessionId: string): void {
     if (found >= 0) {
       entries[idx].uuid = available[found].uuid;
       cursor = found + 1;
-      changed = true;
+      changedEntries.push(entries[idx]);
     }
   }
 
-  if (changed) {
-    writeHistoryEntries(sessionId, entries);
+  if (changedEntries.length > 0) {
+    appendHistoryBulk(sessionId, changedEntries);
     console.log(`[Backfill] Restored UUIDs for ${sessionId} (${missingIdx.length} candidate entries)`);
   }
 }
@@ -1567,7 +1655,7 @@ export function assignUserUuid(sessionId: string, uuid: string): void {
     for (let i = entries.length - 1; i >= 0; i--) {
       if (entries[i].role === "user" && !entries[i].uuid) {
         entries[i].uuid = uuid;
-        writeHistoryEntries(sessionId, entries);
+        appendHistory(sessionId, entries[i]);
         return;
       }
     }
@@ -1588,7 +1676,7 @@ export function markQuestionAnswered(
   try {
     const entries = readHistoryEntries(sessionId);
     if (entries.length === 0) return;
-    let changed = false;
+    const changedEntries: HistoryEntry[] = [];
     for (const entry of entries) {
       if (
         (entry.role !== "question" && entry.role !== "elicitation_url")
@@ -1601,9 +1689,9 @@ export function markQuestionAnswered(
       entry.answered = true;
       entry.answers = { ...answers };
       entry.revision = (positiveInteger(entry.revision) || 1) + 1;
-      changed = true;
+      changedEntries.push(entry);
     }
-    if (changed) writeHistoryEntries(sessionId, entries);
+    if (changedEntries.length > 0) appendHistoryBulk(sessionId, changedEntries);
   } catch (e) {
     console.error(`[History] Error marking question answered: ${e}`);
   }
@@ -1649,7 +1737,7 @@ export function markSecureInputRequestResolved(
 ): void {
   try {
     const entries = readHistoryEntries(sessionId);
-    let changed = false;
+    const changedEntries: HistoryEntry[] = [];
     for (const entry of entries) {
       if (entry.role !== "secure_input" || entry.questionId !== requestId) continue;
       if (
@@ -1665,9 +1753,9 @@ export function markSecureInputRequestResolved(
       // Terminal state is a new canonical card revision. Without this, a
       // reconnect cache can legitimately retain an older pending snapshot.
       entry.revision = (positiveInteger(entry.revision) || 1) + 1;
-      changed = true;
+      changedEntries.push(entry);
     }
-    if (changed) writeHistoryEntries(sessionId, entries);
+    if (changedEntries.length > 0) appendHistoryBulk(sessionId, changedEntries);
   } catch (error) {
     console.error(`[History] Error resolving secure input ${requestId}: ${error}`);
   }
@@ -1681,13 +1769,89 @@ export function getHistory(sessionId: string): HistoryEntry[] {
 
 /** Latest canonical lifecycle snapshot for every native task/runtime task. */
 export function getTaskStates(sessionId: string): HistoryEntry[] {
-  return readHistoryEntries(sessionId, { backfillUserUuids: false })
-    .filter((entry) => entry.role === "task_state")
-    .map(cloneHistoryEntry);
+  ensureHistoryDatabaseSession(sessionId);
+  return historyDatabase().getByRole(sessionId, "task_state").map(cloneHistoryEntry);
 }
 
 export function getHistoryCount(sessionId: string): number {
-  return readHistoryEntries(sessionId).length;
+  ensureHistoryDatabaseSession(sessionId);
+  return historyDatabase().count(sessionId);
+}
+
+export interface RememberSearchOptions {
+  query: string;
+  roles?: string[];
+  toolName?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** Full-text search over one session's durable transcript. */
+export function rememberSearchHistory(
+  sessionId: string,
+  options: RememberSearchOptions,
+): TranscriptSearchHit[] {
+  ensureHistoryDatabaseSession(sessionId);
+  return historyDatabase().search(sessionId, options);
+}
+
+/** Retrieve one durable transcript entry by stable sequence or entry ID. */
+export function rememberGetHistoryEntry(
+  sessionId: string,
+  selector: { sessionSeq?: number; entryId?: string },
+): HistoryEntry | undefined {
+  ensureHistoryDatabaseSession(sessionId);
+  const entry = selector.entryId
+    ? historyDatabase().getByEntryId(sessionId, selector.entryId)
+    : selector.sessionSeq
+      ? historyDatabase().getBySessionSeq(sessionId, selector.sessionSeq)
+      : undefined;
+  return entry ? hydrateHistoryEntry(entry) : undefined;
+}
+
+/** Retrieve bounded neighboring entries around one stable sequence. */
+export function rememberHistoryContext(
+  sessionId: string,
+  sessionSeq: number,
+  before = 3,
+  after = 3,
+): HistoryEntry[] {
+  ensureHistoryDatabaseSession(sessionId);
+  return hydrateHistoryEntries(historyDatabase().context(
+    sessionId,
+    sessionSeq,
+    Math.max(0, Math.min(20, before)),
+    Math.max(0, Math.min(20, after)),
+  ));
+}
+
+/** List a bounded transcript page before/after a stable sequence, or the latest page. */
+export function rememberListHistory(
+  sessionId: string,
+  options: { sessionSeq?: number; direction?: "before" | "after"; limit?: number } = {},
+): HistoryEntry[] {
+  ensureHistoryDatabaseSession(sessionId);
+  return hydrateHistoryEntries(historyDatabase().list(
+    sessionId,
+    Math.max(1, Math.min(50, options.limit ?? 20)),
+    options.sessionSeq,
+    options.direction ?? "before",
+  ));
+}
+
+/** List recent user-initiated runs with their durable completion boundary. */
+export function rememberRecentRuns(
+  sessionId: string,
+  limit = 10,
+): Array<{ prompt: HistoryEntry; boundary?: HistoryEntry }> {
+  ensureHistoryDatabaseSession(sessionId);
+  return historyDatabase().recentRuns(sessionId, Math.max(1, Math.min(50, limit)))
+    .map((run) => ({
+      prompt: hydrateHistoryEntry(run.prompt),
+      ...(run.boundary ? { boundary: hydrateHistoryEntry(run.boundary) } : {}),
+    }));
 }
 
 /**
@@ -1715,8 +1879,10 @@ export function getHistoryPage(
   offset?: number
 ): { entries: HistoryEntry[]; total: number; offset: number } {
   const startedAt = Date.now();
-  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
-  const total = all.length;
+  ensureHistoryDatabaseSession(sessionId);
+  backfillUserUuids(sessionId);
+  const database = historyDatabase();
+  const total = database.count(sessionId);
   if (total === 0) {
     warnIfSlow("history_page", startedAt, { sessionId, total, limit, offset: offset ?? "tail" });
     return { entries: [], total: 0, offset: 0 };
@@ -1729,9 +1895,9 @@ export function getHistoryPage(
     // Default: last `limit` entries
     start = Math.max(0, total - limit);
   }
-  const end = Math.min(start + limit, total);
+  const entries = hydrateHistoryEntries(database.getPage(sessionId, start, Math.max(1, limit)));
   warnIfSlow("history_page", startedAt, { sessionId, total, limit, offset: start });
-  return { entries: hydrateHistoryEntries(all.slice(start, end)), total, offset: start };
+  return { entries, total, offset: start };
 }
 
 export interface BoundedHistoryPage {
@@ -1754,6 +1920,8 @@ export interface ResumeHistoryOptions {
   recentUserPrompts?: number;
   maxDeltaEntries?: number;
   maxDeltaBytes?: number;
+  maxInitialEntries?: number;
+  maxInitialBytes?: number;
 }
 
 function hydratedTailWithinBudget(
@@ -1783,27 +1951,25 @@ export function getBoundedHistoryTail(
   maxBytes = 256 * 1024,
 ): BoundedHistoryPage {
   const startedAt = Date.now();
-  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
-  const page = hydratedTailWithinBudget(all, all.length, maxEntries, maxBytes);
-  let lastUserIndex = -1;
-  let totalUserPrompts = 0;
-  for (let index = all.length - 1; index >= 0; index--) {
-    if (all[index].role === "user") {
-      totalUserPrompts++;
-      if (lastUserIndex < 0) lastUserIndex = index;
-    }
-  }
+  ensureHistoryDatabaseSession(sessionId);
+  backfillUserUuids(sessionId);
+  const database = historyDatabase();
+  const summary = database.summary(sessionId)!;
+  const tail = database.getTail(sessionId, Math.max(1, maxEntries));
+  const bounded = hydratedTailWithinBudget(tail, tail.length, maxEntries, maxBytes);
+  const offset = summary.entryCount - tail.length + bounded.offset;
   warnIfSlow("history_bounded_tail", startedAt, {
     sessionId,
-    total: all.length,
-    entries: page.entries.length,
-    offset: page.offset,
+    total: summary.entryCount,
+    entries: bounded.entries.length,
+    offset,
   });
   return {
-    ...page,
-    total: all.length,
-    deferredContextAvailable: lastUserIndex >= 0 && lastUserIndex < page.offset,
-    totalUserPrompts,
+    entries: bounded.entries,
+    offset,
+    total: summary.entryCount,
+    deferredContextAvailable: offset > 0,
+    totalUserPrompts: summary.userPromptCount,
   };
 }
 
@@ -1819,13 +1985,12 @@ export function getBoundedHistoryDelta(
   knownHistoryOffset?: number,
   knownHistoryEntryCount?: number,
 ): BoundedHistoryPage | null {
-  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
-  const totalUserPrompts = all.reduce(
-    (count, entry) => count + (entry.role === "user" ? 1 : 0),
-    0,
-  );
-  const knownIndex = all.findIndex((entry) => entry.sessionSeq === knownSessionSeq);
-  if (knownIndex < 0) return null;
+  ensureHistoryDatabaseSession(sessionId);
+  backfillUserUuids(sessionId);
+  const database = historyDatabase();
+  const summary = database.summary(sessionId)!;
+  const knownIndex = database.offsetForSessionSeq(sessionId, knownSessionSeq);
+  if (knownIndex === undefined) return null;
   if (knownHistoryOffset !== undefined || knownHistoryEntryCount !== undefined) {
     if (!Number.isSafeInteger(knownHistoryOffset) ||
         !Number.isSafeInteger(knownHistoryEntryCount) ||
@@ -1835,43 +2000,44 @@ export function getBoundedHistoryDelta(
       return null;
     }
   }
-  const count = all.length - knownIndex - 1;
+  const count = summary.entryCount - knownIndex - 1;
   if (count > maxEntries) return null;
-  const entries = hydrateHistoryEntries(all.slice(knownIndex + 1));
+  const entries = hydrateHistoryEntries(database.getAfter(sessionId, knownSessionSeq, maxEntries));
   if (Buffer.byteLength(JSON.stringify(entries), "utf8") > maxBytes) return null;
   return {
     entries,
-    total: all.length,
+    total: summary.entryCount,
     offset: knownIndex + 1,
     deferredContextAvailable: false,
-    totalUserPrompts,
+    totalUserPrompts: summary.userPromptCount,
   };
 }
 
 /**
  * Build the complete visible window for a session resume in one server read.
  *
- * The initial snapshot contains at least `minEntries` and extends backward far
- * enough to include the requested number of recent user prompts. A delta is
- * returned only when the client's contiguous cached window plus that delta
- * already satisfies the same contract. The client therefore never needs to
- * chain older-history requests merely to finish opening a session.
+ * The initial snapshot targets at least `minEntries` and the requested recent
+ * prompts, then applies hard entry/byte limits so a pathological tool-heavy
+ * turn cannot freeze the phone. Any contiguous cached suffix is a safe delta
+ * cursor; older context remains available through normal pagination.
  */
 export function getResumeHistoryPage(
   sessionId: string,
   options: ResumeHistoryOptions = {},
 ): ResumeHistoryPage {
   const startedAt = Date.now();
-  const all = readHistoryEntries(sessionId, { backfillUserUuids: true });
-  const total = all.length;
+  ensureHistoryDatabaseSession(sessionId);
+  backfillUserUuids(sessionId);
+  const database = historyDatabase();
+  const summary = database.summary(sessionId)!;
+  const total = summary.entryCount;
   const minEntries = Math.max(1, options.minEntries ?? 50);
   const recentUserPrompts = Math.max(0, options.recentUserPrompts ?? 3);
   const maxDeltaEntries = Math.max(1, options.maxDeltaEntries ?? 500);
   const maxDeltaBytes = Math.max(1, options.maxDeltaBytes ?? 2 * 1024 * 1024);
-  const totalUserPrompts = all.reduce(
-    (count, entry) => count + (entry.role === "user" ? 1 : 0),
-    0,
-  );
+  const maxInitialEntries = Math.max(1, options.maxInitialEntries ?? 500);
+  const maxInitialBytes = Math.max(1, options.maxInitialBytes ?? 2 * 1024 * 1024);
+  const totalUserPrompts = summary.userPromptCount;
   const targetUserPrompts = Math.min(totalUserPrompts, recentUserPrompts);
 
   const knownSessionSeq = options.knownSessionSeq;
@@ -1880,19 +2046,13 @@ export function getResumeHistoryPage(
   if (Number.isSafeInteger(knownSessionSeq) && knownSessionSeq! >= 0 &&
       Number.isSafeInteger(knownHistoryOffset) && knownHistoryOffset! >= 0 &&
       Number.isSafeInteger(knownHistoryEntryCount) && knownHistoryEntryCount! > 0) {
-    const knownIndex = all.findIndex((entry) => entry.sessionSeq === knownSessionSeq);
-    const cacheIsContiguous = knownIndex >= 0 &&
+    const knownIndex = database.offsetForSessionSeq(sessionId, knownSessionSeq!);
+    const cacheIsContiguous = knownIndex !== undefined &&
       knownHistoryOffset! + knownHistoryEntryCount! === knownIndex + 1;
     if (cacheIsContiguous) {
-      const deltaEntries = all.slice(knownIndex + 1);
-      const cachedAndNewUserPrompts = all
-        .slice(knownHistoryOffset!)
-        .reduce(
-          (count, entry) => count + (entry.role === "user" ? 1 : 0),
-          0,
-        );
-      if (cachedAndNewUserPrompts >= targetUserPrompts &&
-          deltaEntries.length <= maxDeltaEntries) {
+      const deltaCount = total - knownIndex! - 1;
+      if (deltaCount <= maxDeltaEntries) {
+        const deltaEntries = database.getAfter(sessionId, knownSessionSeq!, maxDeltaEntries);
         const hydratedDelta = hydrateHistoryEntries(deltaEntries);
         if (Buffer.byteLength(JSON.stringify(hydratedDelta), "utf8") <= maxDeltaBytes) {
           warnIfSlow("history_resume_delta", startedAt, {
@@ -1916,28 +2076,31 @@ export function getResumeHistoryPage(
 
   let start = Math.max(0, total - minEntries);
   if (targetUserPrompts > 0) {
-    let foundUserPrompts = 0;
-    for (let index = total - 1; index >= 0; index--) {
-      if (all[index].role !== "user") continue;
-      foundUserPrompts++;
-      if (foundUserPrompts >= targetUserPrompts) {
-        start = Math.min(start, index);
-        break;
-      }
-    }
+    const promptOffset = database.recentUserPromptOffset(sessionId, targetUserPrompts);
+    if (promptOffset !== undefined) start = Math.min(start, promptOffset);
   }
-  const entries = hydrateHistoryEntries(all.slice(start));
+  const candidateLimit = Math.min(maxInitialEntries, total - start);
+  const candidateStart = total - candidateLimit;
+  const candidate = database.getPage(sessionId, candidateStart, candidateLimit);
+  const bounded = hydratedTailWithinBudget(
+    candidate,
+    candidate.length,
+    maxInitialEntries,
+    maxInitialBytes,
+  );
+  const entries = bounded.entries;
+  const boundedStart = candidateStart + bounded.offset;
   warnIfSlow("history_resume_initial", startedAt, {
     sessionId,
     total,
     entries: entries.length,
-    offset: start,
+    offset: boundedStart,
   });
   return {
     entries,
     total,
-    offset: start,
-    deferredContextAvailable: false,
+    offset: boundedStart,
+    deferredContextAvailable: boundedStart > start,
     totalUserPrompts,
     historyKind: "initial",
   };
@@ -2158,6 +2321,7 @@ export function settleStaleRuntimeTaskStates(sessionId: string): number {
     return 0;
   }
   let settled = 0;
+  const changedEntries: HistoryEntry[] = [];
   const timestamp = new Date().toISOString();
   for (const entry of entries) {
     if (entry.role !== "task_state"
@@ -2172,14 +2336,11 @@ export function settleStaleRuntimeTaskStates(sessionId: string): number {
     entry.content = entry.content || "Interrupted when the Claude SDK process ended";
     entry.timestamp = timestamp;
     entry.revision = (positiveInteger(entry.revision) || 1) + 1;
+    changedEntries.push(entry);
     settled++;
   }
   if (settled > 0) {
-    writeHistoryEntries(sessionId, entries, {
-      dirtyEntries: new Set(entries.filter((entry) =>
-        entry.role === "task_state" && entry.timestamp === timestamp
-      )),
-    });
+    appendHistoryBulk(sessionId, changedEntries);
     console.log(`[Tasks] Settled ${settled} stale runtime task(s) for ${sessionId}`);
   }
   return settled;
@@ -2575,7 +2736,20 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
   // 2. Archive our chat history
   const histFile = historyFile(sessionId);
   const histBackup = historyBackupFile(sessionId);
-  if (fs.existsSync(histFile)) {
+  ensureHistoryDatabaseSession(sessionId);
+  if (historyDatabase().count(sessionId) > 0) {
+    const archiveName = `${sessionId}_${ts}_history.json`;
+    fs.writeFileSync(
+      path.join(ARCHIVE_DIR, archiveName),
+      JSON.stringify(readHistoryEntries(sessionId)),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    historyDatabase().deleteSession(sessionId);
+    fs.rmSync(histFile, { force: true });
+    fs.rmSync(histBackup, { force: true });
+    historyCache.delete(sessionId);
+    console.log(`[ClearContext] Archived history: ${archiveName}`);
+  } else if (fs.existsSync(histFile)) {
     const archiveName = `${sessionId}_${ts}_history.json`;
     fs.renameSync(histFile, path.join(ARCHIVE_DIR, archiveName));
     fs.rmSync(histBackup, { force: true });
@@ -3533,43 +3707,28 @@ export async function listCodexNativeSdkSessions(cwd: string, limit = 30): Promi
 /** On startup, close out any tool_calls that never got a result (e.g. server crashed mid-query) */
 export function cleanupPendingToolCalls(): void {
   ensureHistoryDir();
-  if (!fs.existsSync(HISTORY_DIR)) return;
-
-  const files = fs.readdirSync(HISTORY_DIR).filter((f) => f.endsWith(".json"));
-  for (const file of files) {
-    const sessionId = file.replace(/\.json$/, "");
-    let entries: HistoryEntry[];
+  const sessionIds = historyDatabase().listSessionIds();
+  for (const sessionId of sessionIds) {
+    let pending: HistoryEntry[];
     try {
-      entries = readHistoryEntries(sessionId);
+      pending = historyDatabase().pendingToolCalls(sessionId);
     } catch {
       continue;
     }
-
-    // Collect all tool_use_ids that have results
-    const resultIds = new Set(
-      entries
-        .filter((e) => e.role === "tool_result" && e.toolUseId)
-        .map((e) => e.toolUseId!)
-    );
-
-    // Add empty results for any tool_calls missing them
-    let modified = false;
-    for (const entry of entries) {
-      if (entry.role === "tool_call" && entry.toolUseId && !resultIds.has(entry.toolUseId)) {
-        entries.push({
-          role: "tool_result",
-          content: "",
-          toolUseId: entry.toolUseId,
-          toolOutput: "",
-          timestamp: new Date().toISOString(),
-        });
-        modified = true;
-      }
+    let modified = 0;
+    for (const entry of pending) {
+      appendHistory(sessionId, {
+        role: "tool_result",
+        content: "",
+        toolUseId: entry.toolUseId,
+        toolOutput: "",
+        timestamp: new Date().toISOString(),
+      });
+      modified++;
     }
 
-    if (modified) {
-      writeHistoryEntries(sessionId, entries);
-      console.log(`Cleaned up pending tool calls in ${file}`);
+    if (modified > 0) {
+      console.log(`Cleaned up ${modified} pending tool calls in ${sessionId}`);
     }
   }
 }
@@ -3582,71 +3741,17 @@ export interface HistoryStorageCompactResult {
   warnings: string[];
 }
 
-function historyEntryNeedsStorageCompaction(entry: HistoryEntry): boolean {
-  if (entry.role !== "tool_result") return false;
-
-  if (typeof entry.toolOutput === "string") {
-    return Buffer.byteLength(entry.toolOutput, "utf8") > TOOL_OUTPUT_BLOB_THRESHOLD || !!entry.toolOutputRef;
-  }
-
-  if (!entry.toolOutputRef && typeof entry.content === "string") {
-    return Buffer.byteLength(entry.content, "utf8") > TOOL_OUTPUT_BLOB_THRESHOLD;
-  }
-
-  if (entry.toolOutputRef) {
-    const preview = (entry.toolOutputPreview || entry.content || "").slice(0, TOOL_OUTPUT_PREVIEW_CHARS);
-    return entry.content !== preview || entry.toolOutputPreview !== preview;
-  }
-
-  return false;
-}
-
-function historyNeedsStorageCompaction(entries: HistoryEntry[]): boolean {
-  return entries.some(historyEntryNeedsStorageCompaction);
-}
-
-export function compactHistoryStorage(options: { minBytes?: number } = {}): HistoryStorageCompactResult {
-  ensureHistoryDir();
-  const result: HistoryStorageCompactResult = {
+export function compactHistoryStorage(_options: { minBytes?: number } = {}): HistoryStorageCompactResult {
+  // SQLite migration applies tool-output compaction while importing each
+  // session. Do not eagerly walk every retained JSON backup at startup: that
+  // would defeat lazy migration and stall servers with years of transcripts.
+  return {
     scanned: 0,
     compacted: 0,
     beforeBytes: 0,
     afterBytes: 0,
     warnings: [],
   };
-  if (!fs.existsSync(HISTORY_DIR)) return result;
-
-  const minBytes = Math.max(0, Math.floor(options.minBytes ?? HISTORY_COMPACT_MIN_BYTES));
-  const files = fs.readdirSync(HISTORY_DIR).filter((file) => file.endsWith(".json"));
-  for (const file of files) {
-    const sessionId = file.replace(/\.json$/, "");
-    const fullPath = path.join(HISTORY_DIR, file);
-    let before = 0;
-    try {
-      before = fs.statSync(fullPath).size;
-      if (before < minBytes) continue;
-      result.scanned++;
-      result.beforeBytes += before;
-      const entries = readHistoryEntries(sessionId, { backfillUserUuids: false });
-      if (!historyNeedsStorageCompaction(entries)) {
-        result.afterBytes += before;
-        continue;
-      }
-      writeHistoryEntries(sessionId, entries);
-      const after = fs.statSync(fullPath).size;
-      result.afterBytes += after;
-      if (after < before) {
-        result.compacted++;
-        console.log(`[HistoryCompact] ${sessionId}: ${(before / 1024 / 1024).toFixed(1)} MB -> ${(after / 1024 / 1024).toFixed(1)} MB`);
-      }
-    } catch (err: any) {
-      result.afterBytes += before;
-      const warning = `${sessionId}: ${err?.message || String(err)}`;
-      result.warnings.push(warning);
-      console.warn(`[HistoryCompact] ${warning}`);
-    }
-  }
-  return result;
 }
 
 // ── SDK session discovery ──

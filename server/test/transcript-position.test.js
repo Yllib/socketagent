@@ -15,7 +15,7 @@ const {
   positionSessionMessage,
 } = require("../dist/session-store");
 
-test("corrupt current history recovers from the last durable snapshot", () => {
+test("corrupt retained JSON cannot roll durable SQLite history backward", () => {
   const sessionId = `test-history-recovery-${randomUUID()}`;
   const historyPath = path.join(os.homedir(), ".socket-agent", "history", `${sessionId}.json`);
   try {
@@ -34,12 +34,7 @@ test("corrupt current history recovers from the last durable snapshot", () => {
     fs.writeFileSync(historyPath, Buffer.alloc(97));
 
     const recovered = getHistory(sessionId);
-    assert.deepEqual(recovered.map((entry) => entry.content), ["known-good"]);
-    assert.doesNotThrow(() => JSON.parse(fs.readFileSync(historyPath, "utf8")));
-    assert.ok(
-      fs.readdirSync(path.dirname(historyPath))
-        .some((name) => name.startsWith(`${sessionId}.json.corrupt-`)),
-    );
+    assert.deepEqual(recovered.map((entry) => entry.content), ["known-good", "newer-current-entry"]);
 
     appendHistory(sessionId, {
       role: "assistant",
@@ -48,7 +43,7 @@ test("corrupt current history recovers from the last durable snapshot", () => {
     });
     assert.deepEqual(
       getHistory(sessionId).map((entry) => entry.content),
-      ["known-good", "works-after-recovery"],
+      ["known-good", "newer-current-entry", "works-after-recovery"],
     );
   } finally {
     deleteSessionArtifacts(sessionId);
@@ -230,13 +225,13 @@ test("resume history returns the complete recent prompt window in one page", () 
       3,
     );
 
-    const incompleteCache = getResumeHistoryPage(sessionId, {
+    const contiguousTailCache = getResumeHistoryPage(sessionId, {
       knownSessionSeq: entries[109].sessionSeq,
       knownHistoryOffset: 70,
       knownHistoryEntryCount: 40,
     });
-    assert.equal(incompleteCache.historyKind, "initial");
-    assert.equal(incompleteCache.offset, 40);
+    assert.equal(contiguousTailCache.historyKind, "delta");
+    assert.equal(contiguousTailCache.offset, 110);
 
     const completeCache = getResumeHistoryPage(sessionId, {
       knownSessionSeq: entries[109].sessionSeq,
@@ -249,6 +244,35 @@ test("resume history returns the complete recent prompt window in one page", () 
       completeCache.entries.map((entry) => entry.content),
       Array.from({ length: 10 }, (_, index) => `message-${index + 110}`),
     );
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});
+
+test("resume history hard-bounds a tool-heavy initial window", () => {
+  const sessionId = `test-transcript-resume-budget-${randomUUID()}`;
+  try {
+    appendHistory(sessionId, {
+      role: "user",
+      content: "start",
+      timestamp: new Date().toISOString(),
+    });
+    for (let index = 0; index < 80; index++) {
+      appendHistory(sessionId, {
+        role: "assistant",
+        content: `${index}:${"x".repeat(16_000)}`,
+        timestamp: new Date(Date.now() + index + 1).toISOString(),
+      });
+    }
+
+    const page = getResumeHistoryPage(sessionId, {
+      maxInitialEntries: 20,
+      maxInitialBytes: 100_000,
+    });
+    assert.equal(page.historyKind, "initial");
+    assert.ok(page.entries.length <= 20);
+    assert.ok(Buffer.byteLength(JSON.stringify(page.entries), "utf8") <= 100_000);
+    assert.equal(page.deferredContextAvailable, true);
   } finally {
     deleteSessionArtifacts(sessionId);
   }

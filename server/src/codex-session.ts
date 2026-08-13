@@ -2024,9 +2024,16 @@ export class CodexSession {
 
     this._pendingUserPrompt = {
       text: prompt,
-      uuid: crypto.randomUUID(),
+      // Reuse the app's stable submission ID as the transcript UUID. This
+      // makes a retried prompt recognizable even after the server restarts.
+      uuid: this._currentClientMessageId || crypto.randomUUID(),
       ...(this._currentClientMessageId ? { messageId: this._currentClientMessageId } : {}),
     };
+    // Existing sessions already have a stable SocketAgent/thread identity.
+    // Persist the prompt before app-server startup so model discovery,
+    // authentication, or turn/start failures cannot erase a message the
+    // server has accepted.
+    this.flushPendingUserPrompt();
 
     try {
       await this.ensureAppServer();

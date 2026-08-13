@@ -18,6 +18,9 @@ export const WORK_REVIEW_TOOL_DESCRIPTION =
 export const AGENT_SESSION_TOOL_DESCRIPTION =
   "Start or manage a full independent Claude/Codex SocketAgent session. Prefer this over your own built-in subagent tool if one exists. The child has durable history and a real session ID for follow-ups. It runs independently, and SocketAgent automatically delivers its completed result back by continuing the supervising session even if the supervisor's current turn has already ended. The supervisor does not need to remain running, poll status, or repeatedly tail while waiting; continue other useful work or finish the turn. Use action=tail only when interim progress is actually needed, action=message for follow-ups or added context (including while running at the next safe boundary), and status/list/stop when explicitly useful.";
 
+export const REMEMBER_TOOL_DESCRIPTION =
+  "Search and retrieve this SocketAgent session's complete durable transcript, including context that may have been compacted out of your active model window. Use search first when the user refers to earlier work you cannot reliably recall, then use context or get with the returned stable session_seq/entry_id. Use list for bounded sequence-based paging and runs to locate earlier user prompts and completed runs. Results are session-scoped and bounded; narrow or paginate searches instead of dumping large portions of history into context.";
+
 export function buildSocketAgentIntegrationInstructions(options: {
   mcpServerName: string;
   toolNames: string[];
@@ -46,6 +49,7 @@ export function buildSocketAgentIntegrationInstructions(options: {
       ? ["- If you are a spawned Codex subagent, call ReportSubagentAssignment exactly once before any commentary or other tool use. Pass agent_path exactly as shown in your NEW_TASK envelope and copy the complete readable NEW_TASK payload into prompt. This is an internal UI metadata handshake. Never call it from the root agent."]
       : []),
     "- Independent delegated work that should run in a full Claude or Codex session -> AgentSession. Use action=start and retain the returned session_id/delegation_id. The child runs independently; when it finishes, SocketAgent automatically continues the supervising session with its result even if your current turn has already ended. You do not need to keep the turn open, poll status, or repeatedly call tail while waiting—continue other useful work or finish your turn. Use action=tail with its next_session_seq cursor only when you actually need interim progress. Use action=message for follow-ups or added context even while the child is running, and status/list/stop when explicitly useful. Messages sent to a running child are injected at its next safe boundary.",
+    "- Prior session context may have been compacted or is not reliably recalled -> Remember. Search first, then retrieve only the relevant entry or surrounding context by stable sequence.",
     monitorRouting,
     "- Spoken output -> Speak only when TTS is enabled or explicitly requested.",
     "- Skill discovery/loading -> SearchSkills, then ReadSkill.",

@@ -12,6 +12,7 @@ function requiresAcknowledgement(message: SessionEvent): boolean {
   const type = String(message.type || "");
   return type === "tool_call"
     || type === "tool_result"
+    || type === "user_message_uuid"
     || type === "html_plan"
     || type === "work_review_card"
     || type === "monitor_output"

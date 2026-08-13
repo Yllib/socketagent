@@ -11,6 +11,7 @@ import {
   handleMonitorTool,
   handleNotifyUserTool,
   handlePrivateIntegrationAuthTool,
+  handleRememberTool,
   handleRequestSecureInputTool,
   handleReadSkillTool,
   handleReportSubagentAssignmentTool,
@@ -25,6 +26,7 @@ import {
 import {
   AGENT_SESSION_TOOL_DESCRIPTION,
   HTML_PLAN_TOOL_DESCRIPTION,
+  REMEMBER_TOOL_DESCRIPTION,
   WORK_REVIEW_TOOL_DESCRIPTION,
 } from "./socketagent-instructions";
 
@@ -85,6 +87,10 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "AgentSession",
     description: AGENT_SESSION_TOOL_DESCRIPTION,
+  },
+  {
+    name: "Remember",
+    description: REMEMBER_TOOL_DESCRIPTION,
   },
   {
     name: "SearchSkills",
@@ -378,6 +384,31 @@ function createServer(context: AppToolContext): McpServer {
       },
     },
     async (args) => handleAgentSessionTool(context, args as any),
+  );
+
+  server.registerTool(
+    "Remember",
+    {
+      title: "Remember",
+      description: REMEMBER_TOOL_DESCRIPTION,
+      inputSchema: {
+        action: z.enum(["search", "list", "get", "context", "runs"]),
+        query: z.string().optional().describe("Keyword or phrase for search"),
+        session_seq: z.number().int().positive().optional().describe("Stable sequence returned by search/runs; required for context or usable for get"),
+        entry_id: z.string().optional().describe("Stable entry ID returned by search; alternative selector for get"),
+        before: z.number().int().min(0).max(20).optional().describe("Context entries before session_seq. Default 3"),
+        after: z.number().int().min(0).max(20).optional().describe("Context entries after session_seq. Default 3"),
+        direction: z.enum(["before", "after"]).optional().describe("For list, page before or after session_seq. Default before; omit session_seq for the latest page"),
+        roles: z.array(z.enum(["user", "assistant", "tool_call", "tool_result", "thinking", "task_state", "run_boundary", "monitor", "question", "secure_input", "work_review", "html_plan"])).optional().describe("Search role filters. Defaults to user and assistant"),
+        tool_name: z.string().optional().describe("Search only calls/results for this tool name"),
+        since: z.string().optional().describe("Optional ISO timestamp lower bound for search"),
+        until: z.string().optional().describe("Optional ISO timestamp upper bound for search"),
+        limit: z.number().int().min(1).max(50).optional().describe("Search result or run count. Default 10"),
+        offset: z.number().int().nonnegative().optional().describe("Search pagination offset"),
+        max_chars: z.number().int().min(2000).max(200000).optional().describe("Maximum returned text size. Default 60000"),
+      },
+    },
+    async (args) => handleRememberTool(context, args as any),
   );
 
   server.registerTool(

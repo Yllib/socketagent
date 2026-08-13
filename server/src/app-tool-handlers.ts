@@ -1,7 +1,7 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
-import type { Backend, CodexDriver, ServerMessage } from "./protocol";
+import type { Backend, CodexDriver, HistoryEntry, ServerMessage } from "./protocol";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
@@ -19,6 +19,11 @@ import {
 import {
   attachSendFileDeliveryToHistory,
   getTodos,
+  rememberGetHistoryEntry,
+  rememberHistoryContext,
+  rememberListHistory,
+  rememberRecentRuns,
+  rememberSearchHistory,
   removeHtmlPlanHistoryEntries,
   saveTodos,
 } from "./session-store";
@@ -190,6 +195,27 @@ export interface WorkReviewArgs {
   linked_html_plan_id?: string;
   items?: WorkReviewItemArgs[];
   include_archived?: boolean;
+}
+
+export interface RememberArgs {
+  action: "search" | "list" | "get" | "context" | "runs";
+  query?: string;
+  session_seq?: number;
+  entry_id?: string;
+  before?: number;
+  after?: number;
+  direction?: "before" | "after";
+  roles?: Array<
+    "user" | "assistant" | "tool_call" | "tool_result" | "thinking"
+    | "task_state" | "run_boundary" | "monitor" | "question"
+    | "secure_input" | "work_review" | "html_plan"
+  >;
+  tool_name?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+  max_chars?: number;
 }
 
 const SOCKETAGENT_TASK_SOURCE = "socketagent_tasks";
@@ -1190,6 +1216,170 @@ function codexSkillsForContext(ctx: AppToolContext): SkillEntry[] {
 function skillSummary(skill: SkillEntry): string {
   const description = skill.description ? ` - ${skill.description}` : "";
   return `${skill.name} (${skill.scope})${description}\npath: ${skill.filePath}`;
+}
+
+function rememberEntryView(entry: HistoryEntry, fieldLimit: number): Record<string, unknown> {
+  const bounded = (value: unknown): string | undefined => {
+    if (value === undefined || value === null || value === "") return undefined;
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    return text.length > fieldLimit
+      ? `${text.slice(0, fieldLimit)}\n…[truncated ${text.length - fieldLimit} characters]`
+      : text;
+  };
+  const content = bounded(entry.content);
+  const toolInput = bounded(entry.toolInput);
+  const toolOutput = bounded(entry.toolOutput);
+  return {
+    session_seq: entry.sessionSeq,
+    entry_id: entry.entryId,
+    revision: entry.revision,
+    timestamp: entry.timestamp,
+    role: entry.role,
+    ...(entry.toolName ? { tool_name: entry.toolName } : {}),
+    ...(content ? { content } : {}),
+    ...(toolInput ? { tool_input: toolInput } : {}),
+    ...(toolOutput ? { tool_output: toolOutput } : {}),
+    ...(entry.status ? { status: entry.status } : {}),
+    ...(entry.runId ? { run_id: entry.runId } : {}),
+    ...(entry.runDurationMs !== undefined ? { run_duration_ms: entry.runDurationMs } : {}),
+  };
+}
+
+function rememberResult(payload: unknown, maxChars: number): McpTextResult {
+  const serialized = JSON.stringify(payload, null, 2);
+  if (serialized.length <= maxChars) {
+    return { content: [{ type: "text", text: serialized }] };
+  }
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        truncated: true,
+        returned_characters: maxChars,
+        note: "Narrow the search or request fewer surrounding entries.",
+        preview: serialized.slice(0, maxChars),
+      }, null, 2),
+    }],
+  };
+}
+
+/** Search and retrieve the current session's durable pre-compaction memory. */
+export async function handleRememberTool(
+  ctx: AppToolContext,
+  args: RememberArgs,
+): Promise<McpTextResult> {
+  const sessionId = ctx.getSessionId();
+  if (!sessionId) {
+    return { content: [{ type: "text", text: "Remember is unavailable until this session has an ID." }], isError: true };
+  }
+  const maxChars = Math.max(2_000, Math.min(200_000, Math.floor(args.max_chars ?? 60_000)));
+  try {
+    switch (args.action) {
+      case "search": {
+        const query = String(args.query || "").trim();
+        if (!query) throw new Error("query is required for Remember search");
+        const roles = args.roles?.length ? args.roles : ["user", "assistant"];
+        const hits = rememberSearchHistory(sessionId, {
+          query,
+          roles,
+          ...(args.tool_name ? { toolName: args.tool_name } : {}),
+          ...(args.since ? { since: args.since } : {}),
+          ...(args.until ? { until: args.until } : {}),
+          limit: Math.max(1, Math.min(50, Math.floor(args.limit ?? 10))),
+          offset: Math.max(0, Math.floor(args.offset ?? 0)),
+        });
+        return rememberResult({
+          action: "search",
+          query,
+          result_count: hits.length,
+          next_offset: (args.offset ?? 0) + hits.length,
+          results: hits.map((hit) => ({
+            session_seq: hit.sessionSeq,
+            entry_id: hit.entryId,
+            revision: hit.revision,
+            timestamp: hit.timestamp,
+            role: hit.role,
+            ...(hit.toolName ? { tool_name: hit.toolName } : {}),
+            preview: hit.preview,
+          })),
+        }, maxChars);
+      }
+      case "get": {
+        const sessionSeq = args.session_seq;
+        const entryId = String(args.entry_id || "").trim() || undefined;
+        if (!entryId && (!Number.isSafeInteger(sessionSeq) || sessionSeq! <= 0)) {
+          throw new Error("entry_id or session_seq is required for Remember get");
+        }
+        const entry = rememberGetHistoryEntry(sessionId, {
+          ...(entryId ? { entryId } : {}),
+          ...(sessionSeq ? { sessionSeq } : {}),
+        });
+        if (!entry) {
+          return { content: [{ type: "text", text: "No matching durable history entry was found." }], isError: true };
+        }
+        return rememberResult({ action: "get", entry: rememberEntryView(entry, Math.floor(maxChars / 2)) }, maxChars);
+      }
+      case "list": {
+        const limit = Math.max(1, Math.min(50, Math.floor(args.limit ?? 20)));
+        const entries = rememberListHistory(sessionId, {
+          ...(args.session_seq ? { sessionSeq: args.session_seq } : {}),
+          direction: args.direction ?? "before",
+          limit,
+        });
+        const perEntryLimit = Math.max(500, Math.floor(maxChars / Math.max(1, entries.length * 2)));
+        return rememberResult({
+          action: "list",
+          direction: args.direction ?? "before",
+          cursor_session_seq: args.session_seq,
+          entries: entries.map((entry) => rememberEntryView(entry, perEntryLimit)),
+          next_cursor: entries.length > 0
+            ? (args.direction === "after" ? entries.at(-1)?.sessionSeq : entries[0].sessionSeq)
+            : args.session_seq,
+        }, maxChars);
+      }
+      case "context": {
+        if (!Number.isSafeInteger(args.session_seq) || args.session_seq! <= 0) {
+          throw new Error("session_seq is required for Remember context");
+        }
+        const before = Math.max(0, Math.min(20, Math.floor(args.before ?? 3)));
+        const after = Math.max(0, Math.min(20, Math.floor(args.after ?? 3)));
+        const entries = rememberHistoryContext(sessionId, args.session_seq!, before, after);
+        const perEntryLimit = Math.max(500, Math.floor(maxChars / Math.max(1, entries.length * 2)));
+        return rememberResult({
+          action: "context",
+          center_session_seq: args.session_seq,
+          before,
+          after,
+          entries: entries.map((entry) => rememberEntryView(entry, perEntryLimit)),
+        }, maxChars);
+      }
+      case "runs": {
+        const runs = rememberRecentRuns(sessionId, Math.max(1, Math.min(50, Math.floor(args.limit ?? 10))));
+        return rememberResult({
+          action: "runs",
+          runs: runs.map(({ prompt, boundary }) => ({
+            session_seq: prompt.sessionSeq,
+            entry_id: prompt.entryId,
+            timestamp: prompt.timestamp,
+            prompt: String(prompt.content || "").slice(0, 1_000),
+            ...(boundary ? {
+              completed_session_seq: boundary.sessionSeq,
+              completed_at: boundary.timestamp,
+              outcome: boundary.runOutcome,
+              duration_ms: boundary.runDurationMs,
+            } : { status: "no durable completion boundary" }),
+          })),
+        }, maxChars);
+      }
+      default:
+        throw new Error(`Unsupported Remember action: ${String(args.action)}`);
+    }
+  } catch (error) {
+    return {
+      content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      isError: true,
+    };
+  }
 }
 
 export async function handleSearchSkillsTool(

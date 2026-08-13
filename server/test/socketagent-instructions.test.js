@@ -16,7 +16,7 @@ test("AgentSession prefers SocketAgent delegation over built-in subagent tools",
 test("builds compact SocketAgent routing instructions without losing safety rules", () => {
   const prompt = buildSocketAgentIntegrationInstructions({
     mcpServerName: "socketagent_app",
-    toolNames: ["HtmlPlan", "SendFile", "RequestSecureInput", "TaskBatch"],
+    toolNames: ["HtmlPlan", "SendFile", "RequestSecureInput", "TaskBatch", "Remember"],
     secureInventory: "<secret_inventory>\n[]\n</secret_inventory>",
     discoverMissingTools: true,
   });
@@ -42,6 +42,8 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /do not need to keep the turn open, poll status, or repeatedly call tail/);
   assert.match(prompt, /action=tail with its next_session_seq cursor only when you actually need interim progress/);
   assert.match(prompt, /Messages sent to a running child are injected at its next safe boundary/);
+  assert.match(prompt, /Prior session context may have been compacted.*Remember/);
+  assert.match(prompt, /Search first, then retrieve only the relevant entry or surrounding context/);
   assert.match(prompt, /socketagent:\/\/file\/download/);
   assert.match(prompt, /<secret_inventory>\n\[\]\n<\/secret_inventory>/);
 });

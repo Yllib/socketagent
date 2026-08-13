@@ -1020,6 +1020,51 @@ function loadServerKeyPair(): KeyPair {
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
+const acceptedPromptSubmissions = new Map<
+  string,
+  { acceptedAt: number; sessionId: string }
+>();
+const PROMPT_SUBMISSION_TTL_MS = 24 * 60 * 60_000;
+const MAX_ACCEPTED_PROMPT_SUBMISSIONS = 10_000;
+
+function acceptedPromptSubmission(messageId: string): { acceptedAt: number; sessionId: string } | undefined {
+  if (!messageId) return undefined;
+  const existing = acceptedPromptSubmissions.get(messageId);
+  if (!existing) return undefined;
+  if (existing.acceptedAt < Date.now() - PROMPT_SUBMISSION_TTL_MS) {
+    acceptedPromptSubmissions.delete(messageId);
+    return undefined;
+  }
+  return existing;
+}
+
+function rememberAcceptedPromptSubmission(messageId: string, sessionId: string): void {
+  if (!messageId) return;
+  acceptedPromptSubmissions.set(messageId, { acceptedAt: Date.now(), sessionId });
+  if (acceptedPromptSubmissions.size <= MAX_ACCEPTED_PROMPT_SUBMISSIONS) return;
+  const cutoff = Date.now() - PROMPT_SUBMISSION_TTL_MS;
+  for (const [id, entry] of acceptedPromptSubmissions) {
+    if (entry.acceptedAt < cutoff || acceptedPromptSubmissions.size > MAX_ACCEPTED_PROMPT_SUBMISSIONS) {
+      acceptedPromptSubmissions.delete(id);
+    }
+    if (acceptedPromptSubmissions.size <= MAX_ACCEPTED_PROMPT_SUBMISSIONS) break;
+  }
+}
+
+function persistedPromptSubmission(sessionId: string, messageId: string): boolean {
+  if (!sessionId || !messageId) return false;
+  try {
+    return getHistory(sessionId).some(
+      (entry) => entry.role === "user" && entry.uuid === messageId,
+    );
+  } catch (error: any) {
+    console.warn(
+      `[Prompt] Could not check persisted submission ${messageId} for ${sessionId}:`
+      + ` ${error?.message || error}`,
+    );
+    return false;
+  }
+}
 // Safety registry: unlike activeSessions, this retains every busy runner for
 // an exact session ID. A reconnect race must never make an older runner
 // invisible to the stop button.
@@ -4528,6 +4573,33 @@ function createConnectionHandler(
       }
 
       case "prompt": {
+        const promptMessageId = String((msg as any).messageId || "").trim();
+        const duplicateSubmission = acceptedPromptSubmission(promptMessageId);
+        const persistedDuplicate = !duplicateSubmission
+          && persistedPromptSubmission(String(msg.sessionId || ""), promptMessageId);
+        if (duplicateSubmission || persistedDuplicate) {
+          const duplicateSessionId = duplicateSubmission?.sessionId || String(msg.sessionId || "");
+          if (persistedDuplicate) {
+            rememberAcceptedPromptSubmission(promptMessageId, duplicateSessionId);
+          }
+          sendJson({
+            type: "prompt_received",
+            messageId: promptMessageId,
+            ...(duplicateSessionId ? { sessionId: duplicateSessionId } : {}),
+            duplicate: true,
+          });
+          break;
+        }
+        const acknowledgePrompt = (sessionId?: string): void => {
+          if (!promptMessageId) return;
+          const acceptedSessionId = String(sessionId || "");
+          rememberAcceptedPromptSubmission(promptMessageId, acceptedSessionId);
+          sendJson({
+            type: "prompt_received",
+            messageId: promptMessageId,
+            ...(acceptedSessionId ? { sessionId: acceptedSessionId } : {}),
+          });
+        };
         const explicitPromptSessionId = String(
           msg.sessionId
             || activeSession?.getSessionId?.()
@@ -4582,6 +4654,12 @@ function createConnectionHandler(
           await waitForManagedBackendUpdate();
           if (promptBackend === "codex" && codexUnavailable()) {
             sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", savedResumeId);
+            sendJson({
+              type: "prompt_failed",
+              messageId: promptMessageId,
+              ...(savedResumeId ? { sessionId: savedResumeId } : {}),
+              message: "Codex is not available on this computer",
+            });
             break;
           }
           activeSession = createSession(promptBackend, transport as any, cwd, plugins, getStoredCodexDriver(savedPromptSession));
@@ -4613,7 +4691,14 @@ function createConnectionHandler(
           const injectOptions = activeSession instanceof CodexSession
             ? { fastMode: promptCodexFastMode ?? activeSession.getCodexFastMode() }
             : undefined;
-          (activeSession as any).injectMessage(msg.text, priority, messageId, injectOptions).then(() => {
+          const injectionPromise = (activeSession as any).injectMessage(
+            msg.text,
+            priority,
+            messageId,
+            injectOptions,
+          );
+          acknowledgePrompt(explicitPromptSessionId);
+          injectionPromise.then(() => {
             // Acknowledge injection so the app can promote the pending message
             sendJson({ type: "injection_ack", messageId });
             if (unlockedByUserPrompt) retryDeferredAutomationAfterUserPrompt();
@@ -4621,6 +4706,7 @@ function createConnectionHandler(
             if (e?.message === "Queued prompt retracted") {
               console.log(`[Inject] Queued prompt retracted (messageId=${messageId})`);
             } else {
+              if (promptMessageId) acceptedPromptSubmissions.delete(promptMessageId);
               console.error(`[Inject] Failed: ${e}`);
               sendJson({
                 type: "injection_failed",
@@ -4727,7 +4813,12 @@ function createConnectionHandler(
           : undefined;
         const runPromise = (sessionForRun as any).runQueryWithOptions
           ? (sessionForRun as any).runQueryWithOptions(msg.text, resumeId, runOptions)
-          : sessionForRun.runQuery(msg.text, resumeId);
+          : (sessionForRun as any).runQuery(
+              msg.text,
+              resumeId,
+              promptMessageId || undefined,
+            );
+        acknowledgePrompt(resumeId || sessionForRun.getSessionId() || undefined);
         if (unlockedByUserPrompt) retryDeferredAutomationAfterUserPrompt();
         let sessionStartedPushSent = false;
         const maybeSendSessionStartedPush = () => {
@@ -4752,6 +4843,12 @@ function createConnectionHandler(
           broadcastSessionList();
         }).catch((err: any) => {
           const sid = sessionForRun.getSessionId();
+          sendJson({
+            type: "prompt_failed",
+            messageId: promptMessageId,
+            ...(sid ? { sessionId: sid } : {}),
+            message: err?.message || "Query failed",
+          });
           if (sid && activeSessions.get(sid) === sessionForRun && !sessionShouldRemainPooled(sessionForRun)) {
             activeSessions.delete(sid);
           }
@@ -9651,12 +9748,22 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         }
       })
       .catch((err: any) => {
-        transport.send(
-          JSON.stringify({
-            type: "error",
-            message: err.message || "Server error",
-          })
-        );
+        if (msgType === "prompt") {
+          transport.send(JSON.stringify({
+            type: "prompt_failed",
+            messageId: String((msg as any)?.messageId || ""),
+            sessionId: String((msg as any)?.sessionId || ""),
+            message: err.message || "Prompt could not be started",
+          }));
+        }
+        if (msgType !== "prompt") {
+          transport.send(
+            JSON.stringify({
+              type: "error",
+              message: err.message || "Server error",
+            })
+          );
+        }
       });
   });
 
@@ -9753,10 +9860,20 @@ function startRelayClient(): void {
         })
         .catch((err: any) => {
           console.error(`[Relay] Message handler error: ${err.message}`);
-          handler.sendJson({
-            type: "error",
-            message: err.message || "Server error",
-          });
+          if (msgType === "prompt") {
+            handler.sendJson({
+              type: "prompt_failed",
+              messageId: String((msg as any)?.messageId || ""),
+              sessionId: String((msg as any)?.sessionId || ""),
+              message: err.message || "Prompt could not be started",
+            });
+          }
+          if (msgType !== "prompt") {
+            handler.sendJson({
+              type: "error",
+              message: err.message || "Server error",
+            });
+          }
         });
     },
     onStatusChange: (status: RelayStatus) => {

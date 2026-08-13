@@ -26,6 +26,7 @@ import {
   handleHtmlPlanTool,
   handleMonitorTool,
   handleNotifyUserTool,
+  handleRememberTool,
   handleRequestSecureInputTool,
   handleScheduleReminderTool,
   handleSendFileTool,
@@ -39,7 +40,7 @@ import type {
   AgentSessionToolExecutor,
   DelegatedAgentLiveActivity,
 } from "./delegated-agent-types";
-import { AGENT_SESSION_TOOL_DESCRIPTION, buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, WORK_REVIEW_TOOL_DESCRIPTION } from "./socketagent-instructions";
+import { AGENT_SESSION_TOOL_DESCRIPTION, buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, REMEMBER_TOOL_DESCRIPTION, WORK_REVIEW_TOOL_DESCRIPTION } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
@@ -2764,6 +2765,7 @@ export class ClaudeSession {
         entryId: historyEntry.entryId,
         sessionSeq: historyEntry.sessionSeq,
         revision: historyEntry.revision,
+        ...(messageId ? { clientMessageId: messageId } : {}),
       } as any);
     }
 
@@ -2827,6 +2829,7 @@ export class ClaudeSession {
         entryId: historyEntry.entryId,
         sessionSeq: historyEntry.sessionSeq,
         revision: historyEntry.revision,
+        ...(messageId ? { clientMessageId: messageId } : {}),
       } as any);
     }
 
@@ -3135,6 +3138,27 @@ export class ClaudeSession {
             async (args) => handleAgentSessionTool(appToolContext, args as any)
           ),
           tool(
+            "Remember",
+            REMEMBER_TOOL_DESCRIPTION,
+            {
+              action: z.enum(["search", "list", "get", "context", "runs"]),
+              query: z.string().optional().describe("Keyword or phrase for search"),
+              session_seq: z.number().int().positive().optional().describe("Stable sequence returned by search/runs; required for context or usable for get"),
+              entry_id: z.string().optional().describe("Stable entry ID returned by search; alternative selector for get"),
+              before: z.number().int().min(0).max(20).optional().describe("Context entries before session_seq. Default 3"),
+              after: z.number().int().min(0).max(20).optional().describe("Context entries after session_seq. Default 3"),
+              direction: z.enum(["before", "after"]).optional().describe("For list, page before or after session_seq. Default before; omit session_seq for the latest page"),
+              roles: z.array(z.enum(["user", "assistant", "tool_call", "tool_result", "thinking", "task_state", "run_boundary", "monitor", "question", "secure_input", "work_review", "html_plan"])).optional().describe("Search role filters. Defaults to user and assistant"),
+              tool_name: z.string().optional().describe("Search only calls/results for this tool name"),
+              since: z.string().optional().describe("Optional ISO timestamp lower bound for search"),
+              until: z.string().optional().describe("Optional ISO timestamp upper bound for search"),
+              limit: z.number().int().min(1).max(50).optional().describe("Search result or run count. Default 10"),
+              offset: z.number().int().nonnegative().optional().describe("Search pagination offset"),
+              max_chars: z.number().int().min(2000).max(200000).optional().describe("Maximum returned text size. Default 60000"),
+            },
+            async (args) => handleRememberTool(appToolContext, args as any)
+          ),
+          tool(
             "Monitor",
             "Monitor background process output. Two modes:\n1. Start a NEW background process with monitoring: provide command + description.\n2. Toggle monitoring on/off for an EXISTING background task: provide taskId.\nWhen monitoring is on, process output is debounced (5s batching) and delivered to you automatically so you can react. Timeout stops monitoring only — the process keeps running. To stop the process itself, use the existing task stop mechanism.",
             {
@@ -3379,6 +3403,7 @@ export class ClaudeSession {
           "ScheduleTask",
           "TaskBatch",
           "AgentSession",
+          "Remember",
           "Monitor",
           "SearchSkills",
           "ReadSkill",
@@ -3432,6 +3457,7 @@ export class ClaudeSession {
           entryId: historyEntry.entryId,
           sessionSeq: historyEntry.sessionSeq,
           revision: historyEntry.revision,
+          ...(messageId ? { clientMessageId: messageId } : {}),
         } as any);
         promptLogged = true;
       }
@@ -4338,6 +4364,7 @@ export class ClaudeSession {
               entryId: historyEntry.entryId,
               sessionSeq: historyEntry.sessionSeq,
               revision: historyEntry.revision,
+              ...(messageId ? { clientMessageId: messageId } : {}),
             } as any);
             promptLogged = true;
           }

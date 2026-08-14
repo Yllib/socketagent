@@ -295,6 +295,10 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("config/read", { cwd, includeLayers: false });
   }
 
+  async readAccount(refreshToken = false): Promise<unknown> {
+    return this.request("account/read", { refreshToken });
+  }
+
   async readAccountRateLimits(): Promise<unknown> {
     return this.request("account/rateLimits/read", {});
   }

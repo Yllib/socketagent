@@ -4862,13 +4862,18 @@ function createConnectionHandler(
             markBackendAuthRequired("codex", detail);
             invalidateCodexAvailabilityCache();
             invalidateCodexDriverAvailabilityCache();
-            sendJson({
-              type: "backend_auth_required",
-              backend: "codex",
-              sessionId: sid,
-              message: "Codex authentication is invalid or expired. Sign in to Codex again to continue.",
-              detail,
-            });
+            if (err?.codexMcpAuth === true) {
+              clearBackendHealthOverride("codex");
+            } else if (err?.codexPrimaryAuthSurfaced !== true) {
+              sendJson({
+                type: "backend_auth_required",
+                backend: "codex",
+                authScope: "openai",
+                sessionId: sid,
+                message: "Your OpenAI sign-in has expired. Re-authenticate to continue using Codex.",
+                detail,
+              });
+            }
             sendJson({
               type: "server_settings",
               ...getAdvertisedServerSettings(),

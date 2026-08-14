@@ -398,6 +398,33 @@ export function isCodexAuthError(error: unknown): boolean {
     || /\b401\b/.test(message);
 }
 
+type CodexAuthScope = "openai" | "mcp" | "unknown";
+
+export function isMcpAuthSignal(value: unknown): boolean {
+  let text: string;
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  return /\bmcp(?:Server)?\b|mcp client|codex_apps|reauthenticationRequired/i.test(text)
+    && isCodexAuthError(text);
+}
+
+export function codexAuthScopeFromAccountRead(
+  raw: unknown,
+  hintedMcp: boolean,
+): CodexAuthScope {
+  const result = raw && typeof raw === "object"
+    ? raw as Record<string, unknown>
+    : {};
+  if (result.requiresOpenaiAuth === true && result.account == null) {
+    return "openai";
+  }
+  if (result.account != null) return hintedMcp ? "mcp" : "unknown";
+  return hintedMcp ? "mcp" : "unknown";
+}
+
 function codexAppServerErrorMessage(params: any, fallback: string): string {
   return params?.error?.message
     || params?.status?.error?.message
@@ -524,6 +551,9 @@ export class CodexSession {
   private streamSnapshots = new LatestSnapshotDispatcher<ServerMessage>((message) => {
     this.sendImmediately(message);
   });
+  private appServerAuthCheck: Promise<CodexAuthScope> | null = null;
+  private lastPrimaryAuthRequiredAt = 0;
+  private surfacedMcpAuth = new Set<string>();
 
   public onActivity?: () => void;
   public onClose?: () => void;
@@ -2346,11 +2376,93 @@ export class CodexSession {
     const sid = this.sessionId;
     if (sid) {
       this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
-      if (!isCodexAuthError(params) && !isCodexAuthError(message)) {
+      if (isCodexAuthError(params) || isCodexAuthError(message)) {
+        void this.handleAppServerAuthFailure(message, {
+          hintedMcp: isMcpAuthSignal(params) || isMcpAuthSignal(message),
+          terminal: true,
+        });
+        return;
+      } else {
         this.send({ type: "error", message: `Codex: ${message}`, sessionId: sid } as any);
       }
     }
     this.appServerTurnSettler?.reject(new Error(message));
+  }
+
+  private async classifyAppServerAuthFailure(hintedMcp: boolean): Promise<CodexAuthScope> {
+    if (this.appServerAuthCheck) return this.appServerAuthCheck;
+    const client = this.appServer;
+    if (!client) return hintedMcp ? "mcp" : "unknown";
+
+    const check = (async (): Promise<CodexAuthScope> => {
+      try {
+        const raw = await client.readAccount(true);
+        return codexAuthScopeFromAccountRead(raw, hintedMcp);
+      } catch (error) {
+        // A forced managed-token refresh failing with an auth error is the
+        // authoritative primary-account signal. Other failures leave the MCP
+        // hint in charge rather than turning every downstream 401 into logout.
+        if (isCodexAuthError(error)) return "openai";
+        return hintedMcp ? "mcp" : "unknown";
+      }
+    })();
+    this.appServerAuthCheck = check;
+    try {
+      return await check;
+    } finally {
+      if (this.appServerAuthCheck === check) this.appServerAuthCheck = null;
+    }
+  }
+
+  private emitPrimaryAuthRequired(detail: string): void {
+    const nowMs = Date.now();
+    if (nowMs - this.lastPrimaryAuthRequiredAt < 30_000) return;
+    this.lastPrimaryAuthRequiredAt = nowMs;
+    this.send({
+      type: "backend_auth_required",
+      backend: "codex",
+      authScope: "openai",
+      sessionId: this.sessionId || undefined,
+      message: "Your OpenAI sign-in has expired. Re-authenticate to continue using Codex.",
+      detail,
+    } as any);
+  }
+
+  private emitMcpAuthRequired(detail: string, name = "Connected app"): void {
+    const key = name.trim().toLowerCase() || "connected app";
+    if (this.surfacedMcpAuth.has(key)) return;
+    this.surfacedMcpAuth.add(key);
+    this.send({
+      type: "backend_auth_required",
+      backend: "codex",
+      authScope: "mcp",
+      mcpServerName: name,
+      sessionId: this.sessionId || undefined,
+      message: `${name} needs to be reconnected.`,
+      detail,
+    } as any);
+  }
+
+  private async handleAppServerAuthFailure(
+    detail: string,
+    options: { hintedMcp: boolean; terminal: boolean; mcpServerName?: string },
+  ): Promise<void> {
+    const scope = await this.classifyAppServerAuthFailure(options.hintedMcp);
+    if (scope === "openai") {
+      this.emitPrimaryAuthRequired(detail);
+    } else if (scope === "mcp") {
+      this.emitMcpAuthRequired(detail, options.mcpServerName);
+    }
+
+    if (!options.terminal) return;
+    const error = new Error(detail);
+    if (scope === "openai") {
+      (error as any).codexPrimaryAuthSurfaced = true;
+    } else if (scope === "mcp") {
+      (error as any).codexMcpAuth = true;
+      (error as any).socketAgentSurfaced = true;
+    }
+    this.appServerTurnSettler?.reject(error);
   }
 
   private scheduleAppServerIdleStop(delayMs = CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS): void {
@@ -3284,10 +3396,15 @@ export class CodexSession {
         } else if (statusType === "systemError") {
           const message = codexAppServerErrorMessage(p, "Codex app-server entered systemError state");
           this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
-          if (!isCodexAuthError(p) && !isCodexAuthError(message)) {
+          if (isCodexAuthError(p) || isCodexAuthError(message)) {
+            void this.handleAppServerAuthFailure(message, {
+              hintedMcp: isMcpAuthSignal(p) || isMcpAuthSignal(message),
+              terminal: true,
+            });
+          } else {
             this.send({ type: "error", message, sessionId: sid } as any);
+            this.appServerTurnSettler?.reject(new Error(message));
           }
-          this.appServerTurnSettler?.reject(new Error(message));
         }
         return;
       }
@@ -3789,7 +3906,15 @@ export class CodexSession {
       case "mcpServer/startupStatus/updated": {
         const name = String(p?.name || "MCP server");
         const error = p?.error ? String(p.error) : "";
-        if (error) {
+        const needsReauth = p?.failureReason === "reauthenticationRequired"
+          || (error && isCodexAuthError(error));
+        if (needsReauth) {
+          void this.handleAppServerAuthFailure(error || `${name} authentication expired`, {
+            hintedMcp: true,
+            terminal: false,
+            mcpServerName: name,
+          });
+        } else if (error) {
           this.send({ type: "error", message: `${name}: ${error}` } as ServerMessage);
         }
         return;
@@ -3876,11 +4001,20 @@ export class CodexSession {
         if (p?.message || p?.summary) {
           const summary = String(p?.message || p?.summary);
           const details = String(p?.details || "").trim();
-          this.send({
-            type: "error",
-            message: details ? `${summary}\n${details}` : summary,
-            sessionId: this.sessionId || undefined,
-          } as any);
+          const message = details ? `${summary}\n${details}` : summary;
+          if (isCodexAuthError(p) || isCodexAuthError(message)) {
+            void this.handleAppServerAuthFailure(message, {
+              hintedMcp: isMcpAuthSignal(p) || isMcpAuthSignal(message),
+              terminal: false,
+              mcpServerName: /codex_apps/i.test(message) ? "Connected apps" : undefined,
+            });
+          } else {
+            this.send({
+              type: "error",
+              message,
+              sessionId: this.sessionId || undefined,
+            } as any);
+          }
         }
         return;
 

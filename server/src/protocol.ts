@@ -1526,6 +1526,8 @@ export interface ErrorServerMessage {
 export interface BackendAuthRequiredServerMessage {
   type: "backend_auth_required";
   backend: Backend;
+  authScope?: "openai" | "mcp";
+  mcpServerName?: string;
   message: string;
   detail?: string;
   sessionId?: string;

@@ -25,7 +25,7 @@ import * as path from "path";
 import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
-import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, compactCodexAppServerThread, createSession, rollbackCodexAppServerThread, Session, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
+import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
 import {
@@ -35,6 +35,7 @@ import {
   BULK_RELAY_PAIRING_SUFFIX,
   ClientMessage,
   CodexDriver,
+  CodexGoalStatus,
   SessionInfo,
   TRANSPORT_LANE_VERSION,
   TransportLane,
@@ -1543,6 +1544,7 @@ function serverCapabilitiesPayload(
       atomicFinish: true,
     },
     sessionTransfer: { version: 1 },
+    codexGoals: { version: 1 },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
     codexDriversAvailable: settings.codexDriversAvailable,
@@ -6966,6 +6968,128 @@ function createConnectionHandler(
           console.error(`[skills_list] Error: ${e.message || e}`);
           sendJson({ type: "skills_list", skills: [], projectCwd: "", codexSlashCommands: CODEX_NATIVE_SLASH_COMMANDS, error: e.message || String(e) });
         }
+        break;
+      }
+
+      case "codex_goal_get":
+      case "codex_goal_set":
+      case "codex_goal_clear": {
+        const requestId = String((msg as any).requestId || "");
+        const targetSid = String((msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId || "");
+        const fail = (error: unknown): void => {
+          const message = error instanceof Error ? error.message : String(error);
+          sendJson({
+            type: "codex_goal_state",
+            requestId,
+            sessionId: targetSid,
+            goal: null,
+            ok: false,
+            error: message,
+          });
+        };
+        if (!requestId || !targetSid) {
+          fail(new Error("A request id and Codex session are required"));
+          break;
+        }
+
+        const sessionInfo = getSession(targetSid);
+        if (sessionInfo?.backend !== "codex") {
+          fail(new Error("Goals are only available for Codex sessions"));
+          break;
+        }
+        const activeMatchesTarget = !!activeSession && (
+          activeSession.getSessionId?.() === targetSid ||
+          activeSessionId === targetSid ||
+          (activeSession as any)._resumeSessionId === targetSid
+        );
+        const target = activeSessions.get(targetSid)
+          || (activeMatchesTarget ? activeSession : null);
+        const liveCodex = target instanceof CodexSession ? target : null;
+
+        const run = async (): Promise<void> => {
+          if (msg.type === "codex_goal_get") {
+            const goal = liveCodex
+              ? await liveCodex.getAppServerGoal(targetSid)
+              : await getCodexAppServerGoal(targetSid, sessionInfo.cwd);
+            sendJson({
+              type: "codex_goal_state",
+              requestId,
+              sessionId: targetSid,
+              goal,
+              ok: true,
+            });
+            return;
+          }
+
+          if (msg.type === "codex_goal_clear") {
+            if (liveCodex) {
+              await liveCodex.clearAppServerGoal(targetSid);
+            } else {
+              await clearCodexAppServerGoal(targetSid, sessionInfo.cwd);
+            }
+            sendJson({
+              type: "codex_goal_state",
+              requestId,
+              sessionId: targetSid,
+              goal: null,
+              ok: true,
+            });
+            return;
+          }
+
+          const rawObjective = (msg as any).objective;
+          const rawStatus = (msg as any).status;
+          const hasTokenBudget = Object.prototype.hasOwnProperty.call(msg, "tokenBudget");
+          const update: { objective?: string; status?: CodexGoalStatus; tokenBudget?: number | null } = {};
+          if (rawObjective !== undefined) {
+            const objective = String(rawObjective).trim();
+            if (!objective) throw new Error("Goal objective cannot be empty");
+            update.objective = objective;
+          }
+          if (rawStatus !== undefined) {
+            const allowedStatuses = new Set<CodexGoalStatus>([
+              "active",
+              "paused",
+              "blocked",
+              "usageLimited",
+              "budgetLimited",
+              "complete",
+            ]);
+            if (!allowedStatuses.has(rawStatus as CodexGoalStatus)) {
+              throw new Error(`Unsupported goal status: ${String(rawStatus)}`);
+            }
+            update.status = rawStatus as CodexGoalStatus;
+          }
+          if (hasTokenBudget) {
+            if ((msg as any).tokenBudget == null) {
+              update.tokenBudget = null;
+            } else {
+              const tokenBudget = Number((msg as any).tokenBudget);
+              if (!Number.isSafeInteger(tokenBudget) || tokenBudget <= 0) {
+                throw new Error("Goal token budget must be a positive whole number");
+              }
+              update.tokenBudget = tokenBudget;
+            }
+          }
+          if (Object.keys(update).length === 0) {
+            throw new Error("No goal changes were provided");
+          }
+          const goal = liveCodex
+            ? await liveCodex.setAppServerGoal(update, targetSid)
+            : await setCodexAppServerGoal(targetSid, sessionInfo.cwd, update);
+          sendJson({
+            type: "codex_goal_state",
+            requestId,
+            sessionId: targetSid,
+            goal,
+            ok: true,
+          });
+        };
+
+        void run().catch((error) => {
+          console.error(`[codex_goal] ${msg.type} failed session=${targetSid}: ${error instanceof Error ? error.message : error}`);
+          fail(error);
+        });
         break;
       }
 

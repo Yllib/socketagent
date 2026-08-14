@@ -52,6 +52,46 @@ export interface PromptFailedServerMessage {
   message: string;
 }
 
+export type CodexGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
+
+export interface CodexGoal {
+  threadId: string;
+  objective: string;
+  status: CodexGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CodexGoalGetMessage {
+  type: "codex_goal_get";
+  requestId: string;
+  sessionId: string;
+}
+
+export interface CodexGoalSetMessage {
+  type: "codex_goal_set";
+  requestId: string;
+  sessionId: string;
+  objective?: string;
+  status?: CodexGoalStatus;
+  tokenBudget?: number | null;
+}
+
+export interface CodexGoalClearMessage {
+  type: "codex_goal_clear";
+  requestId: string;
+  sessionId: string;
+}
+
 export interface RetractQueuedPromptMessage {
   type: "retract_queued_prompt";
   messageId: string;
@@ -1097,6 +1137,9 @@ export type ClientMessage =
   | { type: "remove_recent_cwd"; cwd: string }
   | { type: "skills_list" }
   | { type: "codex_slash_command"; name: string; args?: string; sessionId?: string }
+  | CodexGoalGetMessage
+  | CodexGoalSetMessage
+  | CodexGoalClearMessage
   | { type: "skills_save"; name: string; scope: string; format: string; agent?: "claude" | "codex"; frontmatter: Record<string, string>; body: string; filePath?: string }
   | { type: "skills_delete"; filePath: string }
   | { type: "protected_files_list"; requestId?: string }
@@ -1530,6 +1573,9 @@ export interface ServerCapabilitiesMessage {
     atomicFinish: true;
   };
   sessionTransfer?: {
+    version: number;
+  };
+  codexGoals?: {
     version: number;
   };
   /** Backends supported by this server build. Health/auth state is in backendHealth. */
@@ -2059,6 +2105,15 @@ export interface CodexCommandResultServerMessage {
   parentToolUseId?: string | null;
 }
 
+export interface CodexGoalStateServerMessage {
+  type: "codex_goal_state";
+  sessionId: string;
+  goal: CodexGoal | null;
+  requestId?: string;
+  ok: boolean;
+  error?: string;
+}
+
 export interface ToolSummaryServerMessage {
   type: "tool_summary";
   summary: string;
@@ -2523,6 +2578,7 @@ export type ServerMessage =
   | CompactBoundaryServerMessage
   | TaskNotificationServerMessage
   | CodexCommandResultServerMessage
+  | CodexGoalStateServerMessage
   | ToolSummaryServerMessage
   | SessionForkedServerMessage
   | RewindConversationResultServerMessage

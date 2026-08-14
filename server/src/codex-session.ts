@@ -10,7 +10,16 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { AgentSessionSettings, ServerMessage, Backend, SessionInfo, HistoryEntry, CodexDriver } from "./protocol";
+import {
+  AgentSessionSettings,
+  ServerMessage,
+  Backend,
+  SessionInfo,
+  HistoryEntry,
+  CodexDriver,
+  CodexGoal,
+  CodexGoalStatus,
+} from "./protocol";
 import { SessionContext, SocketAgentPlugin } from "./plugin-api";
 import {
   saveSession,
@@ -64,6 +73,41 @@ const TRANSIENT_CODEX_RAW_EVENT_METHODS = new Set([
   "thread/tokenUsage/updated",
   "account/rateLimits/updated",
 ]);
+
+const CODEX_GOAL_STATUSES = new Set<CodexGoalStatus>([
+  "active",
+  "paused",
+  "blocked",
+  "usageLimited",
+  "budgetLimited",
+  "complete",
+]);
+
+function normalizeCodexGoal(value: unknown): CodexGoal | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const threadId = typeof raw.threadId === "string" ? raw.threadId : "";
+  const objective = typeof raw.objective === "string" ? raw.objective : "";
+  const status = typeof raw.status === "string" && CODEX_GOAL_STATUSES.has(raw.status as CodexGoalStatus)
+    ? raw.status as CodexGoalStatus
+    : null;
+  if (!threadId || !status) return null;
+  const finiteInt = (candidate: unknown): number => {
+    const number = Number(candidate);
+    return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+  };
+  const budget = raw.tokenBudget == null ? null : finiteInt(raw.tokenBudget);
+  return {
+    threadId,
+    objective,
+    status,
+    tokenBudget: budget,
+    tokensUsed: finiteInt(raw.tokensUsed),
+    timeUsedSeconds: finiteInt(raw.timeUsedSeconds),
+    createdAt: finiteInt(raw.createdAt),
+    updatedAt: finiteInt(raw.updatedAt),
+  };
+}
 
 function unwrapExecResultEnvelope(value: unknown): string | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -1197,6 +1241,35 @@ export class CodexSession {
     if (!Number.isFinite(numTurns) || numTurns < 1) throw new Error("Rollback must drop at least one turn");
     await this.ensureAppServer();
     await this.appServer!.rollbackThread(threadId, Math.floor(numTurns));
+  }
+
+  async getAppServerGoal(
+    threadId = this.threadId || this.sessionId || this._resumeSessionId,
+  ): Promise<CodexGoal | null> {
+    if (!threadId) throw new Error("No Codex thread id for goal");
+    await this.ensureAppServer();
+    const result = await this.appServer!.getGoal(threadId) as { goal?: unknown };
+    return normalizeCodexGoal(result?.goal);
+  }
+
+  async setAppServerGoal(
+    update: { objective?: string; status?: CodexGoalStatus; tokenBudget?: number | null },
+    threadId = this.threadId || this.sessionId || this._resumeSessionId,
+  ): Promise<CodexGoal> {
+    if (!threadId) throw new Error("No Codex thread id for goal");
+    await this.ensureAppServer();
+    const result = await this.appServer!.setGoal(threadId, update) as { goal?: unknown };
+    const goal = normalizeCodexGoal(result?.goal);
+    if (!goal) throw new Error("Codex returned an invalid goal state");
+    return goal;
+  }
+
+  async clearAppServerGoal(
+    threadId = this.threadId || this.sessionId || this._resumeSessionId,
+  ): Promise<void> {
+    if (!threadId) throw new Error("No Codex thread id for goal");
+    await this.ensureAppServer();
+    await this.appServer!.clearGoal(threadId);
   }
 
   async executeCodexSlashCommand(name: string, args = ""): Promise<void> {
@@ -3219,6 +3292,34 @@ export class CodexSession {
         return;
       }
 
+      case "thread/goal/updated": {
+        const threadId = String(p?.threadId || p?.goal?.threadId || "");
+        if (!threadId || (this.threadId && threadId !== this.threadId)) return;
+        const goal = normalizeCodexGoal(p?.goal);
+        if (!goal) return;
+        const sessionId = this.sessionId || this._resumeSessionId || threadId;
+        this.send({
+          type: "codex_goal_state",
+          sessionId,
+          goal,
+          ok: true,
+        } as any);
+        return;
+      }
+
+      case "thread/goal/cleared": {
+        const threadId = String(p?.threadId || "");
+        if (!threadId || (this.threadId && threadId !== this.threadId)) return;
+        const sessionId = this.sessionId || this._resumeSessionId || threadId;
+        this.send({
+          type: "codex_goal_state",
+          sessionId,
+          goal: null,
+          ok: true,
+        } as any);
+        return;
+      }
+
       case "thread/compacted": {
         const sid = this.sessionId || p?.threadId;
         if (!sid) return;
@@ -4957,6 +5058,32 @@ export async function compactCodexAppServerThread(threadId: string, cwd: string)
 export async function rollbackCodexAppServerThread(threadId: string, cwd: string, numTurns: number): Promise<void> {
   await withStandaloneAppServerClient(cwd, async (client) => {
     await client.rollbackThread(threadId, numTurns);
+  });
+}
+
+export async function getCodexAppServerGoal(threadId: string, cwd: string): Promise<CodexGoal | null> {
+  return withStandaloneAppServerClient(cwd, async (client) => {
+    const result = await client.getGoal(threadId) as { goal?: unknown };
+    return normalizeCodexGoal(result?.goal);
+  });
+}
+
+export async function setCodexAppServerGoal(
+  threadId: string,
+  cwd: string,
+  update: { objective?: string; status?: CodexGoalStatus; tokenBudget?: number | null },
+): Promise<CodexGoal> {
+  return withStandaloneAppServerClient(cwd, async (client) => {
+    const result = await client.setGoal(threadId, update) as { goal?: unknown };
+    const goal = normalizeCodexGoal(result?.goal);
+    if (!goal) throw new Error("Codex returned an invalid goal state");
+    return goal;
+  });
+}
+
+export async function clearCodexAppServerGoal(threadId: string, cwd: string): Promise<void> {
+  await withStandaloneAppServerClient(cwd, async (client) => {
+    await client.clearGoal(threadId);
   });
 }
 

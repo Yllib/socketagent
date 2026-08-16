@@ -90,7 +90,7 @@ function searchableText(entry: HistoryEntry): string {
   return parts.join("\n").slice(0, limit);
 }
 
-function safeFtsQuery(query: string): string {
+function searchTokens(query: string): string[] {
   const tokens = query
     .normalize("NFKC")
     .match(/[\p{L}\p{N}_@./:-]+/gu)
@@ -98,7 +98,13 @@ function safeFtsQuery(query: string): string {
     .filter(Boolean)
     .slice(0, 24) || [];
   if (tokens.length === 0) throw new Error("Remember search requires at least one searchable word");
-  return tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" AND ");
+  return tokens;
+}
+
+function safeFtsQuery(query: string): string {
+  return searchTokens(query)
+    .map((token) => `"${token.replaceAll('"', '""')}"`)
+    .join(" AND ");
 }
 
 function parseEntry(row: StoredTranscriptRow): HistoryEntry {
@@ -133,8 +139,13 @@ export class TranscriptDatabase {
   private readonly insertEntry: StatementSync;
   private readonly deleteFtsEntry: StatementSync;
   private readonly insertFtsEntry: StatementSync;
+  private readonly ftsEnabled: boolean;
+  private readonly searchTable: "transcript_fts" | "transcript_search";
 
-  constructor(filePath = socketAgentDataPath("history", "transcripts.sqlite")) {
+  constructor(
+    filePath = socketAgentDataPath("history", "transcripts.sqlite"),
+    options: { disableFts?: boolean } = {},
+  ) {
     this.filePath = filePath;
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     this.db = new DatabaseSync(filePath);
@@ -181,17 +192,47 @@ export class TranscriptDatabase {
         ON transcript_entries(session_id, role, session_seq);
       CREATE INDEX IF NOT EXISTS transcript_entries_timestamp
         ON transcript_entries(session_id, timestamp);
-      CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
-        session_id UNINDEXED,
-        session_seq UNINDEXED,
-        entry_id UNINDEXED,
-        role UNINDEXED,
-        tool_name UNINDEXED,
-        body,
-        tokenize='unicode61 remove_diacritics 2'
-      );
       PRAGMA user_version=1;
     `);
+    let ftsEnabled = false;
+    if (!options.disableFts) {
+      try {
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
+            session_id UNINDEXED,
+            session_seq UNINDEXED,
+            entry_id UNINDEXED,
+            role UNINDEXED,
+            tool_name UNINDEXED,
+            body,
+            tokenize='unicode61 remove_diacritics 2'
+          )
+        `);
+        ftsEnabled = true;
+      } catch (error) {
+        if (!String(error).toLowerCase().includes("fts5")) throw error;
+        console.warn("[History] SQLite FTS5 is unavailable; using the portable transcript search index");
+      }
+    }
+    if (!ftsEnabled) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS transcript_search (
+          session_id TEXT NOT NULL,
+          session_seq INTEGER NOT NULL,
+          entry_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          body TEXT NOT NULL,
+          PRIMARY KEY (session_id, entry_id)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS transcript_search_session_seq
+          ON transcript_search(session_id, session_seq);
+        CREATE INDEX IF NOT EXISTS transcript_search_role
+          ON transcript_search(session_id, role);
+      `);
+    }
+    this.ftsEnabled = ftsEnabled;
+    this.searchTable = ftsEnabled ? "transcript_fts" : "transcript_search";
     const entryColumns = this.db.prepare("PRAGMA table_info(transcript_entries)")
       .all() as unknown as Array<{ name: string }>;
     if (!entryColumns.some((column) => column.name === "tool_use_id")) {
@@ -218,10 +259,10 @@ export class TranscriptDatabase {
         entry_json=excluded.entry_json
     `);
     this.deleteFtsEntry = this.db.prepare(
-      "DELETE FROM transcript_fts WHERE session_id = ? AND entry_id = ?",
+      `DELETE FROM ${this.searchTable} WHERE session_id = ? AND entry_id = ?`,
     );
     this.insertFtsEntry = this.db.prepare(`
-      INSERT INTO transcript_fts(session_id, session_seq, entry_id, role, tool_name, body)
+      INSERT INTO ${this.searchTable}(session_id, session_seq, entry_id, role, tool_name, body)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
   }
@@ -505,29 +546,33 @@ export class TranscriptDatabase {
     try {
       this.ensureSessionRow(sessionId);
       this.db.prepare("DELETE FROM transcript_entries WHERE session_id = ?").run(sessionId);
-      this.db.prepare("DELETE FROM transcript_fts WHERE session_id = ?").run(sessionId);
-      for (const item of entries) this.writeEntry(sessionId, item.entry, item.positionKey, false);
-      this.db.prepare(`
-        INSERT INTO transcript_fts(session_id, session_seq, entry_id, role, tool_name, body)
-        SELECT session_id, session_seq, entry_id,
-          CASE WHEN json_extract(entry_json, '$.thinking') THEN 'thinking' ELSE role END,
-          COALESCE(tool_name, ''),
-          CASE
-            WHEN role IN ('user', 'assistant') THEN substr(
-              COALESCE(json_extract(entry_json, '$.content'), ''), 1, 65536
-            )
-            WHEN role = 'tool_result' THEN substr(
-              COALESCE(json_extract(entry_json, '$.toolOutputPreview'),
-                json_extract(entry_json, '$.content'), ''), 1, 4096
-            )
-            ELSE substr(
-              COALESCE(json_extract(entry_json, '$.content'), '') || char(10) ||
-              COALESCE(json_extract(entry_json, '$.toolName'), '') || char(10) ||
-              COALESCE(json_extract(entry_json, '$.toolInput'), ''), 1, 16384
-            )
-          END
-        FROM transcript_entries WHERE session_id = ?
-      `).run(sessionId);
+      this.db.prepare(`DELETE FROM ${this.searchTable} WHERE session_id = ?`).run(sessionId);
+      for (const item of entries) {
+        this.writeEntry(sessionId, item.entry, item.positionKey, !this.ftsEnabled);
+      }
+      if (this.ftsEnabled) {
+        this.db.prepare(`
+          INSERT INTO transcript_fts(session_id, session_seq, entry_id, role, tool_name, body)
+          SELECT session_id, session_seq, entry_id,
+            CASE WHEN json_extract(entry_json, '$.thinking') THEN 'thinking' ELSE role END,
+            COALESCE(tool_name, ''),
+            CASE
+              WHEN role IN ('user', 'assistant') THEN substr(
+                COALESCE(json_extract(entry_json, '$.content'), ''), 1, 65536
+              )
+              WHEN role = 'tool_result' THEN substr(
+                COALESCE(json_extract(entry_json, '$.toolOutputPreview'),
+                  json_extract(entry_json, '$.content'), ''), 1, 4096
+              )
+              ELSE substr(
+                COALESCE(json_extract(entry_json, '$.content'), '') || char(10) ||
+                COALESCE(json_extract(entry_json, '$.toolName'), '') || char(10) ||
+                COALESCE(json_extract(entry_json, '$.toolInput'), ''), 1, 16384
+              )
+            END
+          FROM transcript_entries WHERE session_id = ?
+        `).run(sessionId);
+      }
       this.recomputeSummary(sessionId);
       if (legacy) {
         this.db.prepare(`
@@ -553,7 +598,7 @@ export class TranscriptDatabase {
   deleteSession(sessionId: string): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("DELETE FROM transcript_fts WHERE session_id = ?").run(sessionId);
+      this.db.prepare(`DELETE FROM ${this.searchTable} WHERE session_id = ?`).run(sessionId);
       this.db.prepare("DELETE FROM transcript_sessions WHERE session_id = ?").run(sessionId);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -565,6 +610,7 @@ export class TranscriptDatabase {
   search(sessionId: string, options: TranscriptSearchOptions): TranscriptSearchHit[] {
     const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 10)));
     const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    if (!this.ftsEnabled) return this.searchWithoutFts(sessionId, options, limit, offset);
     const where = ["transcript_fts MATCH ?", "f.session_id = ?"];
     const params: Array<string | number> = [safeFtsQuery(options.query), sessionId];
     if (options.roles?.length) {
@@ -614,6 +660,62 @@ export class TranscriptDatabase {
       ...(row.tool_name ? { toolName: row.tool_name } : {}),
       preview: row.preview,
       rank: Number(row.rank),
+    }));
+  }
+
+  private searchWithoutFts(
+    sessionId: string,
+    options: TranscriptSearchOptions,
+    limit: number,
+    offset: number,
+  ): TranscriptSearchHit[] {
+    const tokens = searchTokens(options.query);
+    const where = ["s.session_id = ?", ...tokens.map(() => "instr(lower(s.body), lower(?)) > 0")];
+    const params: Array<string | number> = [sessionId, ...tokens];
+    if (options.roles?.length) {
+      where.push(`s.role IN (${options.roles.map(() => "?").join(",")})`);
+      params.push(...options.roles);
+    }
+    if (options.toolName) {
+      where.push("s.tool_name = ?");
+      params.push(options.toolName);
+    }
+    if (options.since) {
+      where.push("e.timestamp >= ?");
+      params.push(options.since);
+    }
+    if (options.until) {
+      where.push("e.timestamp <= ?");
+      params.push(options.until);
+    }
+    params.push(limit, offset);
+    const rows = this.db.prepare(`
+      SELECT e.session_seq, e.entry_id, e.revision, s.role, e.timestamp,
+        e.tool_name, substr(s.body, 1, 240) AS preview
+      FROM transcript_search AS s
+      JOIN transcript_entries AS e
+        ON e.session_id = s.session_id AND e.entry_id = s.entry_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY e.session_seq DESC
+      LIMIT ? OFFSET ?
+    `).all(...params) as unknown as Array<{
+      session_seq: number;
+      entry_id: string;
+      revision: number;
+      role: string;
+      timestamp: string | null;
+      tool_name: string | null;
+      preview: string;
+    }>;
+    return rows.map((row) => ({
+      sessionSeq: Number(row.session_seq),
+      entryId: row.entry_id,
+      revision: Number(row.revision),
+      role: row.role,
+      ...(row.timestamp ? { timestamp: row.timestamp } : {}),
+      ...(row.tool_name ? { toolName: row.tool_name } : {}),
+      preview: cleanPreview(row.preview),
+      rank: 0,
     }));
   }
 

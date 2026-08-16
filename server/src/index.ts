@@ -9142,7 +9142,7 @@ setTimeout(() => {
   void backfillDiscoveredSessionRunStatsInBackground();
 }, 30_000).unref();
 
-httpServer.listen(PORT, BIND_HOST, async () => {
+async function initializeListeningServer(): Promise<void> {
   console.log(`Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)`);
   cancelWindowsRecoveryGuard();
   if (!["127.0.0.1", "::1", "localhost"].includes(BIND_HOST)) {
@@ -9191,7 +9191,7 @@ httpServer.listen(PORT, BIND_HOST, async () => {
     console.log(`[AppMonitor] Restored ${restoredMonitors} durable monitor(s)`);
   }
   restorePendingWorkReviewResultDeliveries();
-});
+}
 
 // Clean up any tool calls left pending from a previous server crash
 cleanupPendingToolCalls();
@@ -10336,14 +10336,17 @@ function updateToolCommand(command: string, args: string[]): { command: string; 
   if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(command)) {
     return { command, args };
   }
-  const commandLine = [quoteWindowsCmdArg(command), ...args.map(quoteWindowsCmdArg)].join(" ");
+  // `cmd /s /c "\"C:\\Program Files\\...\\npm.cmd\" ..."` loses the
+  // executable quotes when Node serializes argv for CreateProcess. Prefixing
+  // the batch invocation with `call` avoids that special first-token parsing.
+  const commandLine = ["call", quoteWindowsCmdArg(command), ...args.map(quoteWindowsCmdArg)].join(" ");
   return {
     command: process.env.ComSpec || "cmd.exe",
     args: [
       "/d",
       "/s",
       "/c",
-      `"${commandLine}"`,
+      commandLine,
     ],
   };
 }
@@ -11150,3 +11153,11 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.exit(0);
   });
 }
+
+// Start accepting connections only after every module-level runtime value has
+// been initialized. On fast Windows hosts the relay can pair immediately after
+// listen; starting earlier let its first messages hit temporal-dead-zone values
+// such as SERVER_GIT_HASH, GIT_ROOT, and managedBackendUpdatePromise.
+httpServer.listen(PORT, BIND_HOST, () => {
+  void initializeListeningServer();
+});

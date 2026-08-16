@@ -10332,13 +10332,17 @@ function quoteWindowsCmdArg(value: string): string {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
-function updateToolCommand(command: string, args: string[]): { command: string; args: string[] } {
+function updateToolCommand(command: string, args: string[]): {
+  command: string;
+  args: string[];
+  windowsVerbatimArguments?: boolean;
+} {
   if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(command)) {
     return { command, args };
   }
-  // `cmd /s /c "\"C:\\Program Files\\...\\npm.cmd\" ..."` loses the
-  // executable quotes when Node serializes argv for CreateProcess. Prefixing
-  // the batch invocation with `call` avoids that special first-token parsing.
+  // Keep this command line verbatim. Node's normal Windows argv serialization
+  // adds another quoting layer around the `/c` payload, so cmd.exe sees the
+  // quoted npm.cmd path as a literal command name instead of an executable.
   const commandLine = ["call", quoteWindowsCmdArg(command), ...args.map(quoteWindowsCmdArg)].join(" ");
   return {
     command: process.env.ComSpec || "cmd.exe",
@@ -10348,26 +10352,44 @@ function updateToolCommand(command: string, args: string[]): { command: string; 
       "/c",
       commandLine,
     ],
+    windowsVerbatimArguments: true,
   };
+}
+
+type UpdateToolSyncOptions = import("child_process").ExecFileSyncOptions & {
+  windowsVerbatimArguments?: boolean;
+};
+type UpdateToolSyncStringOptions = import("child_process").ExecFileSyncOptionsWithStringEncoding & {
+  windowsVerbatimArguments?: boolean;
+};
+
+function execUpdateToolSync(command: string, args: string[], options: UpdateToolSyncStringOptions): string;
+function execUpdateToolSync(command: string, args: string[], options: UpdateToolSyncOptions): string | Buffer;
+function execUpdateToolSync(command: string, args: string[], options: UpdateToolSyncOptions): string | Buffer {
+  // Node supports this option for synchronous child processes even though
+  // older @types/node releases omit it from ExecFileSyncOptions.
+  return execFileSync(command, args, options);
 }
 
 function runPackageUpdateSync(cwd: string): void {
   const runtime = resolveUpdateRuntimeTools();
   const npm = updateToolCommand(runtime.npm, ["ci", "--include=optional"]);
-  execFileSync(npm.command, npm.args, {
+  execUpdateToolSync(npm.command, npm.args, {
     cwd,
     env: runtime.env,
     stdio: "pipe",
     timeout: 120000,
     windowsHide: true,
+    windowsVerbatimArguments: npm.windowsVerbatimArguments,
   });
   const npx = updateToolCommand(runtime.npx, ["tsc"]);
-  execFileSync(npx.command, npx.args, {
+  execUpdateToolSync(npx.command, npx.args, {
     cwd,
     env: runtime.env,
     stdio: "pipe",
     timeout: 120000,
     windowsHide: true,
+    windowsVerbatimArguments: npx.windowsVerbatimArguments,
   });
 }
 
@@ -10380,6 +10402,7 @@ function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: 
       env: runtime.env,
       timeout,
       windowsHide: true,
+      windowsVerbatimArguments: spec.windowsVerbatimArguments,
     }, (err: any, stdout: any, stderr: any) => {
       if (err) {
         err.message = stderr ? `${err.message}\n${stderr}` : err.message;
@@ -10443,13 +10466,14 @@ function latestManagedBackendVersionsSync(runtime: UpdateRuntimeTools): Record<s
   const versions: Record<string, string> = {};
   for (const { name, spec } of MANAGED_BACKEND_PACKAGES) {
     const view = updateToolCommand(runtime.npm, ["view", spec, "version", "--json"]);
-    const output = execFileSync(view.command, view.args, {
+    const output = execUpdateToolSync(view.command, view.args, {
       cwd: SERVER_DIR,
       env: runtime.env,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30000,
       windowsHide: true,
+      windowsVerbatimArguments: view.windowsVerbatimArguments,
     });
     versions[name] = parseNpmVersionOutput(output);
   }
@@ -10496,12 +10520,13 @@ function runManagedBackendUpdateSync(): void {
   const args = managedBackendInstallArgs(runtime, specs);
   const npm = updateToolCommand(runtime.npm, args);
   console.log(`[Auto-update] Updating changed managed agent backends: ${specs.join(", ")}`);
-  execFileSync(npm.command, npm.args, {
+  execUpdateToolSync(npm.command, npm.args, {
     cwd: SERVER_DIR,
     env: runtime.env,
     stdio: "pipe",
     timeout: 300000,
     windowsHide: true,
+    windowsVerbatimArguments: npm.windowsVerbatimArguments,
   });
   refreshBackendRuntimeCaches(backendsForManagedBackendSpecs(specs));
 }

@@ -18,4 +18,9 @@ test("Windows batch updates preserve executable paths containing spaces", () => 
     /const commandLine = \["call", quoteWindowsCmdArg\(command\), \.\.\.args\.map\(quoteWindowsCmdArg\)\]/,
   );
   assert.doesNotMatch(source, /`"\$\{commandLine\}"`/);
+  assert.match(source, /windowsVerbatimArguments: true/);
+  assert.match(source, /windowsVerbatimArguments: spec\.windowsVerbatimArguments/);
+  assert.match(source, /windowsVerbatimArguments: npm\.windowsVerbatimArguments/);
+  assert.match(source, /windowsVerbatimArguments: npx\.windowsVerbatimArguments/);
+  assert.match(source, /windowsVerbatimArguments: view\.windowsVerbatimArguments/);
 });

@@ -131,36 +131,13 @@ function cleanPlanId(value?: string): string {
   return cleaned || crypto.randomUUID();
 }
 
-/**
- * Keep formatting HTML while removing executable, interactive, and remotely
- * loaded content. The app applies a second CSP/JavaScript-disabled boundary.
- */
-export function sanitizeHtmlPlan(value: string): string {
-  let html = String(value || "").trim();
-  if (!html) throw new Error("Plan HTML is required");
+/** Validate the tool payload without rewriting the document the agent made. */
+export function validateHtmlPlan(value: string): string {
+  const html = String(value || "");
+  if (!html.trim()) throw new Error("Plan HTML is required");
   if (Buffer.byteLength(html, "utf8") > MAX_HTML_PLAN_BYTES) {
     throw new Error(`Plan HTML exceeds the ${Math.round(MAX_HTML_PLAN_BYTES / 1024)} KB limit`);
   }
-
-  html = html
-    .replace(/<!doctype[^>]*>/gi, "")
-    .replace(/<!--([\s\S]*?)-->/g, "")
-    .replace(/<(script|iframe|frame|frameset|object|embed|form|input|button|textarea|select|option|base|link|meta|audio|video|source)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
-    .replace(/<(script|iframe|frame|frameset|object|embed|form|input|button|textarea|select|option|base|link|meta|audio|video|source)\b[^>]*\/?\s*>/gi, "")
-    .replace(/\s(?:on[a-z]+|srcdoc|action|formaction)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
-    .replace(/@import\s+[^;]+;?/gi, "")
-    .replace(/url\(\s*(?!['"]?data:image\/(?:png|jpeg|gif|webp);base64,)[^)]+\)/gi, "none");
-
-  html = html.replace(
-    /\s(?:href|src|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
-    (attribute, doubleQuoted, singleQuoted, unquoted) => {
-      const url = String(doubleQuoted ?? singleQuoted ?? unquoted ?? "").trim();
-      return url.startsWith("#") || /^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(url)
-        ? attribute
-        : "";
-    },
-  );
-
   return html;
 }
 
@@ -176,7 +153,7 @@ export function saveHtmlPlan(args: {
   const existingIndex = plans.findIndex((plan) => plan.planId === planId);
   const now = new Date().toISOString();
   const title = cleanTitle(args.title);
-  const html = sanitizeHtmlPlan(args.html);
+  const html = validateHtmlPlan(args.html);
   const existing = existingIndex >= 0 ? plans[existingIndex] : null;
   if (existing && existing.title === title && existing.html === html) return publicPlan(existing);
   const revision = existing ? existing.currentRevision + 1 : 0;

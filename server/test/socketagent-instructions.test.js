@@ -29,7 +29,9 @@ test("builds compact SocketAgent routing instructions without losing safety rule
   assert.match(prompt, /Use your native plan\/task tool or TaskBatch for working plans and progress tracking/);
   assert.doesNotMatch(prompt, /the agent's native plan\/task tool/);
   assert.match(prompt, /normal chat for concise user-facing content, whichever is appropriate/);
-  assert.match(prompt, /inline SVG\/CSS or data-image assets/);
+  assert.match(prompt, /preserves and displays it exactly/);
+  assert.match(prompt, /Inline assets and HTTPS resources are supported/);
+  assert.match(prompt, /JavaScript is not executed by the viewer/);
   assert.match(prompt, /Never request secrets in normal chat/);
   assert.match(prompt, /absolute file_path/);
   assert.match(prompt, /discover tools for socketagent_app/);

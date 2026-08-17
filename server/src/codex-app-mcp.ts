@@ -149,7 +149,7 @@ function createServer(context: AppToolContext): McpServer {
       description: HTML_PLAN_TOOL_DESCRIPTION,
       inputSchema: {
         title: z.string().describe("Short descriptive plan title"),
-        html: z.string().describe("Polished, self-contained semantic HTML for a detailed implementation/design plan. Inline CSS, inline SVG, and embedded data images are allowed; scripts and remote resources are not."),
+        html: z.string().describe("Complete polished HTML document for the detailed implementation/design plan. SocketAgent preserves and displays this value exactly. Inline assets and HTTPS resources are supported; viewer JavaScript is disabled."),
         plan_id: z.string().optional().describe("Existing plan ID to update. Omit to create a new plan."),
       },
     },

@@ -15,7 +15,7 @@ const {
   listHtmlPlans,
   renameHtmlPlan,
   remapHtmlPlans,
-  sanitizeHtmlPlan,
+  validateHtmlPlan,
   saveHtmlPlan,
   rollbackHtmlPlan,
 } = require("../dist/html-plan-store");
@@ -150,19 +150,27 @@ test("renumbers brief 1-based revision stores without losing snapshots", () => {
   assert.match(getHtmlPlanRevision("one-based-session", "one-based-plan", 0).html, /Original/);
 });
 
-test("removes executable and remote content while retaining formatting", () => {
-  const sanitized = sanitizeHtmlPlan(`
+test("preserves submitted HTML byte-for-byte while enforcing validation", () => {
+  const html = `
+    <!doctype html><!-- retained -->
     <style>.card { color: red; background: url(https://bad.example/a.png) }</style>
     <script>alert(1)</script>
     <h2 onclick="alert(2)">Safe heading</h2>
     <img src="https://bad.example/image.png">
     <img src="data:image/png;base64,AAAA">
-  `);
-  assert.doesNotMatch(sanitized, /<script/i);
-  assert.doesNotMatch(sanitized, /onclick/i);
-  assert.doesNotMatch(sanitized, /bad\.example/i);
-  assert.match(sanitized, /Safe heading/);
-  assert.match(sanitized, /data:image\/png;base64,AAAA/);
+  `;
+  assert.equal(validateHtmlPlan(html), html);
+  const saved = saveHtmlPlan({
+    sessionId: "exact-html-session",
+    title: "Exact document",
+    html,
+  });
+  assert.equal(saved.html, html);
+  assert.equal(
+    getHtmlPlanRevision("exact-html-session", saved.planId, 0).html,
+    html,
+  );
+  assert.throws(() => validateHtmlPlan("   "), /required/i);
 });
 
 test("deleting a plan removes its durable chat artifact history", () => {

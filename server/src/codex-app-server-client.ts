@@ -86,6 +86,13 @@ export interface CodexAppServerThreadResumeParams {
   config?: unknown;
   experimentalRawEvents?: boolean;
   persistExtendedHistory?: boolean;
+  /**
+   * Resume the runtime without serializing every historical turn into the
+   * response. SocketAgent hydrates chat history through its own paginated
+   * store, so returning the native transcript is both redundant and
+   * prohibitively expensive for long-running sessions.
+   */
+  excludeTurns?: boolean;
   [key: string]: unknown;
 }
 
@@ -162,6 +169,16 @@ interface PendingRequest<T> {
   timer: NodeJS.Timeout;
 }
 
+export class CodexAppServerRequestTimeoutError extends Error {
+  constructor(
+    public readonly method: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`codex app-server request timed out: ${method}`);
+    this.name = "CodexAppServerRequestTimeoutError";
+  }
+}
+
 export class CodexAppServerClient extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private nextId = 1;
@@ -233,7 +250,10 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   async resumeThread(params: CodexAppServerThreadResumeParams): Promise<unknown> {
-    return this.request("thread/resume", params);
+    return this.request("thread/resume", {
+      ...params,
+      excludeTurns: params.excludeTurns ?? true,
+    });
   }
 
   async forkThread(params: CodexAppServerThreadResumeParams): Promise<unknown> {
@@ -348,7 +368,7 @@ export class CodexAppServerClient extends EventEmitter {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`codex app-server request timed out: ${method}`));
+        reject(new CodexAppServerRequestTimeoutError(method, timeoutMs));
       }, timeoutMs);
       this.pending.set(id, { method, resolve: resolve as (value: unknown) => void, reject, timer });
     });

@@ -51,6 +51,7 @@ import {
   CodexAppServerApprovalPolicy,
   CodexAppServerApprovalsReviewer,
   CodexAppServerClient,
+  CodexAppServerRequestTimeoutError,
   CodexAppServerNotification,
   CodexAppServerRequestResponder,
   CodexAppServerUserInput,
@@ -82,6 +83,13 @@ const CODEX_GOAL_STATUSES = new Set<CodexGoalStatus>([
   "budgetLimited",
   "complete",
 ]);
+
+export function isTimedOutCodexThreadResume(
+  error: unknown,
+): error is CodexAppServerRequestTimeoutError {
+  return error instanceof CodexAppServerRequestTimeoutError
+    && error.method === "thread/resume";
+}
 
 function normalizeCodexGoal(value: unknown): CodexGoal | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -2164,10 +2172,6 @@ export class CodexSession {
         throw new Error("Codex did not provide an available model for this session");
       }
 
-      const completion = new Promise<void>((resolve, reject) => {
-        this.appServerTurnSettler = { resolve, reject };
-      });
-
       const threadConfig = this.buildAppServerThreadParams();
       if (this.threadId) {
         let resumed: unknown;
@@ -2208,6 +2212,13 @@ export class CodexSession {
       if (!this.threadId) throw new Error("codex app-server did not return a thread id");
       void this.refreshSupportedModels();
 
+      // Install the turn settler only after thread startup/resume succeeds.
+      // A failed resume may require killing the app-server process; there is
+      // no active turn for that process exit to reject at this point.
+      const completion = new Promise<void>((resolve, reject) => {
+        this.appServerTurnSettler = { resolve, reject };
+      });
+
       const collaborationMode = this.codexCollaborationMode();
       const turn = await this.appServer!.startTurn({
         threadId: this.threadId,
@@ -2247,11 +2258,22 @@ export class CodexSession {
     } catch (err: any) {
       this._pendingUserPrompt = null;
       this.clearPendingAppServerSteers(`codex app-server error: ${err?.message || String(err)}`);
+      if (isTimedOutCodexThreadResume(err)) {
+        console.warn(
+          `[codex app-server] Discarding timed-out thread resume after ${err.timeoutMs}ms`
+        );
+        try {
+          await this.stopAppServerClient(true);
+        } catch (stopError: any) {
+          console.error(
+            `[codex app-server] Failed to terminate timed-out resume: ${stopError?.message || stopError}`
+          );
+        }
+      }
       if (!isCodexAuthError(err)) {
-        this.send({
-          type: "error",
-          message: `codex app-server error: ${err?.message || String(err)}`,
-        } as ServerMessage);
+        // The caller emits the canonical prompt_failed event with the stable
+        // user-message ID. Mark this handled so it does not also emit a
+        // second generic error card for the same failure.
         if (err && typeof err === "object") err.socketAgentSurfaced = true;
       }
       throw err;

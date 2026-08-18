@@ -1,0 +1,77 @@
+const assert = require("node:assert/strict");
+const test = require("node:test");
+
+const {
+  CodexAppServerClient,
+  CodexAppServerRequestTimeoutError,
+} = require("../dist/codex-app-server-client");
+const { isTimedOutCodexThreadResume } = require("../dist/codex-session");
+
+const echoServer = String.raw`
+process.stdin.setEncoding("utf8");
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\n");
+  buffer = lines.pop() || "";
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const request = JSON.parse(line);
+    process.stdout.write(JSON.stringify({
+      id: request.id,
+      result: { method: request.method, params: request.params },
+    }) + "\n");
+  }
+});
+`;
+
+test("thread resume excludes the native turn transcript by default", async () => {
+  const client = new CodexAppServerClient({
+    cwd: process.cwd(),
+    command: process.execPath,
+    args: ["-e", echoServer],
+    requestTimeoutMs: 1000,
+  });
+  try {
+    const result = await client.resumeThread({ threadId: "large-thread" });
+    assert.equal(result.method, "thread/resume");
+    assert.equal(result.params.threadId, "large-thread");
+    assert.equal(result.params.excludeTurns, true);
+
+    const explicit = await client.resumeThread({
+      threadId: "history-client",
+      excludeTurns: false,
+    });
+    assert.equal(explicit.params.excludeTurns, false);
+  } finally {
+    await client.stop();
+  }
+});
+
+test("request timeouts retain the RPC method for poisoned-client cleanup", async () => {
+  const client = new CodexAppServerClient({
+    cwd: process.cwd(),
+    command: process.execPath,
+    args: ["-e", "process.stdin.resume()"],
+    requestTimeoutMs: 20,
+  });
+  try {
+    await assert.rejects(
+      client.resumeThread({ threadId: "stuck-thread" }),
+      (error) => {
+        assert.ok(error instanceof CodexAppServerRequestTimeoutError);
+        assert.equal(error.method, "thread/resume");
+        assert.equal(error.timeoutMs, 20);
+        assert.equal(isTimedOutCodexThreadResume(error), true);
+        return true;
+      },
+    );
+  } finally {
+    await client.stop();
+  }
+});
+
+test("non-resume timeouts do not trigger thread-writer cleanup", () => {
+  const error = new CodexAppServerRequestTimeoutError("model/list", 20);
+  assert.equal(isTimedOutCodexThreadResume(error), false);
+});

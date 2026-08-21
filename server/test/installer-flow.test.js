@@ -107,3 +107,15 @@ test("Linux installs and repairs Codex's Bubblewrap sandbox dependency", () => {
   assert.match(startup, /periodic retry/);
   assert.match(startup, /SOCKETAGENT_AUTO_REPAIR_CODEX_SANDBOX/);
 });
+
+test("Unix installer provisions native Node build tools", () => {
+  const installer = read("install-server.sh");
+
+  assert.match(installer, /native_build_tools_ready/);
+  assert.match(installer, /apt-get install -y build-essential python3/);
+  assert.match(installer, /dnf install -y gcc-c\+\+ make python3/);
+  assert.match(installer, /pacman -Sy --noconfirm base-devel python/);
+  assert.match(installer, /apk add build-base python3/);
+  assert.match(installer, /command -v make/);
+  assert.match(installer, /command -v (?:c\+\+|g\+\+|clang\+\+)/);
+});

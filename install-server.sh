@@ -74,6 +74,63 @@ ok()    { echo -e "  ${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}[!]${NC} $1"; }
 fail()  { echo -e "  ${RED}[X]${NC} $1"; }
 
+run_as_root() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    fail "Administrator access is required to install native build tools."
+    exit 1
+  fi
+}
+
+native_build_tools_ready() {
+  command -v python3 >/dev/null 2>&1 \
+    && command -v make >/dev/null 2>&1 \
+    && { command -v c++ >/dev/null 2>&1 || command -v g++ >/dev/null 2>&1 || command -v clang++ >/dev/null 2>&1; }
+}
+
+ensure_native_build_tools() {
+  native_build_tools_ready && return
+
+  echo "  Installing the compiler tools required by native Node packages..."
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    xcode-select --install >/dev/null 2>&1 || true
+    local waited=0
+    while ! native_build_tools_ready; do
+      if (( waited >= 1800 )); then
+        fail "Timed out waiting for the macOS Command Line Tools installation."
+        exit 1
+      fi
+      sleep 10
+      waited=$((waited + 10))
+    done
+  elif command -v apt-get >/dev/null 2>&1; then
+    run_as_root apt-get update
+    run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential python3
+  elif command -v dnf >/dev/null 2>&1; then
+    run_as_root dnf install -y gcc-c++ make python3
+  elif command -v yum >/dev/null 2>&1; then
+    run_as_root yum install -y gcc-c++ make python3
+  elif command -v pacman >/dev/null 2>&1; then
+    run_as_root pacman -Sy --noconfirm base-devel python
+  elif command -v zypper >/dev/null 2>&1; then
+    run_as_root zypper --non-interactive install gcc-c++ make python3
+  elif command -v apk >/dev/null 2>&1; then
+    run_as_root apk add build-base python3
+  else
+    fail "No supported package manager was found for native build tools."
+    exit 1
+  fi
+
+  native_build_tools_ready || {
+    fail "Native build tools were installed, but Python, make, or a C++ compiler is still unavailable."
+    exit 1
+  }
+  ok "Native build tools are ready"
+}
+
 require_git_checkout() {
   if ! command -v git >/dev/null 2>&1; then
     fail "Git is required. SocketAgent must be installed from a git checkout."
@@ -271,6 +328,9 @@ if [[ "$OS_NAME" == "Linux" ]]; then
     warn "SocketAgent will retry the Bubblewrap repair automatically after the server starts."
   fi
 fi
+
+phase "Native Node Build Tools"
+ensure_native_build_tools
 
 # ══════════════════════════════════════════════
 #  Phase 2: Claude Code CLI

@@ -54,6 +54,13 @@ test("public install entrypoints expose one-command setup only", () => {
     readme,
     /irm https:\/\/raw\.githubusercontent\.com\/Yllib\/socketagent\/master\/install-windows\.ps1 \| iex/,
   );
+  assert.doesNotMatch(
+    readme,
+    /powershell(?:\.exe)?\s+-ExecutionPolicy[^\n]*install-windows\.ps1/i,
+  );
+  assert.doesNotMatch(windowsEntrypoint, /&\s+powershell(?:\.exe)?\b/i);
+  assert.doesNotMatch(windowsEntrypoint, /^\s*exit\b/im);
+  assert.match(windowsEntrypoint, /This window will stay open so the error is not lost/);
 });
 
 test("Linux installs and repairs Codex's Bubblewrap sandbox dependency", () => {

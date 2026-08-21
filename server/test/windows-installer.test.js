@@ -35,3 +35,16 @@ test("Windows installer verifies real executables and retains direct fallbacks",
   assert.match(installer, /nodejs\.org\/dist\/v22\.14\.0/);
   assert.match(installer, /WinGet finished, but Node\.js .* is not runnable/);
 });
+
+test("Windows bootstrap stays in the current shell and generated commands reuse its host", () => {
+  const bootstrap = read("install-windows.ps1");
+  const installer = read("install.ps1");
+
+  assert.match(bootstrap, /& \$installer/);
+  assert.doesNotMatch(bootstrap, /&\s+powershell(?:\.exe)?\b/i);
+  assert.doesNotMatch(bootstrap, /^\s*exit\b/im);
+  assert.match(installer, /function Get-CurrentPowerShellExecutable/);
+  assert.match(installer, /set "POWERSHELL_EXE=\$powerShellExe"/);
+  assert.match(installer, /"%POWERSHELL_EXE%" -NoProfile/);
+  assert.doesNotMatch(installer, /^\s*exit 1\s*$/im);
+});

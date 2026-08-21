@@ -82,8 +82,8 @@ function Assert-GitCheckout {
         Write-Host "  Install Git, then run:"
         Write-Host "    git clone https://github.com/Yllib/socketagent.git"
         Write-Host "    cd socketagent"
-        Write-Host "    powershell -ExecutionPolicy Bypass -File install.ps1"
-        exit 1
+        Write-Host "    & .\install.ps1"
+        throw "SocketAgent requires a valid git checkout"
     }
 
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
@@ -92,7 +92,7 @@ function Assert-GitCheckout {
     $inside = (& git -C $REPO_ROOT rev-parse --is-inside-work-tree 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $inside -ne "true") {
         Write-Fail "SocketAgent repository check failed. This server must run from a valid git checkout."
-        exit 1
+        throw "SocketAgent repository validation failed"
     }
 }
 
@@ -172,6 +172,29 @@ function Get-CommandWithoutStoreAlias($commandName) {
         return $null
     }
     return $resolved
+}
+
+function Get-CurrentPowerShellExecutable {
+    $currentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+    if ($currentProcess -and $currentProcess.Path -and (Test-Path $currentProcess.Path)) {
+        return $currentProcess.Path
+    }
+
+    foreach ($candidate in @(
+        (Join-Path $PSHOME "pwsh.exe"),
+        (Join-Path $PSHOME "powershell.exe")
+    )) {
+        if ($candidate -and (Test-Path $candidate)) { return $candidate }
+    }
+
+    foreach ($name in @("pwsh", "powershell")) {
+        $resolved = Get-CommandWithoutStoreAlias $name
+        if ($resolved -and $resolved.Source -and (Test-Path $resolved.Source)) {
+            return $resolved.Source
+        }
+    }
+
+    throw "Cannot locate the PowerShell executable that is running this installer"
 }
 
 function Test-CodexAppServer($codexPath = "codex") {
@@ -263,7 +286,8 @@ function Install-SocketAgentCli {
     $targetPs1 = Join-Path $REPO_ROOT "bin\socketagent.ps1"
     $socketAgentCmd = Join-Path $toolsDir "socketagent.cmd"
     $socketClaudeCmd = Join-Path $toolsDir "socketclaude.cmd"
-    $cmdContent = "@echo off`r`npowershell -ExecutionPolicy Bypass -File `"$targetPs1`" %*`r`n"
+    $powerShellExe = Get-CurrentPowerShellExecutable
+    $cmdContent = "@echo off`r`n`"$powerShellExe`" -NoProfile -ExecutionPolicy Bypass -File `"$targetPs1`" %*`r`n"
     Set-Content -Path $socketAgentCmd -Value $cmdContent -Encoding ASCII
     Set-Content -Path $socketClaudeCmd -Value $cmdContent -Encoding ASCII
 
@@ -293,12 +317,12 @@ Write-Host ""
 # Verify we're in the right directory
 if (-not (Test-Path $SERVER_DIR)) {
     Write-Fail "Cannot find server/ directory. Run this script from the SocketAgent repo root."
-    exit 1
+    throw "SocketAgent server directory is missing"
 }
 
 if (-not (Test-Path (Join-Path $SERVER_DIR "package.json"))) {
     Write-Fail "Cannot find server/package.json. Is this the SocketAgent repository?"
-    exit 1
+    throw "SocketAgent server package is missing"
 }
 
 try {
@@ -321,9 +345,9 @@ if ($portInUse) {
         $procName = if ($procInfo) { "$($procInfo.ProcessName) (PID $($conflictPids[0]))" } else { "PID $($conflictPids[0])" }
         Write-Fail "Port $Port is already in use by $procName"
         Write-Host ""
-        Write-Host "  Use a different port:  powershell -File install.ps1 -Port 8086" -ForegroundColor Yellow
+        Write-Host "  Use a different port:  & .\install.ps1 -Port 8086" -ForegroundColor Yellow
         Write-Host ""
-        exit 1
+        throw "Port $Port is already in use"
     }
 }
 
@@ -602,6 +626,7 @@ if ($isUpgrade) {
 Write-Phase "Phase 6: Register Windows Service"
 
 $nodeExe = (Get-Command node).Source
+$powerShellExe = Get-CurrentPowerShellExecutable
 $serverScript = Join-Path (Join-Path $SERVER_DIR "dist") "index.js"
 
 # Stop and remove existing task
@@ -642,6 +667,7 @@ set "SERVER_DIR=$SERVER_DIR"
 set "REPO_ROOT=$REPO_ROOT"
 set "LOG_FILE=$LOG_FILE"
 set "NODE_EXE=$nodeExe"
+set "POWERSHELL_EXE=$powerShellExe"
 set "SERVER_SCRIPT=$serverScript"
 set "RECOVERY_BAT=$recoveryBatFile"
 set "NPM_CMD=npm.cmd"
@@ -661,7 +687,7 @@ goto loop
 
 :arm_recovery
 if not exist "%RECOVERY_BAT%" exit /b 0
-powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "`$a=New-ScheduledTaskAction -Execute `$env:ComSpec -Argument ('/d /c ' + [char]34 + `$env:RECOVERY_BAT + [char]34); `$t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); `$p=New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited; `$s=New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable; Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action `$a -Trigger `$t -Principal `$p -Settings `$s -Force | Out-Null" >nul 2>&1
+"%POWERSHELL_EXE%" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "`$a=New-ScheduledTaskAction -Execute `$env:ComSpec -Argument ('/d /c ' + [char]34 + `$env:RECOVERY_BAT + [char]34); `$t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); `$p=New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited; `$s=New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable; Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action `$a -Trigger `$t -Principal `$p -Settings `$s -Force | Out-Null" >nul 2>&1
 exit /b 0
 
 :preflight
@@ -728,10 +754,11 @@ setlocal EnableExtensions
 rem SocketAgent Windows recovery guard
 set "SERVER_DIR=$SERVER_DIR"
 set "LOG_FILE=$LOG_FILE"
+set "POWERSHELL_EXE=$powerShellExe"
 set "PORT=8085"
 for /f "tokens=1,* delims==" %%A in ('findstr /b "PORT=" "%SERVER_DIR%\.env" 2^>nul') do if /i "%%A"=="PORT" set "PORT=%%B"
 set "PORT=%PORT:"=%"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "`$p=[int]`$env:PORT; `$c=New-Object Net.Sockets.TcpClient; try { `$iar=`$c.BeginConnect('127.0.0.1',`$p,`$null,`$null); if (-not `$iar.AsyncWaitHandle.WaitOne(1500,`$false)) { exit 1 }; `$c.EndConnect(`$iar); exit 0 } catch { exit 1 } finally { `$c.Close() }"
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "`$p=[int]`$env:PORT; `$c=New-Object Net.Sockets.TcpClient; try { `$iar=`$c.BeginConnect('127.0.0.1',`$p,`$null,`$null); if (-not `$iar.AsyncWaitHandle.WaitOne(1500,`$false)) { exit 1 }; `$c.EndConnect(`$iar); exit 0 } catch { exit 1 } finally { `$c.Close() }"
 if not errorlevel 1 goto done
 echo [recovery] SocketAgent is not listening on port %PORT%; restarting scheduled task. >> "%LOG_FILE%" 2>&1
 set "TASK_NAME=SocketAgent"
@@ -923,5 +950,5 @@ Write-Host ""
         }
     }
     Write-Host ""
-    exit 1
+    throw "SocketAgent installation failed during $currentPhase"
 }

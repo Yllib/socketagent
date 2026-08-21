@@ -17,7 +17,7 @@ Install the server on the computer you want SocketAgent to control.
 Open PowerShell and paste this command:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Yllib/socketagent/master/install-windows.ps1 | iex"
+irm https://raw.githubusercontent.com/Yllib/socketagent/master/install-windows.ps1 | iex
 ```
 
 ### macOS, Linux, or WSL

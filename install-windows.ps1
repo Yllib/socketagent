@@ -145,5 +145,22 @@ if (-not (Test-Path $installer)) {
 }
 
 Set-Location $InstallDir
-& powershell -ExecutionPolicy Bypass -File $installer
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# The bootstrap is normally loaded with `irm ... | iex`, so it already runs in
+# PowerShell. Starting powershell.exe again breaks on machines where Windows
+# PowerShell is disabled but pwsh/current-host execution is allowed. The cloned
+# script is local, so run it in this host after applying a process-only bypass.
+try {
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction SilentlyContinue
+} catch {}
+
+try {
+    & $installer
+} catch {
+    Write-Host ""
+    Write-Warn "SocketAgent did not finish installing. This window will stay open so the error is not lost."
+    Write-Host "  Retry after correcting the error:" -ForegroundColor Yellow
+    Write-Host "    & `"$installer`"" -ForegroundColor Gray
+    Write-Host ""
+    throw
+}

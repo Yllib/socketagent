@@ -91,6 +91,10 @@ require_git_checkout() {
   fi
 }
 
+has_controlling_tty() {
+  [[ -c /dev/tty ]] && { : </dev/tty; } 2>/dev/null
+}
+
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<EOF
 SocketAgent installer
@@ -109,7 +113,7 @@ fi
 
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install-server.sh" && -d "$SCRIPT_DIR/server" ]]; then
   require_git_checkout "$SCRIPT_DIR"
-  if [[ -r /dev/tty ]]; then
+  if has_controlling_tty; then
     exec bash "$SCRIPT_DIR/install-server.sh" "$@" </dev/tty
   fi
   exec bash "$SCRIPT_DIR/install-server.sh" "$@"
@@ -137,7 +141,7 @@ else
 fi
 
 cd "$INSTALL_DIR"
-if [[ -r /dev/tty ]]; then
+if has_controlling_tty; then
   exec bash ./install-server.sh "$@" </dev/tty
 fi
 exec bash ./install-server.sh "$@"

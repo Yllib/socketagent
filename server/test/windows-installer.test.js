@@ -48,3 +48,12 @@ test("Windows bootstrap stays in the current shell and generated commands reuse 
   assert.match(installer, /"%POWERSHELL_EXE%" -NoProfile/);
   assert.doesNotMatch(installer, /^\s*exit 1\s*$/im);
 });
+
+test("Windows forces npm lifecycle scripts through cmd.exe", () => {
+  const installer = read("install.ps1");
+
+  assert.match(installer, /function Set-NpmWindowsScriptShell/);
+  assert.match(installer, /\$env:npm_config_script_shell = \$cmdPath/);
+  assert.match(installer, /Ensure-NpmGlobalBinOnPath\s+Set-NpmWindowsScriptShell/);
+  assert.match(installer, /set "npm_config_script_shell=%ComSpec%"/);
+});

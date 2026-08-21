@@ -197,6 +197,21 @@ function Get-CurrentPowerShellExecutable {
     throw "Cannot locate the PowerShell executable that is running this installer"
 }
 
+function Set-NpmWindowsScriptShell {
+    $cmdPath = $env:ComSpec
+    if (-not $cmdPath -and $env:SystemRoot) {
+        $cmdPath = Join-Path $env:SystemRoot "System32\cmd.exe"
+    }
+    if (-not $cmdPath -or -not (Test-Path $cmdPath)) {
+        throw "Cannot locate cmd.exe for npm package scripts"
+    }
+
+    # npm can inherit a user-level script-shell=powershell setting. Several
+    # native dependencies use cmd.exe operators such as || in install scripts.
+    # Override the setting for this process and every npm child it starts.
+    $env:npm_config_script_shell = $cmdPath
+}
+
 function Test-CodexAppServer($codexPath = "codex") {
     $result = Invoke-NativeCapture { & $codexPath app-server --help }
     return $result.ExitCode -eq 0
@@ -472,6 +487,7 @@ if (-not $nodeInstalled) {
     Write-Ok "Node.js $rawVersion installed"
 }
 Ensure-NpmGlobalBinOnPath
+Set-NpmWindowsScriptShell
 
 # ══════════════════════════════════════════════
 #  Phase 2: Claude Code CLI
@@ -668,6 +684,7 @@ set "REPO_ROOT=$REPO_ROOT"
 set "LOG_FILE=$LOG_FILE"
 set "NODE_EXE=$nodeExe"
 set "POWERSHELL_EXE=$powerShellExe"
+set "npm_config_script_shell=%ComSpec%"
 set "SERVER_SCRIPT=$serverScript"
 set "RECOVERY_BAT=$recoveryBatFile"
 set "NPM_CMD=npm.cmd"

@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   codexAuthScopeFromAccountRead,
+  isCodexActiveWriterError,
   isMcpAuthSignal,
 } = require("../dist/codex-session.js");
 
@@ -44,4 +45,16 @@ test("recognizes codex_apps and startup reauthentication as MCP auth signals", (
     }),
     true,
   );
+});
+
+test("recognizes the app-server active writer rejection", () => {
+  assert.equal(
+    isCodexActiveWriterError(
+      new Error(
+        'thread/resume: {"code":-32600,"message":"thread abc already has an active writer"}',
+      ),
+    ),
+    true,
+  );
+  assert.equal(isCodexActiveWriterError(new Error("usage limit exceeded")), false);
 });

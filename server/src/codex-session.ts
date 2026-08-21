@@ -91,6 +91,15 @@ export function isTimedOutCodexThreadResume(
     && error.method === "thread/resume";
 }
 
+export function isCodexActiveWriterError(error: unknown): boolean {
+  const detail = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : JSON.stringify(error);
+  return /thread\b.*already has an active writer/i.test(detail || "");
+}
+
 function normalizeCodexGoal(value: unknown): CodexGoal | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
@@ -488,6 +497,7 @@ export class CodexSession {
   private appServerInitialized = false;
   private appServerInitializePromise: Promise<void> | null = null;
   private appServerIdleStopTimer: ReturnType<typeof setTimeout> | null = null;
+  private appServerAuthenticationInvalidated = false;
   private appServerMcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
   private activeAppServerTurnId: string | null = null;
   private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
@@ -2161,6 +2171,7 @@ export class CodexSession {
     this.flushPendingUserPrompt();
 
     try {
+      await this.resetInvalidatedAppServerAuthentication();
       await this.ensureAppServer();
 
       // Current app-server versions require model on turn/start. A new session
@@ -2258,15 +2269,16 @@ export class CodexSession {
     } catch (err: any) {
       this._pendingUserPrompt = null;
       this.clearPendingAppServerSteers(`codex app-server error: ${err?.message || String(err)}`);
-      if (isTimedOutCodexThreadResume(err)) {
-        console.warn(
-          `[codex app-server] Discarding timed-out thread resume after ${err.timeoutMs}ms`
-        );
+      if (isTimedOutCodexThreadResume(err) || isCodexActiveWriterError(err)) {
+        const reason = isTimedOutCodexThreadResume(err)
+          ? `timed-out thread resume after ${err.timeoutMs}ms`
+          : "thread resume rejected because another writer owns the thread";
+        console.warn(`[codex app-server] Discarding ${reason}`);
         try {
           await this.stopAppServerClient(true);
         } catch (stopError: any) {
           console.error(
-            `[codex app-server] Failed to terminate timed-out resume: ${stopError?.message || stopError}`
+            `[codex app-server] Failed to terminate rejected resume: ${stopError?.message || stopError}`
           );
         }
       }
@@ -2283,7 +2295,9 @@ export class CodexSession {
       this.activeAppServerTurnId = null;
       this.appServerTurnSettler = null;
       this.onActivity?.();
-      if (CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS <= 0) {
+      if (this.appServerAuthenticationInvalidated) {
+        await this.resetInvalidatedAppServerAuthentication();
+      } else if (CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS <= 0) {
         await this.stopAppServerClient();
       } else {
         this.scheduleAppServerIdleStop(CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS);
@@ -2556,12 +2570,23 @@ export class CodexSession {
   async dispose(): Promise<void> {
     this.streamSnapshots.dispose(true);
     this.cancelPendingAppServerTurnCompletion();
-    await this.stopAppServerClient();
+    await this.stopAppServerClient(true);
   }
 
   async closeWarmIdle(): Promise<void> {
     if (!this.isWarmIdle) return;
     await this.stopAppServerClient();
+  }
+
+  async invalidateAppServerAuthentication(): Promise<void> {
+    this.appServerAuthenticationInvalidated = true;
+    if (!this.isBusy) await this.resetInvalidatedAppServerAuthentication();
+  }
+
+  private async resetInvalidatedAppServerAuthentication(): Promise<void> {
+    if (!this.appServerAuthenticationInvalidated) return;
+    await this.stopAppServerClient(true);
+    this.appServerAuthenticationInvalidated = false;
   }
 
   private buildAppServerThreadParams(): {

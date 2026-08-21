@@ -54,4 +54,12 @@ export class SessionInstanceRegistry<T extends object> {
     }
     return [...result];
   }
+
+  allInstances(): T[] {
+    const result = new Set<T>();
+    for (const instances of this.bySessionId.values()) {
+      for (const instance of instances) result.add(instance);
+    }
+    return [...result];
+  }
 }

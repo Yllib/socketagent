@@ -38,3 +38,14 @@ test("candidate extras are deduplicated", () => {
   registry.setActive("session", runner, true);
   assert.deepEqual(registry.instances("session", [runner, runner]), [runner]);
 });
+
+test("allInstances deduplicates runners registered under more than one ID", () => {
+  const registry = new SessionInstanceRegistry();
+  const shared = {};
+  const other = {};
+  registry.setActive("old", shared, true);
+  registry.setActive("new", shared, true);
+  registry.setActive("other", other, true);
+
+  assert.deepEqual(new Set(registry.allInstances()), new Set([shared, other]));
+});

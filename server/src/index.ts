@@ -1159,6 +1159,53 @@ function syncLiveSessionInstance(session: Session): void {
   liveSessionInstances.setActive(sessionId, session, ownsLiveBackend);
 }
 
+async function recoverCanonicalLiveSession(sessionId: string): Promise<Session | undefined> {
+  const mapped = activeSessions.get(sessionId);
+  const candidates = liveSessionInstances.instances(
+    sessionId,
+    mapped ? [mapped] : [],
+  );
+  if (candidates.length === 0) return undefined;
+
+  const canonical = candidates.find(
+    (candidate) => candidate === mapped && sessionIsBusy(candidate),
+  ) || candidates.find((candidate) => sessionIsBusy(candidate))
+    || mapped
+    || candidates[0];
+
+  activeSessions.set(sessionId, canonical);
+
+  const duplicateCodexRunners = candidates.filter(
+    (candidate): candidate is CodexSession => (
+      candidate !== canonical && candidate instanceof CodexSession
+    ),
+  );
+  if (duplicateCodexRunners.length > 0) {
+    console.warn(
+      `[SessionPool] Closing ${duplicateCodexRunners.length} duplicate Codex runner(s) for ${sessionId}`,
+    );
+    await Promise.all(duplicateCodexRunners.map(async (duplicate) => {
+      await duplicate.dispose();
+      liveSessionInstances.remove(duplicate, sessionId);
+    }));
+  }
+
+  return canonical;
+}
+
+async function invalidateCodexAuthenticationForLiveSessions(): Promise<void> {
+  const codexSessions = liveSessionInstances.allInstances().filter(
+    (session): session is CodexSession => session instanceof CodexSession,
+  );
+  if (codexSessions.length === 0) return;
+  console.log(
+    `[CodexAuth] Invalidating ${codexSessions.length} live app-server authentication context(s)`,
+  );
+  await Promise.all(
+    codexSessions.map((session) => session.invalidateAppServerAuthentication()),
+  );
+}
+
 function abortGroupForSession(
   sessionId: string,
   extras: Iterable<Session | null | undefined> = [],
@@ -4012,7 +4059,10 @@ function createConnectionHandler(
           forceAuthenticate,
           signal: abortController.signal,
           onProgress: sendProgress as any,
-        }).then(() => {
+        }).then(async () => {
+          if (backend === "codex" && operation === "auth") {
+            await invalidateCodexAuthenticationForLiveSessions();
+          }
           if (backend === "claude") refreshClaudeExecutableInfo();
           clearBackendHealthOverride(backend);
           invalidateCodexAvailabilityCache();
@@ -4332,7 +4382,7 @@ function createConnectionHandler(
         }
 
         // Check if this session is still running in the background
-        const existing = activeSessions.get(msg.sessionId);
+        const existing = await recoverCanonicalLiveSession(msg.sessionId);
         if (existing) {
           // Reattach the transport to the running session
           existing.setWebSocket(transport as any, true);
@@ -4626,7 +4676,7 @@ function createConnectionHandler(
           ? Boolean((msg as any).codexFastMode)
           : undefined;
         if (msg.sessionId) {
-          const runningForPrompt = activeSessions.get(msg.sessionId);
+          const runningForPrompt = await recoverCanonicalLiveSession(msg.sessionId);
           if (runningForPrompt && activeSession !== runningForPrompt) {
             runningForPrompt.setWebSocket(transport as any);
             activeSession = runningForPrompt;

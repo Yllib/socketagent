@@ -1626,6 +1626,11 @@ export class CodexSession {
     }
   }
 
+  async consumeAccountRateLimitReset(idempotencyKey: string): Promise<unknown> {
+    await this.ensureAppServer();
+    return this.appServer!.consumeAccountRateLimitReset(idempotencyKey);
+  }
+
   async buildStatusResult(threadId: string): Promise<{ summary: string; payload: Record<string, unknown> }> {
     const lines: string[] = [];
     let config: any = null;
@@ -1702,6 +1707,7 @@ export class CodexSession {
         },
         limits: limitPayload,
         usage: usagePayload,
+        resetCredits: rateLimits?.rateLimitResetCredits ?? null,
       },
     };
   }
@@ -1712,8 +1718,9 @@ export class CodexSession {
       ? Object.values(value.rateLimitsByLimitId)
       : [];
     const limits = (byId.length > 0 ? byId : [value.rateLimits]).filter(Boolean) as any[];
-    return limits.slice(0, 4).map((limit) => ({
-      label: String(limit.limitName || limit.limitId || "Codex"),
+    return limits.map((limit) => ({
+      id: String(limit.limitId || limit.limitName || "codex"),
+      label: String(limit.limitName || (limit.limitId === "codex" ? "Codex" : limit.limitId) || "Codex"),
       plan: limit.planType ? String(limit.planType) : "",
       credits: limit.credits
         ? (limit.credits.unlimited ? "unlimited" : String(limit.credits.balance ?? "0"))
@@ -1730,6 +1737,7 @@ export class CodexSession {
     return {
       usedPercent: Number.isFinite(usedPercent) ? usedPercent : null,
       window: this.formatWindowDuration(window.windowDurationMins),
+      windowDurationMins: window.windowDurationMins ?? null,
       resetsAt: Number.isFinite(Number(window.resetsAt)) ? Number(window.resetsAt) : null,
       resetLabel: this.formatResetTime(window.resetsAt),
     };
@@ -1739,15 +1747,23 @@ export class CodexSession {
     const summary = value?.summary;
     if (!summary) return {};
     const today = this.localDateKey();
-    const todayBucket = Array.isArray(value.dailyUsageBuckets)
-      ? value.dailyUsageBuckets.find((bucket: any) => bucket?.startDate === today)
-      : null;
+    const metric = (value: unknown) => value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+    const buckets = Array.isArray(value.dailyUsageBuckets)
+      ? value.dailyUsageBuckets.filter((bucket: any) =>
+          typeof bucket?.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(bucket.startDate) &&
+          bucket.startDate <= today && metric(bucket.tokens) !== null)
+      : [];
+    const todayBucket = buckets.find((bucket: any) => bucket.startDate === today);
+    const latestBucket = buckets.reduce((latest: any, bucket: any) =>
+      !latest || bucket.startDate > latest.startDate ? bucket : latest, null);
     return {
-      lifetimeTokens: Number(summary.lifetimeTokens),
-      todayTokens: todayBucket ? Number(todayBucket.tokens) : null,
-      peakDailyTokens: Number(summary.peakDailyTokens),
-      currentStreakDays: Number(summary.currentStreakDays),
-      longestStreakDays: Number(summary.longestStreakDays),
+      lifetimeTokens: metric(summary.lifetimeTokens),
+      todayTokens: todayBucket ? metric(todayBucket.tokens) : null,
+      latestUsageDate: latestBucket?.startDate ?? null,
+      latestDailyTokens: latestBucket ? metric(latestBucket.tokens) : null,
+      peakDailyTokens: metric(summary.peakDailyTokens),
+      currentStreakDays: metric(summary.currentStreakDays),
+      longestStreakDays: metric(summary.longestStreakDays),
     };
   }
 
@@ -1892,6 +1908,7 @@ export class CodexSession {
   }
 
   async listCodexCollaborationModes(): Promise<Array<Record<string, unknown>>> {
+    if (playReviewModeEnabled()) return [{ id: "default", name: "Review demo" }];
     await this.ensureAppServer();
     const result = await this.appServer!.listCollaborationModes();
     void this.refreshSupportedModels();
@@ -1917,6 +1934,15 @@ export class CodexSession {
   }
 
   async refreshSupportedModels(): Promise<void> {
+    if (playReviewModeEnabled()) {
+      this.publishSupportedModels([{
+        value: "play-review-demo",
+        displayName: "Review demo",
+        description: "Deterministic review responses. No live AI model is used.",
+        isDefault: true,
+      }]);
+      return;
+    }
     const cachedCatalog = getCachedModelCatalog("codex");
     if (cachedCatalog) {
       this.publishSupportedModels(cachedCatalog.models, {
@@ -5855,6 +5881,8 @@ export function invalidateCodexAvailabilityCache(): void {
 }
 
 export function getCodexAvailability(): { available: boolean; reason?: string } {
+  // Review sessions use the built-in deterministic runner and require no CLI.
+  if (playReviewModeEnabled()) return { available: true };
   const now = Date.now();
   if (_cachedCodexAvailability && now - _cachedCodexAvailability.checkedAt < CODEX_AVAILABILITY_CACHE_MS) {
     return _cachedCodexAvailability.value;

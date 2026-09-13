@@ -35,15 +35,8 @@ function Register-SocketAgentRecovery {
     $recoveryBat = Join-Path $serverDir "run-recovery.bat"
     if (-not (Test-Path $recoveryBat)) { return }
 
-    $action = New-ScheduledTaskAction `
-        -Execute $env:ComSpec `
-        -Argument ('/d /c "' + $recoveryBat + '"')
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5)
-    Register-ScheduledTask `
-        -TaskName "SocketAgentRecovery" `
-        -Action $action `
-        -Trigger $trigger `
-        -Force | Out-Null
+    & (Join-Path $serverDir 'scripts\register-windows-recovery.ps1')
+
 }
 
 $cmd = if ($Args.Count -gt 0) { $Args[0] } else { "help" }
@@ -68,17 +61,22 @@ switch ($cmd.ToLowerInvariant()) {
     }
     "status" {
         Get-ScheduledTask -TaskName (Get-SocketAgentTaskName)
+        & node (Join-Path $serverDir "scripts\check-health.js")
+        exit $LASTEXITCODE
     }
     "logs" {
         Get-Content (Join-Path $serverDir "socketagent.log") -Tail 50 -Wait
     }
     "restart" {
         $taskName = Get-SocketAgentTaskName
+        . (Join-Path $serverDir "scripts\windows-service.ps1")
+        Update-SocketAgentTaskLauncher $serverDir
         Register-SocketAgentRecovery
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
         Start-ScheduledTask -TaskName $taskName
-        Get-ScheduledTask -TaskName $taskName
+        & node (Join-Path $serverDir "scripts\check-health.js") 180
+        exit $LASTEXITCODE
     }
     "doctor" {
         Write-Host "SocketAgent diagnostics"

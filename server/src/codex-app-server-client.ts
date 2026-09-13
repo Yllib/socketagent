@@ -383,6 +383,11 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("account/rateLimits/read", {});
   }
 
+  async consumeAccountRateLimitReset(idempotencyKey: string): Promise<unknown> {
+    if (!idempotencyKey.trim()) throw new Error("A reset attempt ID is required");
+    return this.request("account/rateLimitResetCredit/consume", { idempotencyKey });
+  }
+
   async readAccountUsage(): Promise<unknown> {
     return this.request("account/usage/read", {});
   }

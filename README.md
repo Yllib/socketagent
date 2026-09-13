@@ -1,6 +1,23 @@
 # SocketAgent
 
-Use Claude Code or OpenAI Codex from your Android phone. Install the Android app, install the SocketAgent server on your computer, then pair them with a QR code.
+Access Claude Code and OpenAI Codex agents on your computers from your Android phone or Windows desktop. Install the free SocketAgent server software on the computers you want to connect to, then pair them with the app.
+
+## Download SocketAgent Desktop for Windows
+
+[Download SocketAgent Desktop for Windows](https://github.com/Yllib/socketagent/releases/download/windows-v1.0.252/SocketAgent-Desktop-Setup.exe)
+
+Run the installer on Windows 10 or 11, 64-bit. Setup detects an existing local
+SocketAgent server and links to it automatically. If there is no local server,
+setup offers to install one.
+
+A local server is optional. You can add other computers via their pairing codes
+without installing a server on this computer. You can also import the computer
+transfer QR code exported by the Android app.
+
+SocketAgent Desktop includes a resizable session sidebar, system tray support,
+saved window size and position, and desktop menus. Press Enter to send a message
+or Shift+Enter for a new line. Closing the window keeps the app in the tray;
+choose Quit from the tray menu to exit.
 
 ## Download the Android App
 
@@ -10,7 +27,9 @@ Download the latest APK:
 
 ## Install the Server
 
-Install the server on the computer you want SocketAgent to control.
+Install the server on the computer you want SocketAgent to control. The Windows
+desktop installer above can do this for you, or you can install only the server
+using the commands below.
 
 ### Windows
 
@@ -28,9 +47,24 @@ Open a terminal and paste this command:
 curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash
 ```
 
-The installer needs no choices or sign-in prompts. It installs SocketAgent plus
+Windows setup offers a destination folder on a first install and reuses the existing
+folder on subsequent runs. It installs SocketAgent plus
 both supported agent CLIs, starts SocketAgent, and then shows the pairing QR
 code. Sign in to Claude or Codex later from the app or the relevant CLI.
+
+For a custom Windows destination without prompts:
+
+```powershell
+$env:SOCKETAGENT_INSTALL_DIR = 'D:\Apps\SocketAgent'
+$env:SOCKETAGENT_UNATTENDED = '1'
+irm https://raw.githubusercontent.com/Yllib/socketagent/master/install-windows.ps1 | iex
+```
+
+Windows stores server files in the selected folder, managed Claude/Codex tools in
+`%USERPROFILE%\.socket-agent\toolchains\npm-global`, and session data in
+`%USERPROFILE%\.socket-agent`. Existing legacy data is preserved. The launcher
+and command shortcuts live under `%LOCALAPPDATA%\SocketAgent`. Setup prints the
+actual locations, including any configured overrides.
 
 ## Pair the App
 
@@ -105,7 +139,7 @@ Notifications section.
 
 ## Requirements
 
-- Android phone
+- Android phone or Windows 10/11 desktop, 64-bit
 - Windows, macOS, Linux, or WSL computer
 - Claude Code account if you want Claude sessions
 - ChatGPT/Codex account if you want Codex sessions
@@ -115,7 +149,9 @@ Notifications section.
 - The server must run from a git checkout. Do not install from a downloaded ZIP.
 - Re-running the installer is safe. It keeps existing pairing and auth data.
 - Installed servers auto-update when no sessions are active.
-- Local data is stored under `~/.claude-assistant/` so existing installs keep their history and pairing.
+- Auto-update replaces tracked files in the installed checkout. Keep your projects
+  outside that folder, or set `SOCKETAGENT_AUTO_UPDATE=0` to manage updates yourself.
+- Local data is stored under `~/.socket-agent/`; existing `~/.claude-assistant/` data is preserved during migration.
 
 ## Troubleshooting
 
@@ -130,9 +166,22 @@ socketagent pair
 
 Then scan the new QR code.
 
+**A blank window opens at Windows login**
+
+SocketAgent runs in the background after you sign in to Windows. Updated servers
+repair older startup tasks for their next start. If Windows protects the old task,
+the window may flash briefly before hiding. Open PowerShell with **Run as administrator**
+and rerun setup to replace that task and remove the flash.
+Use `socketagent status` to check readiness and `socketagent logs`
+to view server output.
+
 **Windows says scripts are blocked**
 
-Run the PowerShell command from this README exactly as written. It includes `-ExecutionPolicy Bypass` for the installer run.
+The Windows bootstrap applies an execution-policy bypass only to its installer
+process. Managed Claude and Codex commands use `.cmd` launchers and work in fresh
+PowerShell terminals without changing your account's execution policy. If an
+older installation reports a blocked `claude.ps1` or `codex.ps1`, rerun setup and
+open a new terminal. Organization policy can still restrict installation.
 
 **The QR code disappeared**
 

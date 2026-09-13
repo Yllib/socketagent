@@ -10,7 +10,33 @@ $ErrorActionPreference = "Stop"
 
 $RepoUrl = if ($env:SOCKETAGENT_REPO_URL) { $env:SOCKETAGENT_REPO_URL } else { "https://github.com/Yllib/socketagent.git" }
 $Branch = if ($env:SOCKETAGENT_BRANCH) { $env:SOCKETAGENT_BRANCH } else { "master" }
-$InstallDir = if ($env:SOCKETAGENT_INSTALL_DIR) { $env:SOCKETAGENT_INSTALL_DIR } else { Join-Path $env:USERPROFILE "socketagent" }
+$InstallDir = $env:SOCKETAGENT_INSTALL_DIR
+if (-not $InstallDir) {
+    $candidates = @()
+    $locationFile = Join-Path $env:LOCALAPPDATA 'SocketAgent\install-location.txt'
+    if (Test-Path $locationFile) { $candidates += (Get-Content $locationFile -Raw).Trim() }
+    foreach ($taskName in @('SocketAgent', 'SocketClaude')) {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($task) {
+            foreach ($action in $task.Actions) {
+                if ($action.WorkingDirectory) { $candidates += Split-Path $action.WorkingDirectory -Parent }
+                if ($action.Arguments -match '"([^"\r\n]+)\\server\\run-service(?:-hidden)?\.(?:bat|vbs)"') { $candidates += $Matches[1] }
+            }
+        }
+    }
+    $candidates += Join-Path $env:USERPROFILE 'socketagent'
+    $InstallDir = $candidates | Where-Object { $_ -and (Test-Path (Join-Path $_ '.git')) -and (Test-Path (Join-Path $_ 'install.ps1')) } | Select-Object -First 1
+    if ($InstallDir) { Write-Host "Using existing installation: $InstallDir" }
+    else {
+        $InstallDir = Join-Path $env:USERPROFILE 'socketagent'
+        Write-Host "Server destination: $InstallDir"
+        if ($env:SOCKETAGENT_UNATTENDED -ne '1' -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+            $choice = Read-Host 'Press Enter to use this folder, or type another folder'
+            if ($choice.Trim()) { $InstallDir = $choice.Trim().Trim('"') }
+        }
+    }
+}
+$InstallDir = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($InstallDir))
 
 function Write-Ok($message) {
     Write-Host "  [OK] $message" -ForegroundColor Green
@@ -125,18 +151,40 @@ Ensure-Git
 
 if (Test-Path (Join-Path $InstallDir ".git")) {
     Write-Host "Updating existing SocketAgent checkout..."
-    & git -C $InstallDir fetch --prune origin $Branch
-    if ($LASTEXITCODE -ne 0) { throw "git fetch failed" }
-    & git -C $InstallDir checkout $Branch
-    if ($LASTEXITCODE -ne 0) { throw "git checkout failed" }
-    & git -C $InstallDir pull --ff-only origin $Branch
-    if ($LASTEXITCODE -ne 0) { throw "git pull failed" }
+    $gitResult = Invoke-NativeCapture { git -C $InstallDir fetch --prune origin $Branch }
+    $gitResult.Output | ForEach-Object { Write-Host ([string]$_) }
+    if ($gitResult.ExitCode -ne 0) { throw "git fetch failed" }
+    $gitResult = Invoke-NativeCapture { git -C $InstallDir checkout $Branch }
+    $gitResult.Output | ForEach-Object { Write-Host ([string]$_) }
+    if ($gitResult.ExitCode -ne 0) { throw "git checkout failed" }
+    $gitResult = Invoke-NativeCapture { git -C $InstallDir pull --ff-only origin $Branch }
+    $gitResult.Output | ForEach-Object { Write-Host ([string]$_) }
+    if ($gitResult.ExitCode -ne 0) { throw "git pull failed" }
 } elseif (Test-Path $InstallDir) {
     throw "Install directory exists but is not a git checkout: $InstallDir. Set SOCKETAGENT_INSTALL_DIR to a different folder or remove that directory."
 } else {
     Write-Host "Cloning SocketAgent..."
-    & git clone --branch $Branch $RepoUrl $InstallDir
-    if ($LASTEXITCODE -ne 0) { throw "git clone failed" }
+    $gitResult = Invoke-NativeCapture { git clone --branch $Branch $RepoUrl $InstallDir }
+    $gitResult.Output | ForEach-Object { Write-Host ([string]$_) }
+    if ($gitResult.ExitCode -ne 0) { throw "git clone failed" }
+}
+
+# The desktop setup carries its tested Windows setup support with the app.
+# Core server code still comes from the selected repository; existing standalone
+# installs are unchanged when no support directory is supplied.
+if ($env:SOCKETAGENT_INSTALLER_SUPPORT) {
+    foreach ($relative in @(
+        'install.ps1', 'bin/socketagent.ps1',
+        'server/scripts/windows-service.ps1', 'server/scripts/windows-launcher.cs',
+        'server/scripts/register-windows-recovery.ps1', 'server/scripts/migrate-windows-service.ps1',
+        'server/scripts/check-health.js', 'server/src/windows-managed-shims.ts'
+    )) {
+        $source = Join-Path $env:SOCKETAGENT_INSTALLER_SUPPORT $relative
+        if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing bundled setup support: $relative" }
+        $target = Join-Path $InstallDir $relative
+        New-Item -ItemType Directory -Force (Split-Path $target) | Out-Null
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
 }
 
 $installer = Join-Path $InstallDir "install.ps1"

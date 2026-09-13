@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Desktop builds share this entrypoint but never use the Android release flow.
+if [[ "${1:-}" == "--windows" ]]; then
+  shift
+  exec "$(cd "$(dirname "$0")" && pwd)/build-windows-app.sh" "$@"
+fi
+
 # SocketAgent App Build Script
 #
 # Usage:

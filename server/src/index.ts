@@ -1,3 +1,4 @@
+import { repairWindowsManagedShims } from "./windows-managed-shims";
 import * as dotenv from "dotenv";
 const bootstrapPath = require("path") as typeof import("path");
 const bootstrapFs = require("fs") as typeof import("fs");
@@ -7424,6 +7425,29 @@ function createConnectionHandler(
         break;
       }
 
+      case "consume_codex_reset": {
+        const { requestId, idempotencyKey, sessionId, confirmed } = msg;
+        const session = activeSession;
+        try {
+          if (confirmed !== true || typeof requestId !== "string" || !requestId ||
+              typeof idempotencyKey !== "string" || !idempotencyKey.trim() || idempotencyKey.length > 128) {
+            throw new Error("Confirm the reset before using it");
+          }
+          if (!(session instanceof CodexSession) || session.getSessionId() !== sessionId) {
+            throw new Error("The selected Codex session changed. Reopen account usage and try again.");
+          }
+          const result = await session.consumeAccountRateLimitReset(idempotencyKey) as any;
+          // The service owns the new quota values. Read them again even when no
+          // credit was consumed; never guess the remaining count in the app.
+          const refreshed = await session.buildStatusResult(sessionId);
+          sendJson({ type: "codex_reset_result", requestId, sessionId,
+            outcome: result?.outcome, payload: refreshed.payload });
+        } catch (error: any) {
+          sendJson({ type: "codex_reset_result", requestId, sessionId, error: error.message || String(error) });
+        }
+        break;
+      }
+
       case "get_codex_status": {
         if (activeSession instanceof CodexSession) {
           try {
@@ -8654,6 +8678,11 @@ const httpServer = http.createServer((req, res) => {
       if (restartPreparationTimer) clearTimeout(restartPreparationTimer);
       restartPreparing = false;
       res.writeHead(200); res.end("{}"); return;
+    }
+    if (req.method === "GET" && route === "/internal/restart/health") {
+      res.writeHead(serverReady && !shuttingDown ? 200 : 503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ service: "socketagent", ready: serverReady && !shuttingDown, pid: process.pid }));
+      return;
     }
     if (req.method === "GET" && route === "/internal/restart/status") {
       res.writeHead(serverReady && !shuttingDown ? 200 : 503, { "Content-Type": "application/json" });
@@ -10694,6 +10723,7 @@ function runManagedBackendUpdateSync(): void {
     windowsHide: true,
     windowsVerbatimArguments: npm.windowsVerbatimArguments,
   });
+  repairWindowsManagedShims(managedNpmPrefix(runtime.env));
   refreshBackendRuntimeCaches(backendsForManagedBackendSpecs(specs));
 }
 
@@ -10712,6 +10742,7 @@ async function runManagedBackendUpdate(): Promise<void> {
   }
   console.log(`[Auto-update] Updating changed managed agent backends: ${specs.join(", ")}`);
   await runUpdateToolAsync(runtime, runtime.npm, managedBackendInstallArgs(runtime, specs), SERVER_DIR, 300000);
+  repairWindowsManagedShims(managedNpmPrefix(runtime.env));
   refreshBackendRuntimeCaches(backendsForManagedBackendSpecs(specs));
 }
 
@@ -10910,6 +10941,7 @@ function windowsRecoveryBatContent(): string {
     "rem SocketAgent Windows recovery guard",
     `set "SERVER_DIR=${batchSetValue(SERVER_DIR)}"`,
     `set "LOG_FILE=${batchSetValue(logFile)}"`,
+    `set "POWERSHELL_EXE=${batchSetValue(process.env.POWERSHELL_EXE || "powershell.exe")}"`,
     'set "PORT=8085"',
     'for /f "tokens=1,* delims==" %%A in (\'findstr /b "PORT=" "%SERVER_DIR%\\.env" 2^>nul\') do if /i "%%A"=="PORT" set "PORT=%%B"',
     'set "PORT=%PORT:"=%"',
@@ -10919,7 +10951,7 @@ function windowsRecoveryBatContent(): string {
     'set "TASK_NAME=SocketAgent"',
     'schtasks /Query /TN SocketAgent >nul 2>&1 || set "TASK_NAME=SocketClaude"',
     'schtasks /End /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1',
-    "timeout /t 2 /nobreak >nul",
+    '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 2" >nul 2>&1',
     'schtasks /Run /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1',
     ":done",
     "schtasks /Delete /TN SocketAgentRecovery /F >nul 2>&1",
@@ -10934,6 +10966,8 @@ function windowsRunServiceBatContent(): string {
   const serverScript = path.join(SERVER_DIR, "dist", "index.js");
   const nodeExe = process.env.SOCKETAGENT_NODE || process.execPath;
   const servicePath = batchSetValue(process.env.PATH);
+  const launcherHash = crypto.createHash("sha256").update(fs.readFileSync(path.join(SERVER_DIR, "scripts", "windows-launcher.cs"))).digest("hex").slice(0, 16);
+  const launcher = path.join(process.env.LOCALAPPDATA || path.join(userHome, "AppData", "Local"), "SocketAgent", "launchers", `socketagent-launcher-${launcherHash}.exe`);
 
   return [
     "@echo off",
@@ -10944,13 +10978,19 @@ function windowsRunServiceBatContent(): string {
     `set "SERVER_DIR=${batchSetValue(SERVER_DIR)}"`,
     `set "REPO_ROOT=${batchSetValue(GIT_ROOT)}"`,
     `set "LOG_FILE=${batchSetValue(logFile)}"`,
+    `set "POWERSHELL_EXE=${batchSetValue(process.env.POWERSHELL_EXE || "powershell.exe")}"`,
     `set "NODE_EXE=${batchSetValue(nodeExe)}"`,
     `set "SERVER_SCRIPT=${batchSetValue(serverScript)}"`,
     `set "RECOVERY_BAT=${batchSetValue(path.join(SERVER_DIR, "run-recovery.bat"))}"`,
+    `set "SOCKETAGENT_LAUNCHER=${batchSetValue(launcher)}"`,
     'set "NPM_CMD=npm.cmd"',
     'set "NPX_CMD=npx.cmd"',
     'if exist "%ProgramFiles%\\nodejs\\npm.cmd" set "NPM_CMD=%ProgramFiles%\\nodejs\\npm.cmd"',
     'if exist "%ProgramFiles%\\nodejs\\npx.cmd" set "NPX_CMD=%ProgramFiles%\\nodejs\\npx.cmd"',
+    "",
+    'if "%SOCKETAGENT_SUPERVISED%"=="1" goto loop',
+    '"%SOCKETAGENT_LAUNCHER%" --hide-parent-console "%~f0"',
+    "exit /b %ERRORLEVEL%",
     "",
     ":loop",
     "call :arm_recovery",
@@ -10959,12 +10999,12 @@ function windowsRunServiceBatContent(): string {
     'cd /d "%SERVER_DIR%"',
     '"%NODE_EXE%" "%SERVER_SCRIPT%" >> "%LOG_FILE%" 2>&1',
     'echo Server exited (%ERRORLEVEL%), restarting in 5s... >> "%LOG_FILE%" 2>&1',
-    "timeout /t 5 /nobreak >nul",
+    '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 5" >nul 2>&1',
     "goto loop",
     "",
     ":arm_recovery",
     'if not exist "%RECOVERY_BAT%" exit /b 0',
-    'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "$a=New-ScheduledTaskAction -Execute $env:ComSpec -Argument (\'/d /c \' + [char]34 + $env:RECOVERY_BAT + [char]34); $t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); $p=New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited; $s=New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable; Register-ScheduledTask -TaskName \'SocketAgentRecovery\' -Action $a -Trigger $t -Principal $p -Settings $s -Force | Out-Null" >nul 2>&1',
+    '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%SERVER_DIR%\\scripts\\register-windows-recovery.ps1" >nul 2>&1',
     "exit /b 0",
     "",
     ":preflight",
@@ -11028,6 +11068,13 @@ function windowsRunServiceBatContent(): string {
 function ensureWindowsServiceWrapper(): void {
   if (process.platform !== "win32") return;
   try {
+    repairWindowsManagedShims(managedNpmPrefix(process.env));
+    const script = path.join(SERVER_DIR, "scripts", "migrate-windows-service.ps1");
+    const output = execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script], {
+      windowsHide: true, timeout: 60000, encoding: "utf8",
+    });
+    if (output.trim()) console.log(`[Startup] ${output.trim()}`);
+
     const batFile = path.join(SERVER_DIR, "run-service.bat");
     const recoveryFile = path.join(SERVER_DIR, "run-recovery.bat");
     const content = windowsRunServiceBatContent();
@@ -11173,16 +11220,8 @@ function armWindowsRecoveryGuard(reason: string, delaySeconds = 300): string | n
   if (!fs.existsSync(recoveryFile)) {
     throw new Error(`Windows recovery script is missing: ${recoveryFile}`);
   }
-  const command = [
-    "$bat = $env:SOCKETAGENT_RECOVERY_BAT",
-    "$delay = [int]$env:SOCKETAGENT_RECOVERY_DELAY_SECONDS",
-    "$action = New-ScheduledTaskAction -Execute $env:ComSpec -Argument ('/d /c ' + [char]34 + $bat + [char]34)",
-    "$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds($delay)",
-    "$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited",
-    "$settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable",
-    "Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null",
-  ].join("; ");
-  execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
+  execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+    path.join(SERVER_DIR, "scripts", "register-windows-recovery.ps1"), "-DelaySeconds", String(delaySeconds)], {
     cwd: SERVER_DIR,
     env: {
       ...process.env,

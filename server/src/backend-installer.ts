@@ -1,3 +1,4 @@
+import { repairWindowsManagedShims } from "./windows-managed-shims";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -518,6 +519,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
       signal: options.signal,
       onProgress: options.onProgress,
     });
+    repairWindowsManagedShims(managedNpmPrefix(env));
     const managedCommand = resolveManagedBackendCommand(env, options.backend);
     if (!managedCommand) {
       throw new Error(`Managed ${label} install finished, but no executable was created in ${managedNpmBinDir(env)}`);

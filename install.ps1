@@ -42,6 +42,7 @@ $DATA_DIR = if ($env:SOCKETAGENT_DATA_DIR) {
 $LEGACY_DATA_DIR = Join-Path $env:USERPROFILE ".claude-assistant"
 $KEYS_FILE = Join-Path $DATA_DIR "relay-keys.json"
 $LOG_FILE = Join-Path $SERVER_DIR "socketagent.log"
+. (Join-Path $SERVER_DIR "scripts\windows-service.ps1")
 $SETUP_SCRIPT = Join-Path (Join-Path $SERVER_DIR "scripts") "setup.js"
 $NPM_GLOBAL_DIR = if ($env:SOCKETAGENT_NPM_GLOBAL_DIR) {
     $env:SOCKETAGENT_NPM_GLOBAL_DIR
@@ -130,7 +131,7 @@ function Add-DirectoryToPath($directory, [bool]$persistUser = $false) {
 function Ensure-NpmGlobalBinOnPath {
     $dirs = @($NPM_BIN_DIR)
     if (-not (Test-CommandExists "npm")) { return }
-    $prefixResult = Invoke-NativeCapture { npm prefix -g }
+    $prefixResult = Invoke-NativeCapture { npm.cmd prefix -g }
     if ($prefixResult.ExitCode -eq 0) {
         $prefix = ($prefixResult.Output | Where-Object { $_ } | Select-Object -First 1).ToString().Trim()
         if ($prefix) { $dirs += $prefix }
@@ -252,11 +253,11 @@ function Install-ServerDependenciesAndBuild {
         $packageLock = Join-Path $SERVER_DIR "package-lock.json"
         if (Test-Path $packageLock) {
             Write-Host "  Running npm ci --include=optional..."
-            $npmResult = Invoke-NativeCapture { npm ci --include=optional }
+            $npmResult = Invoke-NativeCapture { npm.cmd ci --include=optional }
             $installLabel = "npm ci --include=optional"
         } else {
             Write-Host "  Running npm install --include=optional..."
-            $npmResult = Invoke-NativeCapture { npm install --include=optional }
+            $npmResult = Invoke-NativeCapture { npm.cmd install --include=optional }
             $installLabel = "npm install --include=optional"
         }
         $npmOutput = $npmResult.Output
@@ -266,7 +267,7 @@ function Install-ServerDependenciesAndBuild {
         Write-Ok "Dependencies installed"
 
         Write-Host "  Compiling TypeScript..."
-        $tscResult = Invoke-NativeCapture { npx tsc }
+        $tscResult = Invoke-NativeCapture { npx.cmd tsc }
         $tscOutput = $tscResult.Output
         $tscExit = $tscResult.ExitCode
         $tscOutput | ForEach-Object { Write-Host "    $_" }
@@ -501,7 +502,7 @@ if ($claudePath) {
     Write-Ok "Managed Claude Code CLI already installed ($claudeVer)"
 } else {
     Write-Host "  Installing managed Claude Code CLI..."
-    $cliResult = Invoke-NativeCapture { npm install -g --include=optional @anthropic-ai/claude-code@latest }
+    $cliResult = Invoke-NativeCapture { npm.cmd install -g --include=optional @anthropic-ai/claude-code@latest }
     $cliOutput = $cliResult.Output
     $cliExit = $cliResult.ExitCode
     $cliOutput | ForEach-Object { Write-Host "    $_" }
@@ -541,7 +542,7 @@ if ($codexPath) {
 
 if (-not $codexInstalled) {
     Write-Host "  Installing managed OpenAI Codex CLI..."
-    $codexResult = Invoke-NativeCapture { npm install -g --include=optional @openai/codex@latest }
+    $codexResult = Invoke-NativeCapture { npm.cmd install -g --include=optional @openai/codex@latest }
     $codexOutput = $codexResult.Output
     $codexExit = $codexResult.ExitCode
     $codexOutput | ForEach-Object { Write-Host "    $_" }
@@ -571,6 +572,8 @@ Add-DirectoryToPath $NPM_BIN_DIR $true
 Write-Phase "Phase 4: Install Dependencies & Build"
 
 Install-ServerDependenciesAndBuild
+& node -e "require(process.argv[1]).repairWindowsManagedShims(process.argv[2])" (Join-Path $SERVER_DIR 'dist\windows-managed-shims.js') $NPM_GLOBAL_DIR
+if ($LASTEXITCODE -ne 0) { throw 'Could not repair managed command launchers' }
 
 # ══════════════════════════════════════════════
 #  Phase 5: Generate Configuration
@@ -645,6 +648,13 @@ $nodeExe = (Get-Command node).Source
 $powerShellExe = Get-CurrentPowerShellExecutable
 $serverScript = Join-Path (Join-Path $SERVER_DIR "dist") "index.js"
 
+# Keep the legacy task name when repairing an older installation, so setup
+# replaces its supervisor instead of leaving two tasks competing for the port.
+if (-not (Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue) -and
+    (Get-ScheduledTask -TaskName 'SocketClaude' -ErrorAction SilentlyContinue)) {
+    $TASK_NAME = 'SocketClaude'
+}
+
 # Stop and remove existing task
 $existing = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
 if ($existing) {
@@ -655,6 +665,8 @@ if ($existing) {
     Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false
     Write-Host "  Removed existing task"
 }
+
+$launcherExe = Get-SocketAgentLauncher
 
 # Generate run-service.bat with restart loop
 # This ensures the server auto-restarts after updates (process.exit(1))
@@ -689,8 +701,13 @@ set "SERVER_SCRIPT=$serverScript"
 set "RECOVERY_BAT=$recoveryBatFile"
 set "NPM_CMD=npm.cmd"
 set "NPX_CMD=npx.cmd"
+set "SOCKETAGENT_LAUNCHER=$launcherExe"
 if exist "%ProgramFiles%\nodejs\npm.cmd" set "NPM_CMD=%ProgramFiles%\nodejs\npm.cmd"
 if exist "%ProgramFiles%\nodejs\npx.cmd" set "NPX_CMD=%ProgramFiles%\nodejs\npx.cmd"
+
+if "%SOCKETAGENT_SUPERVISED%"=="1" goto loop
+"%SOCKETAGENT_LAUNCHER%" --hide-parent-console "%~f0"
+exit /b %ERRORLEVEL%
 
 :loop
 call :arm_recovery
@@ -699,12 +716,12 @@ if errorlevel 1 echo [startup] Preflight update failed; launching existing build
 cd /d "%SERVER_DIR%"
 "%NODE_EXE%" "%SERVER_SCRIPT%" >> "%LOG_FILE%" 2>&1
 echo Server exited (%ERRORLEVEL%), restarting in 5s... >> "%LOG_FILE%" 2>&1
-timeout /t 5 /nobreak >nul
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 5" >nul 2>&1
 goto loop
 
 :arm_recovery
 if not exist "%RECOVERY_BAT%" exit /b 0
-"%POWERSHELL_EXE%" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "`$a=New-ScheduledTaskAction -Execute `$env:ComSpec -Argument ('/d /c ' + [char]34 + `$env:RECOVERY_BAT + [char]34); `$t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5); `$p=New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited; `$s=New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable; Register-ScheduledTask -TaskName 'SocketAgentRecovery' -Action `$a -Trigger `$t -Principal `$p -Settings `$s -Force | Out-Null" >nul 2>&1
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%SERVER_DIR%\scripts\register-windows-recovery.ps1" >nul 2>&1
 exit /b 0
 
 :preflight
@@ -781,7 +798,7 @@ echo [recovery] SocketAgent is not listening on port %PORT%; restarting schedule
 set "TASK_NAME=SocketAgent"
 schtasks /Query /TN SocketAgent >nul 2>&1 || set "TASK_NAME=SocketClaude"
 schtasks /End /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1
-timeout /t 2 /nobreak >nul
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 2" >nul 2>&1
 schtasks /Run /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1
 :done
 schtasks /Delete /TN SocketAgentRecovery /F >nul 2>&1
@@ -790,10 +807,7 @@ exit /b 0
 Set-Content -Path $recoveryBatFile -Value $recoveryContent -Encoding ASCII
 Write-Ok "Generated run-recovery.bat"
 
-$action = New-ScheduledTaskAction `
-    -Execute "cmd.exe" `
-    -Argument "/c `"$batFile`"" `
-    -WorkingDirectory $SERVER_DIR
+$action = New-SocketAgentTaskAction $batFile
 
 # Settings: run indefinitely, restart on failure, allow on battery
 $settings = New-ScheduledTaskSettingsSet `
@@ -809,9 +823,10 @@ $settings = New-ScheduledTaskSettingsSet `
 # S4U startup tasks run in Session 0 and can leave app-server turns in
 # `systemError` even though account checks succeed. Start SocketAgent when the
 # user logs on so Claude and Codex share the same usable Windows session.
-$logonTrigger = New-ScheduledTaskTrigger -AtLogOn
+$logonUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $logonUser
 $logonPrincipal = New-ScheduledTaskPrincipal `
-    -UserId $env:USERNAME `
+    -UserId $logonUser `
     -LogonType Interactive `
     -RunLevel Limited
 
@@ -822,6 +837,8 @@ Register-ScheduledTask `
     -Settings $settings `
     -Principal $logonPrincipal `
     -Description "SocketAgent WebSocket server" | Out-Null
+
+Grant-SocketAgentTaskOwnerAccess $TASK_NAME
 
 Write-Ok "Registered as scheduled task '$TASK_NAME' (interactive logon)"
 
@@ -853,17 +870,17 @@ try {
 } catch {
     Write-Warn "Could not start scheduled task: $($_.Exception.Message)"
     Write-Warn "Starting server directly for this session; it will start from the task on next logon/startup."
-    Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batFile`"" -WindowStyle Hidden | Out-Null
+    Start-Process -FilePath (Get-SocketAgentLauncher) -ArgumentList ('"' + $batFile + '"') | Out-Null
 }
-Start-Sleep -Seconds 3
-
-$taskInfo = Get-ScheduledTask -TaskName $TASK_NAME
-if ($taskInfo.State -eq "Running") {
-    Write-Ok "Server is running on port $Port"
-} else {
-    Write-Warn "Server may not have started. Check: Get-ScheduledTask -TaskName $TASK_NAME"
-    Write-Warn "Logs: $LOG_FILE"
-}
+& $nodeExe (Join-Path $SERVER_DIR 'scripts\check-health.js') 180
+if ($LASTEXITCODE -ne 0) { throw "Server did not become ready. Check $LOG_FILE" }
+Write-Ok "SocketAgent is ready"
+$installStateDir = Join-Path $env:LOCALAPPDATA 'SocketAgent'
+New-Item -ItemType Directory -Force $installStateDir | Out-Null
+Set-Content -Path (Join-Path $installStateDir 'install-location.txt') -Value $REPO_ROOT -Encoding UTF8
+Write-Host "  Server files: $REPO_ROOT"
+Write-Host "  Session data: $DATA_DIR"
+Write-Host "  Agent tools: $NPM_GLOBAL_DIR"
 
 # ══════════════════════════════════════════════
 #  Phase 7: Install CLI
@@ -878,6 +895,7 @@ Install-SocketAgentCli
 
 Write-Phase "Phase 8: Finish"
 
+if ($env:SOCKETAGENT_UNATTENDED -ne '1') {
 # Set UTF-8 for QR code rendering in legacy terminals
 if ($null -eq $env:WT_SESSION) {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -897,6 +915,8 @@ Write-Host "  Open SocketAgent, choose Add Computer, and scan this pairing code:
 Write-Host ""
 Show-QrCode $qrPayload
 Write-Host ""
+
+}
 
 } catch {
     Write-Host ""

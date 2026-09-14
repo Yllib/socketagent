@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { HistoryEntry } from "./protocol";
+import { normalizeCodexSubagentStatus, codexSubagentIsActive } from "./codex-subagent-state";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -287,12 +288,74 @@ function appServerUserInputToText(input: any): string {
 export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
   const result: HistoryEntry[] = [];
   const threadId = thread?.id || thread?.sessionId || "";
+  const agents = new Map<string, { card: HistoryEntry; status: string }>();
+  const ensureAgent = (agentId: string, timestamp: string, details: any = {}) => {
+    if (!agentId || agentId === threadId) return undefined;
+    let agent = agents.get(agentId);
+    if (!agent) {
+      const description = details.prompt?.trim().slice(0, 160)
+        || details.agentPath?.split('/').filter(Boolean).at(-1)?.replace(/[_-]+/g, ' ')
+        || 'Codex agent';
+      const card: HistoryEntry = {
+        role: 'tool_call', toolName: 'Agent', content: description,
+        toolUseId: `codex-subagent:${agentId}`, timestamp,
+        toolInput: { description, subagent_type: 'codex', agentId },
+      };
+      agent = { card, status: 'pending' };
+      agents.set(agentId, agent);
+      result.push(card);
+    }
+    for (const key of ['prompt', 'model', 'reasoningEffort', 'agentPath']) {
+      if (typeof details[key] === 'string' && details[key]) agent.card.toolInput![key] = details[key];
+    }
+    if (details.prompt) {
+      agent.card.content = details.prompt.trim().slice(0, 160);
+      agent.card.toolInput!.description = agent.card.content;
+    }
+    return agent;
+  };
+  const setAgentStatus = (agentId: string, rawStatus: unknown, timestamp: string, message?: string) => {
+    const status = normalizeCodexSubagentStatus(rawStatus);
+    if (!status) return;
+    const agent = ensureAgent(agentId, timestamp);
+    if (!agent || agent.status === status) return;
+    agent.status = status;
+    if (!codexSubagentIsActive(status)) {
+      const output = message || `Codex subagent ${status}`;
+      result.push({ role: 'tool_result', toolUseId: agent.card.toolUseId,
+        content: output, toolOutput: output, subagentStatus: status, timestamp });
+    }
+  };
   const turns = Array.isArray(thread?.turns) ? thread.turns : [];
   for (const turn of turns) {
     const timestamp = epochToIso(turn?.startedAt ?? turn?.completedAt, nowIso());
     const items = Array.isArray(turn?.items) ? turn.items : [];
     for (const item of items) {
       if (!item || typeof item !== "object") continue;
+
+      if (item.type === 'subAgentActivity') {
+        const id = String(item.agentThreadId || '');
+        if (item.kind === 'interacted') {
+          if (agents.has(id)) ensureAgent(id, timestamp, item);
+        } else {
+          const agent = ensureAgent(id, timestamp, item);
+          if (item.kind === 'completed' && agent && ['pending', 'running'].includes(agent.status)) {
+            setAgentStatus(id, 'completed', timestamp);
+          } else if (item.kind === 'interrupted') {
+            setAgentStatus(id, 'interrupted', timestamp);
+          }
+        }
+        continue;
+      }
+      if (item.type === 'collabAgentToolCall') {
+        if (item.tool === 'spawnAgent') {
+          for (const id of item.receiverThreadIds || []) ensureAgent(String(id), timestamp, item);
+        }
+        for (const [id, state] of Object.entries(item.agentsStates || {}) as [string, any][]) {
+          setAgentStatus(id, state?.status, timestamp, state?.message);
+        }
+        continue;
+      }
 
       if (item.type === "userMessage") {
         const content = (Array.isArray(item.content) ? item.content : [])

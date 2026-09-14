@@ -10,6 +10,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { CodexSubagentStatus, normalizeCodexSubagentStatus, codexSubagentIsActive } from "./codex-subagent-state";
 import {
   AgentSessionSettings,
   ServerMessage,
@@ -518,8 +519,6 @@ export function isCodexAppServerProcessFailure(value: unknown): boolean {
   return /\bsystemError\b|\bspawn E(?:IO|PERM|ACCES)\b|app-server exited|broken pipe|transport (?:closed|failed)|request .*timed out/i.test(detail);
 }
 
-type CodexSubagentStatus = "pending" | "running" | "completed" | "interrupted" | "errored" | "shutdown";
-
 type CodexSubagentState = {
   agentId: string;
   toolUseId: string;
@@ -533,7 +532,9 @@ type CodexSubagentState = {
   agentPath?: string;
   parentToolUseId?: string;
   everActive: boolean;
-  resultSent: boolean;
+  activeTurnId?: string;
+  completedTurnIds: Set<string>;
+  revision: number;
 };
 
 // Codex can complete one app-server turn and immediately start another when
@@ -778,6 +779,7 @@ export class CodexSession {
       const settler = this.appServerTurnSettler;
       this.appServerTurnSettler = null;
       settler?.resolve();
+      void this.reconcileCodexSubagents();
     }, CODEX_TURN_COMPLETION_GRACE_MS);
     this.pendingAppServerTurnCompletion.unref?.();
   }
@@ -1006,6 +1008,7 @@ export class CodexSession {
       if (pending.questionData) this.sendTo(ws, pending.questionData);
     }
     this.sendSubagentSnapshot(ws);
+    void this.reconcileCodexSubagents();
   }
 
   private codexSubagentToolUseId(agentId: string): string {
@@ -1021,10 +1024,8 @@ export class CodexSession {
   private sendSubagentSnapshot(ws?: WebSocket): void {
     const sessionId = this.sessionId;
     if (!sessionId) return;
-    const activeAgents = [...this.codexSubagents.values()].filter(
-      (agent) => agent.status === "pending" || agent.status === "running",
-    );
-    const tasks = activeAgents.map((agent) => ({
+    // Terminal children carry their outcome through reconnects too.
+    const tasks = [...this.codexSubagents.values()].map((agent) => ({
       agentId: agent.agentId,
       toolUseId: agent.toolUseId,
       description: agent.description,
@@ -1112,7 +1113,8 @@ export class CodexSession {
       ...(agentPath ? { agentPath } : {}),
       ...(options.parentToolUseId ? { parentToolUseId: options.parentToolUseId } : {}),
       everActive: false,
-      resultSent: false,
+      completedTurnIds: new Set(),
+      revision: 0,
     };
     this.codexSubagents.set(agentId, state);
     this.onActivity?.();
@@ -1175,39 +1177,35 @@ export class CodexSession {
   private updateCodexSubagentStatus(agentId: string, rawStatus: string, message?: string): void {
     const agent = this.codexSubagents.get(agentId);
     if (!agent) return;
-    let status: CodexSubagentStatus | null = null;
-    if (rawStatus === "active" || rawStatus === "running" || rawStatus === "pendingInit") {
-      status = "running";
-      agent.everActive = true;
-      agent.resultSent = false;
-    } else if (rawStatus === "idle" || rawStatus === "completed" || rawStatus === "notLoaded" || rawStatus === "notFound") {
-      if (!agent.everActive && rawStatus === "idle") return;
-      status = "completed";
-    } else if (rawStatus === "interrupted") {
-      status = "interrupted";
-    } else if (rawStatus === "errored" || rawStatus === "systemError" || rawStatus === "failed") {
-      status = "errored";
-    } else if (rawStatus === "shutdown") {
-      status = "shutdown";
-    }
+    const status = normalizeCodexSubagentStatus(rawStatus);
     if (!status) return;
+    // Idle precedes turn/completed, whose payload owns failed/interrupted state.
+    if (rawStatus === "idle" && (!agent.everActive || agent.activeTurnId)) return;
+    if (rawStatus === "idle" && !codexSubagentIsActive(agent.status)) return;
+    if (["notLoaded", "notFound", "shutdown"].includes(rawStatus) && !codexSubagentIsActive(agent.status)) return;
+    agent.revision++;
+    if (codexSubagentIsActive(status)) {
+      agent.everActive = true;
+    }
     if (agent.status === status) return;
     agent.status = status;
     this.onActivity?.();
 
-    if (status !== "running" && !agent.resultSent && this.sessionId) {
-      agent.resultSent = true;
+    if (!codexSubagentIsActive(status) && this.sessionId) {
+      agent.activeTurnId = undefined;
       const output = message || `Codex subagent ${status}`;
       this.send({
         type: "tool_result",
         toolUseId: agent.toolUseId,
         output,
+        subagentStatus: status,
         sessionId: this.sessionId,
       } as any);
       this.send({
         type: "subagent_result",
         parentToolUseId: agent.toolUseId,
         content: output,
+        subagentStatus: status,
         sessionId: this.sessionId,
       } as any);
       appendHistory(this.sessionId, {
@@ -1215,6 +1213,7 @@ export class CodexSession {
         content: output,
         toolUseId: agent.toolUseId,
         toolOutput: output,
+        subagentStatus: status,
         timestamp: now(),
       });
     }
@@ -1222,6 +1221,43 @@ export class CodexSession {
     if (!this.hasRunningSubagents && !this._isRunning) {
       this.scheduleAppServerIdleStop();
     }
+  }
+
+  private subagentReconciliation: Promise<void> | null = null;
+
+  private reconcileCodexSubagents(): Promise<void> {
+    if (this.subagentReconciliation) return this.subagentReconciliation;
+    const client = this.appServer;
+    if (!client) return Promise.resolve();
+    const reconcile = async () => {
+      for (const agent of this.codexSubagents.values()) {
+        if (!codexSubagentIsActive(agent.status)) continue;
+        const revision = agent.revision;
+        try {
+          let response = await client.readThread({ threadId: agent.agentId, includeTurns: false }) as any;
+          if (this.appServer !== client || agent.revision !== revision) continue;
+          const runtimeStatus = response?.thread?.status?.type;
+          if (runtimeStatus === "idle") {
+            // Fetch terminal details only when the runtime says work has ended.
+            response = await client.readThread({ threadId: agent.agentId, includeTurns: true }) as any;
+            if (this.appServer !== client || agent.revision !== revision) continue;
+            if (response?.thread?.status?.type !== "idle") continue;
+            const lastTurn = response?.thread?.turns?.at(-1);
+            const terminalStatus = normalizeCodexSubagentStatus(lastTurn?.status);
+            if (!terminalStatus || codexSubagentIsActive(terminalStatus)) continue;
+            agent.activeTurnId = undefined;
+            if (lastTurn?.id) agent.completedTurnIds.add(lastTurn.id);
+            this.updateCodexSubagentStatus(agent.agentId, lastTurn?.status || "completed", lastTurn?.error?.message);
+          } else if (runtimeStatus) {
+            this.updateCodexSubagentStatus(agent.agentId, runtimeStatus);
+          }
+        } catch {
+          // A failed read is not evidence that the child finished.
+        }
+      }
+    };
+    this.subagentReconciliation = reconcile().finally(() => { this.subagentReconciliation = null; });
+    return this.subagentReconciliation;
   }
 
   private parentToolUseIdForThread(threadId: unknown): string | undefined {
@@ -3880,7 +3916,7 @@ export class CodexSession {
             const agent = this.registerCodexSubagent(startedThreadId, {
               agentPath: String(p?.agentPath || p?.thread?.agentPath || ""),
             });
-            if (agent) this.updateCodexSubagentStatus(agent.agentId, "running");
+            if (agent && !agent.everActive) this.updateCodexSubagentStatus(agent.agentId, "running");
           }
         }
         return;
@@ -3916,7 +3952,11 @@ export class CodexSession {
       case "turn/started":
         if (p?.threadId && p.threadId !== this.threadId) {
           const agent = this.registerCodexSubagent(String(p.threadId));
-          if (agent) this.updateCodexSubagentStatus(agent.agentId, "active");
+          const turnId = String(p?.turn?.id || p?.turnId || "");
+          if (agent && (!turnId || !agent.completedTurnIds.has(turnId))) {
+            agent.activeTurnId = turnId || undefined;
+            this.updateCodexSubagentStatus(agent.agentId, "active");
+          }
           return;
         }
         if (this._manualCompactionPending) {
@@ -4550,6 +4590,10 @@ export class CodexSession {
       case "item/started":
       case "item/completed":
         if (p?.item?.type === "subAgentActivity") {
+          // Activity items are notifications about an action, not child turns.
+          // Process the authoritative final item once; messaging a child does
+          // not imply it has started generating again.
+          if (method !== "item/completed") return;
           const item = p.item;
           if (item.kind === "started") {
             const agent = this.registerCodexSubagent(String(item.agentThreadId || ""), {
@@ -4558,14 +4602,28 @@ export class CodexSession {
                 ? new Date(Number(p.completedAtMs)).toISOString()
                 : now(),
             });
-            if (agent) this.updateCodexSubagentStatus(agent.agentId, "running");
+            if (agent && !agent.everActive) this.updateCodexSubagentStatus(agent.agentId, "running");
           } else if (item.kind === "interacted") {
+            const agent = this.codexSubagents.get(String(item.agentThreadId || ""));
+            if (agent) this.registerCodexSubagent(agent.agentId, {
+              agentPath: String(item.agentPath || ""),
+            });
+          } else if (item.kind === "interrupted") {
+            const agent = this.codexSubagents.get(String(item.agentThreadId || ""));
+            if (agent && codexSubagentIsActive(agent.status)) {
+              this.updateCodexSubagentStatus(agent.agentId, "interrupted");
+            }
+          } else if (item.kind === "completed") {
             const agent = this.registerCodexSubagent(String(item.agentThreadId || ""), {
               agentPath: String(item.agentPath || ""),
             });
-            if (agent) this.updateCodexSubagentStatus(agent.agentId, "running");
-          } else if (item.kind === "interrupted") {
-            this.updateCodexSubagentStatus(String(item.agentThreadId || ""), "interrupted");
+            if (agent?.activeTurnId) {
+              // The activity has no child turn ID. It may refer to an older
+              // turn; read runtime state before settling a known newer turn.
+              void this.reconcileCodexSubagents();
+            } else if (agent && codexSubagentIsActive(agent.status)) {
+              this.updateCodexSubagentStatus(agent.agentId, "completed");
+            }
           }
           return;
         }
@@ -4574,7 +4632,18 @@ export class CodexSession {
 
       case "turn/completed": {
         if (p?.threadId && p.threadId !== this.threadId) {
-          this.updateCodexSubagentStatus(String(p.threadId), p?.turn?.status || "completed", p?.turn?.error?.message);
+          const agent = this.registerCodexSubagent(String(p.threadId));
+          const turnId = String(p?.turn?.id || "");
+          if (agent) {
+            if (turnId && agent.completedTurnIds.has(turnId)) return;
+            if (turnId) {
+              agent.completedTurnIds.add(turnId);
+              if (agent.completedTurnIds.size > 128) agent.completedTurnIds.delete(agent.completedTurnIds.values().next().value!);
+            }
+            if (agent.activeTurnId && turnId && agent.activeTurnId !== turnId) return;
+            agent.activeTurnId = undefined;
+            this.updateCodexSubagentStatus(agent.agentId, p?.turn?.status || "completed", p?.turn?.error?.message);
+          }
           return;
         }
         if (this.activeAppServerTurnId && p?.turn?.id && p.turn.id !== this.activeAppServerTurnId) return;

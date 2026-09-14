@@ -1232,6 +1232,7 @@ export interface ToolResultServerMessage {
   type: "tool_result";
   toolUseId: string;
   output: string;
+  subagentStatus?: string;
   sessionId: string;
   /** The Agent tool returned its non-terminal async launch acknowledgement. */
   backgroundPending?: boolean;
@@ -1787,6 +1788,7 @@ export interface HistoryEntry {
     captureOrigins: string[];
   };
   // Subagent hierarchy and message tracking
+  subagentStatus?: string;
   parentToolUseId?: string | null;
   uuid?: string;
   triggerUserMessageUuid?: string;
@@ -2269,7 +2271,7 @@ export interface ActiveSubagentsServerMessage {
     description: string;
     subagentType: string;
     startedAt: string;
-    status?: "pending" | "running" | "completed" | "interrupted" | "errored" | "shutdown";
+    status?: "pending" | "running" | "completed" | "interrupted" | "errored" | "shutdown" | "unavailable";
     prompt?: string;
     model?: string;
     reasoningEffort?: string;

@@ -4,7 +4,7 @@ Access Claude Code and OpenAI Codex agents on your computers from your Android p
 
 ## Download SocketAgent Desktop for Windows
 
-[Download SocketAgent Desktop for Windows](https://github.com/Yllib/socketagent/releases/download/windows-v1.0.252/SocketAgent-Desktop-Setup.exe)
+[Download SocketAgent Desktop for Windows](https://github.com/Yllib/socketagent/releases/download/windows-v1.0.253/SocketAgent-Desktop-Setup.exe)
 
 Run the installer on Windows 10 or 11, 64-bit. Setup detects an existing local
 SocketAgent server and links to it automatically. If there is no local server,

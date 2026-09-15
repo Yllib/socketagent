@@ -855,6 +855,11 @@ const CLAUDE_WARM_IDLE_TIMEOUT_MS = (() => {
   return Math.floor(parsed);
 })();
 
+/** How long to trust the SDK's claim that a queued turn is on its way before
+ *  treating the stream as stuck. Real SDK-driven continuations arrive within
+ *  a second or two; anything waiting this long is a hung stream, not slow work. */
+const CLAUDE_STALE_CONTINUATION_TIMEOUT_MS = 60 * 1000;
+
 type ClaudeQueuedUserMessage = {
   type: "user";
   uuid: string;
@@ -974,6 +979,13 @@ export class ClaudeSession {
   private activeInputQueue: ClaudeInputQueue | null = null;
   /** User-authored "next" messages waiting for a non-cancelling SDK boundary. */
   private _pendingBoundaryContext: ClaudePendingContext[] = [];
+  /** Fires when the SDK claims a queued turn is coming but never sends it,
+   *  which otherwise leaves _isRunning stuck true forever. See
+   *  _recoverFromStaleContinuation. */
+  private _staleContinuationTimer: NodeJS.Timeout | null = null;
+  /** Set by the watchdog so the finally block can restart the turn with the
+   *  message(s) that were waiting when the SDK stream got stuck. */
+  private _pendingStaleRecovery: { prompt: string; messageId?: string } | null = null;
   private warmIdleTimer: NodeJS.Timeout | null = null;
   private pendingTurns: PendingTurn[] = [];
   private _isRunning = false;
@@ -1668,6 +1680,33 @@ export class ClaudeSession {
   private _takePendingBoundaryContext(): ClaudePendingContext[] {
     if (this._pendingBoundaryContext.length === 0) return [];
     return this._pendingBoundaryContext.splice(0);
+  }
+
+  /**
+   * The SDK reported a queued turn after a result event but never sent it,
+   * so the stream has been sitting idle with _isRunning stuck true. Close
+   * the stuck stream so the query loop's finally block can tear it down;
+   * anything the user sent in the meantime gets carried forward as a fresh
+   * follow-up turn once teardown finishes (see the finally block below).
+   */
+  private _recoverFromStaleContinuation(): void {
+    this._staleContinuationTimer = null;
+    if (!this._isRunning || !this.activeQuery) return;
+    console.warn(
+      `[Watchdog] SDK claimed a queued turn but sent nothing for `
+      + `${CLAUDE_STALE_CONTINUATION_TIMEOUT_MS / 1000}s; recovering session ${this.sessionId || this._resumeSessionId || "(pending)"}`,
+    );
+    const stuck = this._takePendingBoundaryContext();
+    if (stuck.length > 0) {
+      this._pendingStaleRecovery = {
+        prompt: stuck.map((entry) => entry.text).join("\n\n"),
+        messageId: stuck[0].uuid,
+      };
+    }
+    // A graceful between-turns interrupt (not the forceful close() used by
+    // abort()) so the query loop's finally block runs without surfacing a
+    // scary error, and the session stays reusable for the follow-up turn.
+    void this.activeQuery.interrupt().catch(() => {});
   }
 
   private _enterWarmIdle(): void {
@@ -2821,6 +2860,11 @@ export class ClaudeSession {
   async abort(): Promise<void> {
     this._stopRequested = true;
     this._pendingBoundaryContext = [];
+    if (this._staleContinuationTimer) {
+      clearTimeout(this._staleContinuationTimer);
+      this._staleContinuationTimer = null;
+    }
+    this._pendingStaleRecovery = null;
     this.streamSnapshots.flushAll();
     this._leaveWarmIdle();
     this._cancelPendingQuestions();
@@ -2863,6 +2907,11 @@ export class ClaudeSession {
   interrupt(): void {
     this._stopRequested = true;
     this._pendingBoundaryContext = [];
+    if (this._staleContinuationTimer) {
+      clearTimeout(this._staleContinuationTimer);
+      this._staleContinuationTimer = null;
+    }
+    this._pendingStaleRecovery = null;
     this._cancelPendingQuestions();
     if (this.activeQuery) {
       void this.activeQuery.interrupt().catch(error => {
@@ -4330,6 +4379,13 @@ export class ClaudeSession {
       const consumeQuery = async () => {
         try {
           for await (const message of q) {
+        // The SDK sent something, so a previously claimed queued turn is
+        // making progress after all — the stale-continuation watchdog no
+        // longer applies to this wait.
+        if (this._staleContinuationTimer) {
+          clearTimeout(this._staleContinuationTimer);
+          this._staleContinuationTimer = null;
+        }
         if (!(message as { parent_tool_use_id?: unknown }).parent_tool_use_id) {
           const correlation = claudeTurnCorrelation(message);
           if (correlation.triggerUserMessageUuid) this._turnCorrelation = correlation;
@@ -5827,6 +5883,18 @@ export class ClaudeSession {
             }
           }
 
+          // We only have SocketAgent's own word for pendingContinuation — it
+          // was really pushed onto activeInputQueue. A continuation justified
+          // solely by the SDK's queued_turn_count is unverified: if the SDK
+          // never actually sends that turn, _isRunning stays true forever
+          // with nothing left to break the wait. Arm a watchdog for that case.
+          if (continuationPending && pendingContinuation.length === 0 && sdkQueuedTurnCount > 0) {
+            this._staleContinuationTimer = setTimeout(
+              () => this._recoverFromStaleContinuation(),
+              CLAUDE_STALE_CONTINUATION_TIMEOUT_MS,
+            );
+          }
+
           this.send({
             type: "result",
             content: lastResultContent,
@@ -5914,6 +5982,10 @@ export class ClaudeSession {
     } finally {
       this._cancelPendingQuestions();
       this._pendingBoundaryContext = [];
+      if (this._staleContinuationTimer) {
+        clearTimeout(this._staleContinuationTimer);
+        this._staleContinuationTimer = null;
+      }
       if (this._activeSubagents.size > 0 || this._sdkBackgroundTasks.size > 0) {
         this._resetSdkTaskTracking(
           this._stopRequested ? "stopped" : "failed",
@@ -5936,6 +6008,14 @@ export class ClaudeSession {
       this._rejectPendingTurns(new Error("Claude SDK stream closed"));
       this.onActivity?.();
       if (!this._restartingForSettings) this.onClose?.();
+      const staleRecovery = this._pendingStaleRecovery;
+      this._pendingStaleRecovery = null;
+      if (staleRecovery && !this._stopRequested) {
+        const resumeSessionId = this.sessionId || this._resumeSessionId || undefined;
+        void this.runQuery(staleRecovery.prompt, resumeSessionId, staleRecovery.messageId).catch((error) => {
+          console.error(`[Watchdog] Stale-continuation recovery failed: ${error}`);
+        });
+      }
     }
       };
       this._queryConsumer = consumeQuery();

@@ -833,6 +833,16 @@ function syncLiveSessionInstance(session: Session): void {
     || !!(session as any).appServer
     || !!(session as any).activeQuery;
   liveSessionInstances.setActive(sessionId, session, ownsLiveBackend);
+  // A harness can resume with no prompt behind it — a Monitor's output, a
+  // finished background task, a subagent report. Those runners are absent
+  // from activeSessions, so keep the pool pointed at the busy one rather
+  // than reporting the session idle while it works. A busy mapping wins.
+  if (sessionIsBusy(session)) {
+    const mapped = activeSessions.get(sessionId);
+    if (!mapped || (mapped !== session && !sessionIsBusy(mapped))) {
+      activeSessions.set(sessionId, session);
+    }
+  }
 }
 
 async function recoverCanonicalLiveSession(sessionId: string): Promise<Session | undefined> {
@@ -1078,7 +1088,11 @@ function sessionSuppressesOngoingNotification(session: Session): boolean {
 }
 
 function sessionShouldRemainPooled(session: Session): boolean {
-  return Boolean((session as any)._authRequest || (session as any).isWarmIdle === true);
+  // Busy covers outstanding background tasks and subagents, which outlive the
+  // turn that started them. Dropping such a runner hides work the app should
+  // still be showing and lets auto-update restart underneath it.
+  return Boolean((session as any)._authRequest || (session as any).isWarmIdle === true)
+    || sessionIsBusy(session);
 }
 
 function describeActiveSessions(): string {
@@ -1625,6 +1639,22 @@ function attachSessionLifecycleCallbacks(session: Session): void {
   session.onActivity = () => {
     syncLiveSessionInstance(session);
     if (!sessionIsBusy(session)) completeRecoverableRun(session);
+    notifySessionActivity();
+  };
+  (session as any).onHarnessRunStateChanged = (running: boolean) => {
+    const sid = sessionInstanceId(session);
+    if (!sid) return;
+    try {
+      if (running) {
+        console.log(`[SelfRun] Tracking harness-started run for ${sid}`);
+        beginLogicalRun(session, sid);
+      } else {
+        settleLogicalRun(session, "completed", sid);
+      }
+    } catch (error: any) {
+      console.warn(`[SelfRun] Could not track run for ${sid}: ${error?.message || error}`);
+    }
+    syncLiveSessionInstance(session);
     notifySessionActivity();
   };
   session.onAgentSessionRequest = (args) => manageAgentSession(session, args);

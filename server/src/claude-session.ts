@@ -698,6 +698,26 @@ export function filterClaudePhoneCommands(
     });
 }
 
+/**
+ * Decides what a harness session-state event means for run tracking.
+ *
+ * "start" covers a turn nobody prompted for: the harness wakes itself when a
+ * background task or subagent finishes, and that work has to read as running.
+ * "end" only settles runs that began that way — a prompt's run ends through
+ * the result event, which carries usage and warm-idle handling this must not
+ * pre-empt. The result for a self-started run lands just before its idle
+ * event and already clears the running flag, so "end" does not require it.
+ */
+export function claudeHarnessRunTransition(
+  state: string,
+  isRunning: boolean,
+  selfStartedRun: boolean,
+): "start" | "end" | null {
+  if (state === "running" && !isRunning) return "start";
+  if (state === "idle" && selfStartedRun) return "end";
+  return null;
+}
+
 export function claudeContinuationPending(
   sdkQueuedTurnCount: unknown,
   socketAgentQueuedCount: number,
@@ -986,6 +1006,9 @@ export class ClaudeSession {
   /** Set by the watchdog so the finally block can restart the turn with the
    *  message(s) that were waiting when the SDK stream got stuck. */
   private _pendingStaleRecovery: { prompt: string; messageId?: string } | null = null;
+  /** True while the current run was started by the harness itself (a
+   *  background task or subagent finishing) rather than by a prompt. */
+  private _selfStartedRun = false;
   private warmIdleTimer: NodeJS.Timeout | null = null;
   private pendingTurns: PendingTurn[] = [];
   private _isRunning = false;
@@ -1054,6 +1077,8 @@ export class ClaudeSession {
   public onClose?: () => void;
   public onSessionIdChanged?: (previousSessionId: string, nextSessionId: string) => void;
   public onMonitorOutput?: (text: string) => void;
+  /** Fires when the harness starts or ends a turn nobody prompted for. */
+  public onHarnessRunStateChanged?: (running: boolean) => void;
   public onAgentSessionRequest?: AgentSessionToolExecutor;
   // When set, this fresh session replaces an old cleared session — remap the ID in the store
   public replacesSessionId?: string;
@@ -2865,6 +2890,7 @@ export class ClaudeSession {
       this._staleContinuationTimer = null;
     }
     this._pendingStaleRecovery = null;
+    this._selfStartedRun = false;
     this.streamSnapshots.flushAll();
     this._leaveWarmIdle();
     this._cancelPendingQuestions();
@@ -5135,7 +5161,35 @@ export class ClaudeSession {
         if (message.type === "system" && (message as any).subtype === "session_state_changed") {
           const sc = message as any;
           const state = sc.state || "idle";
-          console.log(`[SDK] Session state: ${state}`);
+          console.log(`[SDK] Session state: ${state} (${this.sessionId || "pending"})`);
+          // The harness also starts turns nobody prompted for: a background
+          // task or a subagent finishing wakes it back up on its own. Track
+          // those as real runs, otherwise the session reads as idle in the
+          // app while Claude is visibly working.
+          const runTransition = claudeHarnessRunTransition(
+            state,
+            this._isRunning,
+            this._selfStartedRun,
+          );
+          if (runTransition === "start") {
+            this._leaveWarmIdle();
+            this._selfStartedRun = true;
+            this._isRunning = true;
+            this._runStartedAt = new Date().toISOString();
+            console.log(`[SelfRun] Harness resumed ${this.sessionId || "(pending)"} with no prompt`);
+            this.onHarnessRunStateChanged?.(true);
+            this.onActivity?.();
+          } else if (runTransition === "end") {
+            this._selfStartedRun = false;
+            this._isRunning = false;
+            this._runStartedAt = null;
+            // A result event re-arms warm idle on its way out. Ending on the
+            // state event alone skips that, which would leave the SDK stream
+            // open with no idle timeout to ever close it.
+            if (!this._isWarmIdle) this._enterWarmIdle();
+            this.onHarnessRunStateChanged?.(false);
+            this.onActivity?.();
+          }
           this.send({
             type: "session_state_changed",
             state,
@@ -6006,6 +6060,10 @@ export class ClaudeSession {
       try { this.activeQuery?.close(); } catch {}
       this.activeQuery = null;
       this._rejectPendingTurns(new Error("Claude SDK stream closed"));
+      if (this._selfStartedRun) {
+        this._selfStartedRun = false;
+        this.onHarnessRunStateChanged?.(false);
+      }
       this.onActivity?.();
       if (!this._restartingForSettings) this.onClose?.();
       const staleRecovery = this._pendingStaleRecovery;

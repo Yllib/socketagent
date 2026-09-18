@@ -708,6 +708,26 @@ export function filterClaudePhoneCommands(
  * pre-empt. The result for a self-started run lands just before its idle
  * event and already clears the running flag, so "end" does not require it.
  */
+/**
+ * Reads the tool result the harness returns when a bash command moves to the
+ * background. It has four wordings — run_in_background, a manual background,
+ * a command backgrounded so an arriving message can reach the model, and a
+ * command that outran its timeout — and only one of them was ever matched, so
+ * the other three streamed no output at all. Every wording also ends the
+ * sentence with a period straight after the path, which a greedy capture
+ * folds into the filename, leaving a watcher pointed at a file that does not
+ * exist. Both are why backgrounded commands never showed their output.
+ */
+export function parseClaudeBackgroundedBash(
+  output: string,
+): { taskId: string; outputFile: string } | null {
+  const match = output.match(
+    /\bbackground(?:ed)?\b[\s\S]{0,200}?\bID: ([A-Za-z0-9_-]+)[\s\S]{0,400}?Output is being written to: (\S+?)\.(?=\s|$)/,
+  );
+  if (!match) return null;
+  return { taskId: match[1], outputFile: match[2] };
+}
+
 export function claudeHarnessRunTransition(
   state: string,
   isRunning: boolean,
@@ -5707,12 +5727,12 @@ export class ClaudeSession {
                   this._readToolPaths.delete(toolUseId);
                 }
 
-                // Detect bash command moved to background (timeout)
-                const bgMatch = output.match(/Command running in background with ID: (\S+)\. Output is being written to: (\S+)/);
-                if (bgMatch && this._activeBashStream) {
+                // Detect bash command moved to background (any wording)
+                const backgrounded = parseClaudeBackgroundedBash(output);
+                if (backgrounded && this._activeBashStream) {
                   backgroundPending = true;
-                  const bgTaskId = bgMatch[1];
-                  const outputFile = bgMatch[2];
+                  const bgTaskId = backgrounded.taskId;
+                  const outputFile = backgrounded.outputFile;
                   console.log(`[SDK] Bash moved to background: taskId=${bgTaskId}, outputFile=${outputFile}, toolUseId=${toolUseId}`);
 
                   // Track output file for Monitor toggle mode
@@ -5807,7 +5827,7 @@ export class ClaudeSession {
                     timestamp: now(),
                   });
                 }
-                if (!bgMatch && !backgroundPending) {
+                if (!backgrounded && !backgroundPending) {
                   this._toolParentIds.delete(toolUseId);
                 }
                 if (subagentState) {

@@ -805,6 +805,18 @@ function sessionIsBusy(session: Session): boolean {
   return session.isRunning || (session as any).isCompacting === true;
 }
 
+/**
+ * Whether the agent itself is working, as opposed to merely holding a
+ * detached background command. sessionIsBusy covers both because pooling,
+ * stop targeting and auto-update all have to wait on a background command
+ * too, but the app reports this one as "Working" — and a backgrounded
+ * command is already its own card in the activity panel, so counting it
+ * here leaves the session spinning with nobody home.
+ */
+function sessionAgentIsWorking(session: Session): boolean {
+  return session.isRunning || (session as any).isCompacting === true;
+}
+
 function hasBusyLiveSession(sessionId: string): boolean {
   const mapped = activeSessions.get(sessionId);
   return liveSessionInstances
@@ -1187,7 +1199,7 @@ function enrichSessions(sessions: SessionInfo[]): SessionInfo[] {
       const delegatedWorkActive = logicalRun
         ? delegatedWorkOutstanding(s.id, logicalRun.startedAt)
         : false;
-      if ((active && sessionIsBusy(active)) || delegatedWorkActive) {
+      if ((active && sessionAgentIsWorking(active)) || delegatedWorkActive) {
         const activeStartedAt = logicalRun?.startedAt
           || (active ? getSessionActiveStartedAt(active) : undefined);
         return {
@@ -1531,7 +1543,7 @@ function sendSessionStartedPush(session: Session): boolean {
 
 async function sendSessionRunningPushRefresh(session: Session): Promise<void> {
   const sessionId = session.getSessionId?.();
-  if (!sessionId || !sessionIsBusy(session)) return;
+  if (!sessionId || !sessionAgentIsWorking(session)) return;
   if (sessionSuppressesOngoingNotification(session)) return;
   const startedAt = getSessionActiveStartedAt(session);
   if (!startedAt) return;
@@ -1554,7 +1566,7 @@ const runningPushRefreshTimer = setInterval(() => {
   runningPushRefreshInFlight = true;
   const running = [...activeSessions.values()].filter(
     (session) =>
-      sessionIsBusy(session) && !sessionSuppressesOngoingNotification(session),
+      sessionAgentIsWorking(session) && !sessionSuppressesOngoingNotification(session),
   );
   Promise.all(running.map((session) => sendSessionRunningPushRefresh(session)))
     .catch((err) => {
@@ -9460,7 +9472,7 @@ function buildStatusSyncMessage(): string {
   const backgroundTaskIds: string[] = [];
   const sessionModels: Record<string, string> = {};
   for (const [sid, session] of activeSessions) {
-    const busy = sessionIsBusy(session);
+    const busy = sessionAgentIsWorking(session);
     const placeholderId = (session as any)._scheduledPlaceholderSessionId;
     const exposeSession = typeof placeholderId !== "string" || sid !== placeholderId;
     if (busy) {
@@ -9497,7 +9509,7 @@ function buildStatusSyncMessage(): string {
       continue;
     }
     const active = activeSessions.get(sid);
-    const liveHarness = !!active && sessionIsBusy(active);
+    const liveHarness = !!active && sessionAgentIsWorking(active);
     const delegatedWorkActive = delegatedWorkOutstanding(sid, current.startedAt);
     if (!liveHarness && !delegatedWorkActive) {
       // Do not expose a stale persisted run as live. /continue and ordinary

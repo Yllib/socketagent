@@ -1121,7 +1121,11 @@ function autoUpdateBlockReason(): string | null {
     return `file transfers are active (${describeActiveFileTransfers()})`;
   }
   for (const [, session] of activeSessions) {
-    if (sessionIsBusy(session)) {
+    // Deliberately the agent's own work, not a detached background command.
+    // A command can hang forever — one waiting on stdin it will never get —
+    // and deferring on that never resolves, so the server would sit on an
+    // update indefinitely with nothing left to wait for.
+    if (sessionAgentIsWorking(session)) {
       return `sessions are running (${describeActiveSessions()})`;
     }
   }

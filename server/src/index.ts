@@ -90,7 +90,7 @@ import { applyInitialSessionSettings } from "./initial-session-settings";
 import { TurnAbortTracker } from "./turn-abort-tracker";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { routeMonitorOutputToSession } from "./monitor-output-route";
-import { SERVER_RELEASE_VERSION } from "./server-build-info";
+import { SERVER_RELEASE_VERSION, serverReleaseVersionFor } from "./server-build-info";
 import { startPrivateIntegrationAuthorization } from "./private-integration-auth";
 import {
   browserSessionManager,
@@ -265,10 +265,13 @@ function parseServerReleaseVersion(raw: string): string | null {
 }
 
 function readLocalServerReleaseVersion(): string {
+  // Re-derived per call rather than reused from SERVER_RELEASE_VERSION so the
+  // reported version follows the checkout after auto-update advances HEAD,
+  // while the process is still running the previous build.
   try {
-    return parseServerReleaseVersion(
+    return serverReleaseVersionFor("HEAD", parseServerReleaseVersion(
       fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
-    ) || SERVER_RELEASE_VERSION;
+    ));
   } catch {
     return SERVER_RELEASE_VERSION;
   }
@@ -302,7 +305,7 @@ function readRemoteServerReleaseVersion(branch: string): string | null {
         windowsHide: true,
       },
     );
-    return parseServerReleaseVersion(raw);
+    return serverReleaseVersionFor(`origin/${branch}`, parseServerReleaseVersion(raw));
   } catch {
     return null;
   }

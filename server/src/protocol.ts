@@ -1271,6 +1271,29 @@ export interface ToolResultServerMessage {
   revision?: number;
 }
 
+/** Announces that a user prompt is now part of the session transcript.
+ *
+ *  Every client attached to the session receives this, not only the one that
+ *  sent the prompt, so it carries the prompt text: a second client watching
+ *  the same session has nothing else to render it from until it refetches
+ *  history. The sender matches it to its own pending bubble by
+ *  `clientMessageId`, so the text never renders twice.
+ */
+export interface UserMessageUuidServerMessage {
+  type: "user_message_uuid";
+  uuid: string;
+  sessionId: string;
+  /** The stored prompt, with the server's own markers still in it. Absent on
+   *  the backend's echo of a prompt already written to history. */
+  content?: string;
+  /** Set when the sending client tagged its prompt. */
+  clientMessageId?: string;
+  deliveryId?: string;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
+}
+
 export interface ToolImageServerMessage {
   type: "tool_image";
   toolUseId: string;
@@ -2725,6 +2748,7 @@ export type ServerMessage =
   | TextServerMessage
   | ToolCallServerMessage
   | ToolResultServerMessage
+  | UserMessageUuidServerMessage
   | QuestionServerMessage
   | QuestionAnsweredServerMessage
   | SecureInputRequestServerMessage

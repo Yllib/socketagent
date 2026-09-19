@@ -21,7 +21,7 @@ import {
   Backend,
   WorkflowStatePayload,
 } from "./protocol";
-import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, cacheToolImage, positionSessionMessage, clearSessionPendingHandoffContext, removeHistoryEntriesByUuids } from "./session-store";
+import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, recordUserPrompt, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, cacheToolImage, positionSessionMessage, clearSessionPendingHandoffContext, removeHistoryEntriesByUuids } from "./session-store";
 import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
@@ -3202,21 +3202,12 @@ export class ClaudeSession {
 
     // Log injected message to history so it persists across sessions
     if (sessionId) {
-      const historyEntry = appendHistory(sessionId, {
-        role: "user",
+      this.send(recordUserPrompt({
+        sessionId,
         content: text,
         uuid: userMsgUuid,
-        timestamp: new Date().toISOString(),
-      });
-      this.send({
-        type: "user_message_uuid",
-        uuid: userMsgUuid,
-        sessionId,
-        entryId: historyEntry.entryId,
-        sessionSeq: historyEntry.sessionSeq,
-        revision: historyEntry.revision,
-        ...(messageId ? { clientMessageId: messageId } : {}),
-      } as any);
+        clientMessageId: messageId,
+      }));
     }
 
     if (atNextBoundary) {
@@ -3266,21 +3257,12 @@ export class ClaudeSession {
     const turnPromise = this._trackPendingTurn();
 
     if (sid) {
-      const historyEntry = appendHistory(sid, {
-        role: "user",
+      this.send(recordUserPrompt({
+        sessionId: sid,
         content: prompt,
         uuid: userMsgUuid,
-        timestamp: new Date().toISOString(),
-      });
-      this.send({
-        type: "user_message_uuid",
-        uuid: userMsgUuid,
-        sessionId: sid,
-        entryId: historyEntry.entryId,
-        sessionSeq: historyEntry.sessionSeq,
-        revision: historyEntry.revision,
-        ...(messageId ? { clientMessageId: messageId } : {}),
-      } as any);
+        clientMessageId: messageId,
+      }));
     }
 
     this.activeInputQueue.push(this._createUserMessage(prompt, sid, userMsgUuid));
@@ -3953,21 +3935,12 @@ export class ClaudeSession {
       let promptLogged = isRestartContinuationPrompt(prompt);
       if (!promptLogged && (this.sessionId || resumeSessionId)) {
         const sid = this.sessionId || resumeSessionId || "";
-        const historyEntry = appendHistory(sid, {
-          role: "user",
+        this.send(recordUserPrompt({
+          sessionId: sid,
           content: prompt,
           uuid: userMsgUuid,
-          timestamp: new Date().toISOString(),
-        });
-        this.send({
-          type: "user_message_uuid",
-          uuid: userMsgUuid,
-          sessionId: sid,
-          entryId: historyEntry.entryId,
-          sessionSeq: historyEntry.sessionSeq,
-          revision: historyEntry.revision,
-          ...(messageId ? { clientMessageId: messageId } : {}),
-        } as any);
+          clientMessageId: messageId,
+        }));
         promptLogged = true;
       }
 
@@ -4763,22 +4736,14 @@ export class ClaudeSession {
 
           // Log user prompt now that we have the session ID (for new sessions)
           if (!promptLogged) {
-            const historyEntry = appendHistory(message.session_id, {
-              role: "user",
+            // Forward the prompt once we know which session it belongs to.
+            this.send(recordUserPrompt({
+              sessionId: message.session_id,
               content: prompt,
               uuid: userMsgUuid,
+              clientMessageId: messageId,
               timestamp: now(),
-            });
-            // Forward UUID once we know which session it belongs to.
-            this.send({
-              type: "user_message_uuid",
-              uuid: userMsgUuid,
-              sessionId: message.session_id,
-              entryId: historyEntry.entryId,
-              sessionSeq: historyEntry.sessionSeq,
-              revision: historyEntry.revision,
-              ...(messageId ? { clientMessageId: messageId } : {}),
-            } as any);
+            }));
             promptLogged = true;
           }
         }
@@ -5633,11 +5598,13 @@ export class ClaudeSession {
           // Only for real user prompts, not synthetic tool result messages
           const userMsgUuid = (message as any).uuid || undefined;
           if (userMsgUuid && isLiveClaudeUserEcho(message)) {
+            // The prompt itself was already announced with its text when it
+            // was written to history; this only confirms the backend's UUID.
             this.send({
               type: "user_message_uuid",
               uuid: userMsgUuid,
               sessionId: this.sessionId || "",
-            } as any);
+            });
           }
           const apiMessage = (message as any).message;
           if (apiMessage?.content && Array.isArray(apiMessage.content)) {

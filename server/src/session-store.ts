@@ -4,7 +4,13 @@ import * as crypto from "crypto";
 import * as zlib from "zlib";
 import { execFileSync } from "child_process";
 import { listSessions as sdkListSessions, type SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentSessionSettings, Backend, SessionInfo, HistoryEntry } from "./protocol";
+import type {
+  AgentSessionSettings,
+  Backend,
+  SessionInfo,
+  HistoryEntry,
+  UserMessageUuidServerMessage,
+} from "./protocol";
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
 import { buildCodexSpawn } from "./codex-env";
@@ -1452,6 +1458,38 @@ function writeHistoryEntries(
     sessionId,
     entries: safeEntries.length,
   });
+}
+
+/** Writes a user prompt to history and builds the event announcing it to every
+ *  client attached to the session.
+ *
+ *  All the prompt paths funnel through here so the announcement stays the same
+ *  across them. A client that did not send the prompt renders it from this
+ *  event's `content` and had no way to see it before that field existed.
+ */
+export function recordUserPrompt(params: {
+  sessionId: string;
+  content: string;
+  uuid: string;
+  clientMessageId?: string;
+  timestamp?: string;
+}): UserMessageUuidServerMessage {
+  const entry = appendHistory(params.sessionId, {
+    role: "user",
+    content: params.content,
+    uuid: params.uuid,
+    timestamp: params.timestamp || new Date().toISOString(),
+  });
+  return {
+    type: "user_message_uuid",
+    uuid: params.uuid,
+    sessionId: params.sessionId,
+    content: params.content,
+    entryId: entry.entryId,
+    sessionSeq: entry.sessionSeq,
+    revision: entry.revision,
+    ...(params.clientMessageId ? { clientMessageId: params.clientMessageId } : {}),
+  };
 }
 
 export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEntry {

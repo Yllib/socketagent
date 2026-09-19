@@ -27,6 +27,7 @@ import {
   saveSession,
   getSession,
   appendHistory,
+  recordUserPrompt,
   appendHistoryBulk,
   appendSdkEvent,
   updateSessionActivity,
@@ -2371,23 +2372,13 @@ export class CodexSession {
 
       const sessionId = this.sessionId!;
       const userUuid = this._currentClientMessageId || crypto.randomUUID();
-      const userEntry = appendHistory(sessionId, {
-        role: "user",
+      this.send(recordUserPrompt({
+        sessionId,
         content: prompt,
         uuid: userUuid,
+        clientMessageId: this._currentClientMessageId || undefined,
         timestamp: now(),
-      });
-      this.send({
-        type: "user_message_uuid",
-        uuid: userUuid,
-        sessionId,
-        entryId: userEntry.entryId,
-        sessionSeq: userEntry.sessionSeq,
-        revision: userEntry.revision,
-        ...(this._currentClientMessageId
-          ? { clientMessageId: this._currentClientMessageId }
-          : {}),
-      } as any);
+      }));
 
       await new Promise((resolve) => setTimeout(resolve, 250));
 
@@ -3259,21 +3250,13 @@ export class CodexSession {
 
   private flushPendingUserPrompt(): void {
     if (!this.sessionId || !this._pendingUserPrompt) return;
-    const historyEntry = appendHistory(this.sessionId, {
-      role: "user",
+    this.send(recordUserPrompt({
+      sessionId: this.sessionId,
       content: this._pendingUserPrompt.text,
       uuid: this._pendingUserPrompt.uuid,
+      clientMessageId: this._pendingUserPrompt.messageId,
       timestamp: now(),
-    });
-    this.send({
-      type: "user_message_uuid",
-      uuid: this._pendingUserPrompt.uuid,
-      sessionId: this.sessionId,
-      entryId: historyEntry.entryId,
-      sessionSeq: historyEntry.sessionSeq,
-      revision: historyEntry.revision,
-      ...(this._pendingUserPrompt.messageId ? { clientMessageId: this._pendingUserPrompt.messageId } : {}),
-    } as any);
+    }));
     this._pendingUserPrompt = null;
   }
 
@@ -3470,21 +3453,13 @@ export class CodexSession {
   private persistAcceptedInjectedPrompt(prompt: { text: string; uuid: string; messageId?: string }): void {
     const sid = this.sessionId;
     if (!sid) return;
-    const historyEntry = appendHistory(sid, {
-      role: "user",
+    this.send(recordUserPrompt({
+      sessionId: sid,
       content: prompt.text,
       uuid: prompt.uuid,
+      clientMessageId: prompt.messageId,
       timestamp: now(),
-    });
-    this.send({
-      type: "user_message_uuid",
-      uuid: prompt.uuid,
-      sessionId: sid,
-      entryId: historyEntry.entryId,
-      sessionSeq: historyEntry.sessionSeq,
-      revision: historyEntry.revision,
-      ...(prompt.messageId ? { clientMessageId: prompt.messageId } : {}),
-    } as any);
+    }));
   }
 
   private async handleAppServerRequest(

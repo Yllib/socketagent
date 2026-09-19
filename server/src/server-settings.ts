@@ -7,6 +7,7 @@ import { buildCodexSpawn } from "./codex-env";
 import { getCodexLinuxSandboxHealth } from "./codex-linux-sandbox";
 import { resolveClientPath } from "./path-utils";
 import { getClaudeAvailability, getClaudeExecutableInfo } from "./claude-session";
+import { readClaudeAuthState, readCodexAuthState } from "./backend-auth";
 import {
   legacyManagedNpmBinDir,
   managedNpmBinDir,
@@ -99,6 +100,7 @@ export function markBackendAuthRequired(backend: Backend, detail?: string): void
     enabled: true,
     available: false,
     severity: "error",
+    kind: "auth",
     reason: `${label} authentication is invalid or expired. Repair the backend to sign in again.`,
     detail,
   });
@@ -205,12 +207,13 @@ function codexHealth(): BackendHealthInfo {
     };
   }
 
-  const authPath = path.join(process.env.HOME || os.homedir(), ".codex", "auth.json");
-  if (!fs.existsSync(authPath)) {
+  const auth = readCodexAuthState();
+  if (!auth.authenticated) {
     return {
       ...base,
+      kind: "auth",
       version: firstOutputLine(versionProbe.stdout, versionProbe.stderr),
-      reason: "Codex CLI is installed, but ~/.codex/auth.json is missing.",
+      reason: auth.reason,
     };
   }
 
@@ -257,6 +260,7 @@ function claudeHealth(): BackendHealthInfo {
       enabled: true,
       available: false,
       severity: "error",
+      kind: "install",
       source: info.source,
       reason: info.reason || "No Claude executable is available.",
       installRoot: managedNpmPrefix(),
@@ -269,10 +273,29 @@ function claudeHealth(): BackendHealthInfo {
       enabled: true,
       available: false,
       severity: "error",
+      kind: "launch",
       source: info.source,
       command: info.path,
       reason: availability.reason || "Claude executable is not launchable.",
       detail: availability.detail,
+      installRoot: managedNpmPrefix(),
+    };
+  }
+
+  // A launchable Claude says nothing about whether it is signed in, so the
+  // saved credential is the only pre-turn signal that the user is logged out.
+  const auth = readClaudeAuthState();
+  if (!auth.authenticated) {
+    return {
+      backend: "claude",
+      enabled: true,
+      available: false,
+      severity: "error",
+      kind: "auth",
+      source: info.source,
+      command: info.path,
+      version: availability.version,
+      reason: auth.reason,
       installRoot: managedNpmPrefix(),
     };
   }

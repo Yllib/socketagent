@@ -58,6 +58,7 @@ import { RelayClient, RelayStatus } from "./relay-client";
 import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
+import { isAuthFailureMessage } from "./backend-auth";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
 import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
@@ -4725,6 +4726,7 @@ function createConnectionHandler(
           if (!turnAbortTracker.finish(sessionForRun, turnAbortState)) {
             settleLogicalRun(sessionForRun, "completed", resumeId);
           }
+          clearBackendHealthOverride(sessionForRun instanceof CodexSession ? "codex" : "claude");
           broadcastSessionList();
         }).catch((err: any) => {
           const sid = sessionForRun.getSessionId();
@@ -4754,6 +4756,27 @@ function createConnectionHandler(
                 authScope: "openai",
                 sessionId: sid,
                 message: "Your OpenAI sign-in has expired. Re-authenticate to continue using Codex.",
+                detail,
+              });
+            }
+            sendJson({
+              type: "server_settings",
+              ...getAdvertisedServerSettings(),
+              codexCollaborationMode: "default",
+            });
+            broadcastServerCapabilities();
+          } else if (sessionForRun instanceof ClaudeSession && isAuthFailureMessage(err)) {
+            settleLogicalRun(sessionForRun, "failed", resumeId);
+            const detail = err?.message || String(err);
+            markBackendAuthRequired("claude", detail);
+            refreshClaudeExecutableInfo();
+            invalidateBackendHealthCache();
+            if (err?.socketAgentSurfaced !== true) {
+              sendJson({
+                type: "backend_auth_required",
+                backend: "claude",
+                sessionId: sid,
+                message: "Your Claude sign-in has expired. Re-authenticate to continue using Claude.",
                 detail,
               });
             }

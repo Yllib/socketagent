@@ -1695,6 +1695,12 @@ export interface BackendHealthInfo {
   enabled: boolean;
   available: boolean;
   severity: "ok" | "warning" | "error" | "disabled";
+  /**
+   * What kind of problem `reason` describes, so the app can say "Auth error"
+   * where signing in is the fix. Absent on healthy backends and on older
+   * servers, which the app must keep rendering as a generic backend error.
+   */
+  kind?: "auth" | "install" | "launch";
   source?: "explicit" | "sdk" | "managed" | "legacy" | "system" | "path" | "unresolved";
   command?: string;
   version?: string;

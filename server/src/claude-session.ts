@@ -718,14 +718,35 @@ export function filterClaudePhoneCommands(
  * folds into the filename, leaving a watcher pointed at a file that does not
  * exist. Both are why backgrounded commands never showed their output.
  */
+const BACKGROUNDED_BASH_NOTICE =
+  /\bbackground(?:ed)?\b[\s\S]{0,200}?\bID: ([A-Za-z0-9_-]+)[\s\S]{0,400}?Output is being written to: (\S+?)\.(?=\s|$)/;
+
 export function parseClaudeBackgroundedBash(
   output: string,
 ): { taskId: string; outputFile: string } | null {
-  const match = output.match(
-    /\bbackground(?:ed)?\b[\s\S]{0,200}?\bID: ([A-Za-z0-9_-]+)[\s\S]{0,400}?Output is being written to: (\S+?)\.(?=\s|$)/,
-  );
+  const match = output.match(BACKGROUNDED_BASH_NOTICE);
   if (!match) return null;
   return { taskId: match[1], outputFile: match[2] };
+}
+
+/**
+ * Drops the harness's backgrounding notice from a tool result.
+ *
+ * That notice is addressed to the model: where the output file lives and to
+ * Read it for interim output. On a phone it is noise that fills the card the
+ * live output is supposed to occupy, and the app already knows the command was
+ * backgrounded from the bash_backgrounded message. Anything the command
+ * actually printed before it was backgrounded is kept.
+ */
+export function stripClaudeBackgroundedBashNotice(output: string): string {
+  return output
+    .split("\n")
+    .filter((line) => (
+      !BACKGROUNDED_BASH_NOTICE.test(line)
+      && !/^Session cwd remains\b/.test(line.trim())
+    ))
+    .join("\n")
+    .trim();
 }
 
 export function claudeHarnessRunTransition(
@@ -5784,27 +5805,33 @@ export class ClaudeSession {
                 const CHUNK_SIZE = 200; // ~200 chars per chunk (roughly 3-4 lines)
                 const parentId = (message as any).parent_tool_use_id || null;
                 const msgUuid = (message as any).uuid || undefined;
-                if (output.length > CHUNK_THRESHOLD) {
-                  const numChunks = Math.ceil(output.length / CHUNK_SIZE);
-                  console.log(`[SDK] <<< tool_result_chunk: toolUseId=${toolUseId} len=${output.length} chunks=${numChunks}`);
+                // The card this result lands in is the one BgBashWatcher
+                // streams the command's real output into, so the harness's
+                // backgrounding notice would only be in the way.
+                const shownOutput = backgrounded
+                  ? stripClaudeBackgroundedBashNotice(output)
+                  : output;
+                if (shownOutput.length > CHUNK_THRESHOLD) {
+                  const numChunks = Math.ceil(shownOutput.length / CHUNK_SIZE);
+                  console.log(`[SDK] <<< tool_result_chunk: toolUseId=${toolUseId} len=${shownOutput.length} chunks=${numChunks}`);
                   let chunkIdx = 0;
-                  for (let i = 0; i < output.length; i += CHUNK_SIZE) {
+                  for (let i = 0; i < shownOutput.length; i += CHUNK_SIZE) {
                     this.send({
                       type: "tool_result_chunk",
                       toolUseId,
                       chunkIndex: chunkIdx++,
-                      content: output.slice(i, i + CHUNK_SIZE),
-                      done: i + CHUNK_SIZE >= output.length,
+                      content: shownOutput.slice(i, i + CHUNK_SIZE),
+                      done: i + CHUNK_SIZE >= shownOutput.length,
                       sessionId: this.sessionId || "",
                       parentToolUseId: parentId,
                     } as any);
                   }
                 } else {
-                  console.log(`[SDK] <<< tool_result: toolUseId=${toolUseId} len=${output.length}`);
+                  console.log(`[SDK] <<< tool_result: toolUseId=${toolUseId} len=${shownOutput.length}`);
                   this.send({
                     type: "tool_result",
                     toolUseId,
-                    output,
+                    output: shownOutput,
                     backgroundPending,
                     sessionId: this.sessionId || "",
                     parentToolUseId: parentId,
@@ -5820,7 +5847,7 @@ export class ClaudeSession {
                     role: "tool_result",
                     content: "",
                     toolUseId: block.tool_use_id || "",
-                    toolOutput: output,
+                    toolOutput: shownOutput,
                     backgroundPending,
                     parentToolUseId: parentId,
                     uuid: msgUuid,

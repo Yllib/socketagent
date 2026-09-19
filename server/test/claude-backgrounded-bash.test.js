@@ -48,3 +48,38 @@ test("ordinary command output is not mistaken for a backgrounding notice", () =>
     null,
   );
 });
+
+// ── Stripping the notice out of what the app shows ──
+
+const { stripClaudeBackgroundedBashNotice } = require("../dist/claude-session");
+
+// Verbatim from a real ebookillustrator run, trailer included.
+const REAL_NOTICE =
+  "Command running in background with ID: b6pwyrh6f. Output is being written to:"
+  + " /tmp/claude-1000/-home-billy-agents-ebookillustrator/064cb7b0-0696-43d9-8726-01f4866a8eea/tasks/b6pwyrh6f.output."
+  + " You will be notified when it completes. To check interim output, use Read on that file path."
+  + "\nSession cwd remains /home/billy/agents/ebookillustrator; directory changes made by the"
+  + " backgrounded command do not apply to subsequent commands.";
+
+test("a backgrounded result carries nothing to show", () => {
+  assert.equal(stripClaudeBackgroundedBashNotice(REAL_NOTICE), "");
+});
+
+for (const [name, notice] of Object.entries(WORDINGS)) {
+  test(`the ${name} notice is removed`, () => {
+    assert.equal(stripClaudeBackgroundedBashNotice(notice), "");
+  });
+}
+
+test("output printed before the command was backgrounded survives", () => {
+  const withOutput = `chapter 3 rendered\nchapter 4 rendered\n${REAL_NOTICE}`;
+  assert.equal(
+    stripClaudeBackgroundedBashNotice(withOutput),
+    "chapter 3 rendered\nchapter 4 rendered",
+  );
+});
+
+test("an ordinary tool result is left alone", () => {
+  const ordinary = "total 12\n-rw-rw-r-- 1 billy billy 10 b332rvi6y.output";
+  assert.equal(stripClaudeBackgroundedBashNotice(ordinary), ordinary);
+});

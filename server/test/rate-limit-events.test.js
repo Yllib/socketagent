@@ -166,3 +166,62 @@ test("Codex treats usedPercent as percentage points at the one-percent boundary"
     ],
   );
 });
+
+// The `limits` array is what a current account actually returns; the named
+// seven_day_opus / seven_day_sonnet fields come back null. Payload below is
+// copied from a live max-plan response.
+const LIVE_LIMITS = [
+  { kind: "session", group: "session", percent: 16, severity: "normal", resets_at: "2026-09-19T08:20:00.716056+00:00", scope: null, is_active: false },
+  { kind: "weekly_all", group: "weekly", percent: 26, severity: "normal", resets_at: "2026-09-24T13:00:00.716079+00:00", scope: null, is_active: true },
+  { kind: "weekly_scoped", group: "weekly", percent: 4, severity: "normal", resets_at: "2026-09-24T12:59:59.716305+00:00", scope: { model: { id: null, display_name: "Fable" }, surface: null }, is_active: false },
+];
+
+const usage = (limits) => ({ rate_limits_available: true, rate_limits: limits });
+
+test("the normalized limits array is read in preference to the named windows", () => {
+  const events = buildClaudeUsageRateLimitEvents(usage({
+    five_hour: { utilization: 16, resets_at: "2026-09-19T08:20:00.716056+00:00" },
+    seven_day: { utilization: 26, resets_at: "2026-09-24T13:00:00.716079+00:00" },
+    seven_day_opus: null,
+    seven_day_sonnet: null,
+    limits: LIVE_LIMITS,
+  }), "session-1");
+
+  assert.deepEqual(
+    events.map((e) => ({ type: e.rateLimitType, percent: e.utilizationPercent })),
+    [{ type: "five_hour", percent: 16 }, { type: "seven_day", percent: 26 }],
+  );
+  assert.ok(events.every((e) => e.resetsAt), "microsecond+offset timestamps must parse");
+});
+
+test("a per-model weekly wins when it is the busiest, and names its model", () => {
+  // The window the old code could not see: with the named per-model fields
+  // null, a scoped weekly near its limit was dropped for a quieter aggregate.
+  const events = buildClaudeUsageRateLimitEvents(usage({
+    seven_day_opus: null,
+    seven_day_sonnet: null,
+    limits: [
+      LIVE_LIMITS[0],
+      { ...LIVE_LIMITS[1], percent: 26 },
+      { ...LIVE_LIMITS[2], percent: 97 },
+    ],
+  }), "session-1");
+
+  const weekly = events.find((e) => e.rateLimitType !== "five_hour");
+  assert.equal(weekly.utilizationPercent, 97);
+  assert.equal(weekly.status, "allowed_warning");
+  assert.equal(weekly.scopeLabel, "Fable");
+});
+
+test("accounts still sending only the named windows keep working", () => {
+  const events = buildClaudeUsageRateLimitEvents(usage({
+    five_hour: { utilization: 16, resets_at: "2026-09-19T08:20:00.000Z" },
+    seven_day: { utilization: 26, resets_at: "2026-09-24T13:00:00.000Z" },
+  }), "session-1");
+
+  assert.deepEqual(
+    events.map((e) => ({ type: e.rateLimitType, percent: e.utilizationPercent })),
+    [{ type: "five_hour", percent: 16 }, { type: "seven_day", percent: 26 }],
+  );
+  assert.equal(events[0].scopeLabel, undefined, "unscoped windows carry no label");
+});

@@ -15,6 +15,8 @@ export interface RateLimitEventPayload {
   utilization?: number;
   utilizationPercent?: number;
   rateLimitType?: HarnessRateLimitType;
+  /** Model a scoped weekly window applies to, when the window names one. */
+  scopeLabel?: string;
   sessionId: string;
 }
 
@@ -92,18 +94,44 @@ export function buildClaudeRateLimitEvent(
   };
 }
 
-export function buildClaudeUsageRateLimitEvents(
-  usage: Record<string, any> | null | undefined,
-  sessionId: string,
-): RateLimitEventPayload[] {
-  if (!usage?.rate_limits_available || !usage.rate_limits || !sessionId) {
-    return [];
+/** One window, normalized away from whichever shape the account returned. */
+interface UsageWindow {
+  type: string;
+  percent: number | undefined;
+  resetsAt: unknown;
+  scopeLabel?: string;
+}
+
+/**
+ * Reads the windows out of the structured /usage response.
+ *
+ * Prefers `limits`, the normalized array the account actually returns: one row
+ * per window, weeklies scoped to a model carrying it in `scope`. The named
+ * `seven_day_opus` / `seven_day_sonnet` fields are null on current accounts,
+ * so reading only those left the aggregate weekly as the single candidate and
+ * discarded every per-model window. The named fields remain the fallback for
+ * accounts and SDK versions that still populate them.
+ */
+function usageWindows(limits: Record<string, any>): UsageWindow[] {
+  const rows = Array.isArray(limits.limits) ? limits.limits : [];
+  if (rows.length > 0) {
+    return rows
+      .filter((row: any) => row && typeof row === "object")
+      .map((row: any) => {
+        const kind = String(row.kind || "");
+        const model = row.scope?.model?.display_name;
+        return {
+          // Classified on `kind`, never the display name.
+          type: kind === "session" ? "five_hour" : kind === "weekly_all" ? "seven_day" : kind,
+          percent: normalizeExplicitPercent(row.percent),
+          resetsAt: row.resets_at,
+          ...(typeof model === "string" && model ? { scopeLabel: model } : {}),
+        };
+      })
+      .filter((window: UsageWindow) => window.type);
   }
-  const limits = usage.rate_limits as Record<string, any>;
-  const fiveHour = limits.five_hour
-    ? [{ type: "five_hour", value: limits.five_hour }]
-    : [];
-  const weeklyCandidates = [
+  return [
+    ["five_hour", limits.five_hour],
     ["seven_day", limits.seven_day],
     ["seven_day_opus", limits.seven_day_opus],
     ["seven_day_sonnet", limits.seven_day_sonnet],
@@ -111,35 +139,44 @@ export function buildClaudeUsageRateLimitEvents(
     .filter((entry) => entry[1])
     .map(([type, value]) => ({
       type: String(type),
-      value: value as Record<string, unknown>,
       // The structured Claude SDK /usage contract reports percentage points.
       // Unlike legacy rate_limit_event payloads, 1 means 1%, not 100%.
-      percent: normalizeExplicitPercent(
-        (value as Record<string, unknown>).utilization,
-      ),
-    }))
-    .sort((a, b) => (b.percent ?? -1) - (a.percent ?? -1));
-  const selected = [
-    ...fiveHour,
-    ...(weeklyCandidates.length > 0 ? [weeklyCandidates[0]] : []),
-  ];
-  return selected.map(({ type, value }) => {
-    const utilizationPercent = normalizeExplicitPercent(value.utilization);
-    return {
-      type: "rate_limit_event",
-      backend: "claude",
-      status: statusForUtilization(utilizationPercent),
-      resetsAt: normalizeResetTime(value.resets_at),
-      ...(utilizationPercent === undefined
-        ? {}
-        : {
-            utilization: utilizationPercent / 100,
-            utilizationPercent,
-          }),
-      rateLimitType: type,
-      sessionId,
-    };
-  });
+      percent: normalizeExplicitPercent((value as Record<string, unknown>).utilization),
+      resetsAt: (value as Record<string, unknown>).resets_at,
+    }));
+}
+
+/**
+ * The five-hour window plus the weekly window closest to its limit.
+ *
+ * One weekly, because the cache and the app's meter hold a single row per
+ * window; the busiest one is the one worth warning about.
+ */
+export function buildClaudeUsageRateLimitEvents(
+  usage: Record<string, any> | null | undefined,
+  sessionId: string,
+): RateLimitEventPayload[] {
+  if (!usage?.rate_limits_available || !usage.rate_limits || !sessionId) {
+    return [];
+  }
+  const windows = usageWindows(usage.rate_limits as Record<string, any>);
+  const fiveHour = windows.filter((window) => window.type === "five_hour");
+  const weekly = windows
+    .filter((window) => rateLimitWindowForType(window.type) === "weekly")
+    .sort((left, right) => (right.percent ?? -1) - (left.percent ?? -1));
+
+  return [...fiveHour.slice(0, 1), ...weekly.slice(0, 1)].map((window) => ({
+    type: "rate_limit_event" as const,
+    backend: "claude" as const,
+    status: statusForUtilization(window.percent),
+    resetsAt: normalizeResetTime(window.resetsAt),
+    ...(window.percent === undefined
+      ? {}
+      : { utilization: window.percent / 100, utilizationPercent: window.percent }),
+    rateLimitType: window.type,
+    ...(window.scopeLabel ? { scopeLabel: window.scopeLabel } : {}),
+    sessionId,
+  }));
 }
 
 function codexWindowType(

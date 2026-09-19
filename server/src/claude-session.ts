@@ -1681,7 +1681,10 @@ export class ClaudeSession {
     const getUsage =
       activeQuery?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (typeof getUsage !== "function") return;
-    Promise.resolve(getUsage.call(activeQuery))
+    // skipBehaviors drops the scan of every transcript touched in the last
+    // seven days, which this runs per turn and needs none of: the meter reads
+    // two percentages. That scan is 4,000 files and ~100 MB on a busy machine.
+    Promise.resolve(getUsage.call(activeQuery, { skipBehaviors: true }))
       .then((usage: any) => {
         for (const event of buildClaudeUsageRateLimitEvents(
           usage,

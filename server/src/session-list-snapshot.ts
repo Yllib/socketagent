@@ -1,0 +1,84 @@
+/**
+ * Helpers behind the two-stage session list broadcast: a synchronous list
+ * assembled from the store plus the last native scan, followed by a fresh
+ * native scan that replaces it. Both stages have to agree about archived
+ * sessions, or an archive visibly bounces back into the list.
+ */
+
+export interface MergeableSession {
+  id: string;
+  lastActive: string;
+  title: string;
+  messagePreview: string;
+}
+
+/**
+ * Builds the session list served immediately, before any native scan runs.
+ *
+ * `nativeSnapshot` is the result of the last completed scan, so it still holds
+ * sessions archived since. The store no longer lists them, but the merge would
+ * put them back, so archived ids are dropped from both sides. Stored fields win
+ * over native ones except where the store has nothing worth showing.
+ */
+export function mergeSessionListBase<T extends MergeableSession>(
+  stored: readonly T[],
+  nativeSnapshot: readonly T[] | null,
+  archivedIds: ReadonlySet<string>,
+): T[] {
+  const live = stored.filter((session) => !archivedIds.has(session.id));
+  if (!nativeSnapshot) return live;
+
+  const byId = new Map<string, T>(
+    nativeSnapshot
+      .filter((session) => !archivedIds.has(session.id))
+      .map((session) => [session.id, { ...session }]),
+  );
+  for (const session of live) {
+    const native = byId.get(session.id);
+    byId.set(session.id, native ? {
+      ...native,
+      ...session,
+      title: session.title && session.title !== "Untitled" ? session.title : native.title,
+      messagePreview: session.messagePreview || native.messagePreview,
+    } : session);
+  }
+  return [...byId.values()].sort(
+    (left, right) => new Date(right.lastActive).getTime() - new Date(left.lastActive).getTime(),
+  );
+}
+
+/**
+ * Serialises native session scans, keeping at most one queued re-run.
+ *
+ * A request that arrives mid-scan cannot be answered by the scan already
+ * running: that one started before whatever prompted the request, so its
+ * result is stale by the time it lands. Dropping the request instead leaves
+ * the stale list published until some unrelated event happens to trigger the
+ * next scan. Queueing one re-run bounds the work at one extra scan no matter
+ * how many requests arrive while a scan is in flight.
+ */
+export function createNativeRefreshCoordinator(
+  run: (reason: string) => Promise<void>,
+): (reason: string) => void {
+  let inFlight: Promise<void> | null = null;
+  let queuedReason: string | null = null;
+
+  const start = (reason: string): void => {
+    inFlight = run(reason)
+      .catch(() => {})
+      .then(() => {
+        inFlight = null;
+        const next = queuedReason;
+        queuedReason = null;
+        if (next !== null) start(next);
+      });
+  };
+
+  return (reason: string): void => {
+    if (inFlight) {
+      queuedReason = reason;
+      return;
+    }
+    start(reason);
+  };
+}

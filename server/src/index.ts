@@ -30,7 +30,8 @@ import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedUserMessage, rememberListHistory, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedUserMessage, rememberListHistory, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { mergeSessionListBase, createNativeRefreshCoordinator } from "./session-list-snapshot";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
 import {
   AgentEffort,
@@ -1141,23 +1142,12 @@ interface SessionClient {
 }
 const sessionClients = new Map<string, SessionClient>();
 let lastNativeSessionSnapshot: SessionInfo[] | null = null;
-let nativeSessionRefreshPromise: Promise<void> | null = null;
 
 function immediateSessionListBase(): SessionInfo[] {
-  const stored = listStoredSessions();
-  if (!lastNativeSessionSnapshot) return stored;
-  const byId = new Map(lastNativeSessionSnapshot.map((session) => [session.id, { ...session }]));
-  for (const session of stored) {
-    const native = byId.get(session.id);
-    byId.set(session.id, native ? {
-      ...native,
-      ...session,
-      title: session.title && session.title !== "Untitled" ? session.title : native.title,
-      messagePreview: session.messagePreview || native.messagePreview,
-    } : session);
-  }
-  return [...byId.values()].sort(
-    (left, right) => new Date(right.lastActive).getTime() - new Date(left.lastActive).getTime(),
+  return mergeSessionListBase(
+    listStoredSessions(),
+    lastNativeSessionSnapshot,
+    archivedSessionIds(),
   );
 }
 
@@ -1246,22 +1236,17 @@ function sendSessionListBroadcast(enriched: SessionInfo[], reason: string, start
   logSlowWs("ws_send_session_list", startedAt, { reason, count: enriched.length });
 }
 
-function refreshNativeSessionListInBackground(reason: string): void {
-  if (nativeSessionRefreshPromise) return;
-  nativeSessionRefreshPromise = listSessionsWithNativeBackends()
-    .then((sessions) => {
-      lastNativeSessionSnapshot = sessions.map((session) => ({ ...session }));
-      sendSessionListBroadcast(enrichSessions(sessions), `${reason}:native`);
-    })
-    .catch((error: unknown) => {
-      console.warn(
-        `[Sessions] native refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    })
-    .finally(() => {
-      nativeSessionRefreshPromise = null;
-    });
-}
+const refreshNativeSessionListInBackground = createNativeRefreshCoordinator(async (reason) => {
+  try {
+    const sessions = await listSessionsWithNativeBackends();
+    lastNativeSessionSnapshot = sessions.map((session) => ({ ...session }));
+    sendSessionListBroadcast(enrichSessions(sessions), `${reason}:native`);
+  } catch (error: unknown) {
+    console.warn(
+      `[Sessions] native refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+});
 
 /** Broadcast current session list to all connected clients immediately. */
 async function broadcastSessionListNow(reason = "manual"): Promise<void> {

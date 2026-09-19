@@ -276,6 +276,17 @@ export function deleteSession(id: string): void {
   writeStore(sessions);
 }
 
+let archivedSessionIdsCache: ReadonlySet<string> | null = null;
+
+/**
+ * Ids hidden from every session list. Cached because the list is rebuilt on
+ * each broadcast; writeArchivedSessionIds is the only writer and drops it.
+ */
+export function archivedSessionIds(): ReadonlySet<string> {
+  if (!archivedSessionIdsCache) archivedSessionIdsCache = readArchivedSessionIds();
+  return archivedSessionIdsCache;
+}
+
 function readArchivedSessionIds(): Set<string> {
   ensureStoreDir();
   if (!fs.existsSync(ARCHIVED_SESSION_IDS_FILE)) return new Set();
@@ -290,6 +301,7 @@ function readArchivedSessionIds(): Set<string> {
 
 function writeArchivedSessionIds(ids: Set<string>): void {
   ensureStoreDir();
+  archivedSessionIdsCache = null;
   fs.writeFileSync(
     ARCHIVED_SESSION_IDS_FILE,
     JSON.stringify([...ids].sort(), null, 2),

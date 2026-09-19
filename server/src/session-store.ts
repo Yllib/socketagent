@@ -12,6 +12,7 @@ import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
 import { mergeSessionTimestamps } from "./session-list-snapshot";
 import { isRestartContinuationPrompt } from "./restart-recovery";
+import { isUnusableSessionPreview, isBareSlashCommand } from "./native-transcript-filter";
 import { remapHtmlPlans } from "./html-plan-store";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
@@ -4241,8 +4242,11 @@ function listSdkSessionsFromFiles(cwd: string, limit = 30): SdkSessionEntry[] {
     }
 
     // Use prompt history for the preview (last user prompt for this session)
+    // A bare slash command is exactly where this shortcut is wrong: the
+    // recorded prompt is real, but the transcript behind it may hold nothing
+    // else. Fall through and let the transcript decide.
     const promptPreview = promptHistory.get(sessionId);
-    if (promptPreview) {
+    if (promptPreview && !isBareSlashCommand(promptPreview)) {
       results.push({
         sessionId,
         firstMessage: promptPreview.slice(0, 200),
@@ -4281,8 +4285,10 @@ function listSdkSessionsFromFiles(cwd: string, limit = 30): SdkSessionEntry[] {
           } else if (typeof content === "string") {
             text = content;
           }
-          // Skip warmup/internal messages, keep looking
-          if (text && !/^\s*Warmup\s*$/i.test(text)) {
+          // Skip warmup traffic and Claude Code's records of local slash
+          // commands, and keep looking: a session that opened with /usage and
+          // then held a real conversation still belongs in the list.
+          if (!isUnusableSessionPreview(text)) {
             userMessage = text.slice(0, 200);
             break;
           }

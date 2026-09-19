@@ -15,6 +15,11 @@ fi
 #   ./build-app.sh --flavor play --bundle  # Build the Play Store AAB
 #   ./build-app.sh --deploy            # Build, bump patch, deploy to GitHub
 #   ./build-app.sh --deploy --bump minor   # Build, bump minor, deploy
+#   ./build-app.sh --deploy --skip-desktop # Deploy Android only
+#
+# A deploy also builds the Windows desktop app and publishes its installer to
+# the public download URL, because the desktop client has no update banner and
+# no working in-app file transfer.
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 REPO_PARENT="$(cd "$REPO_ROOT/.." && pwd)"
@@ -41,15 +46,17 @@ BUMP="patch"
 DEPLOY=false
 FLAVOR="direct"
 BUNDLE=false
+SKIP_DESKTOP=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --deploy) DEPLOY=true; shift ;;
     --flavor) FLAVOR="$2"; shift 2 ;;
     --bundle) BUNDLE=true; shift ;;
+    --skip-desktop) SKIP_DESKTOP=true; shift ;;
     --local) echo "Local app builds are disabled. Use the remote build machine."; exit 1 ;;
     --bump) BUMP="$2"; shift 2 ;;
-    *) echo "Unknown option: $1"; echo "Usage: $0 [--flavor direct|play] [--bundle] [--deploy] [--bump major|minor|patch]"; exit 1 ;;
+    *) echo "Unknown option: $1"; echo "Usage: $0 [--flavor direct|play] [--bundle] [--deploy] [--bump major|minor|patch] [--skip-desktop]"; exit 1 ;;
   esac
 done
 
@@ -342,8 +349,25 @@ gh release create "v$NEW_VERSION" "$ARTIFACT_PATH" \
   --notes "App version $NEW_VERSION" \
   --latest
 
+# ── Build and publish the desktop installer ──
+DESKTOP_URL=""
+if $SKIP_DESKTOP; then
+  echo "Skipping the desktop installer (--skip-desktop)."
+else
+  echo ""
+  echo "Building the Windows desktop app..."
+  "$REPO_ROOT/build-windows-app.sh"
+  "$REPO_ROOT/publish-desktop-installer.sh" --version "$NEW_VERSION"
+  DESKTOP_URL="${SOCKETAGENT_DOWNLOAD_URL:-https://rubanoenterprises.com/socketagent_desktop_installer.exe}"
+fi
+
 echo ""
 echo "=== Deploy complete ==="
 echo "Version: $NEW_VERSION"
 echo "Release: https://github.com/$SERVER_REPO/releases/tag/v$NEW_VERSION"
 echo "Users will see the update banner on next app launch."
+if [[ -n "$DESKTOP_URL" ]]; then
+  echo "Desktop installer: $DESKTOP_URL"
+else
+  echo "Desktop installer: not published; run ./publish-desktop-installer.sh after building it."
+fi

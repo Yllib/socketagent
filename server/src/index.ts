@@ -8554,7 +8554,15 @@ function createConnectionHandler(
 function appendRecoveryNotice(sessionId: string, content: string): void {
   if (!getSession(sessionId)) return;
   try {
-    appendHistory(sessionId, { role: "assistant", content: "[Server recovery] " + content, timestamp: new Date().toISOString() });
+    // A notification, not something the agent said. Written as assistant text
+    // it rendered as a chat bubble with a bracket tag standing in for the card
+    // the app already has for exactly this.
+    appendHistory(sessionId, {
+      role: "notification",
+      content,
+      status: "info",
+      timestamp: new Date().toISOString(),
+    });
   } catch (error) { console.error("[Recovery] Could not write status:", error); }
 }
 

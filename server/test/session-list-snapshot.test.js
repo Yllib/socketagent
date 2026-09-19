@@ -174,3 +174,33 @@ test("a session's sort key does not change between the two list shapes", () => {
   const fromNativeScan = newestIso([stored[0].lastActive], native[0].lastActive);
   assert.equal(immediate.lastActive, fromNativeScan);
 });
+
+const { mergeSessionTimestamps } = require("../dist/session-list-snapshot");
+
+test("every merge site agrees on a session's timestamps", () => {
+  // Verbatim from the Codex rows that alternated in the wild: the stored
+  // record carries millisecond precision, the rollout file only seconds.
+  const stored = { createdAt: "2026-07-14T13:36:05.372Z", lastActive: "2026-09-17T16:00:05.526Z" };
+  const native = { createdAt: "2026-09-08T22:12:33.000Z", lastActive: "2026-09-14T16:00:11.000Z" };
+
+  const merged = mergeSessionTimestamps(stored, native);
+  assert.equal(merged.lastActive, "2026-09-17T16:00:05.526Z", "newest evidence wins");
+  assert.equal(merged.createdAt, "2026-07-14T13:36:05.372Z", "stored predates the transcript");
+
+  // The immediate list has to produce exactly that, or rows jump between
+  // the two list shapes the app receives seconds apart.
+  const [immediate] = mergeSessionListBase(
+    [session("a", stored)], [session("a", native)], new Set(),
+  );
+  assert.equal(immediate.lastActive, merged.lastActive);
+  assert.equal(immediate.createdAt, merged.createdAt);
+});
+
+test("a session with no stored createdAt falls back to the transcript", () => {
+  const merged = mergeSessionTimestamps(
+    { lastActive: "2026-09-01T00:00:00.000Z" },
+    { createdAt: "2026-08-01T00:00:00.000Z", lastActive: "2026-09-02T00:00:00.000Z" },
+  );
+  assert.equal(merged.createdAt, "2026-08-01T00:00:00.000Z");
+  assert.equal(merged.lastActive, "2026-09-02T00:00:00.000Z");
+});

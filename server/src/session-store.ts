@@ -10,7 +10,7 @@ import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./cod
 import { buildCodexSpawn } from "./codex-env";
 import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
-import { newestIso } from "./session-list-snapshot";
+import { mergeSessionTimestamps } from "./session-list-snapshot";
 import { remapHtmlPlans } from "./html-plan-store";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
@@ -3685,8 +3685,10 @@ function sdkSessionInfoToSessionInfo(info: SDKSessionInfo, tracked?: SessionInfo
     id: info.sessionId,
     title: title || "Claude session",
     cwd,
-    createdAt: tracked?.createdAt || isoFromMs(info.createdAt, lastModified),
-    lastActive: newestIso([tracked?.lastActive, nativeLastActive], nativeLastActive),
+    ...mergeSessionTimestamps(tracked ?? {}, {
+      createdAt: isoFromMs(info.createdAt, lastModified),
+      lastActive: nativeLastActive,
+    }),
     messagePreview,
     backend: "claude",
   } as SessionInfo);
@@ -3820,7 +3822,7 @@ function mergeClaudeNativeSession(existing: SessionInfo, nativeSession: SessionI
     ...existing,
     title: existingTitle || nativeSession.title,
     cwd: existing.cwd || nativeSession.cwd,
-    lastActive: newestIso([existing.lastActive, nativeSession.lastActive], nativeSession.lastActive),
+    ...mergeSessionTimestamps(existing, nativeSession),
     messagePreview: existing.messagePreview || nativeSession.messagePreview,
     backend: "claude",
   } as SessionInfo);
@@ -3845,6 +3847,7 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
       merged.push({
         ...session,
         ...nativeSession,
+        ...mergeSessionTimestamps(session, nativeSession),
         title: storedTitle && storedTitle !== "Untitled"
           ? storedTitle
           : nativeSession.title,

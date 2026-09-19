@@ -13,6 +13,27 @@ export interface MergeableSession {
   messagePreview: string;
 }
 
+/**
+ * The single rule for a session's timestamps when a stored record and a native
+ * transcript describe the same session.
+ *
+ * Every merge site has to use it. The app sorts on lastActive and is handed
+ * each of these lists in turn, seconds apart, so a site that decides
+ * differently makes its rows jump between two positions on every broadcast.
+ *
+ * lastActive takes the newest evidence from either side. createdAt prefers the
+ * stored record, which predates any rewriting of the native transcript.
+ */
+export function mergeSessionTimestamps(
+  stored: { createdAt?: string; lastActive?: string },
+  native: { createdAt: string; lastActive: string },
+): { createdAt: string; lastActive: string } {
+  return {
+    createdAt: stored.createdAt || native.createdAt,
+    lastActive: newestIso([stored.lastActive, native.lastActive], native.lastActive),
+  };
+}
+
 /** Latest of the given timestamps, or `fallback` when none are usable. */
 export function newestIso(values: Array<string | undefined>, fallback: string): string {
   let best = fallback;
@@ -64,8 +85,7 @@ export function mergeSessionListBase<T extends MergeableSession>(
       ...session,
       title: session.title && session.title !== "Untitled" ? session.title : native.title,
       messagePreview: session.messagePreview || native.messagePreview,
-      createdAt: session.createdAt || native.createdAt,
-      lastActive: newestIso([session.lastActive, native.lastActive], native.lastActive),
+      ...mergeSessionTimestamps(session, native),
     } : session);
   }
   return [...byId.values()].sort(

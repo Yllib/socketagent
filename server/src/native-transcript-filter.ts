@@ -46,3 +46,25 @@ export function isUnusableSessionPreview(text: string): boolean {
 export function isBareSlashCommand(text: string): boolean {
   return /^\/[a-z0-9][\w:-]*$/i.test(text.trim());
 }
+
+/**
+ * True when everything the SDK knows about a session is a local command.
+ *
+ * The SDK's own index carries the command block through as `firstPrompt`, so
+ * the file scanner is not the only way these reach the list. Filtered only
+ * when every piece of evidence is a command artifact and there is at least
+ * one: a session with a real summary, a user-set title, or nothing at all
+ * stays listed. Callers must never apply this to a tracked session, since the
+ * store is the authority on those.
+ */
+export function isLocalCommandOnlySession(info: {
+  firstPrompt?: string;
+  summary?: string;
+  customTitle?: string;
+}): boolean {
+  if (info.customTitle?.trim()) return false;
+  const evidence = [info.summary, info.firstPrompt]
+    .map((value) => (value ?? "").trim())
+    .filter(Boolean);
+  return evidence.length > 0 && evidence.every(isLocalCommandArtifact);
+}

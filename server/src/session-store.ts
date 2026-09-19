@@ -12,7 +12,7 @@ import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
 import { mergeSessionTimestamps } from "./session-list-snapshot";
 import { isRestartContinuationPrompt } from "./restart-recovery";
-import { isUnusableSessionPreview, isBareSlashCommand } from "./native-transcript-filter";
+import { isUnusableSessionPreview, isBareSlashCommand, isLocalCommandOnlySession } from "./native-transcript-filter";
 import { remapHtmlPlans } from "./html-plan-store";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
@@ -3664,6 +3664,9 @@ async function listCodexNativeSessionsFromAppServer(useCache = true): Promise<Se
 
 function sdkSessionInfoToSessionInfo(info: SDKSessionInfo, tracked?: SessionInfo): SessionInfo | null {
   if (!info.sessionId) return null;
+  // Slash commands leave a transcript the SDK indexes like any other. Only
+  // untracked ones: a session in the store is one SocketAgent ran.
+  if (!tracked && isLocalCommandOnlySession(info)) return null;
   const cwd = tracked?.cwd || info.cwd;
   if (!cwd) return null;
 
@@ -4137,6 +4140,7 @@ function buildTrackedClaudeMap(): Map<string, SessionInfo> {
 function sdkSessionInfoToEntry(info: SDKSessionInfo, trackedMap: Map<string, SessionInfo>): SdkSessionEntry | null {
   if (!info.sessionId) return null;
   const tracked = trackedMap.get(info.sessionId);
+  if (!tracked && isLocalCommandOnlySession(info)) return null;
   const fallbackMs = Date.now();
   const lastModified = typeof info.lastModified === "number" ? info.lastModified : fallbackMs;
   const preview =

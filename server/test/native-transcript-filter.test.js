@@ -53,3 +53,35 @@ test("a bare slash command is spotted, a sentence starting with one is not", () 
     assert.equal(isBareSlashCommand(notBare), false, notBare);
   }
 });
+
+const { isLocalCommandOnlySession } = require("../dist/native-transcript-filter");
+
+const commandBlock = (name) =>
+  `<command-name>/${name}</command-name>\n  <command-message>${name}</command-message>`;
+
+test("the rule is about local commands, not about /usage", () => {
+  // Keyed on the wrapper Claude Code writes, so every command is covered.
+  for (const name of ["usage", "context", "cost", "doctor", "clear", "agents", "some-future-command"]) {
+    assert.ok(isLocalCommandArtifact(commandBlock(name)), name);
+    assert.ok(isLocalCommandOnlySession({ firstPrompt: commandBlock(name) }), name);
+  }
+});
+
+test("a session is only filtered when that is all there is", () => {
+  const cmd = commandBlock("usage");
+  // Ran a command, then actually talked: the summary is real work.
+  assert.equal(
+    isLocalCommandOnlySession({ firstPrompt: cmd, summary: "Fixing the archive bug" }),
+    false,
+  );
+  // The user named it, so they mean to keep it.
+  assert.equal(
+    isLocalCommandOnlySession({ firstPrompt: cmd, customTitle: "usage check" }),
+    false,
+  );
+  // No evidence either way is not evidence of a command.
+  assert.equal(isLocalCommandOnlySession({}), false);
+  assert.equal(isLocalCommandOnlySession({ firstPrompt: "", summary: "" }), false);
+  // Both halves point the same way.
+  assert.ok(isLocalCommandOnlySession({ firstPrompt: cmd, summary: CAVEAT }));
+});

@@ -10855,7 +10855,7 @@ async function waitForManagedBackendUpdate(): Promise<void> {
 }
 
 async function ensureManagedBackendsCurrent(reason: string): Promise<void> {
-  if (!autoUpdateEnabled() || !managedBackendAutoUpdateEnabled()) return;
+  if (!managedBackendAutoUpdateEnabled()) return;
   if (managedBackendUpdateInProgress) return;
   if (!managedBackendCheckIsDue(
     readManagedBackendUpdateCheckedAt(),
@@ -11429,13 +11429,23 @@ if (process.platform === "linux" && codexLinuxSandboxAutoRepairEnabled()) {
   );
   codexSandboxRepairTimer.unref();
 }
-if (autoUpdateEnabled()) {
+// Keeping the agent CLIs current is a separate decision from pulling new
+// server code. A development machine pins its checkout precisely so its own
+// commits survive, and still wants working, current backends; tying the two
+// together left those machines months behind on Claude and Codex with nothing
+// reporting it. SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS is the only control.
+if (managedBackendAutoUpdateEnabled()) {
   void ensureManagedBackendsCurrent("startup");
   const managedBackendUpdateTimer = setInterval(
     () => void ensureManagedBackendsCurrent("periodic"),
     Math.min(MANAGED_BACKENDS_UPDATE_INTERVAL_MS, 60 * 60 * 1000),
   );
   managedBackendUpdateTimer.unref();
+} else {
+  console.log("[Auto-update] Managed backend updates disabled by SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS");
+}
+
+if (autoUpdateEnabled()) {
   console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s, verify=${autoUpdateVerifyMode()})`);
   setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
 } else {

@@ -96,6 +96,7 @@ import { startPrivateIntegrationAuthorization } from "./private-integration-auth
 import {
   browserSessionManager,
   type BrowserFrame,
+  type BrowserViewportState,
   BrowserPhoneInput,
   normalizeBrowserProfile,
   normalizeBrowserUrl,
@@ -2087,6 +2088,23 @@ const interruptedDelegationIdsAtStartup = new Set(
 
 function broadcastBrowserFrame(frame: BrowserFrame): void {
   const raw = JSON.stringify({ type: "browser_frame", ...frame });
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN) client.send(raw);
+  }
+  if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
+}
+
+function broadcastBrowserViewport(session: BrowserViewportState): void {
+  const raw = JSON.stringify({
+    type: "browser_session_state",
+    profile: session.profile,
+    label: session.label,
+    url: session.url,
+    width: session.width,
+    height: session.height,
+    sessionId: session.sessionId || "",
+    active: true,
+  });
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(raw);
   }
@@ -5017,6 +5035,17 @@ function createConnectionHandler(
             type: "browser_session_error",
             profile: msg.profile,
             message: error instanceof Error ? error.message : "Browser frame request failed.",
+          }));
+        break;
+      }
+
+      case "browser_viewport": {
+        void browserSessionManager.setViewport(msg.profile, msg.width, msg.height)
+          .then((session) => broadcastBrowserViewport(session))
+          .catch((error) => sendJson({
+            type: "browser_session_error",
+            profile: msg.profile,
+            message: error instanceof Error ? error.message : "Browser resize failed.",
           }));
         break;
       }

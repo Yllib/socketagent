@@ -127,6 +127,19 @@ export interface BrowserWatchMessage {
   watching: boolean;
 }
 
+/**
+ * Switch the profile between a mobile and a desktop layout.
+ *
+ * Viewers share one browser, so this sets the mode for the profile rather than
+ * for the viewer that asked, and it sticks until something asks otherwise.
+ */
+export interface BrowserViewportMessage {
+  type: "browser_viewport";
+  profile: string;
+  width: number;
+  height: number;
+}
+
 export interface BrowserSessionInputMessage {
   type: "browser_session_input";
   profile: string;
@@ -1059,6 +1072,7 @@ export type ClientMessage =
   | PrivateIntegrationAuthRequestMessage
   | BrowserFrameRequestMessage
   | BrowserWatchMessage
+  | BrowserViewportMessage
   | BrowserSessionInputMessage
   | BrowserRuntimeInstallMessage
   | SecureInputResponseMessage

@@ -17,6 +17,16 @@ export interface BrowserSessionSummary {
   lastUsedAt?: string;
 }
 
+/** A session's identity plus the viewport its viewers must map taps through. */
+export interface BrowserViewportState {
+  profile: string;
+  label: string;
+  sessionId?: string;
+  url: string;
+  width: number;
+  height: number;
+}
+
 export interface BrowserFrame {
   profile: string;
   imageBase64: string;
@@ -105,6 +115,15 @@ interface RunningBrowserSession {
 
 const DEFAULT_WIDTH = 430;
 const DEFAULT_HEIGHT = 860;
+/**
+ * The virtual display, which bounds every viewport the session can take.
+ *
+ * Started well above the default so a viewer can switch to a desktop layout
+ * without relaunching the browser. The emulated viewport, not this, is what
+ * pages see and what gets captured.
+ */
+const DISPLAY_WIDTH = 1920;
+const DISPLAY_HEIGHT = 1200;
 const IDLE_CLOSE_MS = 2 * 60 * 60_000;
 /** How long one watch request keeps the screencast alive without a renewal. */
 const WATCH_TTL_MS = 20_000;
@@ -526,6 +545,59 @@ export class BrowserSessionManager {
     await this.refreshLocation(session).catch(() => {});
   }
 
+  /**
+   * Resize the page the viewers see.
+   *
+   * Sticky: a viewer choosing desktop or mobile sets the mode for the profile
+   * until something asks for a different one. Viewers share one browser, so
+   * there is one viewport, and the last request wins.
+   */
+  async setViewport(profileValue: string, width: number, height: number): Promise<BrowserViewportState> {
+    const session = this.require(normalizeBrowserProfile(profileValue));
+    const next = {
+      width: Math.round(Math.max(320, Math.min(DISPLAY_WIDTH, width))),
+      height: Math.round(Math.max(480, Math.min(DISPLAY_HEIGHT, height))),
+    };
+    if (next.width === session.width && next.height === session.height) {
+      return this.viewportState(session);
+    }
+
+    await session.cdp.command("Emulation.setDeviceMetricsOverride", {
+      width: next.width,
+      height: next.height,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    session.width = next.width;
+    session.height = next.height;
+    this.touch(session);
+
+    // The screencast caps frames at the size it was started with, so a live
+    // one has to be restarted to widen.
+    if (session.watch) {
+      await session.cdp.command("Page.stopScreencast").catch(() => {});
+      await session.cdp.command("Page.startScreencast", {
+        format: "jpeg",
+        quality: 60,
+        maxWidth: session.width,
+        maxHeight: session.height,
+        everyNthFrame: 1,
+      }).catch(() => {});
+    }
+    return this.viewportState(session);
+  }
+
+  private viewportState(session: RunningBrowserSession): BrowserViewportState {
+    return {
+      profile: session.profile,
+      label: session.label,
+      ...(session.sessionId ? { sessionId: session.sessionId } : {}),
+      url: session.url,
+      width: session.width,
+      height: session.height,
+    };
+  }
+
   /** Stop streaming the profile. Safe to call when it was never watched. */
   unwatch(profileValue: string): void {
     const session = this.sessions.get(normalizeBrowserProfile(profileValue));
@@ -607,14 +679,14 @@ export class BrowserSessionManager {
     restrictDirectory(root);
     restrictDirectory(profileDir);
     removeStaleBrowserControlFile(profileDir);
-    const display = await startVirtualDisplay(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    const display = await startVirtualDisplay(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     const debuggingPort = await reserveLoopbackPort();
     const processHandle = spawn(browserExecutable, [
       ...(display.headless ? ["--headless"] : []),
       `--remote-debugging-port=${debuggingPort}`,
       "--remote-debugging-address=127.0.0.1",
       `--user-data-dir=${profileDir}`,
-      `--window-size=${DEFAULT_WIDTH},${DEFAULT_HEIGHT}`,
+      `--window-size=${DISPLAY_WIDTH},${DISPLAY_HEIGHT}`,
       "--force-device-scale-factor=1",
       "--no-first-run",
       "--no-default-browser-check",

@@ -11,6 +11,7 @@ import { buildCodexSpawn } from "./codex-env";
 import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
 import { mergeSessionTimestamps } from "./session-list-snapshot";
+import { isRestartContinuationPrompt } from "./restart-recovery";
 import { remapHtmlPlans } from "./html-plan-store";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
@@ -2780,14 +2781,19 @@ export function getMissedMessages(
                 timestamp: msg.timestamp,
               });
             } else if (block.type === "text") {
-              entries.push({
-                role: "user",
-                content: block.text,
-                timestamp: msg.timestamp,
-              });
+              // SocketAgent's own restart continuation is in the transcript
+              // because the model had to receive it, not because the user sent
+              // it. Reading it back here would undo that.
+              if (!isRestartContinuationPrompt(block.text)) {
+                entries.push({
+                  role: "user",
+                  content: block.text,
+                  timestamp: msg.timestamp,
+                });
+              }
             }
           }
-        } else if (typeof content === "string") {
+        } else if (typeof content === "string" && !isRestartContinuationPrompt(content)) {
           entries.push({
             role: "user",
             content,

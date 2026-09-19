@@ -115,6 +115,18 @@ export interface BrowserFrameRequestMessage {
   profile: string;
 }
 
+/**
+ * Ask the server to stream the profile while a viewer is open on the phone.
+ *
+ * The server expires a watch that is not renewed, so the phone repeats this
+ * while its viewer is showing and sends `watching: false` when it closes.
+ */
+export interface BrowserWatchMessage {
+  type: "browser_watch";
+  profile: string;
+  watching: boolean;
+}
+
 export interface BrowserSessionInputMessage {
   type: "browser_session_input";
   profile: string;
@@ -1046,6 +1058,7 @@ export type ClientMessage =
   | AnswerMessage
   | PrivateIntegrationAuthRequestMessage
   | BrowserFrameRequestMessage
+  | BrowserWatchMessage
   | BrowserSessionInputMessage
   | BrowserRuntimeInstallMessage
   | SecureInputResponseMessage

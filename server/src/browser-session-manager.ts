@@ -57,6 +57,8 @@ export type BrowserPhoneInput =
 
 interface CdpResponse {
   id?: number;
+  method?: string;
+  params?: JsonRecord;
   result?: JsonRecord;
   error?: { message?: string };
 }
@@ -67,11 +69,29 @@ interface CdpTarget {
   webSocketDebuggerUrl?: string;
 }
 
+/**
+ * A live screencast of one profile, running only while a phone is watching it.
+ *
+ * The phone re-arms `expiresAt` while its viewer is open, so a phone that
+ * backgrounds, disconnects, or crashes stops the stream by falling silent
+ * rather than by sending anything.
+ */
+interface BrowserWatch {
+  expiresAt: number;
+  expiryTimer: NodeJS.Timeout;
+  stop: () => void;
+  /** The newest frame not yet sent, held back by the send interval. */
+  pending?: BrowserFrame;
+  sendTimer?: NodeJS.Timeout;
+  lastSentAt: number;
+}
+
 interface RunningBrowserSession {
   profile: string;
   label: string;
   sessionId?: string;
   url: string;
+  title: string;
   profileDir: string;
   process: ChildProcess;
   displayProcess?: ChildProcess;
@@ -80,11 +100,16 @@ interface RunningBrowserSession {
   height: number;
   lastUsedAt: string;
   idleTimer?: NodeJS.Timeout;
+  watch?: BrowserWatch;
 }
 
 const DEFAULT_WIDTH = 430;
 const DEFAULT_HEIGHT = 860;
 const IDLE_CLOSE_MS = 2 * 60 * 60_000;
+/** How long one watch request keeps the screencast alive without a renewal. */
+const WATCH_TTL_MS = 20_000;
+/** Floor on the gap between pushed frames, so a busy page cannot flood a phone. */
+const FRAME_INTERVAL_MS = 200;
 
 interface BrowserDisplay {
   headless: boolean;
@@ -323,6 +348,7 @@ class CdpClient {
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
   }>();
+  private listeners = new Map<string, Set<(params: JsonRecord) => void>>();
 
   private constructor(socket: WebSocket) {
     this.socket = socket;
@@ -360,6 +386,17 @@ class CdpClient {
     });
   }
 
+  /** Subscribe to a CDP event. Returns the unsubscribe function. */
+  on(method: string, handler: (params: JsonRecord) => void): () => void {
+    const handlers = this.listeners.get(method) ?? new Set();
+    handlers.add(handler);
+    this.listeners.set(method, handlers);
+    return () => {
+      handlers.delete(handler);
+      if (!handlers.size) this.listeners.delete(method);
+    };
+  }
+
   close(): void {
     try { this.socket.close(); } catch {}
   }
@@ -368,7 +405,14 @@ class CdpClient {
     let message: CdpResponse;
     try { message = JSON.parse(raw) as CdpResponse; }
     catch { return; }
-    if (typeof message.id !== "number") return;
+    if (typeof message.id !== "number") {
+      // Events carry a method instead of an id.
+      if (typeof message.method !== "string") return;
+      for (const handler of this.listeners.get(message.method) ?? []) {
+        try { handler(message.params ?? {}); } catch {}
+      }
+      return;
+    }
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
@@ -412,6 +456,130 @@ function boundedLabel(value: string | undefined, profile: string): string {
 
 export class BrowserSessionManager {
   private sessions = new Map<string, RunningBrowserSession>();
+  private frameListeners = new Set<(frame: BrowserFrame) => void>();
+
+  /**
+   * Subscribe to frames pushed by watched profiles. Returns the unsubscribe
+   * function.
+   */
+  onFrame(listener: (frame: BrowserFrame) => void): () => void {
+    this.frameListeners.add(listener);
+    return () => this.frameListeners.delete(listener);
+  }
+
+  /**
+   * Stream the profile to whoever is watching for the next [ttlMs].
+   *
+   * Callers renew this while their viewer is open. Without a live screencast a
+   * phone only sees the page as it was when it last asked for a frame, so it
+   * misses everything the agent does and everything the page does on its own.
+   */
+  async watch(profileValue: string, ttlMs = WATCH_TTL_MS): Promise<void> {
+    const session = this.require(normalizeBrowserProfile(profileValue));
+    const expiresAt = Date.now() + Math.max(1_000, ttlMs);
+    if (session.watch) {
+      session.watch.expiresAt = expiresAt;
+      return;
+    }
+
+    const watch: BrowserWatch = {
+      expiresAt,
+      expiryTimer: setInterval(() => {
+        if (Date.now() >= (session.watch?.expiresAt ?? 0)) this.unwatch(session.profile);
+      }, 5_000),
+      stop: () => {},
+      lastSentAt: 0,
+    };
+    watch.expiryTimer.unref?.();
+    session.watch = watch;
+
+    const unsubscribeFrame = session.cdp.on("Page.screencastFrame", (params) => {
+      // Chrome pauses the cast until each frame is acknowledged.
+      if (typeof params.sessionId === "number") {
+        void session.cdp.command("Page.screencastFrameAck", { sessionId: params.sessionId })
+          .catch(() => {});
+      }
+      if (typeof params.data !== "string" || !params.data) return;
+      this.queueFrame(session, params.data);
+    });
+    const unsubscribeNavigation = session.cdp.on("Page.frameNavigated", () => {
+      void this.refreshLocation(session).catch(() => {});
+    });
+    watch.stop = () => {
+      unsubscribeFrame();
+      unsubscribeNavigation();
+      void session.cdp.command("Page.stopScreencast").catch(() => {});
+    };
+
+    try {
+      await session.cdp.command("Page.startScreencast", {
+        format: "jpeg",
+        quality: 60,
+        maxWidth: session.width,
+        maxHeight: session.height,
+        everyNthFrame: 1,
+      });
+    } catch (error) {
+      this.unwatch(session.profile);
+      throw error;
+    }
+    await this.refreshLocation(session).catch(() => {});
+  }
+
+  /** Stop streaming the profile. Safe to call when it was never watched. */
+  unwatch(profileValue: string): void {
+    const session = this.sessions.get(normalizeBrowserProfile(profileValue));
+    if (session) this.stopWatch(session);
+  }
+
+  private stopWatch(session: RunningBrowserSession): void {
+    const watch = session.watch;
+    if (!watch) return;
+    session.watch = undefined;
+    clearInterval(watch.expiryTimer);
+    if (watch.sendTimer) clearTimeout(watch.sendTimer);
+    watch.stop();
+  }
+
+  /**
+   * Hold a frame back to at most one per [FRAME_INTERVAL_MS], always sending
+   * the newest one so the phone lands on the page's settled state.
+   */
+  private queueFrame(session: RunningBrowserSession, imageBase64: string): void {
+    const watch = session.watch;
+    if (!watch) return;
+    watch.pending = {
+      profile: session.profile,
+      imageBase64,
+      mimeType: "image/jpeg",
+      width: session.width,
+      height: session.height,
+      url: session.url,
+      title: session.title,
+    };
+    if (watch.sendTimer) return;
+    const wait = Math.max(0, watch.lastSentAt + FRAME_INTERVAL_MS - Date.now());
+    watch.sendTimer = setTimeout(() => {
+      watch.sendTimer = undefined;
+      const frame = watch.pending;
+      watch.pending = undefined;
+      if (!frame || session.watch !== watch) return;
+      watch.lastSentAt = Date.now();
+      for (const listener of this.frameListeners) {
+        try { listener(frame); } catch {}
+      }
+    }, wait);
+    watch.sendTimer.unref?.();
+  }
+
+  private async refreshLocation(session: RunningBrowserSession): Promise<void> {
+    const [location, title] = await Promise.all([
+      session.cdp.command("Runtime.evaluate", { expression: "location.href", returnByValue: true }),
+      session.cdp.command("Runtime.evaluate", { expression: "document.title", returnByValue: true }),
+    ]);
+    session.url = readStringResult(location) || session.url;
+    session.title = readStringResult(title) || session.title;
+  }
 
   async open(
     profileValue: string,
@@ -483,6 +651,7 @@ export class BrowserSessionManager {
         label: boundedLabel(labelValue, profile),
         ...(sessionId ? { sessionId } : {}),
         url,
+        title: "",
         profileDir,
         process: processHandle,
         ...(display.process ? { displayProcess: display.process } : {}),
@@ -495,6 +664,7 @@ export class BrowserSessionManager {
         const current = this.sessions.get(profile);
         if (current === session) {
           if (current.idleTimer) clearTimeout(current.idleTimer);
+          this.stopWatch(current);
           current.cdp.close();
           current.displayProcess?.kill("SIGTERM");
           this.sessions.delete(profile);
@@ -570,6 +740,7 @@ export class BrowserSessionManager {
     if (!imageBase64) throw new Error("Browser did not return a frame.");
     const url = readStringResult(location) || session.url;
     session.url = url;
+    session.title = readStringResult(title) || session.title;
     return {
       profile: session.profile,
       imageBase64,
@@ -744,6 +915,7 @@ export class BrowserSessionManager {
     if (!session) return;
     this.sessions.delete(profile);
     if (session.idleTimer) clearTimeout(session.idleTimer);
+    this.stopWatch(session);
     session.cdp.close();
     await stopChildProcess(session.process);
     await stopChildProcess(session.displayProcess);
@@ -787,6 +959,7 @@ export class BrowserSessionManager {
     ]);
     const url = readStringResult(location) || session.url;
     session.url = url;
+    session.title = readStringResult(title) || session.title;
     return {
       profile: session.profile,
       label: session.label,

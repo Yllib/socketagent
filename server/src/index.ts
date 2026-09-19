@@ -95,6 +95,7 @@ import { SERVER_RELEASE_VERSION, serverReleaseVersionFor } from "./server-build-
 import { startPrivateIntegrationAuthorization } from "./private-integration-auth";
 import {
   browserSessionManager,
+  type BrowserFrame,
   BrowserPhoneInput,
   normalizeBrowserProfile,
   normalizeBrowserUrl,
@@ -2083,6 +2084,16 @@ const interruptedDelegationIdsAtStartup = new Set(
     .filter((record) => record.status === "running" || record.status === "starting")
     .map((record) => record.delegationId),
 );
+
+function broadcastBrowserFrame(frame: BrowserFrame): void {
+  const raw = JSON.stringify({ type: "browser_frame", ...frame });
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN) client.send(raw);
+  }
+  if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
+}
+
+browserSessionManager.onFrame(broadcastBrowserFrame);
 
 function broadcastHeadlessSessionMessage(data: string, fallbackSessionId = ""): void {
   try {
@@ -5007,6 +5018,17 @@ function createConnectionHandler(
             profile: msg.profile,
             message: error instanceof Error ? error.message : "Browser frame request failed.",
           }));
+        break;
+      }
+
+      case "browser_watch": {
+        if (!msg.watching) {
+          browserSessionManager.unwatch(msg.profile);
+          break;
+        }
+        // A phone that has gone away simply stops renewing, so a failure here
+        // is not worth interrupting its viewer over.
+        void browserSessionManager.watch(msg.profile).catch(() => {});
         break;
       }
 

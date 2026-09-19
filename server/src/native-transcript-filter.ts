@@ -67,6 +67,34 @@ function isCommandOnlyText(text: string): boolean {
  * command block in its index entry and keeps its place, as does one whose
  * summary describes real work.
  */
+/**
+ * The same test against an assembled session row, whatever produced it.
+ *
+ * The converters below run only on rows discovered through the SDK index. A
+ * session SocketAgent tracked is listed straight out of the store, so a
+ * `/usage` run from the app reached the list without ever meeting them. This
+ * is the check the display lists apply, after every source has been merged.
+ */
+/**
+ * A preview with the command artifact stripped out.
+ *
+ * A real session can still end on a command, leaving rows titled with real
+ * work and previewed with `<local-command-stdout>Bye!</local-command-stdout>`.
+ * The row stays; the line that says nothing goes. The app hides the preview
+ * line when it is empty.
+ */
+export function listedPreview(preview: string | undefined): string {
+  const text = (preview ?? "").trim();
+  return isLocalCommandArtifact(text) ? "" : (preview ?? "");
+}
+
+export function isLocalCommandOnlyEntry(session: {
+  title?: string;
+  messagePreview?: string;
+}): boolean {
+  return isLocalCommandOnlySession({}, session);
+}
+
 export function isLocalCommandOnlySession(
   info: {
     firstPrompt?: string;

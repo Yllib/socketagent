@@ -54,7 +54,12 @@ test("a bare slash command is spotted, a sentence starting with one is not", () 
   }
 });
 
-const { isLocalCommandOnlySession } = require("../dist/native-transcript-filter");
+const {
+  isLocalCommandOnlySession,
+  isLocalCommandOnlyEntry,
+  listedPreview,
+} = require("../dist/native-transcript-filter");
+const { mergeSessionListBase } = require("../dist/session-list-snapshot");
 
 const commandBlock = (name) =>
   `<command-name>/${name}</command-name>\n  <command-message>${name}</command-message>`;
@@ -155,4 +160,70 @@ test("a user-set title keeps the session listed", () => {
     isLocalCommandOnlySession({ firstPrompt: COMMAND }, { title: "Usage check" }),
     false,
   );
+});
+
+// Rows exactly as the session list showed them. A tracked session is listed
+// straight out of the store and never meets the SDK converters, so the check
+// has to run on the assembled row as well.
+const listRow = (id, title, messagePreview) => ({
+  id,
+  title,
+  messagePreview,
+  createdAt: "2026-08-12T00:00:00.000Z",
+  lastActive: "2026-08-12T00:00:00.000Z",
+});
+
+test("an assembled /usage row is dropped from the list", () => {
+  assert.ok(isLocalCommandOnlyEntry(listRow("a", "/usage", COMMAND)));
+  assert.ok(isLocalCommandOnlyEntry(listRow("b", "Untitled", COMMAND)));
+  assert.ok(isLocalCommandOnlyEntry(listRow("c", "/usage", CAVEAT)));
+});
+
+// This one is real work that happened to end on a command.
+test("a real session with a command preview stays listed", () => {
+  assert.equal(
+    isLocalCommandOnlyEntry(
+      listRow("d", "Validate and test Movespeed USB drive", "<local-command-stdout>Bye!</local-command-stdout>"),
+    ),
+    false,
+  );
+  assert.equal(
+    isLocalCommandOnlyEntry(listRow("e", "Bobby", "Run it elevated: powershell -File ...")),
+    false,
+  );
+});
+
+test("a preview that is only a command artifact is not shown", () => {
+  assert.equal(listedPreview("<local-command-stdout>Bye!</local-command-stdout>"), "");
+  assert.equal(listedPreview(COMMAND), "");
+  assert.equal(listedPreview("Run it elevated"), "Run it elevated");
+  assert.equal(listedPreview(undefined), "");
+});
+
+test("the list drops command rows and cleans the previews that remain", () => {
+  const merged = mergeSessionListBase(
+    [
+      listRow("a", "/usage", COMMAND),
+      listRow("b", "Validate and test Movespeed USB drive", "<local-command-stdout>Bye!</local-command-stdout>"),
+      listRow("c", "Bobby", "Run it elevated"),
+    ],
+    null,
+    new Set(),
+  );
+  assert.deepEqual(
+    merged.map((row) => [row.title, row.messagePreview]),
+    [
+      ["Validate and test Movespeed USB drive", ""],
+      ["Bobby", "Run it elevated"],
+    ],
+  );
+});
+
+test("a command row is dropped from the native half of the merge too", () => {
+  const merged = mergeSessionListBase(
+    [],
+    [listRow("a", "/usage", COMMAND), listRow("b", "Real work", "fix the parser")],
+    new Set(),
+  );
+  assert.deepEqual(merged.map((row) => row.title), ["Real work"]);
 });

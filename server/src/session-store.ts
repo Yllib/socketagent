@@ -12,7 +12,7 @@ import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
 import { mergeSessionTimestamps } from "./session-list-snapshot";
 import { isRestartContinuationPrompt } from "./restart-recovery";
-import { isUnusableSessionPreview, isBareSlashCommand, isLocalCommandOnlySession } from "./native-transcript-filter";
+import { isUnusableSessionPreview, isBareSlashCommand, isLocalCommandOnlyEntry, isLocalCommandOnlySession, listedPreview } from "./native-transcript-filter";
 import { remapHtmlPlans } from "./html-plan-store";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
@@ -3920,7 +3920,12 @@ export async function listSessionsWithNativeBackends(useCache = true): Promise<S
     }
   }
 
-  const sessions = [...byId.values()].sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
+  // Applied here rather than only in the SDK converters: a tracked session
+  // comes straight out of the store and never passes through them.
+  const sessions = [...byId.values()]
+    .filter((session) => !isLocalCommandOnlyEntry(session))
+    .map((session) => ({ ...session, messagePreview: listedPreview(session.messagePreview) }))
+    .sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
   warnIfSlow("session_list_native", startedAt, { count: sessions.length, useCache });
   return sessions;
 }

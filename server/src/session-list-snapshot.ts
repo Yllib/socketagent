@@ -5,6 +5,8 @@
  * sessions, or an archive visibly bounces back into the list.
  */
 
+import { isLocalCommandOnlyEntry, listedPreview } from "./native-transcript-filter";
+
 export interface MergeableSession {
   id: string;
   createdAt: string;
@@ -70,13 +72,18 @@ export function mergeSessionListBase<T extends MergeableSession>(
   nativeSnapshot: readonly T[] | null,
   archivedIds: ReadonlySet<string>,
 ): T[] {
-  const live = stored.filter((session) => !archivedIds.has(session.id));
-  if (!nativeSnapshot) return live;
+  const listable = (session: T) =>
+    !archivedIds.has(session.id) && !isLocalCommandOnlyEntry(session);
+  const live = stored.filter(listable);
+  if (!nativeSnapshot) {
+    return live.map((session) => ({
+      ...session,
+      messagePreview: listedPreview(session.messagePreview),
+    }));
+  }
 
   const byId = new Map<string, T>(
-    nativeSnapshot
-      .filter((session) => !archivedIds.has(session.id))
-      .map((session) => [session.id, { ...session }]),
+    nativeSnapshot.filter(listable).map((session) => [session.id, { ...session }]),
   );
   for (const session of live) {
     const native = byId.get(session.id);
@@ -88,9 +95,11 @@ export function mergeSessionListBase<T extends MergeableSession>(
       ...mergeSessionTimestamps(session, native),
     } : session);
   }
-  return [...byId.values()].sort(
-    (left, right) => new Date(right.lastActive).getTime() - new Date(left.lastActive).getTime(),
-  );
+  return [...byId.values()]
+    .map((session) => ({ ...session, messagePreview: listedPreview(session.messagePreview) }))
+    .sort(
+      (left, right) => new Date(right.lastActive).getTime() - new Date(left.lastActive).getTime(),
+    );
 }
 
 /**

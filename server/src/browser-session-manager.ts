@@ -44,6 +44,8 @@ export interface BrowserSnapshotElement {
   name: string;
   type?: string;
   value?: string;
+  /** Present only on things that can be on or off. */
+  checked?: boolean;
   disabled: boolean;
 }
 
@@ -876,17 +878,31 @@ export class BrowserSessionManager {
         return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
       };
       document.querySelectorAll('[data-socketagent-ref]').forEach((el) => el.removeAttribute('data-socketagent-ref'));
-      const selector = 'a,button,input,textarea,select,summary,[role="button"],[role="link"],[contenteditable="true"]';
+      const selector = [
+        'a','button','input','textarea','select','summary',
+        '[contenteditable="true"]',
+        // Component libraries build controls out of divs with a role, so
+        // without these a checkbox or menu item is invisible and unclickable.
+        '[role="button"]','[role="link"]','[role="checkbox"]','[role="radio"]',
+        '[role="switch"]','[role="tab"]','[role="option"]','[role="combobox"]',
+        '[role="menuitem"]','[role="menuitemcheckbox"]','[role="menuitemradio"]',
+        '[role="treeitem"]','[role="slider"]'
+      ].join(',');
       const elements = Array.from(document.querySelectorAll(selector)).filter(visible).slice(0, 300).map((el, index) => {
         const ref = 'sa-' + (index + 1);
         el.setAttribute('data-socketagent-ref', ref);
         const type = String(el.getAttribute('type') || '').toLowerCase();
         const secretHint = [type, el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase();
         const secret = type === 'password' || /(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(secretHint);
+        const checkedAttr = el.getAttribute('aria-checked') ?? el.getAttribute('aria-selected');
+        const checked = checkedAttr === null
+          ? (type === 'checkbox' || type === 'radio' ? Boolean(el.checked) : undefined)
+          : checkedAttr === 'true';
         return {
           ref,
           tag: el.tagName.toLowerCase(),
           role: el.getAttribute('role') || undefined,
+          ...(checked === undefined ? {} : { checked }),
           name: String(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || '').trim().slice(0, 240),
           type: type || undefined,
           value: secret ? undefined : (typeof el.value === 'string' ? el.value.slice(0, 500) : undefined),

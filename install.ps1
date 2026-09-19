@@ -198,6 +198,60 @@ function Get-CurrentPowerShellExecutable {
     throw "Cannot locate the PowerShell executable that is running this installer"
 }
 
+function Test-SocketAgentElevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-SocketAgentAdminAccount {
+    # A filtered admin token still lists the Administrators group, so this is
+    # true for an administrator who simply has not elevated yet.
+    $administrators = "S-1-5-32-544"
+    foreach ($group in [Security.Principal.WindowsIdentity]::GetCurrent().Groups) {
+        if ($group.Value -eq $administrators) { return $true }
+    }
+    return $false
+}
+
+# SocketAgent's scheduled task runs elevated, and Windows only lets an elevated
+# caller register a task that does. Elevation is a hard requirement here rather
+# than a nicety: unelevated, registration fails outright, and the alternative
+# would be installing a server that cannot do what it is asked to do.
+function Assert-SocketAgentElevated {
+    if (Test-SocketAgentElevated) { return }
+
+    # Elevating a standard account hands UAC a different user, and the install
+    # would then land in that administrator's profile instead of this one.
+    if (-not (Test-SocketAgentAdminAccount)) {
+        Write-Fail "SocketAgent installs as an administrator and this account is not one."
+        throw "Sign in with an administrator account and run the installer again"
+    }
+    # Nothing on disk to relaunch, so the caller has to elevate for us.
+    if (-not $PSCommandPath) {
+        Write-Fail "This installer needs administrator rights."
+        throw "Reopen PowerShell with Run as administrator and run the installer again"
+    }
+
+    Write-Host "  Re-launching with administrator rights (SocketAgent runs elevated)..."
+    # ArgumentList entries are joined with spaces and not quoted, so the script
+    # path has to carry its own quotes or any profile with a space breaks this.
+    $arguments = @(
+        "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "`"$PSCommandPath`"",
+        "-Port", $Port
+    )
+    if ($ResetPairing) { $arguments += "-ResetPairing" }
+    try {
+        Start-Process -FilePath (Get-CurrentPowerShellExecutable) -Verb RunAs -ArgumentList $arguments
+    } catch {
+        Write-Fail "Elevation was declined. SocketAgent cannot be installed without it."
+        throw "Approve the administrator prompt and run the installer again"
+    }
+    Write-Host "  Setup continues in the new administrator window; this one is done."
+    exit 0
+}
+
 function Set-NpmWindowsScriptShell {
     $cmdPath = $env:ComSpec
     if (-not $cmdPath -and $env:SystemRoot) {
@@ -342,6 +396,8 @@ if (-not (Test-Path (Join-Path $SERVER_DIR "package.json"))) {
 }
 
 try {
+
+Assert-SocketAgentElevated
 
 # ── Pre-flight: check if port is available ──
 $existingTask = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
@@ -825,10 +881,14 @@ $settings = New-ScheduledTaskSettingsSet `
 # user logs on so Claude and Codex share the same usable Windows session.
 $logonUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $logonUser
+#
+# SocketAgent always runs with full administrator rights. Assert-SocketAgentElevated
+# guarantees this registration is made from an elevated session, which is what
+# Windows requires before it will accept a Highest principal.
 $logonPrincipal = New-ScheduledTaskPrincipal `
     -UserId $logonUser `
     -LogonType Interactive `
-    -RunLevel Limited
+    -RunLevel Highest
 
 Register-ScheduledTask `
     -TaskName $TASK_NAME `
@@ -840,9 +900,9 @@ Register-ScheduledTask `
 
 Grant-SocketAgentTaskOwnerAccess $TASK_NAME
 
-Write-Ok "Registered as scheduled task '$TASK_NAME' (interactive logon)"
+Write-Ok "Registered as scheduled task '$TASK_NAME' (interactive logon, administrator)"
 
-# Add Windows Firewall rule (requires admin — skip silently if not elevated)
+# Add Windows Firewall rule (the installer is elevated, so this should not fail)
 $fwRuleName = "SocketAgent Server (TCP $Port)"
 try {
     $existingRule = Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue

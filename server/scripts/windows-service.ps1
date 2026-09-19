@@ -75,8 +75,9 @@ function Update-SocketAgentTaskLauncher([string]$ServerDirectory) {
 }
 
 function Grant-SocketAgentTaskOwnerAccess([string]$TaskName) {
-    # Setup creates a Limited task for this user. Allow that same user to repair
-    # its action later without elevation, even when setup itself was elevated.
+    # Setup registers the task for this user. Give that same user full control
+    # of the task object so a later repair of its action is a question of
+    # elevation alone, rather than also being denied by the task's own ACL.
     $scheduler = New-Object -ComObject 'Schedule.Service'
     $scheduler.Connect()
     $task = $scheduler.GetFolder('\').GetTask($TaskName)

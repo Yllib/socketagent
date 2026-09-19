@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Refuses a push whose lockfile pins an agent dependency below the latest
+# published version.
+#
+# Every machine installs with `npm ci`, which takes exactly what the lockfile
+# pins, so a push is what decides which SDK ten machines will run. Checking
+# here is the only point where that is still true and still cheap to fix.
+#
+# Bypass with `git push --no-verify` when you mean to.
+#
+set -uo pipefail
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+SERVER_DIR="$REPO_DIR/server"
+PACKAGES=(@anthropic-ai/claude-agent-sdk @anthropic-ai/sdk)
+
+command -v npm >/dev/null 2>&1 || exit 0
+[ -d "$SERVER_DIR/node_modules" ] || exit 0
+
+stale=()
+for pkg in "${PACKAGES[@]}"; do
+  have="$(node -p "require('$SERVER_DIR/node_modules/$pkg/package.json').version" 2>/dev/null)"
+  want="$(npm view "$pkg" version 2>/dev/null)"
+  # Offline or a registry hiccup must not block the push; it cannot be verified
+  # either way, so say so and get out of the way.
+  if [ -z "$want" ]; then
+    echo "pre-push: could not reach npm to check $pkg; pushing unverified." >&2
+    exit 0
+  fi
+  [ "$have" = "$want" ] || stale+=("  $pkg  $have -> $want")
+done
+
+[ ${#stale[@]} -eq 0 ] && exit 0
+
+cat >&2 <<MSG
+
+Push refused: agent dependencies are behind.
+
+$(printf '%s\n' "${stale[@]}")
+
+Every machine installs what this lockfile pins, so pushing now ships the old
+versions to all of them. To bump, verify and commit:
+
+  server/scripts/update-agent-sdk.sh
+
+Then push again. To push anyway: git push --no-verify
+
+MSG
+exit 1

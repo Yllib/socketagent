@@ -7,9 +7,27 @@
 
 export interface MergeableSession {
   id: string;
+  createdAt: string;
   lastActive: string;
   title: string;
   messagePreview: string;
+}
+
+/** Latest of the given timestamps, or `fallback` when none are usable. */
+export function newestIso(values: Array<string | undefined>, fallback: string): string {
+  let best = fallback;
+  let bestMs = Date.parse(fallback);
+  if (!Number.isFinite(bestMs)) bestMs = 0;
+  for (const value of values) {
+    if (!value) continue;
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) continue;
+    if (ms > bestMs) {
+      best = value;
+      bestMs = ms;
+    }
+  }
+  return best;
 }
 
 /**
@@ -19,6 +37,12 @@ export interface MergeableSession {
  * sessions archived since. The store no longer lists them, but the merge would
  * put them back, so archived ids are dropped from both sides. Stored fields win
  * over native ones except where the store has nothing worth showing.
+ *
+ * Timestamps follow the same rules the native scan applies in
+ * sdkSessionInfoToSessionInfo. They have to: the app sorts on lastActive, and
+ * the two lists alternate every couple of seconds, so any disagreement makes
+ * half the rows change their sort key on every broadcast and the list reshuffle
+ * under the user's finger.
  */
 export function mergeSessionListBase<T extends MergeableSession>(
   stored: readonly T[],
@@ -40,6 +64,8 @@ export function mergeSessionListBase<T extends MergeableSession>(
       ...session,
       title: session.title && session.title !== "Untitled" ? session.title : native.title,
       messagePreview: session.messagePreview || native.messagePreview,
+      createdAt: session.createdAt || native.createdAt,
+      lastActive: newestIso([session.lastActive, native.lastActive], native.lastActive),
     } : session);
   }
   return [...byId.values()].sort(

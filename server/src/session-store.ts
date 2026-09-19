@@ -10,6 +10,7 @@ import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./cod
 import { buildCodexSpawn } from "./codex-env";
 import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
+import { newestIso } from "./session-list-snapshot";
 import { remapHtmlPlans } from "./html-plan-store";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
@@ -3653,21 +3654,6 @@ async function listCodexNativeSessionsFromAppServer(useCache = true): Promise<Se
   return sessions;
 }
 
-function newestIso(values: Array<string | undefined>, fallback: string): string {
-  let best = fallback;
-  let bestMs = Date.parse(fallback);
-  if (!Number.isFinite(bestMs)) bestMs = 0;
-  for (const value of values) {
-    if (!value) continue;
-    const ms = Date.parse(value);
-    if (!Number.isFinite(ms)) continue;
-    if (ms > bestMs) {
-      best = value;
-      bestMs = ms;
-    }
-  }
-  return best;
-}
 
 function sdkSessionInfoToSessionInfo(info: SDKSessionInfo, tracked?: SessionInfo): SessionInfo | null {
   if (!info.sessionId) return null;

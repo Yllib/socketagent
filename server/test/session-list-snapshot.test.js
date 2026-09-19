@@ -11,6 +11,7 @@ function session(id, overrides = {}) {
     id,
     title: `title-${id}`,
     messagePreview: `preview-${id}`,
+    createdAt: "2026-09-01T00:00:00.000Z",
     lastActive: "2026-09-18T12:00:00.000Z",
     ...overrides,
   };
@@ -129,4 +130,47 @@ test("a failed scan does not wedge the coordinator", async () => {
   request("second");
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(reasons, ["first", "second"]);
+});
+
+// ── Timestamp agreement with the native scan ──
+//
+// The app sorts on lastActive and the two lists alternate every couple of
+// seconds, so a disagreement reshuffles the list under the user's finger.
+
+const { newestIso } = require("../dist/session-list-snapshot");
+
+test("lastActive takes the newest of stored and native, as the native scan does", () => {
+  const stored = [session("a", { lastActive: "2026-09-14T16:00:11.000Z" })];
+  const native = [session("a", { lastActive: "2026-09-17T16:00:05.526Z" })];
+  const [merged] = mergeSessionListBase(stored, native, new Set());
+  assert.equal(merged.lastActive, "2026-09-17T16:00:05.526Z");
+  assert.equal(merged.lastActive, newestIso(["2026-09-14T16:00:11.000Z"], "2026-09-17T16:00:05.526Z"));
+});
+
+test("a newer stored lastActive still wins", () => {
+  const stored = [session("a", { lastActive: "2026-09-18T00:00:00.000Z" })];
+  const native = [session("a", { lastActive: "2026-09-01T00:00:00.000Z" })];
+  assert.equal(mergeSessionListBase(stored, native, new Set())[0].lastActive, "2026-09-18T00:00:00.000Z");
+});
+
+test("createdAt prefers the stored value and falls back to native", () => {
+  const native = [session("a", { createdAt: "2026-09-08T22:12:33.000Z" })];
+  assert.equal(
+    mergeSessionListBase([session("a", { createdAt: "2026-07-14T13:36:05.372Z" })], native, new Set())[0].createdAt,
+    "2026-07-14T13:36:05.372Z",
+  );
+  assert.equal(
+    mergeSessionListBase([session("a", { createdAt: "" })], native, new Set())[0].createdAt,
+    "2026-09-08T22:12:33.000Z",
+  );
+});
+
+test("a session's sort key does not change between the two list shapes", () => {
+  // The exact flap seen in the wild: 43 of 82 rows alternating every broadcast.
+  const stored = [session("wakespeed", { lastActive: "2026-09-14T16:00:11.000Z" })];
+  const native = [session("wakespeed", { lastActive: "2026-09-17T16:00:05.526Z" })];
+  const immediate = mergeSessionListBase(stored, native, new Set())[0];
+  // What listSessionsWithNativeBackends produces for the same session.
+  const fromNativeScan = newestIso([stored[0].lastActive], native[0].lastActive);
+  assert.equal(immediate.lastActive, fromNativeScan);
 });

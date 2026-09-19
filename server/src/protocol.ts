@@ -1168,6 +1168,7 @@ export type ClientMessage =
   | { type: "force_update" }
   | { type: "get_status_sync" }
   | { type: "get_codex_status" }
+  | { type: "get_claude_usage" }
   | { type: "consume_codex_reset"; sessionId: string; requestId: string; idempotencyKey: string; confirmed: boolean }
   | { type: "get_recent_cwds" }
   | { type: "add_recent_cwd"; cwd: string }

@@ -1676,6 +1676,20 @@ export class ClaudeSession {
     return null;
   }
 
+  /**
+   * The structured /usage data: plan rate-limit windows and session totals.
+   *
+   * Null when the SDK is too old to offer it or the session has no live query.
+   * `rate_limits_available` is false for API-key, Bedrock and Vertex sessions,
+   * where plan limits do not apply.
+   */
+  async getPlanUsage(): Promise<Record<string, any> | null> {
+    const activeQuery = this.activeQuery as any;
+    const getUsage = activeQuery?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (typeof getUsage !== "function") return null;
+    return await getUsage.call(activeQuery, { skipBehaviors: true });
+  }
+
   private _refreshPlanRateLimits(): void {
     const activeQuery = this.activeQuery as any;
     const getUsage =

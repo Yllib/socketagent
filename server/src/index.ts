@@ -7499,6 +7499,20 @@ function createConnectionHandler(
         break;
       }
 
+      case "get_claude_usage": {
+        const sid = activeSession?.getSessionId?.() || activeSessionId || "";
+        if (activeSession instanceof ClaudeSession) {
+          try {
+            sendJson({ type: "claude_usage", sessionId: sid, usage: await activeSession.getPlanUsage() });
+          } catch (e: any) {
+            sendJson({ type: "claude_usage", sessionId: sid, error: e?.message || String(e) });
+          }
+        } else {
+          sendJson({ type: "claude_usage", sessionId: sid, usage: null });
+        }
+        break;
+      }
+
       case "get_codex_status": {
         if (activeSession instanceof CodexSession) {
           try {

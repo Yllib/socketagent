@@ -15,6 +15,17 @@ export interface RecoveryRun {
  * interrupted tool may already have performed its external side effect. */
 export const RESTART_CONTINUATION_PROMPT = "[System: SocketAgent restarted while this session was working. Continue the interrupted task using the existing conversation and saved state. A tool or external action may have completed before shutdown without its result being recorded. Check the actual state before repeating commands, sends, purchases, or deployments. Do not repeat completed work. If an action's outcome cannot be checked safely, ask the user. Preserve the user's existing scope and approvals.]";
 
+/**
+ * True for SocketAgent's own restart continuation prompt.
+ *
+ * The model has to receive it, but the user did not type it, so it must not
+ * be recorded as one of their turns. The restart notification card already
+ * tells them the session resumed.
+ */
+export function isRestartContinuationPrompt(prompt: string): boolean {
+  return prompt.trim() === RESTART_CONTINUATION_PROMPT;
+}
+
 export class RestartRecoveryStore {
   private runs = new Map<string, RecoveryRun>();
   private completed: string[] = [];

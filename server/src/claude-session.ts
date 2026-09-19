@@ -61,6 +61,7 @@ import {
 } from "./rate-limit-events";
 import { recordRateLimitEvent } from "./rate-limit-cache";
 
+import { isRestartContinuationPrompt } from "./restart-recovery";
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
 export interface ClaudeExecutableInfo {
@@ -3929,8 +3930,11 @@ export class ClaudeSession {
       promptStream.push(this._createUserMessage(nativePrompt, promptSessionId, userMsgUuid));
       // Validate and persist resumed-session history before query() launches a
       // Claude subprocess. A corrupt crash snapshot must not strand an orphan.
-      let promptLogged = false;
-      if (this.sessionId || resumeSessionId) {
+      // SocketAgent's restart continuation reaches the model but is not one of
+      // the user's turns, so it is never written to history. Marking it logged
+      // also keeps the late-session_id fallback below from writing it.
+      let promptLogged = isRestartContinuationPrompt(prompt);
+      if (!promptLogged && (this.sessionId || resumeSessionId)) {
         const sid = this.sessionId || resumeSessionId || "";
         const historyEntry = appendHistory(sid, {
           role: "user",

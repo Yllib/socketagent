@@ -47,24 +47,46 @@ export function isBareSlashCommand(text: string): boolean {
   return /^\/[a-z0-9][\w:-]*$/i.test(text.trim());
 }
 
+/** Text that only ever comes from invoking a command, never from a person. */
+function isCommandOnlyText(text: string): boolean {
+  return isLocalCommandArtifact(text) || isBareSlashCommand(text);
+}
+
 /**
- * True when everything the SDK knows about a session is a local command.
+ * True when everything known about a session is a local command.
  *
- * The SDK's own index carries the command block through as `firstPrompt`, so
- * the file scanner is not the only way these reach the list. Filtered only
- * when every piece of evidence is a command artifact and there is at least
- * one: a session with a real summary, a user-set title, or nothing at all
- * stays listed. Callers must never apply this to a tracked session, since the
- * store is the authority on those.
+ * Two shapes reach the list. The transcript's own `<command-*>` block arrives
+ * as `firstPrompt`, and alongside it the SDK derives a title and summary that
+ * read as the bare command name, `/usage`. An earlier cut required every piece
+ * of evidence to be a `<command-*>` block, so the derived `/usage` title made
+ * the row look like real content and it stayed listed.
+ *
+ * The rule is therefore: at least one piece of evidence has to be an actual
+ * command block, and nothing may look like something a person wrote. A session
+ * that opened with `/compact` and then held a real conversation carries no
+ * command block in its index entry and keeps its place, as does one whose
+ * summary describes real work.
  */
-export function isLocalCommandOnlySession(info: {
-  firstPrompt?: string;
-  summary?: string;
-  customTitle?: string;
-}): boolean {
-  if (info.customTitle?.trim()) return false;
-  const evidence = [info.summary, info.firstPrompt]
+export function isLocalCommandOnlySession(
+  info: {
+    firstPrompt?: string;
+    summary?: string;
+    customTitle?: string;
+  },
+  tracked?: {
+    title?: string;
+    messagePreview?: string;
+  },
+): boolean {
+  const evidence = [
+    info.summary,
+    info.firstPrompt,
+    info.customTitle,
+    // The store's placeholder says nothing either way.
+    tracked?.title === "Untitled" ? undefined : tracked?.title,
+    tracked?.messagePreview,
+  ]
     .map((value) => (value ?? "").trim())
     .filter(Boolean);
-  return evidence.length > 0 && evidence.every(isLocalCommandArtifact);
+  return evidence.some(isLocalCommandArtifact) && evidence.every(isCommandOnlyText);
 }

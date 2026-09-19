@@ -85,3 +85,74 @@ test("a session is only filtered when that is all there is", () => {
   // Both halves point the same way.
   assert.ok(isLocalCommandOnlySession({ firstPrompt: cmd, summary: CAVEAT }));
 });
+
+// The row that survived the first cut, reproduced from the session card:
+// title "/usage", preview "<command-name>/usage</command-name>...". The SDK
+// derives a title and summary from the command name, and neither is a
+// <command-*> block, so a rule that demanded every field be one kept the row.
+test("a slash-command transcript with a derived /usage title is filtered", () => {
+  assert.ok(
+    isLocalCommandOnlySession({
+      firstPrompt: COMMAND,
+      summary: "/usage",
+      customTitle: "/usage",
+    }),
+  );
+  assert.ok(isLocalCommandOnlySession({ firstPrompt: COMMAND, summary: "/usage" }));
+  assert.ok(isLocalCommandOnlySession({ firstPrompt: COMMAND, customTitle: "/usage" }));
+  assert.ok(isLocalCommandOnlySession({ firstPrompt: CAVEAT, summary: "/usage" }));
+});
+
+// Running /usage from the app leaves the same throwaway transcript, and the
+// store's title and preview are derived from the same command text.
+test("a tracked slash-command session is filtered too", () => {
+  assert.ok(
+    isLocalCommandOnlySession(
+      { firstPrompt: COMMAND, summary: "/usage" },
+      { title: "/usage", messagePreview: COMMAND },
+    ),
+  );
+  assert.ok(
+    isLocalCommandOnlySession(
+      { firstPrompt: COMMAND },
+      { title: "Untitled", messagePreview: COMMAND },
+    ),
+  );
+});
+
+// The reason the rule needs a real command block and not just a slash command:
+// a conversation can open with one and then be entirely real.
+test("a session that opened with a slash command and continued is kept", () => {
+  assert.equal(isLocalCommandOnlySession({ firstPrompt: "/compact" }), false);
+  assert.equal(
+    isLocalCommandOnlySession({ firstPrompt: "/model", summary: "Refactor the parser" }),
+    false,
+  );
+});
+
+test("a real session is never filtered", () => {
+  assert.equal(
+    isLocalCommandOnlySession({
+      firstPrompt: "fix the login bug",
+      summary: "Debugging the login flow",
+    }),
+    false,
+  );
+  assert.equal(isLocalCommandOnlySession({}), false);
+  assert.equal(
+    isLocalCommandOnlySession({ firstPrompt: COMMAND, summary: "Reviewed the usage numbers" }),
+    false,
+  );
+});
+
+// A title someone typed is real content and outranks the command block.
+test("a user-set title keeps the session listed", () => {
+  assert.equal(
+    isLocalCommandOnlySession({ firstPrompt: COMMAND, customTitle: "Usage check" }),
+    false,
+  );
+  assert.equal(
+    isLocalCommandOnlySession({ firstPrompt: COMMAND }, { title: "Usage check" }),
+    false,
+  );
+});

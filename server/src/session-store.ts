@@ -3664,9 +3664,11 @@ async function listCodexNativeSessionsFromAppServer(useCache = true): Promise<Se
 
 function sdkSessionInfoToSessionInfo(info: SDKSessionInfo, tracked?: SessionInfo): SessionInfo | null {
   if (!info.sessionId) return null;
-  // Slash commands leave a transcript the SDK indexes like any other. Only
-  // untracked ones: a session in the store is one SocketAgent ran.
-  if (!tracked && isLocalCommandOnlySession(info)) return null;
+  // Slash commands leave a transcript the SDK indexes like any other. Tracked
+  // ones included: running /usage from the app leaves the same throwaway
+  // transcript as running it in a terminal, and the store's own title and
+  // preview join the evidence rather than overriding it.
+  if (isLocalCommandOnlySession(info, tracked)) return null;
   const cwd = tracked?.cwd || info.cwd;
   if (!cwd) return null;
 
@@ -4140,7 +4142,7 @@ function buildTrackedClaudeMap(): Map<string, SessionInfo> {
 function sdkSessionInfoToEntry(info: SDKSessionInfo, trackedMap: Map<string, SessionInfo>): SdkSessionEntry | null {
   if (!info.sessionId) return null;
   const tracked = trackedMap.get(info.sessionId);
-  if (!tracked && isLocalCommandOnlySession(info)) return null;
+  if (isLocalCommandOnlySession(info, tracked)) return null;
   const fallbackMs = Date.now();
   const lastModified = typeof info.lastModified === "number" ? info.lastModified : fallbackMs;
   const preview =

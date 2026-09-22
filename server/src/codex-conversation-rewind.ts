@@ -1,5 +1,5 @@
 import type { HistoryEntry } from "./protocol";
-import { archiveHistorySnapshot, getHistory, replaceHistory } from "./session-store";
+import { archiveHistorySnapshot, getConversationRewindBoundary, truncateConversationHistory } from "./session-store";
 
 const rewinding = new Set<string>();
 export function isCodexRewinding(sessionId: string): boolean { return rewinding.has(sessionId); }
@@ -35,12 +35,11 @@ export async function rewindCodexConversation(client: {
   try {
     const resumed = await client.resumeThread({ threadId: sessionId, cwd }) as any;
     const response = await client.readThread({ threadId: sessionId, includeTurns: true }) as any;
-    const history = getHistory(sessionId);
-    const index = history.findIndex(entry => entry.role === "user" && entry.uuid === uuid);
-    if (index < 0) throw new Error("The selected prompt is no longer in this conversation");
-    const target = codexRewindTarget(response?.thread, history[index]);
+    const boundary = getConversationRewindBoundary(sessionId, uuid);
+    const target = codexRewindTarget(response?.thread, boundary.entry);
+    let messagesRemoved = boundary.messagesRemoved;
     if (!dryRun) {
-      archiveHistorySnapshot(sessionId);
+      await archiveHistorySnapshot(sessionId);
       let turns: any[];
       if ((resumed?.thread?.historyMode || response?.thread?.historyMode) === "paginated") {
         await client.revertThread(sessionId, response.thread.turns[target.turnIndex].id);
@@ -66,9 +65,9 @@ export async function rewindCodexConversation(client: {
           || turns.some((turn: any, i: number) => turn.id !== response.thread.turns[i].id)) {
         throw new Error("Codex returned an unexpected rollback result. Reconnect to check the native conversation before trying again");
       }
-      replaceHistory(sessionId, history.slice(0, index));
+      messagesRemoved = truncateConversationHistory(sessionId, boundary.entry);
     }
-    return { numTurns: target.numTurns, messagesRemoved: history.length - index, rewindIncludesTarget: true };
+    return { numTurns: target.numTurns, messagesRemoved, rewindIncludesTarget: true };
   } finally {
     rewinding.delete(sessionId);
   }

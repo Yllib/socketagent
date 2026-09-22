@@ -1658,6 +1658,25 @@ export function replaceHistory(sessionId: string, entries: HistoryEntry[]): void
   writeHistoryEntries(sessionId, entries);
 }
 
+export function getConversationRewindBoundary(sessionId: string, uuid: string) {
+  ensureHistoryDatabaseSession(sessionId);
+  const database = historyDatabase();
+  const entry = database.getUserByUuid(sessionId, uuid);
+  if (!entry) throw new Error("The selected prompt is no longer in this conversation");
+  return { entry, messagesRemoved: database.countFrom(sessionId, entry.sessionSeq!) };
+}
+
+export function truncateConversationHistory(sessionId: string, entry: HistoryEntry): number {
+  const database = historyDatabase();
+  const nextSeq = transcriptPositionStates.get(sessionId)?.nextSeq ?? database.maxSessionSeq(sessionId) + 1;
+  const removed = database.truncateFrom(sessionId, entry.sessionSeq!, entry.entryId!);
+  // Discard positions for removed streams without loading the retained transcript.
+  transcriptPositionStates.set(sessionId, { nextSeq, byKey: new Map(), byEntryId: new Map() });
+  historyCache.delete(sessionId);
+  updateSessionHistoryMetadataFromDatabase(sessionId);
+  return removed;
+}
+
 export function removeHtmlPlanHistoryEntries(sessionId: string, planId: string): void {
   if (!sessionId || !planId) return;
   const entries = readHistoryEntries(sessionId);
@@ -3161,11 +3180,19 @@ function ensureArchiveDir(): void {
  * Archived files get a timestamp suffix so multiple clears don't overwrite.
  */
 /** Keep rewind history recoverable and available to approved global searches. */
-export function archiveHistorySnapshot(sessionId: string): void {
+export async function archiveHistorySnapshot(sessionId: string): Promise<void> {
   ensureArchiveDir();
+  ensureHistoryDatabaseSession(sessionId);
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const prefix = path.join(ARCHIVE_DIR, `${sessionId}_${ts}`);
-  fs.writeFileSync(`${prefix}_history.json`, JSON.stringify(readHistoryEntries(sessionId)), { mode: 0o600 });
+  const temporary = `${prefix}_history.json.tmp`;
+  try {
+    await historyDatabase().exportSessionJson(sessionId, temporary);
+    await fs.promises.rename(temporary, `${prefix}_history.json`);
+  } catch (error) {
+    await fs.promises.rm(temporary, { force: true });
+    throw error;
+  }
   const session = getSession(sessionId);
   if (session) fs.writeFileSync(`${prefix}_meta.json`, JSON.stringify({ ...session, clearedAt: new Date().toISOString() }), { mode: 0o600 });
 }

@@ -2966,6 +2966,7 @@ function isContextClearedSession(sessionInfo: SessionInfo | undefined, sessionId
 
 async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> {
   if (sessionInfo.backend !== "codex") return [];
+  if (isCodexRewinding(sessionInfo.id)) return [];
   // App-server events are authoritative while SocketAgent owns a live turn.
   // A reconnect-triggered rollout import can otherwise append the completed
   // assistant item just before the live item persists the same response.
@@ -2989,6 +2990,7 @@ async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> 
 
 function syncCodexRolloutHistory(sessionInfo: SessionInfo): any[] {
   if (sessionInfo.backend !== "codex") return [];
+  if (isCodexRewinding(sessionInfo.id)) return [];
   if (hasBusyLiveSession(sessionInfo.id)) return [];
   const rolloutHistory = readCodexRolloutHistory(sessionInfo.id);
   if (rolloutHistory.length === 0) return [];

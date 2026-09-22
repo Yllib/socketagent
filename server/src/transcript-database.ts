@@ -558,6 +558,74 @@ export class TranscriptDatabase {
     `).get(sessionId, uuid);
   }
 
+  getUserByUuid(sessionId: string, uuid: string): HistoryEntry | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM transcript_entries WHERE session_id = ? AND role = 'user'
+        AND json_extract(entry_json, '$.uuid') = ? LIMIT 1
+    `).get(sessionId, uuid);
+    return row ? parseEntry(row as unknown as StoredTranscriptRow) : undefined;
+  }
+
+  countFrom(sessionId: string, sessionSeq: number): number {
+    return Number((this.db.prepare(`
+      SELECT COUNT(*) AS count FROM transcript_entries
+      WHERE session_id = ? AND session_seq >= ?
+    `).get(sessionId, sessionSeq) as { count: number }).count);
+  }
+
+  /** Stream a consistent backup without hydrating every entry or blocking writers. */
+  async exportSessionJson(sessionId: string, filePath: string): Promise<void> {
+    const reader = new DatabaseSync(this.filePath, { readOnly: true });
+    let file: Awaited<ReturnType<typeof fs.promises.open>> | undefined;
+    try {
+      reader.exec("BEGIN");
+      reader.prepare("SELECT 1 FROM transcript_sessions WHERE session_id = ?").get(sessionId);
+      file = await fs.promises.open(filePath, "wx", 0o600);
+      const rows = reader.prepare(`SELECT entry_json FROM transcript_entries
+        WHERE session_id = ? ORDER BY session_seq`).iterate(sessionId);
+      let batch = "[";
+      let first = true;
+      for (const row of rows) {
+        batch += (first ? "" : ",") + String(row.entry_json);
+        first = false;
+        if (batch.length >= 1024 * 1024) {
+          await file.writeFile(batch);
+          batch = "";
+        }
+      }
+      await file.writeFile(batch + "]");
+      await file.sync();
+    } finally {
+      reader.close();
+      await file?.close();
+    }
+  }
+
+  /** Delete only the discarded suffix; retained rows and their search index stay intact. */
+  truncateFrom(sessionId: string, sessionSeq: number, entryId: string): number {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const boundary = this.getBySessionSeq(sessionId, sessionSeq);
+      if (!boundary || boundary.entryId !== entryId) throw new Error("Rewind boundary changed");
+      if (this.ftsEnabled) {
+        this.db.prepare(`DELETE FROM transcript_fts WHERE rowid IN (
+          SELECT rowid FROM transcript_entries WHERE session_id = ? AND session_seq >= ?
+        )`).run(sessionId, sessionSeq);
+      } else {
+        this.db.prepare("DELETE FROM transcript_search WHERE session_id = ? AND session_seq >= ?")
+          .run(sessionId, sessionSeq);
+      }
+      const deleted = this.db.prepare("DELETE FROM transcript_entries WHERE session_id = ? AND session_seq >= ?")
+        .run(sessionId, sessionSeq);
+      this.recomputeSummary(sessionId);
+      this.db.exec("COMMIT");
+      return Number(deleted.changes);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   getByToolUseId(
     sessionId: string,
     role: string,

@@ -43,10 +43,11 @@ test('rewind archives old history, commits local truncation after native success
 
 test('failed native rollback preserves local history and rejects simultaneous requests',async()=>{
  const sid='rewind-failure';appendHistory(sid,{role:'user',uuid:'u1',content:'keep me',timestamp:'2026-09-22T10:00:00Z'});
- let reject;
- const client={resumeThread:async()=>{},readThread:async()=>({thread:{turns:[turn('1','u1','keep me')]}}),rollbackThread:()=>new Promise((_,r)=>reject=r)};
+ let reject, reachedRollback;
+ const ready = new Promise(resolve => reachedRollback = resolve);
+ const client={resumeThread:async()=>{},readThread:async()=>({thread:{turns:[turn('1','u1','keep me')]}}),rollbackThread:()=>new Promise((_,r)=>{reject=r;reachedRollback();})};
  const pending=rewindCodexConversation(client,sid,'/tmp','u1');
- await new Promise(r=>setImmediate(r));
+ await ready;
  await assert.rejects(rewindCodexConversation(client,sid,'/tmp','u1'),/already/);
  reject(new Error('RPC unavailable'));
  await assert.rejects(pending,/RPC unavailable/);
@@ -90,4 +91,22 @@ test('paginated verification failure retains SocketAgent history', async () => {
  listThreadTurns:async()=>({data:[{id:'unexpected'}],nextCursor:null})};
  await assert.rejects(rewindCodexConversation(client,sid,'/tmp','u1'),/unexpected rollback result/);
  assert.equal(getHistory(sid).length,1);assert.equal(isCodexRewinding(sid),false);
+});
+
+test('rewind avoids full transcript hydration and invalidates cached positions', async () => {
+ const {TranscriptDatabase}=require('../dist/transcript-database');
+ const sid='rewind-indexed';
+ const old=appendHistory(sid,{role:'user',uuid:'u1',content:'keep',timestamp:'2026-09-22T10:00:00Z'});
+ const removed=appendHistory(sid,{role:'user',uuid:'u2',content:'drop',timestamp:'2026-09-22T10:00:01Z'});
+ getHistory(sid); // Populate the pre-rewind cache.
+ const all=TranscriptDatabase.prototype.getAll;
+ TranscriptDatabase.prototype.getAll=()=>{throw new Error('Full history hydration during rewind');};
+ try {
+  await rewindCodexConversation({resumeThread:async()=>{},readThread:async()=>({thread:{turns:[turn('1','u1','keep'),turn('2','u2','drop')]}}),rollbackThread:async()=>({thread:{turns:[turn('1','u1','keep')]}})},sid,'/tmp','u2');
+ } finally {TranscriptDatabase.prototype.getAll=all;}
+ const retained=getHistory(sid);
+ assert.equal(retained.length,1);assert.equal(retained[0].entryId,old.entryId);assert.equal(retained[0].sessionSeq,old.sessionSeq);
+ const appended=appendHistory(sid,{role:'user',uuid:'u2',content:'new direction',timestamp:'2026-09-22T10:00:02Z'});
+ assert.ok(appended.sessionSeq>removed.sessionSeq);
+ assert.equal(getHistory(sid).length,2);
 });

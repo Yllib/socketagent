@@ -24,6 +24,21 @@ its live history only after Codex returns the expected retained turns. The app
 replaces its visible history and invalidates its disk cache. Native rollout
 rollback markers are honored so reconnect cannot resurrect discarded turns.
 
+Rewind finds the selected prompt through the UUID index. The backup streams
+stored JSON through a separate read-only SQLite snapshot, yielding between
+chunks so other sessions can keep writing. After native verification, one
+transaction deletes only the discarded suffix and its search entries. Retained
+rows, identities, and search documents are not rebuilt. History caches and
+stream positions are invalidated, and native reimports wait for rewind to end.
+
+A full native rewind on an isolated Wakespeed copy with 143,149 transcript
+entries took 4,110 ms: 2,287 ms for the backup and 70 ms for suffix deletion.
+That test removed one native turn and 11 local entries. The earlier live
+18-turn rewind took 69,773 ms, including 50,855 ms rebuilding retained history.
+These are separate runs, not an identical-boundary benchmark. Regression tests
+forbid writes to retained rows, cover FTS and fallback search, verify concurrent
+snapshot writes, and reject full transcript hydration in the rewind path.
+
 Codex CLI 0.155.1's generated schema still exposes `thread/rollback`, but marks
 it deprecated. Official documentation also warns it will be removed:
 https://learn.chatgpt.com/docs/app-server#roll-back-recent-turns

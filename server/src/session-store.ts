@@ -2116,6 +2116,89 @@ export function rememberSearchHistory(
   return historyDatabase().search(sessionId, options);
 }
 
+// Cleared transcripts use a separate index so they never reappear in live history.
+let archiveSearchDatabase: TranscriptDatabase | undefined;
+function archivedRememberDatabase(): TranscriptDatabase {
+  return archiveSearchDatabase ??= new TranscriptDatabase(path.join(STORE_DIR, "remember-archives.sqlite"));
+}
+
+async function syncRememberArchiveIndex(): Promise<TranscriptDatabase> {
+  const database = archivedRememberDatabase();
+  const names = fs.existsSync(ARCHIVE_DIR) ? fs.readdirSync(ARCHIVE_DIR) : [];
+  const present = new Set<string>();
+  for (const name of names) {
+    const parsed = parseArchiveFilename(name);
+    if (parsed?.kind !== "history") continue;
+    const file = path.join(ARCHIVE_DIR, name);
+    if (!fs.lstatSync(file).isFile()) continue;
+    present.add(name);
+    const fingerprint = legacyHistoryFingerprint(file);
+    if (database.legacyMatches(name, fingerprint)) continue;
+    try {
+      const entries = repairTranscriptIdentityCollisions(parseHistorySnapshot(file)).entries;
+      database.replace(name, entries.map(entry => ({ entry: redactSecretsDeep(entry), positionKey: null })), fingerprint);
+    } catch {
+      // A corrupt archive must not leave stale indexed content searchable.
+      database.deleteSession(name);
+    }
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  for (const id of database.sessionIds()) if (!present.has(id)) database.deleteSession(id);
+  return database;
+}
+
+export async function rememberSearchAllHistory(options: RememberSearchOptions) {
+  // Import remaining legacy SocketAgent snapshots only after user approval.
+  const legacyIds = new Set(readStore().map(session => session.id));
+  if (fs.existsSync(HISTORY_DIR)) for (const name of fs.readdirSync(HISTORY_DIR)) {
+    const match = /^([a-zA-Z0-9_-]+)\.json(?:\.bak)?$/.exec(name);
+    if (match) legacyIds.add(match[1]);
+  }
+  for (const id of legacyIds) {
+    ensureHistoryDatabaseSession(id);
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  const archives = await syncRememberArchiveIndex();
+  const offset = Math.max(0, Math.min(1000, Math.floor(options.offset ?? 0)));
+  const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 10)));
+  const query = { ...options, offset: 0, limit: offset + limit };
+  const sessions = new Map(readStore().map(session => [session.id, session]));
+  const hits = [
+    ...historyDatabase().searchAll(query).map(hit => ({ ...hit,
+      sourceId: `session:${hit.sessionId}`, archived: false,
+      title: sessions.get(hit.sessionId)?.title || "Untitled session" })),
+    ...archives.searchAll(query).map(hit => ({ ...hit,
+      sourceId: `archive:${hit.sessionId}`, archived: true,
+      sessionId: parseArchiveFilename(hit.sessionId)!.sid,
+      title: "Archived transcript" })),
+  ].sort((a, b) => a.rank - b.rank || (b.timestamp || "").localeCompare(a.timestamp || "") || a.sourceId.localeCompare(b.sourceId) || b.sessionSeq - a.sessionSeq);
+  return hits.slice(offset, offset + limit);
+}
+
+export async function rememberReadGlobalHistory(sourceId: string, selector: {
+  entryId?: string; sessionSeq?: number; before?: number; after?: number;
+}): Promise<HistoryEntry[]> {
+  let database: TranscriptDatabase;
+  let id: string;
+  if (sourceId.startsWith("archive:")) {
+    id = sourceId.slice(8);
+    if (path.basename(id) !== id || id.includes("\\") || parseArchiveFilename(id)?.kind !== "history") {
+      throw new Error("Invalid archive source_id");
+    }
+    database = await syncRememberArchiveIndex();
+  } else if (sourceId.startsWith("session:")) {
+    id = sourceId.slice(8);
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error("Invalid session source_id");
+    ensureHistoryDatabaseSession(id);
+    database = historyDatabase();
+  } else throw new Error("Use source_id returned by search_all");
+  const entries = selector.before !== undefined || selector.after !== undefined
+    ? database.context(id, selector.sessionSeq!, selector.before ?? 0, selector.after ?? 0)
+    : [selector.entryId ? database.getByEntryId(id, selector.entryId)
+      : database.getBySessionSeq(id, selector.sessionSeq!)].filter((entry): entry is HistoryEntry => !!entry);
+  return hydrateHistoryEntries(entries).map(entry => redactSecretsDeep(entry));
+}
+
 /** Retrieve one durable transcript entry by stable sequence or entry ID. */
 export function rememberGetHistoryEntry(
   sessionId: string,
@@ -3077,6 +3160,16 @@ function ensureArchiveDir(): void {
  * The session metadata (sessions.json) is preserved so it still shows in the list.
  * Archived files get a timestamp suffix so multiple clears don't overwrite.
  */
+/** Keep rewind history recoverable and available to approved global searches. */
+export function archiveHistorySnapshot(sessionId: string): void {
+  ensureArchiveDir();
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const prefix = path.join(ARCHIVE_DIR, `${sessionId}_${ts}`);
+  fs.writeFileSync(`${prefix}_history.json`, JSON.stringify(readHistoryEntries(sessionId)), { mode: 0o600 });
+  const session = getSession(sessionId);
+  if (session) fs.writeFileSync(`${prefix}_meta.json`, JSON.stringify({ ...session, clearedAt: new Date().toISOString() }), { mode: 0o600 });
+}
+
 export function clearSessionContext(sessionId: string, cwd: string): void {
   flushSdkEventQueue(sessionId);
   ensureArchiveDir();

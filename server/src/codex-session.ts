@@ -1,3 +1,5 @@
+import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
+import { requestTranscriptAccess } from "./transcript-access-approval";
 /**
  * Codex backend mirroring claude-session.ts. Drives the OpenAI Codex app-server
  * protocol under the user's ChatGPT subscription (auth_mode: "chatgpt" in
@@ -581,6 +583,7 @@ export class CodexSession {
   private lastSubagentSnapshotFingerprint: string | null = null;
   private _isCompacting = false;
   private _manualCompactionPending = false;
+  private _rewindPending = false;
   private _compactStartedAt: string | null = null;
   private _compactBoundaryEmitted = false;
   private _compactBoundaryTrigger: "auto" | "manual" = "auto";
@@ -704,6 +707,7 @@ export class CodexSession {
       || this.pendingAppServerTurnCompletion !== null
       || this._isCompacting
       || this._manualCompactionPending
+      || this._rewindPending
       || this.appServerTurnSettler !== null
       || this._pendingUserPrompt !== null
       || this._queuedPrompts.length > 0
@@ -1435,6 +1439,27 @@ export class CodexSession {
       this._compactStartedAt = null;
       this.send({ type: "compacting", active: false, sessionId: threadId } as any);
       await this.releaseAppServerThreadWriter();
+      this.scheduleAppServerIdleStop();
+    }
+  }
+
+  async rewindConversationToMessage(uuid: string, dryRun = false, threadId = this.threadId || this.sessionId || this._resumeSessionId) {
+    if (!threadId) throw new Error("No Codex thread selected");
+    if (this.isBusy) throw new Error("Stop running work before rewinding this conversation");
+    this._rewindPending = true;
+    try {
+      await this.ensureAppServer();
+      this.threadId = threadId;
+      const result = await rewindCodexConversation(this.appServer!, threadId, this.cwd, uuid, dryRun);
+      if (!dryRun) {
+        this.codexSubagents.clear();
+        this.sendSubagentSnapshot();
+        this.activeAppServerTurnId = null;
+      }
+      return result;
+    } finally {
+      await this.releaseAppServerThreadWriter();
+      this._rewindPending = false;
       this.scheduleAppServerIdleStop();
     }
   }
@@ -2314,6 +2339,7 @@ export class CodexSession {
   }
 
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
+    if (this._rewindPending || isCodexRewinding(resumeSessionId || this.sessionId || this._resumeSessionId || "")) throw new Error("Wait for conversation rewind to finish");
     this.onBeforeRun?.(resumeSessionId);
     if (playReviewModeEnabled()) {
       return this.runPlayReviewQuery(prompt, resumeSessionId);
@@ -3291,6 +3317,7 @@ export class CodexSession {
       },
       reportSubagentAssignment: (agentPath, prompt) =>
         this.reportCodexSubagentAssignment(agentPath, prompt),
+      requestTranscriptAccess: (detail) => this._abortRequested ? Promise.resolve(false) : requestTranscriptAccess(this.getSessionContext(), detail),
       requestPluginAuthorization: async (pluginName) => {
         const plugin = this._plugins.find((candidate) => candidate.name === pluginName);
         if (!plugin?.requestAuthorization) {
@@ -3934,7 +3961,7 @@ export class CodexSession {
           }
           return;
         }
-        if (this._manualCompactionPending) {
+        if (this._manualCompactionPending || this._rewindPending) {
           this.activeAppServerTurnId = p?.turn?.id || null;
           this.onActivity?.();
           return;
@@ -4622,7 +4649,7 @@ export class CodexSession {
           return;
         }
         if (this.activeAppServerTurnId && p?.turn?.id && p.turn.id !== this.activeAppServerTurnId) return;
-        if (this._manualCompactionPending) { this.activeAppServerTurnId = null; return; }
+        if (this._manualCompactionPending || this._rewindPending) { this.activeAppServerTurnId = null; return; }
         this.requeuePendingAppServerSteers("turn completed before steered userMessage was emitted");
         this.activeAppServerTurnId = null;
         // serverRequest/resolved owns per-request cleanup. A root turn ending
@@ -5881,6 +5908,10 @@ export async function compactCodexAppServerThread(threadId: string, cwd: string)
     await client.resumeThread({ threadId, cwd });
     await client.compactThreadAndWait(threadId);
   });
+}
+
+export async function rewindCodexAppServerToMessage(threadId: string, cwd: string, uuid: string, dryRun = false) {
+  return withStandaloneAppServerClient(cwd, client => rewindCodexConversation(client, threadId, cwd, uuid, dryRun));
 }
 
 export async function rollbackCodexAppServerThread(threadId: string, cwd: string, numTurns: number): Promise<void> {

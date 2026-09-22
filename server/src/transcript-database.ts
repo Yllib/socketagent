@@ -40,6 +40,7 @@ export interface TranscriptSessionRemapOptions {
 }
 
 export interface TranscriptSearchHit {
+  sessionId: string;
   sessionSeq: number;
   entryId: string;
   revision: number;
@@ -1115,12 +1116,25 @@ export class TranscriptDatabase {
     }
   }
 
+  sessionIds(): string[] {
+    return (this.db.prepare("SELECT session_id FROM transcript_sessions").all() as unknown as Array<{ session_id: string }>).map(row => row.session_id);
+  }
+
+  searchAll(options: TranscriptSearchOptions): TranscriptSearchHit[] {
+    return this.searchEntries(undefined, options);
+  }
+
   search(sessionId: string, options: TranscriptSearchOptions): TranscriptSearchHit[] {
-    const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 10)));
+    return this.searchEntries(sessionId, options);
+  }
+
+  private searchEntries(sessionId: string | undefined, options: TranscriptSearchOptions): TranscriptSearchHit[] {
+    const limit = Math.max(1, Math.min(sessionId === undefined ? 1050 : 50, Math.floor(options.limit ?? 10)));
     const offset = Math.max(0, Math.floor(options.offset ?? 0));
     if (!this.ftsEnabled) return this.searchWithoutFts(sessionId, options, limit, offset);
-    const where = ["transcript_fts MATCH ?", "f.session_id = ?"];
-    const params: Array<string | number> = [safeFtsQuery(options.query), sessionId];
+    const where = ["transcript_fts MATCH ?"];
+    const params: Array<string | number> = [safeFtsQuery(options.query)];
+    if (sessionId !== undefined) { where.push("f.session_id = ?"); params.push(sessionId); }
     if (options.roles?.length) {
       where.push(`f.role IN (${options.roles.map(() => "?").join(",")})`);
       params.push(...options.roles);
@@ -1139,7 +1153,7 @@ export class TranscriptDatabase {
     }
     params.push(limit, offset);
     const rows = this.db.prepare(`
-      SELECT e.session_seq, e.entry_id, e.revision, f.role, e.timestamp,
+      SELECT e.session_id, e.session_seq, e.entry_id, e.revision, f.role, e.timestamp,
         e.tool_name,
         snippet(transcript_fts, 5, '[', ']', '…', 24) AS preview,
         bm25(transcript_fts) AS rank
@@ -1147,9 +1161,10 @@ export class TranscriptDatabase {
       JOIN transcript_entries AS e
         ON e.session_id = f.session_id AND e.entry_id = f.entry_id
       WHERE ${where.join(" AND ")}
-      ORDER BY rank, e.session_seq DESC
+      ORDER BY rank, e.timestamp DESC, e.session_id, e.session_seq DESC
       LIMIT ? OFFSET ?
     `).all(...params) as unknown as Array<{
+      session_id: string;
       session_seq: number;
       entry_id: string;
       revision: number;
@@ -1160,6 +1175,7 @@ export class TranscriptDatabase {
       rank: number;
     }>;
     return rows.map((row) => ({
+      sessionId: row.session_id,
       sessionSeq: Number(row.session_seq),
       entryId: row.entry_id,
       revision: Number(row.revision),
@@ -1172,14 +1188,15 @@ export class TranscriptDatabase {
   }
 
   private searchWithoutFts(
-    sessionId: string,
+    sessionId: string | undefined,
     options: TranscriptSearchOptions,
     limit: number,
     offset: number,
   ): TranscriptSearchHit[] {
     const tokens = searchTokens(options.query);
-    const where = ["s.session_id = ?", ...tokens.map(() => "instr(lower(s.body), lower(?)) > 0")];
-    const params: Array<string | number> = [sessionId, ...tokens];
+    const where = tokens.map(() => "instr(lower(s.body), lower(?)) > 0");
+    const params: Array<string | number> = [...tokens];
+    if (sessionId !== undefined) { where.push("s.session_id = ?"); params.push(sessionId); }
     if (options.roles?.length) {
       where.push(`s.role IN (${options.roles.map(() => "?").join(",")})`);
       params.push(...options.roles);
@@ -1198,15 +1215,16 @@ export class TranscriptDatabase {
     }
     params.push(limit, offset);
     const rows = this.db.prepare(`
-      SELECT e.session_seq, e.entry_id, e.revision, s.role, e.timestamp,
+      SELECT e.session_id, e.session_seq, e.entry_id, e.revision, s.role, e.timestamp,
         e.tool_name, substr(s.body, 1, 240) AS preview
       FROM transcript_search AS s
       JOIN transcript_entries AS e
         ON e.session_id = s.session_id AND e.entry_id = s.entry_id
       WHERE ${where.join(" AND ")}
-      ORDER BY e.session_seq DESC
+      ORDER BY e.timestamp DESC, e.session_id, e.session_seq DESC
       LIMIT ? OFFSET ?
     `).all(...params) as unknown as Array<{
+      session_id: string;
       session_seq: number;
       entry_id: string;
       revision: number;
@@ -1216,6 +1234,7 @@ export class TranscriptDatabase {
       preview: string;
     }>;
     return rows.map((row) => ({
+      sessionId: row.session_id,
       sessionSeq: Number(row.session_seq),
       entryId: row.entry_id,
       revision: Number(row.revision),

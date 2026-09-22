@@ -1,3 +1,4 @@
+import { requestTranscriptAccess } from "./transcript-access-approval";
 import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type Settings } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { ClaudeStreamIdentity } from "./claude-stream-identity";
@@ -3387,6 +3388,7 @@ export class ClaudeSession {
         isRunning: () => this._isRunning,
         injectMessage: (text, priority) => this.injectMessage(text, priority),
         onMonitorOutput: (text) => this.onMonitorOutput?.(text),
+        requestTranscriptAccess: (detail) => this._stopRequested ? Promise.resolve(false) : requestTranscriptAccess(this.getSessionContext(), detail, this.abortController?.signal),
         manageAgentSession: (args) => {
           if (!this.onAgentSessionRequest) {
             throw new Error("AgentSession runtime is not attached");
@@ -3627,7 +3629,8 @@ export class ClaudeSession {
             "Remember",
             REMEMBER_TOOL_DESCRIPTION,
             {
-              action: z.enum(["search", "list", "get", "context", "runs"]),
+              action: z.enum(["search", "search_all", "list", "get", "context", "runs"]),
+              source_id: z.string().optional().describe("For get/context, source_id returned by search_all. Each global search or read requires approval in the app."),
               query: z.string().optional().describe("Keyword or phrase for search"),
               session_seq: z.number().int().positive().optional().describe("Stable sequence returned by search/runs; required for context or usable for get"),
               entry_id: z.string().optional().describe("Stable entry ID returned by search; alternative selector for get"),

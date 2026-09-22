@@ -30,6 +30,8 @@ import {
   rememberListHistory,
   rememberRecentRuns,
   rememberSearchHistory,
+  rememberSearchAllHistory,
+  rememberReadGlobalHistory,
   removeHtmlPlanHistoryEntries,
   saveTodos,
 } from "./session-store";
@@ -81,6 +83,7 @@ export interface AppToolContext {
   onMonitorOutput?(text: string): void;
   manageAgentSession?: AgentSessionToolExecutor;
   reportSubagentAssignment?(agentPath: string, prompt: string): boolean;
+  requestTranscriptAccess?(detail: string): Promise<boolean>;
   requestPluginAuthorization?(pluginName: string): Promise<boolean>;
 }
 
@@ -477,7 +480,8 @@ export interface WorkReviewArgs {
 }
 
 export interface RememberArgs {
-  action: "search" | "list" | "get" | "context" | "runs";
+  action: "search" | "search_all" | "list" | "get" | "context" | "runs";
+  source_id?: string;
   query?: string;
   session_seq?: number;
   entry_id?: string;
@@ -1570,6 +1574,38 @@ export async function handleRememberTool(
   }
   const maxChars = Math.max(2_000, Math.min(200_000, Math.floor(args.max_chars ?? 60_000)));
   try {
+    const global = args.action === "search_all" || !!args.source_id;
+    if (global) {
+      if (args.source_id && args.action !== "get" && args.action !== "context") throw new Error("source_id is only supported for get/context");
+      if (args.action === "search_all" && !args.query?.trim()) throw new Error("query is required for search_all");
+      if (args.action === "get" && !args.entry_id && !(Number.isSafeInteger(args.session_seq) && args.session_seq! > 0)) throw new Error("entry_id or session_seq is required for get");
+      if (args.action === "context" && !(Number.isSafeInteger(args.session_seq) && args.session_seq! > 0)) throw new Error("session_seq is required for context");
+      if ((args.offset ?? 0) > 1000) throw new Error("Narrow the search before paging beyond 1000 matches");
+      const detail = args.action === "search_all"
+        ? `Search: ${args.query}\nRoles: ${(args.roles?.length ? args.roles : ["user", "assistant"]).join(", ")}`
+        : `Read ${args.action === "context" ? "surrounding messages" : "a message"} from ${args.source_id}`;
+      if (!ctx.requestTranscriptAccess || !await ctx.requestTranscriptAccess(detail)) {
+        return { isError: true, content: [{ type: "text", text: "Historical transcript access was not approved. No global transcript data was read. Do not bypass this decision through files or other tools." }] };
+      }
+      if (ctx.getSessionId() !== sessionId) throw new Error("Session changed while awaiting approval; request access again");
+      if (args.action === "search_all") {
+        const hits = await rememberSearchAllHistory({ query: args.query!.trim(),
+          roles: args.roles?.length ? args.roles : ["user", "assistant"],
+          toolName: args.tool_name, since: args.since, until: args.until,
+          limit: args.limit, offset: args.offset });
+        return rememberResult({ action: "search_all", query: args.query,
+          result_count: hits.length, next_offset: (args.offset ?? 0) + hits.length,
+          results: hits.map(hit => ({ source_id: hit.sourceId, session_id: hit.sessionId,
+            title: hit.title, archived: hit.archived, session_seq: hit.sessionSeq,
+            entry_id: hit.entryId, timestamp: hit.timestamp, role: hit.role, preview: hit.preview })) }, maxChars);
+      }
+      const entries = await rememberReadGlobalHistory(args.source_id!, {
+        entryId: args.entry_id, sessionSeq: args.session_seq,
+        ...(args.action === "context" ? { before: Math.max(0, Math.min(20, args.before ?? 3)), after: Math.max(0, Math.min(20, args.after ?? 3)) } : {}),
+      });
+      return rememberResult({ action: args.action, source_id: args.source_id,
+        entries: entries.map(entry => rememberEntryView(entry, Math.max(500, Math.floor(maxChars / Math.max(2, entries.length * 2))))) }, maxChars);
+    }
     switch (args.action) {
       case "search": {
         const query = String(args.query || "").trim();

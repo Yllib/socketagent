@@ -18,6 +18,7 @@ function secureSecretFileMode(filePath: string): void {
 secureSecretFileMode(ENV_PATH);
 dotenv.config({ path: ENV_PATH });
 
+import { isCodexRewinding } from "./codex-conversation-rewind";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as http from "http";
@@ -29,7 +30,7 @@ import { flushSessionStore, flushSdkEventQueue } from "./session-store";
 import { execFile, execFileSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
-import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
+import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedUserMessage, rememberListHistory, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { mergeSessionListBase, createNativeRefreshCoordinator } from "./session-list-snapshot";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
@@ -1641,6 +1642,7 @@ function notifySessionActivity(): void {
 function attachSessionLifecycleCallbacks(session: Session): void {
   session.onBeforeRun = resumeSessionId => {
     if (restartPreparing || shuttingDown) throw new Error("Server is preparing to restart. Retry after reconnecting.");
+    if (isCodexRewinding(resumeSessionId || sessionInstanceId(session) || "")) throw new Error("Wait for conversation rewind to finish");
     trackRecoverableRun(session, resumeSessionId);
   };
   syncLiveSessionInstance(session);
@@ -4916,6 +4918,13 @@ function createConnectionHandler(
           }
         }
         if (answerHandled) break;
+        // Expired transcript approvals never become prompts or authorize a later request.
+        if (qId.startsWith("transcript_access_")) {
+          const resolved = answerSession?.resolveQuestion(qId, msg.answers) ?? false;
+          sendJson({ type: "question_answered", questionId: qId, sessionId: answerSid,
+            answers: resolved ? msg.answers : {} });
+          break;
+        }
         if (answerSid && sessionAutomationLocks.isLocked(answerSid)) {
           sendJson({
             type: "question_answered",
@@ -7685,7 +7694,7 @@ function createConnectionHandler(
         const uuid = (msg as any).userMessageUuid as string;
         const dryRun = (msg as any).dryRun === true;
         const shouldRewindFiles = (msg as any).rewindFiles !== false; // default true
-        const sessionId = activeSession?.getSessionId();
+        const sessionId = (msg as any).sessionId || activeSession?.getSessionId() || (activeSession as any)?._resumeSessionId;
 
         if (!sessionId) {
           sendJson({ type: "rewind_conversation_result", sessionId: "", success: false, userMessageUuid: uuid, error: "No active session" });
@@ -7696,9 +7705,28 @@ function createConnectionHandler(
           break;
         }
         const rewindSessionInfo = getSession(sessionId);
-        if (rewindSessionInfo?.backend === "codex" || activeSession instanceof CodexSession) {
-          const detail = "Codex App Server currently exposes turn-count rollback, but not a safe message-level conversation rewind.";
-          sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: detail });
+        const target = activeSessions.get(sessionId)
+          || ((activeSession?.getSessionId() || (activeSession as any)?._resumeSessionId) === sessionId ? activeSession : undefined);
+        if (rewindSessionInfo?.backend === "codex" || target instanceof CodexSession) {
+          try {
+            if (shouldRewindFiles) throw new Error("Codex conversation rewind does not restore files");
+            if (target && sessionIsBusy(target)) throw new Error("Stop running work before rewinding this conversation");
+            const result = target instanceof CodexSession
+              ? await target.rewindConversationToMessage(uuid, dryRun, sessionId)
+              : await rewindCodexAppServerToMessage(sessionId, rewindSessionInfo?.cwd || getDefaultCwd(), uuid, dryRun);
+            const resultMessage = { type: "rewind_conversation_result", sessionId, success: true,
+              userMessageUuid: uuid, dryRun, ...result };
+            if (dryRun) sendJson(resultMessage);
+            if (!dryRun) {
+              const page = getHistoryPageToLastPrompt(sessionId);
+              const historyMessage = { type: "session_history", historyKind: "rewind", sessionId, messages: page.entries, total: page.total, offset: page.offset };
+              broadcastHeadlessSessionMessage(JSON.stringify(resultMessage), sessionId);
+              broadcastHeadlessSessionMessage(JSON.stringify(historyMessage), sessionId);
+              broadcastSessionList();
+            }
+          } catch (error: any) {
+            sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, dryRun, error: error.message || String(error) });
+          }
           break;
         }
 

@@ -426,7 +426,8 @@ function createServer(context: AppToolContext): McpServer {
       title: "Remember",
       description: REMEMBER_TOOL_DESCRIPTION,
       inputSchema: {
-        action: z.enum(["search", "list", "get", "context", "runs"]),
+        action: z.enum(["search", "search_all", "list", "get", "context", "runs"]),
+        source_id: z.string().optional().describe("For get/context, source_id returned by search_all. Each global search or read requires approval in the app."),
         query: z.string().optional().describe("Keyword or phrase for search"),
         session_seq: z.number().int().positive().optional().describe("Stable sequence returned by search/runs; required for context or usable for get"),
         entry_id: z.string().optional().describe("Stable entry ID returned by search; alternative selector for get"),

@@ -128,6 +128,8 @@ function pushToolResult(
 
 export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: string } = {}): HistoryEntry[] {
   const result: HistoryEntry[] = [];
+  const turnStarts: Array<{ id?: string; index: number }> = [];
+  let explicitTurns = false;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let obj: any;
@@ -138,7 +140,19 @@ export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: st
     if (!payload || typeof payload !== "object") continue;
 
     if (obj.type === "event_msg") {
-      if (payload.type === "user_message") {
+      if (payload.type === "task_started") {
+        explicitTurns = true;
+        const id = String(payload.turn_id || "");
+        if (!id || turnStarts.at(-1)?.id !== id) turnStarts.push({ id, index: result.length });
+      } else if (payload.type === "thread_rolled_back") {
+        const count = Number(payload.num_turns);
+        if (Number.isSafeInteger(count) && count > 0 && turnStarts.length) {
+          const keep = Math.max(0, turnStarts.length - count);
+          result.splice(turnStarts[keep].index);
+          turnStarts.splice(keep);
+        }
+      } else if (payload.type === "user_message") {
+        if (!explicitTurns) turnStarts.push({ index: result.length });
         const content = String(payload.message ?? "");
         if (content) result.push({ role: "user", content, timestamp });
       } else if (payload.type === "context_compacted") {
@@ -363,7 +377,7 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
           .filter(Boolean)
           .join("\n")
           .trim();
-        if (content) result.push({ role: "user", content, timestamp });
+        if (content) result.push({ role: "user", content, timestamp, ...(item.clientId ? { uuid: item.clientId } : {}) });
         continue;
       }
 

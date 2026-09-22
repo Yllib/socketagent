@@ -962,6 +962,7 @@ export interface RewindMessage {
 
 export interface RewindConversationMessage {
   type: "rewind_conversation";
+  sessionId?: string;
   userMessageUuid: string;
   dryRun?: boolean;
   rewindFiles?: boolean; // default true — set false to rewind conversation only, leaving files as-is
@@ -1957,7 +1958,7 @@ export interface SessionHistoryServerMessage {
   /** Echoed from resume_session.historyRequestId or load_more_history.requestId. */
   requestId?: string;
   /** Explicit merge behavior; clients must not infer this from local state. */
-  historyKind?: "initial" | "delta" | "older" | "append";
+  historyKind?: "initial" | "delta" | "older" | "append" | "rewind";
   /** Total durable entries currently stored for the session. */
   total?: number;
   /** Zero-based position of the first entry in messages. */
@@ -2289,6 +2290,7 @@ export interface SessionForkedServerMessage {
 
 export interface RewindConversationResultServerMessage {
   type: "rewind_conversation_result";
+  rewindIncludesTarget?: boolean;
   sessionId: string;
   success: boolean;
   userMessageUuid: string;

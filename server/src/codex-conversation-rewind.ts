@@ -27,11 +27,13 @@ export async function rewindCodexConversation(client: {
   resumeThread(params: any): Promise<unknown>;
   readThread(params: any): Promise<unknown>;
   rollbackThread(threadId: string, numTurns: number): Promise<unknown>;
+  revertThread(threadId: string, beforeTurnId: string): Promise<unknown>;
+  listThreadTurns(params: any): Promise<unknown>;
 }, sessionId: string, cwd: string, uuid: string, dryRun = false) {
   if (rewinding.has(sessionId)) throw new Error("A rewind is already in progress");
   rewinding.add(sessionId);
   try {
-    await client.resumeThread({ threadId: sessionId, cwd });
+    const resumed = await client.resumeThread({ threadId: sessionId, cwd }) as any;
     const response = await client.readThread({ threadId: sessionId, includeTurns: true }) as any;
     const history = getHistory(sessionId);
     const index = history.findIndex(entry => entry.role === "user" && entry.uuid === uuid);
@@ -39,8 +41,27 @@ export async function rewindCodexConversation(client: {
     const target = codexRewindTarget(response?.thread, history[index]);
     if (!dryRun) {
       archiveHistorySnapshot(sessionId);
-      const rolledBack = await client.rollbackThread(sessionId, target.numTurns) as any;
-      const turns = rolledBack?.thread?.turns;
+      let turns: any[];
+      if ((resumed?.thread?.historyMode || response?.thread?.historyMode) === "paginated") {
+        await client.revertThread(sessionId, response.thread.turns[target.turnIndex].id);
+        // Revert returns metadata only. Verify the retained IDs using the
+        // native paginated history, never treat its empty turns field as empty history.
+        turns = [];
+        const cursors = new Set<string>();
+        let cursor: string | undefined;
+        do {
+          const page = await client.listThreadTurns({ threadId: sessionId, cursor,
+            limit: 100, sortDirection: "asc", itemsView: "notLoaded" }) as any;
+          if (!Array.isArray(page?.data)) throw new Error("Codex did not return retained turns after rewind");
+          turns.push(...page.data);
+          cursor = page.nextCursor || undefined;
+          if (cursor && cursors.has(cursor)) throw new Error("Codex repeated a turn-history cursor after rewind");
+          if (cursor) cursors.add(cursor);
+        } while (cursor && turns.length <= target.turnIndex);
+      } else {
+        const rolledBack = await client.rollbackThread(sessionId, target.numTurns) as any;
+        turns = rolledBack?.thread?.turns;
+      }
       if (!Array.isArray(turns) || turns.length !== target.turnIndex
           || turns.some((turn: any, i: number) => turn.id !== response.thread.turns[i].id)) {
         throw new Error("Codex returned an unexpected rollback result. Reconnect to check the native conversation before trying again");

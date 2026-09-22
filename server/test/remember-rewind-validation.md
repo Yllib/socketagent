@@ -27,9 +27,23 @@ rollback markers are honored so reconnect cannot resurrect discarded turns.
 Codex CLI 0.155.1's generated schema still exposes `thread/rollback`, but marks
 it deprecated. Official documentation also warns it will be removed:
 https://learn.chatgpt.com/docs/app-server#roll-back-recent-turns
-If the runtime rejects rollback, the original SocketAgent history is retained
-and the error is shown. Regression tests use isolated fixture transcripts and
-mock native RPC responses, not real user conversations or paid agent turns.
+Paginated native threads reject that legacy command. They use `thread/revert`
+with the selected `beforeTurnId`, then verify the retained IDs through
+`thread/turns/list`; revert's response contains metadata, not retained turns.
+If the runtime rejects either operation, SocketAgent keeps its history and
+shows the error. Rewind progress and results remain above the chat viewport.
+
+The JSONL response reader accumulates chunks until a newline before joining
+them. Repeatedly splitting the accumulated buffer made large thread reads
+quadratic: a 166 MB Wakespeed transcript took about 62 seconds before the fix,
+versus 1.2 seconds afterward. A 32 MB fragmented-response regression covers
+the request deadline and separate tests cover framing and malformed lines.
+
+Native integration validation uses an isolated copy of the rollout and SQLite
+history databases under a temporary CODEX_HOME, with its indexed rollout path
+redirected into that directory. The real transcript remains unchanged and no
+model turn is started. A 179-turn copy successfully reverts to 178 retained
+turns. The temporary databases and transcripts are removed afterward.
 
 Validation:
 - Full server suite, including approval, archive search, native turn mapping,

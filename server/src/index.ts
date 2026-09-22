@@ -7708,6 +7708,8 @@ function createConnectionHandler(
         const target = activeSessions.get(sessionId)
           || ((activeSession?.getSessionId() || (activeSession as any)?._resumeSessionId) === sessionId ? activeSession : undefined);
         if (rewindSessionInfo?.backend === "codex" || target instanceof CodexSession) {
+          const rewindStartedAt = Date.now();
+          console.log(`[CodexRewind] started session=${sessionId} dryRun=${dryRun}`);
           try {
             if (shouldRewindFiles) throw new Error("Codex conversation rewind does not restore files");
             if (target && sessionIsBusy(target)) throw new Error("Stop running work before rewinding this conversation");
@@ -7724,7 +7726,9 @@ function createConnectionHandler(
               broadcastHeadlessSessionMessage(JSON.stringify(historyMessage), sessionId);
               broadcastSessionList();
             }
+            console.log(`[CodexRewind] completed session=${sessionId} turns=${result.numTurns} ms=${Date.now() - rewindStartedAt} dryRun=${dryRun}`);
           } catch (error: any) {
+            console.warn(`[CodexRewind] failed session=${sessionId} ms=${Date.now() - rewindStartedAt}: ${error.message || String(error)}`);
             sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, dryRun, error: error.message || String(error) });
           }
           break;

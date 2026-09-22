@@ -66,3 +66,28 @@ test('native rollout rollback markers do not reimport discarded turns on reconne
  add('event_msg',{type:'user_message',message:'new branch'});
  assert.deepEqual(codexRolloutJsonlToHistory(events.join('\n')).map(e=>e.content),['prompt 1','answer 1','new branch']);
 });
+
+test('paginated rewind uses native revert and verifies every retained turn page', async () => {
+ const sid='rewind-paginated';
+ const native=[turn('1','u1','keep'),turn('2','u2','also keep'),turn('3','u3','drop')];
+ for(const [i,text] of ['keep','also keep','drop'].entries()) appendHistory(sid,{role:'user',uuid:'u'+(i+1),content:text,timestamp:'2026-09-22T10:00:00Z'});
+ const cursors=[];let reverted=false;
+ const client={
+   resumeThread:async()=>({thread:{historyMode:'paginated'}}),
+   readThread:async()=>({thread:{turns:native}}),
+   rollbackThread:async()=>assert.fail('legacy rollback must not be used'),
+   revertThread:async(id,before)=>{assert.equal(id,sid);assert.equal(before,'3');reverted=true;return {thread:{turns:[]}};},
+   listThreadTurns:async params=>{assert.equal(reverted,true);assert.equal(params.itemsView,'notLoaded');assert.equal(params.sortDirection,'asc');cursors.push(params.cursor);return params.cursor?{data:[native[1]],nextCursor:null}:{data:[native[0]],nextCursor:'next'};},
+ };
+ await rewindCodexConversation(client,sid,'/tmp','u3');
+ assert.deepEqual(cursors,[undefined,'next']);assert.equal(getHistory(sid).length,2);
+});
+
+test('paginated verification failure retains SocketAgent history', async () => {
+ const sid='rewind-paginated-mismatch';appendHistory(sid,{role:'user',uuid:'u1',content:'keep',timestamp:'2026-09-22T10:00:00Z'});
+ const client={resumeThread:async()=>({thread:{historyMode:'paginated'}}),readThread:async()=>({thread:{turns:[turn('1','u1','keep')]}}),
+ rollbackThread:async()=>assert.fail('legacy rollback must not be used'),revertThread:async()=>({thread:{turns:[]}}),
+ listThreadTurns:async()=>({data:[{id:'unexpected'}],nextCursor:null})};
+ await assert.rejects(rewindCodexConversation(client,sid,'/tmp','u1'),/unexpected rollback result/);
+ assert.equal(getHistory(sid).length,1);assert.equal(isCodexRewinding(sid),false);
+});

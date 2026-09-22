@@ -144,3 +144,52 @@ test("non-resume timeouts do not trigger thread-writer cleanup", () => {
   const error = new CodexAppServerRequestTimeoutError("model/list", 20);
   assert.equal(isTimedOutCodexThreadResume(error), false);
 });
+
+test("large fragmented thread responses finish without starving the request deadline", async () => {
+  const bytes = 32 * 1024 * 1024;
+  const client = new CodexAppServerClient({
+    cwd: process.cwd(), command: process.execPath,
+    args: ["-e", String.raw`
+      process.stdin.once('data', async chunk => {
+        const {id} = JSON.parse(chunk.toString().trim());
+        const response = JSON.stringify({id, result: {text: 'x'.repeat(32 * 1024 * 1024)}}) + '\n';
+        for (let offset = 0; offset < response.length; offset += 16384) {
+          if (!process.stdout.write(response.slice(offset, offset + 16384))) {
+            await new Promise(resolve => process.stdout.once('drain', resolve));
+          }
+        }
+      });
+    `],
+    requestTimeoutMs: 5000,
+  });
+  try {
+    const result = await client.readThread({threadId: 'large', includeTurns: true});
+    assert.equal(result.text.length, bytes);
+    assert.equal(result.text.at(-1), 'x');
+  } finally { await client.stop(); }
+});
+
+test("JSONL framing preserves split lines, multiple messages, and malformed-line recovery", () => {
+  const client = new CodexAppServerClient({cwd: process.cwd()});
+  const seen = [];
+  let malformed = 0;
+  client.on('notification', item => seen.push(item));
+  client.on('malformed', () => malformed++);
+  client.handleStdout('{"method":"first","params":{"text":"');
+  client.handleStdout('hello"}}\n\ninvalid\n{"method":"second",');
+  client.handleStdout('"params":{"text":"世界"}}\n{"method":"third"}\n');
+  assert.deepEqual(seen.map(item => item.method), ['first', 'second', 'third']);
+  assert.equal(seen[0].params.text, 'hello');
+  assert.equal(seen[1].params.text, '世界');
+  assert.equal(malformed, 1);
+});
+
+test('paginated rewind sends an exclusive turn boundary and paginated verification', async () => {
+ const client=new CodexAppServerClient({cwd:process.cwd(),command:process.execPath,args:['-e',echoServer]});
+ try{
+  const revert=await client.revertThread('thread','turn');
+  assert.deepEqual(revert,{method:'thread/revert',params:{threadId:'thread',beforeTurnId:'turn'}});
+  const page=await client.listThreadTurns({threadId:'thread',cursor:'next',limit:100,sortDirection:'asc',itemsView:'notLoaded'});
+  assert.equal(page.method,'thread/turns/list');assert.equal(page.params.cursor,'next');assert.equal(page.params.itemsView,'notLoaded');
+ }finally{await client.stop();}
+});

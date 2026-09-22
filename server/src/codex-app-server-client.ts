@@ -194,7 +194,7 @@ export class CodexAppServerClient extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private nextId = 1;
   private pending = new Map<string | number, PendingRequest<unknown>>();
-  private stdoutTail = "";
+  private stdoutChunks: string[] = [];
   private stderrTail = "";
   private closed = false;
 
@@ -396,6 +396,15 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("thread/rollback", { threadId, numTurns });
   }
 
+  async revertThread(threadId: string, beforeTurnId: string): Promise<unknown> {
+    return this.request("thread/revert", { threadId, beforeTurnId });
+  }
+
+  async listThreadTurns(params: { threadId: string; cursor?: string; limit?: number;
+    sortDirection?: "asc" | "desc"; itemsView?: "notLoaded" | "summary" | "full" }): Promise<unknown> {
+    return this.request("thread/turns/list", params);
+  }
+
   async readThread(params: CodexAppServerThreadReadParams): Promise<unknown> {
     return this.request("thread/read", params);
   }
@@ -530,11 +539,15 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   private handleStdout(chunk: string): void {
-    this.stdoutTail += chunk;
-    const lines = this.stdoutTail.split("\n");
-    this.stdoutTail = lines.pop() ?? "";
-
-    for (const line of lines) {
+    // A full thread response can be hundreds of MB on one JSONL line.
+    // Repeatedly concatenating and splitting the unfinished line makes receipt
+    // quadratic, starving relay heartbeats and timing out otherwise healthy RPCs.
+    let start = 0;
+    for (let end = chunk.indexOf("\n"); end >= 0; end = chunk.indexOf("\n", start)) {
+      this.stdoutChunks.push(chunk.slice(start, end));
+      const line = this.stdoutChunks.join("");
+      this.stdoutChunks = [];
+      start = end + 1;
       if (!line.trim()) continue;
       let msg: unknown;
       try {
@@ -572,6 +585,7 @@ export class CodexAppServerClient extends EventEmitter {
 
       this.emit("unknown", msg);
     }
+    if (start < chunk.length) this.stdoutChunks.push(chunk.slice(start));
   }
 
   private handleResponse(msg: WireResponse): void {

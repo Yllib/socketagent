@@ -1615,6 +1615,8 @@ export interface SessionInfo {
   backend?: Backend;
   /** Codex runtime driver for codex sessions. Absent means use the server default. */
   codexDriver?: CodexDriver;
+  /** Last integration instructions delivered to this native Codex thread. */
+  codexInstructionDelivery?: { threadId: string; digest: string };
   /** Last selected permission mode for this session. */
   permissionMode?: string;
   /** Agent controls persisted for this session and restored on every resume. */

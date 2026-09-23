@@ -1,4 +1,5 @@
 import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
+import { deliverCodexInstructions, invalidateCodexInstructions } from "./codex-instruction-delivery";
 import { requestTranscriptAccess } from "./transcript-access-approval";
 /**
  * Codex backend mirroring claude-session.ts. Drives the OpenAI Codex app-server
@@ -1469,6 +1470,7 @@ export class CodexSession {
     if (!Number.isFinite(numTurns) || numTurns < 1) throw new Error("Rollback must drop at least one turn");
     await this.ensureAppServer();
     await this.appServer!.rollbackThread(threadId, Math.floor(numTurns));
+    invalidateCodexInstructions(threadId);
   }
 
   async getAppServerGoal(
@@ -2545,6 +2547,7 @@ export class CodexSession {
       }
 
       const threadConfig = this.buildAppServerThreadParams();
+      let startedNewThread = false;
       if (this.threadId) {
         let resumed: unknown;
         try {
@@ -2562,6 +2565,7 @@ export class CodexSession {
             this._resumeSessionId = undefined;
             this._sessionInfoSaved = false;
             const started = await this.appServer!.startThread(threadConfig);
+            startedNewThread = true;
             this.adoptAppServerThread(this.extractThreadId(started), started);
             resumed = started;
           } else {
@@ -2578,10 +2582,13 @@ export class CodexSession {
         }
       } else {
         const started = await this.appServer!.startThread(threadConfig);
+        startedNewThread = true;
         this.adoptAppServerThread(this.extractThreadId(started), started);
       }
 
       if (!this.threadId) throw new Error("codex app-server did not return a thread id");
+      await deliverCodexInstructions(this.appServer!, this.threadId,
+        threadConfig.developerInstructions, startedNewThread);
       const gitInfo = codexThreadGitInfo(this.cwd);
       if (gitInfo) {
         void this.appServer!.updateThreadMetadata({
@@ -3057,6 +3064,7 @@ export class CodexSession {
 
   private buildAppServerThreadParams(): {
     cwd: string;
+    developerInstructions: string;
     sandbox: SandboxMode;
     approvalPolicy: CodexAppServerApprovalPolicy;
     approvalsReviewer: CodexAppServerApprovalsReviewer;
@@ -3068,6 +3076,7 @@ export class CodexSession {
     const model = this.codexModel();
     return {
       cwd: this.cwd,
+      developerInstructions: this.codexDeveloperInstructions() || "",
       sandbox: this._sandbox,
       approvalPolicy: this._approvalPolicy,
       approvalsReviewer: this._approvalsReviewer,
@@ -5659,6 +5668,7 @@ export class CodexSession {
 
   private emitCompactBoundary(sid: string, trigger: string): void {
     if (this._compactBoundaryEmitted) return;
+    invalidateCodexInstructions(sid);
     this._compactBoundaryEmitted = true;
     const boundaryTrigger = trigger === "manual" ? "manual" : "auto";
     this._compactBoundaryTrigger = "auto";
@@ -5779,14 +5789,16 @@ export class CodexSession {
   }
 
   private codexCollaborationMode(): Record<string, unknown> | undefined {
-    const developerInstructions = this.codexDeveloperInstructions();
     const model = this.codexModel();
     return {
       mode: this._collaborationMode,
       settings: {
         ...(model ? { model } : {}),
         reasoning_effort: this.codexReasoningEffort(),
-        developer_instructions: developerInstructions ?? null,
+        // Keep built-in mode instructions on older Codex versions. Current
+        // versions ignore this field; integration guidance is delivered via
+        // thread developerInstructions and explicit history updates instead.
+        developer_instructions: null,
       },
     };
   }

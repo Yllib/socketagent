@@ -66,6 +66,7 @@ export interface CodexAppServerInitializeParams {
 
 export interface CodexAppServerThreadStartParams {
   cwd: string;
+  developerInstructions?: string | null;
   sandbox?: CodexAppServerSandbox;
   approvalPolicy?: CodexAppServerApprovalPolicy;
   approvalsReviewer?: CodexAppServerApprovalsReviewer;
@@ -78,6 +79,7 @@ export interface CodexAppServerThreadStartParams {
 
 export interface CodexAppServerThreadResumeParams {
   threadId: string;
+  developerInstructions?: string | null;
   cwd?: string;
   sandbox?: CodexAppServerSandbox;
   approvalPolicy?: CodexAppServerApprovalPolicy;
@@ -271,6 +273,13 @@ export class CodexAppServerClient extends EventEmitter {
 
   async unsubscribeThread(threadId: string): Promise<unknown> {
     return this.request("thread/unsubscribe", { threadId });
+  }
+
+  async injectDeveloperInstructions(threadId: string, text: string): Promise<unknown> {
+    return this.request("thread/inject_items", {
+      threadId,
+      items: [{ type: "message", role: "developer", content: [{ type: "input_text", text }] }],
+    });
   }
 
   async forkThread(params: CodexAppServerThreadResumeParams): Promise<unknown> {

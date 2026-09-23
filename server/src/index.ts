@@ -1,3 +1,5 @@
+import { modelDownloadArchive } from "./model-download-archive";
+import { serveDownloadFile } from "./http-file-download";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
 import * as dotenv from "dotenv";
 const bootstrapPath = require("path") as typeof import("path");
@@ -3249,7 +3251,7 @@ function createConnectionHandler(
     lastProgressEmit: number;
   }>();
   const activeFileSendVersions = new Map<string, number>();
-  const activeFileDownloadAcks = new Map<string, { receivedBytes: number }>();
+  const activeFileDownloadAcks = new Map<string, { receivedBytes: number; ready?: boolean }>();
   let externalNativeWatchTimer: ReturnType<typeof setInterval> | null = null;
   let externalNativeWatchSessionId: string | null = null;
   let externalNativeWatchFingerprint: string | null = null;
@@ -3503,6 +3505,7 @@ function createConnectionHandler(
     transferToken?: string,
     peerId?: string,
     expectedFileVersion?: string,
+    downloadProtocolVersion = 1,
   ): Promise<void> {
     if (!filePath || !fs.existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
@@ -3540,12 +3543,24 @@ function createConnectionHandler(
       );
     }
     const ackKey = fileDownloadAckKey(transferId, transferToken, peerId);
-    if (useBinaryDownload) {
+    if (useBinaryDownload || downloadProtocolVersion >= 2) {
       activeFileDownloadAcks.set(ackKey, { receivedBytes: startOffset });
     }
     const activityId = beginFileTransfer("download", fileName);
     try {
       console.log(`Sending file in ${totalChunks} ${useBinaryDownload ? "binary" : "legacy"} chunks: ${fileName} (${(stat.size / 1024 / 1024).toFixed(1)} MB${startOffset > 0 ? `, resume=${startOffset}` : ""})`);
+
+      if (downloadProtocolVersion >= 2) {
+        sendJson({ type: "file_start", fileId: transferId, fileName,
+          fileSize: stat.size, offsetBytes: startOffset, transferToken,
+          fileVersion: actualFileVersion });
+        const deadline = Date.now() + 30_000;
+        while (!activeFileDownloadAcks.get(ackKey)?.ready) {
+          if (!isCurrentTransfer() || transport.readyState !== WebSocket.OPEN) throw new Error("File transfer socket closed");
+          if (Date.now() >= deadline) throw new Error("File transfer start acknowledgement timed out");
+          await sleep(20);
+        }
+      }
 
       const fd = fs.openSync(filePath, "r");
       try {
@@ -3560,6 +3575,7 @@ function createConnectionHandler(
           }
           const chunkIndex = Math.floor(position / CHUNK_SIZE);
           const bytesRead = fs.readSync(fd, buf, 0, Math.min(CHUNK_SIZE, stat.size - position), position);
+          if (bytesRead === 0) throw new Error("Source file changed during download");
           const chunkBytes = Buffer.from(buf.subarray(0, bytesRead));
           const metadata: BinaryFileDownloadChunkMetadata = {
             fileId: transferId,
@@ -3609,6 +3625,9 @@ function createConnectionHandler(
       }
       if (useBinaryDownload) {
         await waitForFileDownloadWindow(ackKey, stat.size, 0);
+      }
+      if (fileTransferVersion(fs.statSync(filePath)) !== actualFileVersion) {
+        throw new Error("Source file changed during download; retry to get the new revision");
       }
       sendJson({
         type: "file_complete",
@@ -8300,6 +8319,7 @@ function createConnectionHandler(
             transferToken,
             peerId,
             expectedFileVersion,
+            Number((msg as any).downloadProtocolVersion || 1),
           ).catch((e: any) => {
             sendJson({
               type: "file_error",
@@ -8330,6 +8350,7 @@ function createConnectionHandler(
           const state = activeFileDownloadAcks.get(
             fileDownloadAckKey(fileId, transferToken, peerId),
           );
+          if (state && (msg as any).ready === true && receivedBytes === state.receivedBytes) state.ready = true;
           if (state && receivedBytes > state.receivedBytes) {
             state.receivedBytes = receivedBytes;
           }
@@ -8368,6 +8389,7 @@ function createConnectionHandler(
             transferToken,
             peerId,
             expectedFileVersion,
+            Number((msg as any).downloadProtocolVersion || 1),
           ).catch((e: any) => {
             sendJson({
               type: "file_error",
@@ -9082,95 +9104,9 @@ const httpServer = http.createServer((req, res) => {
       return;
     }
 
-    const fileName = path.basename(filePath).replace(/["\r\n]/g, "_");
-    const fileSize = stat.size;
-    if (fileSize === 0) {
-      console.log(`[HTTP Download] Serving empty file ${fileName}`);
-      res.writeHead(200, {
-        "Accept-Ranges": "bytes",
-        "Content-Type": "application/octet-stream",
-        "Content-Length": "0",
-        "Content-Disposition": `attachment; filename="${fileName}"`,
-      });
-      res.end();
-      return;
-    }
-
-    let start = 0;
-    let end = fileSize - 1;
-    let statusCode = 200;
-    const rangeHeader = req.headers.range;
-    if (rangeHeader) {
-      const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
-      if (!match) {
-        res.writeHead(416, {
-          "Accept-Ranges": "bytes",
-          "Content-Range": `bytes */${fileSize}`,
-        });
-        res.end();
-        return;
-      }
-
-      const rawStart = match[1];
-      const rawEnd = match[2];
-      if (rawStart === "" && rawEnd !== "") {
-        const suffixLength = Number.parseInt(rawEnd, 10);
-        if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
-          res.writeHead(416, {
-            "Accept-Ranges": "bytes",
-            "Content-Range": `bytes */${fileSize}`,
-          });
-          res.end();
-          return;
-        }
-        start = Math.max(0, fileSize - suffixLength);
-      } else if (rawStart !== "") {
-        start = Number.parseInt(rawStart, 10);
-      }
-      if (rawEnd !== "" && rawStart !== "") {
-        end = Number.parseInt(rawEnd, 10);
-      }
-      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= fileSize) {
-        res.writeHead(416, {
-          "Accept-Ranges": "bytes",
-          "Content-Range": `bytes */${fileSize}`,
-        });
-        res.end();
-        return;
-      }
-      end = Math.min(end, fileSize - 1);
-      statusCode = 206;
-    }
-
-    const contentLength = end - start + 1;
-    console.log(`[HTTP Download] Serving ${fileName} (${(contentLength / 1024 / 1024).toFixed(1)} MB${statusCode === 206 ? ` range=${start}-${end}/${fileSize}` : ""})`);
-    const activityId = beginFileTransfer("http-download", fileName);
-    let transferFinished = false;
-    const finishTransfer = () => {
-      if (transferFinished) return;
-      transferFinished = true;
-      finishFileTransfer(activityId);
-    };
-    res.once("finish", finishTransfer);
-    res.once("close", finishTransfer);
-    res.writeHead(statusCode, {
-      "Accept-Ranges": "bytes",
-      "Content-Type": "application/octet-stream",
-      "Content-Length": contentLength.toString(),
-      "Content-Disposition": `attachment; filename="${fileName}"`,
-      ...(statusCode === 206 ? { "Content-Range": `bytes ${start}-${end}/${fileSize}` } : {}),
-    });
-    const stream = fs.createReadStream(filePath, { start, end });
-    stream.pipe(res);
-    stream.on("error", (err) => {
-      console.error(`[HTTP Download] Stream error for ${filePath}: ${err.message}`);
-      finishTransfer();
-      if (!res.headersSent) res.writeHead(500);
-      res.end();
-    });
-    stream.on("close", () => {
-      console.log(`[HTTP Download] Complete ${fileName}`);
-    });
+    const activityId = beginFileTransfer("http-download", path.basename(filePath));
+    res.once("close", () => finishFileTransfer(activityId));
+    serveDownloadFile(req, res, filePath);
     return;
   }
 
@@ -9211,20 +9147,13 @@ const httpServer = http.createServer((req, res) => {
         res.end(`${fileName} not found`);
         return;
       }
-      console.log(`[TTS Model] Serving ${modelName}/${fileName} as tar.gz...`);
-      res.writeHead(200, {
-        "Content-Type": "application/gzip",
-        "Content-Disposition": `attachment; filename=${fileName}.tar.gz`,
-        "Transfer-Encoding": "chunked",
-      });
-      const { spawn } = require("child_process");
-      const tar = spawn("tar", ["czf", "-", "-C", modelDir, fileName], { windowsHide: true });
-      tar.stdout.pipe(res);
-      tar.stderr.on("data", (d: Buffer) => console.error("[TTS Model tar]", d.toString()));
-      tar.on("close", (code: number) => {
-        if (code !== 0) console.error(`[TTS Model] tar exited with code ${code}`);
-        else console.log(`[TTS Model] ${fileName} transfer complete`);
-      });
+      void modelDownloadArchive(dirPath, socketAgentDataPath("model-download-archives"))
+        .then((archive) => { if (!res.destroyed) serveDownloadFile(req, res, archive); })
+        .catch((error: unknown) => {
+          console.error("[TTS Model] Archive preparation failed:", error);
+          if (!res.headersSent) res.writeHead(500);
+          res.end();
+        });
       return;
     }
 
@@ -9244,19 +9173,7 @@ const httpServer = http.createServer((req, res) => {
       return;
     }
 
-    const stat = fs.statSync(filePath);
-    console.log(`[TTS Model] Serving ${fileName} (${(stat.size / 1024 / 1024).toFixed(0)} MB)...`);
-    res.writeHead(200, {
-      "Content-Type": "application/octet-stream",
-      "Content-Length": stat.size.toString(),
-      "Content-Disposition": `attachment; filename=${fileName}`,
-    });
-    const stream = fs.createReadStream(filePath);
-    stream.pipe(res);
-    stream.on("error", (err) => {
-      console.error("[TTS Model] Stream error:", err);
-      res.end();
-    });
+    serveDownloadFile(req, res, filePath);
     return;
   }
 

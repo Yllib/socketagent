@@ -777,6 +777,7 @@ export function supportsMonitorOutputAcknowledgement(message: unknown): boolean 
 }
 
 export interface FileDownloadAckMessage {
+  ready?: boolean;
   type: "file_download_ack";
   fileId: string;
   transferToken?: string;
@@ -2067,6 +2068,16 @@ export interface CompactingServerMessage {
   sessionId: string;
 }
 
+export interface FileStartServerMessage {
+  type: "file_start";
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  offsetBytes: number;
+  transferToken?: string;
+  fileVersion: string;
+}
+
 export interface FileChunkServerMessage {
   type: "file_chunk";
   fileId: string;
@@ -2801,6 +2812,7 @@ export type ServerMessage =
   | CompactingServerMessage
   | UploadChunkAckServerMessage
   | FileAvailableServerMessage
+  | FileStartServerMessage
   | FileChunkServerMessage
   | FileCompleteServerMessage
   | FileErrorServerMessage

@@ -8730,6 +8730,7 @@ function appendRecoveryNotice(sessionId: string, content: string): void {
       role: "notification",
       content,
       status: "info",
+      toolInput: { notificationKind: "server_recovery" },
       timestamp: new Date().toISOString(),
     });
   } catch (error) { console.error("[Recovery] Could not write status:", error); }

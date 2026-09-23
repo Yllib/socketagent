@@ -3,6 +3,7 @@ import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type Se
 import { z } from "zod";
 import { ClaudeStreamIdentity } from "./claude-stream-identity";
 import { claudeTotalUsage } from "./claude-usage";
+import { readClaudeSupportedModels } from "./claude-model-discovery";
 import { waitForInteractiveAnswer } from "./interactive-answer";
 import { prepareCodexMcpElicitation, resolveCodexMcpElicitation } from "./codex-elicitation";
 import * as crypto from "crypto";
@@ -848,34 +849,11 @@ let claudeModelDiscoveryPromise: Promise<Array<Record<string, unknown>>> | null 
 
 async function discoverClaudeSupportedModels(cwd: string): Promise<Array<Record<string, unknown>>> {
   if (claudeModelDiscoveryPromise) return claudeModelDiscoveryPromise;
-  claudeModelDiscoveryPromise = (async () => {
-    const abortController = new AbortController();
-    const timeout = setTimeout(() => abortController.abort(), 15_000);
-    const probe = query({
-      // /usage is handled locally by Claude Code. It initializes the control
-      // channel without consuming an inference turn, after which the SDK can
-      // answer supportedModels().
-      prompt: "/usage",
-      options: {
-        cwd,
-        ...claudeExecutableQueryOptions(),
-        tools: [],
-        settingSources: ["user", "project"],
-        abortController,
-      },
-    });
-    try {
-      for await (const message of probe) {
-        if (message.type !== "system" || (message as any).subtype !== "init") continue;
-        const models = await probe.supportedModels();
-        return (Array.isArray(models) ? models : []) as Array<Record<string, unknown>>;
-      }
-      return [];
-    } finally {
-      clearTimeout(timeout);
-      try { probe.close(); } catch {}
-    }
-  })().finally(() => {
+  claudeModelDiscoveryPromise = readClaudeSupportedModels({
+    cwd,
+    ...claudeExecutableQueryOptions(),
+    settingSources: ["user", "project"],
+  }).finally(() => {
     claudeModelDiscoveryPromise = null;
   });
   return claudeModelDiscoveryPromise;

@@ -7,6 +7,11 @@ export const SOCKETAGENT_FILE_LINK_INSTRUCTIONS = [
   "- Preview file: [View file](socketagent://file/view?path=%2Fabsolute%2Ffile.txt)",
   "- Download file: [Download file](socketagent://file/download?path=%2Fabsolute%2Ffile.zip)",
   "- These links are non-destructive references; emitting one does not transfer or modify anything.",
+  "Inline chat images:",
+  "- Put an image directly in your response with Markdown: ![Caption](/absolute/image.png). HTTP(S) URLs and socketagent://image?path=URL_ENCODED_ABSOLUTE_PATH are also supported. No tool call is needed: SocketAgent automatically copies local images or downloads URLs into persistent server snapshots when you send the message.",
+  "- For labeled image switching, put a fenced socketagent-compare JSON block between paragraphs. Its body can be an array of paths/URLs or an object with title and images. Example:",
+  '```socketagent-compare\n{"title":"Layout comparison","images":[{"src":"/absolute/before.png","label":"Before"},{"src":"https://example.com/after.png","label":"After"}]}\n```',
+  "- Compare accepts 1–12 images, as strings or objects with src and label. Use PNG, JPEG, WebP, or GIF up to 20 MB each. Images open full screen with zoom and download. The server saves independent snapshots so later source edits or deletions never change earlier chat images. Saved images have no automatic expiry and remain until explicitly cleaned. Capture a new revision by sending the source again in a new message.",
 ].join("\n");
 
 export const HTML_PLAN_TOOL_DESCRIPTION =

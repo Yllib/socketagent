@@ -1,3 +1,4 @@
+import { hasInlineImages, snapshotInlineImages } from "./inline-image-markdown";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
@@ -733,6 +734,7 @@ function compactHistoryEntryForStorage(sessionId: string, entry: HistoryEntry, i
 
 function hydrateHistoryEntry(entry: HistoryEntry): HistoryEntry {
   const hydrated = cloneHistoryEntry(entry);
+  if (entry.inlineImageContent) hydrated.content = entry.inlineImageContent;
   if (entry.role === "tool_result" && typeof entry.toolOutput !== "string" && entry.toolOutputRef) {
     hydrated.toolOutput = readToolOutputBlob(entry) ?? entry.toolOutputPreview ?? entry.content ?? "";
   }
@@ -918,6 +920,13 @@ export function positionSessionMessage<T extends Record<string, any>>(sessionId:
   mutable.entryId = position.entryId;
   mutable.sessionSeq = position.sessionSeq;
   mutable.revision = positiveInteger(mutable.revision) || Math.max(1, position.revision);
+  if (mutable.type === "text" && hasInlineImages(String(mutable.content || ""))) {
+    const saved = historyDatabase().getByEntryId(sessionId, position.entryId);
+    if (saved?.inlineImageContent && saved.content === mutable.content) {
+      mutable.content = saved.inlineImageContent;
+      mutable.revision = Math.max(mutable.revision, saved.revision || 1);
+    }
+  }
   return message;
 }
 
@@ -1512,6 +1521,9 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
     existing = undefined;
   }
   if (existing) {
+    if (existing.content === positioned.content && existing.inlineImageContent) {
+      positioned.inlineImageContent = existing.inlineImageContent;
+    }
     if (isSendFileCall(positioned) && isSendFileCall(existing)) {
       // A later SDK/native revision of the canonical tool call must not erase
       // delivery metadata attached by the app-tool handler.
@@ -1543,7 +1555,40 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
     historyCache.refresh(sessionId);
   }
   updateSessionHistoryMetadataFromDatabase(sessionId);
+  captureMessageImages(sessionId, safeEntry);
   return safeEntry;
+}
+
+const inlineImageCaptures = new Map<string, Promise<void>>();
+const inlineImageListeners = new Set<(sessionId: string, entry: HistoryEntry) => void>();
+
+export function onInlineImagesSaved(listener: (sessionId: string, entry: HistoryEntry) => void): () => void {
+  inlineImageListeners.add(listener);
+  return () => { inlineImageListeners.delete(listener); };
+}
+
+export async function waitForInlineImageSnapshots(): Promise<void> {
+  await Promise.all([...inlineImageCaptures.values()]);
+}
+
+function captureMessageImages(sessionId: string, entry: HistoryEntry): void {
+  if (entry.role !== "assistant" || entry.thinking || entry.inlineImageContent || !entry.entryId || !hasInlineImages(entry.content)) return;
+  const entryId = entry.entryId;
+  const original = entry.content;
+  const key = `${sessionId}:${entryId}:${original}`;
+  if (inlineImageCaptures.has(key)) return;
+  const work = snapshotInlineImages(original, sessionId).then((content) => {
+    if (content === original) return;
+    // Rewind/deletion may have removed this row while a URL was downloading.
+    // Never recreate it or overwrite a newer native revision.
+    const current = historyDatabase().getByEntryId(sessionId, entryId);
+    if (!current || current.content !== original || current.inlineImageContent) return;
+    const updated = appendHistory(sessionId, { ...current, inlineImageContent: content });
+    for (const listener of inlineImageListeners) listener(sessionId, updated);
+  }).catch((error) => {
+    console.warn(`[InlineImages] Could not preserve message images: ${error?.message || error}`);
+  }).finally(() => { inlineImageCaptures.delete(key); });
+  inlineImageCaptures.set(key, work);
 }
 
 export interface SendFileDeliveryMetadata {
@@ -1621,6 +1666,9 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
       }
     }
     if (existing) {
+      if (entry.content === existing.content && existing.inlineImageContent) {
+        entry.inlineImageContent = existing.inlineImageContent;
+      }
       entry.revision = Math.max(
         positiveInteger(entry.revision) || 1,
         (positiveInteger(existing.revision) || 1) + 1,

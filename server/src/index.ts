@@ -52,6 +52,8 @@ import {
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferPeerId, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
+import { onInlineImagesSaved } from "./session-store";
+import { inlineImageStore } from "./inline-image-store";
 import { isSendFileDeliveryPath } from "./send-file-store";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
@@ -381,6 +383,13 @@ function sendCwdCheck(sendJson: (payload: any) => void, rawPath: unknown, overri
 
 function resolveAllowedDownloadFile(inputPath: string): { resolvedPath: string; stat: fs.Stats } {
   if (!inputPath) throw new Error("Missing path");
+  if (inputPath.startsWith("socketagent://image?")) {
+    const resolvedPath = inlineImageStore.resolve(inputPath);
+    if (!fs.existsSync(resolvedPath)) throw new Error("This image snapshot is unavailable or has been cleaned up.");
+    const stat = fs.statSync(resolvedPath);
+    if (!stat.isFile()) throw new Error("Invalid image snapshot.");
+    return { resolvedPath, stat };
+  }
   const roots = getFileManagerRoots(getDefaultCwd());
   const resolvedPath = resolveFileManagerPath(inputPath, getDefaultCwd());
   if (!isSessionTransferPath(resolvedPath) && !isSendFileDeliveryPath(resolvedPath)) {
@@ -1764,6 +1773,19 @@ function dispatchDurableSessionMessage(message: Record<string, any>): void {
   }
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
 }
+
+onInlineImagesSaved((sessionId, entry) => {
+  let delivery = durableSessionEventDeliveries.get(sessionId);
+  if (!delivery) {
+    delivery = new SessionEventDelivery(dispatchDurableSessionMessage);
+    durableSessionEventDeliveries.set(sessionId, delivery);
+  }
+  dispatchDurableSessionMessage(delivery.prepare({
+    ...entry, role: undefined, type: "text", sessionId,
+    content: entry.inlineImageContent,
+    snapshot: true, finalSnapshot: true, inlineImagesReady: true,
+  }));
+});
 
 function workReviewClientPayload(
   snapshot: Record<string, any>,

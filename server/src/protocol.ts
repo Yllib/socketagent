@@ -1224,6 +1224,8 @@ export type ClientMessage =
 // ── Server → Client messages ──
 
 export interface TextServerMessage {
+  /** Display-only attachment update; does not start or resume an agent turn. */
+  inlineImagesReady?: boolean;
   type: "text";
   content: string;
   sessionId: string;
@@ -1806,6 +1808,8 @@ export interface SessionArchiveFailedServerMessage {
 export interface HistoryEntry {
   role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "run_boundary";
   content: string;
+  /** Display-only snapshot references; native conversation text stays unchanged. */
+  inlineImageContent?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
   toolUseId?: string;

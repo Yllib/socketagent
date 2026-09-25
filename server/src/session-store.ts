@@ -2529,9 +2529,9 @@ export function getResumeHistoryPage(
   const minEntries = Math.max(1, options.minEntries ?? 50);
   const recentUserPrompts = Math.max(0, options.recentUserPrompts ?? 3);
   const maxDeltaEntries = Math.max(1, options.maxDeltaEntries ?? 500);
-  const maxDeltaBytes = Math.max(1, options.maxDeltaBytes ?? 2 * 1024 * 1024);
+  const maxDeltaBytes = Math.max(1, options.maxDeltaBytes ?? 256 * 1024);
   const maxInitialEntries = Math.max(1, options.maxInitialEntries ?? 500);
-  const maxInitialBytes = Math.max(1, options.maxInitialBytes ?? 2 * 1024 * 1024);
+  const maxInitialBytes = Math.max(1, options.maxInitialBytes ?? 256 * 1024);
   const totalUserPrompts = summary.userPromptCount;
   const targetUserPrompts = Math.min(totalUserPrompts, recentUserPrompts);
 

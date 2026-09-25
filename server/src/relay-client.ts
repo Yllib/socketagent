@@ -250,6 +250,13 @@ export class RelayClient {
     }
   }
 
+  sendReply(peerId: string, message: Record<string, unknown>): void {
+    const peer = this.peers.get(peerId);
+    // A disconnected request must not be replayed to a different device.
+    if (!peer?.publicKey || this.ws?.readyState !== WebSocket.OPEN) return;
+    this.sendToPeer(peerId, message, peer);
+  }
+
   /** Whether the relay is connected and paired with a phone */
   get isPaired(): boolean {
     return this.status === "paired" && this.hasPairedPeer();
@@ -673,6 +680,10 @@ export class VirtualRelaySocket {
       // If it's not JSON, send raw
       this.relay.send({ raw: data });
     }
+  }
+
+  sendReply(peerId: string, data: string): void {
+    this.relay.sendReply(peerId, JSON.parse(data) as Record<string, unknown>);
   }
 
   /** Called by RelayClient when pairing status changes */

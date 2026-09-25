@@ -6,6 +6,7 @@
  */
 
 import { isLocalCommandOnlyEntry, listedPreview } from "./native-transcript-filter";
+import type { SessionInfo } from "./protocol";
 
 export interface MergeableSession {
   id: string;
@@ -135,5 +136,38 @@ export function createNativeRefreshCoordinator(
       return;
     }
     start(reason);
+  };
+}
+
+/** List rows carry summaries, never stored context or full analytics history. */
+export function sessionListSummary(session: SessionInfo): SessionInfo {
+  const stats = session.runStats;
+  const runStats = stats ? {
+    current: stats.current,
+    completedCount: stats.completedCount,
+    totalDurationMs: stats.totalDurationMs,
+    averageDurationMs: stats.averageDurationMs,
+    longestDurationMs: stats.longestDurationMs,
+    shortestDurationMs: stats.shortestDurationMs,
+    lastCompletedAt: stats.lastCompletedAt,
+  } : undefined;
+  return {
+    id: session.id,
+    title: session.title,
+    cwd: session.cwd,
+    createdAt: session.createdAt,
+    lastActive: session.lastActive,
+    messagePreview: session.messagePreview,
+    turnCount: session.turnCount,
+    running: session.running,
+    activeStartedAt: session.activeStartedAt,
+    backend: session.backend,
+    codexDriver: session.codexDriver,
+    replacedSessionIds: session.replacedSessionIds,
+    compactionsSinceRollover: session.compactionsSinceRollover,
+    freshThreadPending: session.freshThreadPending,
+    delegatedBySessionId: session.delegatedBySessionId,
+    delegationId: session.delegationId,
+    runStats,
   };
 }

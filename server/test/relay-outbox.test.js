@@ -123,3 +123,19 @@ test("virtual relay socket remains writable across a peer handoff", () => {
   assert.equal(socket.readyState, WebSocket.OPEN);
   assert.equal(socket.connectionGeneration, generation + 1);
 });
+
+test('request replies target one peer; live events still broadcast', () => {
+  const crypto = require('../dist/relay-crypto');
+  const client = new RelayClient({ relayUrl:'wss://relay.invalid', pairingToken:'test',
+    keyPair:crypto.generateKeyPair(), serverCapabilities:()=>({}), onMessage(){}, onStatusChange(){} });
+  client.ws = {readyState: WebSocket.OPEN};
+  for (const id of ['phone','desktop']) client.getPeer(id).publicKey = crypto.generateKeyPair().publicKey;
+  const sends = [];
+  client.sendToPeer = (id,msg) => sends.push([id,msg.type]);
+  const socket = new VirtualRelaySocket(client);
+  socket.sendReply('phone', JSON.stringify({type:'session_history'}));
+  socket.sendReply('disconnected', JSON.stringify({type:'session_history'}));
+  socket.send(JSON.stringify({type:'text'}));
+  assert.deepEqual(sends, [['phone','session_history'],['phone','text'],['desktop','text']]);
+  assert.deepEqual(client.outbox.drain().messages, []);
+});

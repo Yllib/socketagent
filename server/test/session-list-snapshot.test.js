@@ -204,3 +204,22 @@ test("a session with no stored createdAt falls back to the transcript", () => {
   assert.equal(merged.createdAt, "2026-08-01T00:00:00.000Z");
   assert.equal(merged.lastActive, "2026-09-02T00:00:00.000Z");
 });
+
+test('list summaries exclude stored context and per-run records without altering storage', () => {
+  const { sessionListSummary } = require('../dist/session-list-snapshot');
+  const original = session('large', {
+    cwd: '/project', lastContextUsage: { text: 'x'.repeat(100000) },
+    pendingHandoffContext: 'private context',
+    runStats: { completedCount: 500, totalDurationMs: 9000,
+      current: { runId: 'running', startedAt: '2026-09-25T00:00:00Z' },
+      recentRuns: Array.from({length:500}, (_,i)=>({runId:`run-${i}`, durationMs:18})) },
+  });
+  const summary = sessionListSummary(original);
+  assert.equal(summary.runStats.completedCount, 500);
+  assert.deepEqual(summary.runStats.current, original.runStats.current);
+  assert.equal(summary.runStats.recentRuns, undefined);
+  assert.equal(summary.lastContextUsage, undefined);
+  assert.equal(summary.pendingHandoffContext, undefined);
+  assert.equal(original.runStats.recentRuns.length, 500);
+  assert.ok(JSON.stringify(summary).length < 1000);
+});

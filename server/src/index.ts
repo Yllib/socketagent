@@ -34,7 +34,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedUserMessage, rememberListHistory, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
-import { mergeSessionListBase, createNativeRefreshCoordinator } from "./session-list-snapshot";
+import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummary } from "./session-list-snapshot";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
 import {
@@ -492,6 +492,7 @@ interface ClientTransport {
   readonly connectionGeneration?: number;
   supportsRawSdkEvents?: boolean;
   send(data: string): void;
+  sendReply?(peerId: string, data: string): void;
   supportsBinaryFileDownload?(peerId?: string): boolean;
   sendFileDownloadChunk?(
     metadata: BinaryFileDownloadChunkMetadata,
@@ -1223,7 +1224,6 @@ function enrichSessions(sessions: SessionInfo[]): SessionInfo[] {
           running: true,
           ...(activeStartedAt ? { activeStartedAt } : {}),
           messagePreview: active?.lastPreview || s.messagePreview,
-          lastActive: new Date().toISOString(),
         };
       }
       return {
@@ -1240,9 +1240,13 @@ function immediateEnrichedSessions(): SessionInfo[] {
   return enrichSessions(immediateSessionListBase());
 }
 
+let lastSessionListBroadcastJson: string | undefined;
+
 function sendSessionListBroadcast(enriched: SessionInfo[], reason: string, startedAt = Date.now()): void {
   const stringifyStartedAt = Date.now();
-  const msg = JSON.stringify({ type: "session_list", sessions: enriched });
+  const msg = JSON.stringify({ type: "session_list", sessions: enriched.map(sessionListSummary) });
+  if (msg === lastSessionListBroadcastJson) return;
+  lastSessionListBroadcastJson = msg;
   logSlowWs("ws_send_session_list_stringify", stringifyStartedAt, {
     reason,
     count: enriched.length,
@@ -3290,7 +3294,7 @@ function createConnectionHandler(
     });
   }
 
-  function sendJson(obj: Record<string, unknown>): void {
+  function sendJson(obj: Record<string, unknown>, peerId?: string): void {
     if (transport.readyState === WebSocket.OPEN) {
       const startedAt = Date.now();
       const raw = JSON.stringify(redactSecretsDeep(obj));
@@ -3298,7 +3302,8 @@ function createConnectionHandler(
         type: obj.type || "unknown",
         bytes: Buffer.byteLength(raw),
       });
-      transport.send(raw);
+      if (peerId && transport.sendReply) transport.sendReply(peerId, raw);
+      else transport.send(raw);
     }
   }
 
@@ -3690,7 +3695,12 @@ function createConnectionHandler(
     finally { if (reserve) continuationStarting.delete(targetSessionId); }
   }
 
+  const sendConnectionJson = sendJson;
   async function handleMessageImpl(msg: ClientMessage): Promise<void> {
+    const peerId = (msg as ClientMessage & { __relayPeerId?: string }).__relayPeerId;
+    // Request responses belong to the requesting device. Live broadcasts use
+    // the connection sender and still reach all attached devices.
+    const sendJson = (value: Record<string, unknown>): void => sendConnectionJson(value, peerId);
     // Wire-format handshake — relay path absorbs this earlier in relay-client,
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
@@ -5168,7 +5178,7 @@ function createConnectionHandler(
       case "list_sessions": {
         sendJson({
           type: "session_list",
-          sessions: immediateEnrichedSessions(),
+          sessions: immediateEnrichedSessions().map(sessionListSummary),
         });
         refreshNativeSessionListInBackground("list_sessions");
         break;

@@ -378,6 +378,11 @@ test("resume history hard-bounds a tool-heavy initial window", () => {
     assert.ok(page.entries.length <= 20);
     assert.ok(Buffer.byteLength(JSON.stringify(page.entries), "utf8") <= 100_000);
     assert.equal(page.deferredContextAvailable, true);
+    const defaultPage = getResumeHistoryPage(sessionId);
+    assert.ok(Buffer.byteLength(JSON.stringify(defaultPage.entries), "utf8") <= 256 * 1024);
+    assert.equal(defaultPage.entries.at(-1).content, `79:${"x".repeat(16_000)}`);
+    assert.equal(defaultPage.offset + defaultPage.entries.length, defaultPage.total);
+    assert.equal(defaultPage.deferredContextAvailable, true);
   } finally {
     deleteSessionArtifacts(sessionId);
   }

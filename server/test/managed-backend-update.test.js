@@ -56,3 +56,21 @@ test("maps changed managed packages to the model catalogs they invalidate", () =
     ["codex", "claude"],
   );
 });
+
+test('repeated update triggers share one retry deadline instead of multiplying chains', t => {
+  const { ManagedBackendRetry } = require('../dist/managed-backend-update');
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
+  const retry = new ManagedBackendRetry();
+  let calls = 0;
+  for (let i = 0; i < 100; i++) retry.schedule(300000, () => calls++);
+  assert.equal(retry.isWaiting, true);
+  t.mock.timers.tick(299999);
+  assert.equal(calls, 0);
+  t.mock.timers.tick(1);
+  assert.equal(calls, 1);
+  assert.equal(retry.isWaiting, false);
+  retry.schedule(300000, () => calls++);
+  retry.clear();
+  t.mock.timers.tick(300000);
+  assert.equal(calls, 1);
+});

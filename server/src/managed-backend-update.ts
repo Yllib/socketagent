@@ -46,3 +46,27 @@ export function managedBackendCheckIsDue(
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) return true;
   return nowMs - lastCheckedAtMs >= intervalMs;
 }
+
+/** One retry deadline shared by startup, periodic checks, and deferred work. */
+export class ManagedBackendRetry {
+  private timer?: NodeJS.Timeout;
+  private retryAfter = 0;
+
+  get isWaiting(): boolean { return Date.now() < this.retryAfter; }
+
+  schedule(delayMs: number, retry: () => void): void {
+    this.clear();
+    this.retryAfter = Date.now() + delayMs;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      retry();
+    }, delayMs);
+    this.timer.unref();
+  }
+
+  clear(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.retryAfter = 0;
+  }
+}

@@ -71,7 +71,7 @@ import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state"
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
 import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
-import { runBackendInstall } from "./backend-installer";
+import { runBackendInstall, isManagedBackendUsable } from "./backend-installer";
 import { getProcessHome, resolveClientPath } from "./path-utils";
 import { terminalSessionManager } from "./terminal-session";
 import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInputRequestWithSavedSecret, createSecureInputInventoryMessage, deleteSecureInput, getAccessibleSecureInput, isSecureInputPending, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
@@ -86,6 +86,7 @@ import {
   backendsForManagedBackendSpecs,
   managedBackendCheckIsDue,
   MANAGED_BACKEND_PACKAGES,
+  ManagedBackendRetry,
   managedBackendSpecsNeedingUpdate,
   parseNpmVersionOutput,
 } from "./managed-backend-update";
@@ -5770,7 +5771,7 @@ function createConnectionHandler(
             : GIT_ROOT;
           runPackageUpdateSync(tscDir);
           try {
-            runManagedBackendUpdateSync();
+            await runManagedBackendUpdateTracked();
             markManagedBackendUpdateChecked();
           } catch (backendErr: any) {
             console.warn(`[ForceUpdate] Managed backend version check failed; keeping installed versions: ${backendErr?.message || String(backendErr)}`);
@@ -10858,17 +10859,6 @@ function managedBackendAutoUpdateEnabled(): boolean {
   return value !== "0" && value !== "false" && value !== "off";
 }
 
-function managedBackendInstallArgs(runtime: UpdateRuntimeTools, specs: string[]): string[] {
-  return [
-    "install",
-    "-g",
-    "--prefix",
-    managedNpmPrefix(runtime.env),
-    "--include=optional",
-    ...specs,
-  ];
-}
-
 function managedBackendPackageDir(runtime: UpdateRuntimeTools, packageName: string): string {
   const nodeModules = process.platform === "win32"
     ? path.join(managedNpmPrefix(runtime.env), "node_modules")
@@ -10878,10 +10868,11 @@ function managedBackendPackageDir(runtime: UpdateRuntimeTools, packageName: stri
 
 function installedManagedBackendVersions(runtime: UpdateRuntimeTools): Record<string, string | undefined> {
   const versions: Record<string, string | undefined> = {};
-  for (const { name } of MANAGED_BACKEND_PACKAGES) {
+  for (const { name, backend } of MANAGED_BACKEND_PACKAGES) {
     try {
       const pkg = JSON.parse(fs.readFileSync(path.join(managedBackendPackageDir(runtime, name), "package.json"), "utf8"));
-      versions[name] = typeof pkg.version === "string" && pkg.version.trim() ? pkg.version.trim() : undefined;
+      versions[name] = typeof pkg.version === "string" && pkg.version.trim() && isManagedBackendUsable(runtime.env, backend)
+        ? pkg.version.trim() : undefined;
     } catch {
       versions[name] = undefined;
     }
@@ -10893,24 +10884,6 @@ function managedBackendVersionsLabel(versions: Record<string, string | undefined
   return MANAGED_BACKEND_PACKAGES
     .map(({ name }) => `${name}=${versions[name] || "missing"}`)
     .join(", ");
-}
-
-function latestManagedBackendVersionsSync(runtime: UpdateRuntimeTools): Record<string, string> {
-  const versions: Record<string, string> = {};
-  for (const { name, spec } of MANAGED_BACKEND_PACKAGES) {
-    const view = updateToolCommand(runtime.npm, ["view", spec, "version", "--json"]);
-    const output = execUpdateToolSync(view.command, view.args, {
-      cwd: SERVER_DIR,
-      env: runtime.env,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30000,
-      windowsHide: true,
-      windowsVerbatimArguments: view.windowsVerbatimArguments,
-    });
-    versions[name] = parseNpmVersionOutput(output);
-  }
-  return versions;
 }
 
 async function latestManagedBackendVersions(runtime: UpdateRuntimeTools): Promise<Record<string, string>> {
@@ -10937,34 +10910,6 @@ function refreshBackendRuntimeCaches(updatedBackends: readonly Backend[] = ["cla
   invalidateBackendHealthCache();
 }
 
-function runManagedBackendUpdateSync(): void {
-  if (!managedBackendAutoUpdateEnabled()) {
-    console.log("[Auto-update] Managed backend updates disabled by SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS");
-    return;
-  }
-  const runtime = resolveUpdateRuntimeTools();
-  const installed = installedManagedBackendVersions(runtime);
-  const latest = latestManagedBackendVersionsSync(runtime);
-  const specs = managedBackendSpecsNeedingUpdate(installed, latest);
-  if (specs.length === 0) {
-    console.log(`[Auto-update] Managed agent backends already current (${managedBackendVersionsLabel(installed)})`);
-    return;
-  }
-  const args = managedBackendInstallArgs(runtime, specs);
-  const npm = updateToolCommand(runtime.npm, args);
-  console.log(`[Auto-update] Updating changed managed agent backends: ${specs.join(", ")}`);
-  execUpdateToolSync(npm.command, npm.args, {
-    cwd: SERVER_DIR,
-    env: runtime.env,
-    stdio: "pipe",
-    timeout: 300000,
-    windowsHide: true,
-    windowsVerbatimArguments: npm.windowsVerbatimArguments,
-  });
-  repairWindowsManagedShims(managedNpmPrefix(runtime.env));
-  refreshBackendRuntimeCaches(backendsForManagedBackendSpecs(specs));
-}
-
 async function runManagedBackendUpdate(): Promise<void> {
   if (!managedBackendAutoUpdateEnabled()) {
     console.log("[Auto-update] Managed backend updates disabled by SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS");
@@ -10979,8 +10924,16 @@ async function runManagedBackendUpdate(): Promise<void> {
     return;
   }
   console.log(`[Auto-update] Updating changed managed agent backends: ${specs.join(", ")}`);
-  await runUpdateToolAsync(runtime, runtime.npm, managedBackendInstallArgs(runtime, specs), SERVER_DIR, 300000);
-  repairWindowsManagedShims(managedNpmPrefix(runtime.env));
+  for (const backend of backendsForManagedBackendSpecs(specs)) {
+    await runBackendInstall({
+      backend,
+      reinstall: true,
+      authenticate: false,
+      onProgress: (progress) => {
+        if (progress.status === "completed") console.log(`[Auto-update] ${progress.message}`);
+      },
+    });
+  }
   refreshBackendRuntimeCaches(backendsForManagedBackendSpecs(specs));
 }
 
@@ -11033,9 +10986,11 @@ async function waitForManagedBackendUpdate(): Promise<void> {
   }
 }
 
+const managedBackendRetry = new ManagedBackendRetry();
+
 async function ensureManagedBackendsCurrent(reason: string): Promise<void> {
   if (!managedBackendAutoUpdateEnabled()) return;
-  if (managedBackendUpdateInProgress) return;
+  if (managedBackendUpdateInProgress || managedBackendRetry.isWaiting) return;
   if (!managedBackendCheckIsDue(
     readManagedBackendUpdateCheckedAt(),
     Date.now(),
@@ -11045,7 +11000,7 @@ async function ensureManagedBackendsCurrent(reason: string): Promise<void> {
   const blockReason = autoUpdateBlockReason();
   if (blockReason) {
     console.log(`[Auto-update] Managed backend update deferred because ${blockReason}`);
-    setTimeout(() => void ensureManagedBackendsCurrent(`${reason}-retry`), 60000);
+    managedBackendRetry.schedule(60000, () => void ensureManagedBackendsCurrent("retry"));
     return;
   }
 
@@ -11053,10 +11008,11 @@ async function ensureManagedBackendsCurrent(reason: string): Promise<void> {
     console.log(`[Auto-update] Checking managed agent backends (${reason})`);
     await runManagedBackendUpdateTracked();
     markManagedBackendUpdateChecked();
+    managedBackendRetry.clear();
   } catch (e: any) {
     lastAutoUpdateError = `Managed backend update failed: ${e?.message || String(e)}`;
     console.error(`[Auto-update] ${lastAutoUpdateError}`);
-    setTimeout(() => void ensureManagedBackendsCurrent(`${reason}-retry`), 300000);
+    managedBackendRetry.schedule(300000, () => void ensureManagedBackendsCurrent("retry"));
   }
 }
 

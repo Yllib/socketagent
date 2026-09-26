@@ -1,3 +1,4 @@
+import { installManagedBackendSafely } from "./managed-backend-install";
 import { runCodexBrowserAuth } from "./codex-browser-auth";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
 import * as fs from "fs";
@@ -141,6 +142,17 @@ function buildBackendVersionProbe(backend: Backend, command: string, env: NodeJS
     env,
     shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(command),
   };
+}
+
+export function isManagedBackendUsable(env: NodeJS.ProcessEnv, backend: Backend): boolean {
+  const command = resolveManagedBackendCommand(env, backend);
+  if (!command) return false;
+  const probe = buildBackendVersionProbe(backend, command, env);
+  const result = spawnSync(probe.command, probe.args, {
+    env: probe.env, shell: probe.shell, timeout: 10000,
+    stdio: "pipe", windowsHide: true,
+  });
+  return result.status === 0;
 }
 
 function installEnv(): NodeJS.ProcessEnv {
@@ -312,6 +324,10 @@ async function runProcess(options: {
       ? setTimeout(() => {
           timedOut = true;
           child.kill("SIGTERM");
+          forceKill = setTimeout(() => {
+            if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+          }, 3000);
+          forceKill.unref();
         }, options.timeoutMs)
       : null;
     let forceKill: NodeJS.Timeout | undefined;
@@ -327,7 +343,7 @@ async function runProcess(options: {
       if (child.exitCode == null && !child.killed) {
         child.kill("SIGTERM");
         forceKill = setTimeout(() => {
-          if (child.exitCode == null && !child.killed) {
+          if (child.exitCode == null && child.signalCode == null) {
             child.kill("SIGKILL");
           }
         }, 3000);
@@ -507,21 +523,42 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
       status: "running",
       message: `Installing latest ${label} into ${managedNpmPrefix(env)}...`,
     });
-    await runProcess({
-      command: commandName("npm"),
-      args: [
-        "install",
-        "-g",
-        "--prefix",
-        managedNpmPrefix(env),
-        "--include=optional",
-        backendPackageName(options.backend),
-      ],
-      env,
-      phase: "install",
-      shell: process.platform === "win32",
+    await installManagedBackendSafely({
+      prefix: managedNpmPrefix(env),
+      packageName: options.backend === "codex" ? "@openai/codex" : "@anthropic-ai/claude-code",
       signal: options.signal,
-      onProgress: options.onProgress,
+      installAndVerify: async (prefix, cache) => {
+        const candidateEnv = {
+          ...env,
+          SOCKET_AGENT_NPM_PREFIX: prefix,
+          SOCKETAGENT_NPM_PREFIX: prefix,
+          NPM_CONFIG_PREFIX: prefix,
+          NPM_CONFIG_CACHE: cache,
+          npm_config_cache: cache,
+        };
+        await runProcess({
+          command: commandName("npm"),
+          args: ["install", "-g", "--prefix", prefix, "--cache", cache,
+            "--include=optional", "--no-audit", "--no-fund", backendPackageName(options.backend)],
+          env: candidateEnv,
+          phase: "install",
+          timeoutMs: 300000,
+          shell: process.platform === "win32",
+          signal: options.signal,
+          onProgress: options.onProgress,
+        });
+        repairWindowsManagedShims(prefix);
+        const command = resolveManagedBackendCommand(candidateEnv, options.backend);
+        if (!command) throw new Error(`The replacement ${label} executable is missing. Existing software was kept.`);
+        const probe = buildBackendVersionProbe(options.backend, command, candidateEnv);
+        await runProcess({
+          ...probe,
+          phase: "probe",
+          timeoutMs: 10000,
+          signal: options.signal,
+          onProgress: options.onProgress,
+        });
+      },
     });
     repairWindowsManagedShims(managedNpmPrefix(env));
     const managedCommand = resolveManagedBackendCommand(env, options.backend);

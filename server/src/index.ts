@@ -1,3 +1,4 @@
+import { SessionTransferJobs } from "./session-transfer-jobs";
 import { modelDownloadArchive } from "./model-download-archive";
 import { serveDownloadFile } from "./http-file-download";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
@@ -679,6 +680,46 @@ function loadServerKeyPair(): KeyPair {
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
+// Transfers are server-owned jobs; no client connection or phone remains in the data path.
+const transferArchiving = new Set<string>();
+const transferJobs = new SessionTransferJobs(socketAgentDataPath("transfer-jobs"), loadServerKeyPair(), {
+  revision: (id) => {
+    const session = getSession(id);
+    const live = activeSessions.get(id);
+    if (live && sessionIsBusy(live)) throw new Error("Wait for the source session to finish before transferring");
+    return JSON.stringify([getLastHistorySessionSeq(id), session?.lastActive, session?.turnCount]);
+  },
+  export: exportSessionTransfer,
+  import: async (config, bundlePath, expectedSha256) => {
+    await waitForManagedBackendUpdate();
+    if (config.targetBackend === "codex" && !getCodexAvailability().available) throw new Error("Codex is not available on the destination computer");
+    const result = await importSessionTransfer({ ...config, bundlePath, expectedSha256, transferId: config.jobId });
+    addRecentCwd(result.session.cwd);
+    broadcastSessionList();
+    return result;
+  },
+  archive: async (id, revision) => {
+    const session = getSession(id);
+    if (!session) return;
+    const live = activeSessions.get(id);
+    const current = JSON.stringify([getLastHistorySessionSeq(id), session.lastActive, session.turnCount]);
+    if ((live && sessionIsBusy(live)) || current !== revision) {
+      return "The destination is ready. The original was kept because it changed during the transfer.";
+    }
+    if (session.backend === "codex" && getStoredCodexDriver(session) === "app-server") {
+      transferArchiving.add(id);
+      try { await archiveCodexAppServerThread(id, session.cwd); }
+      catch { return "The destination is ready. The original could not be archived; you can archive it manually."; }
+      finally { transferArchiving.delete(id); }
+      invalidateCodexNativeListCache();
+    } else {
+      clearSessionContext(id, session.cwd);
+      markSessionArchived(id);
+    }
+    deleteSession(id);
+    broadcastSessionList();
+  },
+});
 const restartRecovery = new RestartRecoveryStore(socketAgentDataPath("recovery", "runs.json"));
 const recoveryOwners = new WeakMap<Session, { sessionId: string; id: string }>();
 const abandonedRecoveryInstances = new WeakSet<Session>();
@@ -770,6 +811,7 @@ type ActiveBackendInstall = {
   abortController?: AbortController;
   sendProgress?: (progress: Record<string, unknown>) => void;
   lastProgress?: Record<string, unknown>;
+  acceptAuthCallback?: (callbackUrl: string) => Promise<void>;
 };
 
 const activeBackendInstalls = new Map<Backend, ActiveBackendInstall>();
@@ -1387,7 +1429,7 @@ function serverCapabilitiesPayload(
       privateDrafts: true,
       atomicFinish: true,
     },
-    sessionTransfer: { version: 1 },
+    sessionTransfer: { version: 2 },
     codexGoals: { version: 1 },
     sessionMemory: { version: 1 },
     browserSessions: {
@@ -3952,7 +3994,12 @@ function createConnectionHandler(
           reinstall,
           authenticate,
           forceAuthenticate,
+          authMethod: msg.authMethod === "browser" ? "browser" : "device",
           signal: abortController.signal,
+          onBrowserCallbackReady: (acceptCallback) => {
+            const active = activeBackendInstalls.get(backend);
+            if (active?.requestId === requestId) active.acceptAuthCallback = acceptCallback;
+          },
           onProgress: sendProgress as any,
         }).then(async () => {
           if (backend === "codex" && operation === "auth") {
@@ -3994,6 +4041,38 @@ function createConnectionHandler(
             activeBackendInstalls.delete(backend);
           }
         });
+        break;
+      }
+
+      case "backend_auth_callback": {
+        const active = activeBackendInstalls.get("codex");
+        let success = false;
+        try {
+          if (!active?.acceptAuthCallback || active.requestId !== msg.requestId
+            || typeof msg.callbackUrl !== "string" || msg.callbackUrl.length > 16384) {
+            throw new Error("No matching login");
+          }
+          await active.acceptAuthCallback(msg.callbackUrl);
+          success = true;
+        } catch { /* Never log callback URLs or authorization codes. */ }
+        sendJson({
+          type: "backend_auth_callback_result",
+          requestId: msg.requestId,
+          success,
+          ...(success ? {} : { message: "Could not finish sign-in. Try again or use a device code." }),
+        });
+        if (success) {
+          // The phone may have reconnected while its external browser was open.
+          sendJson({
+            type: "backend_install_progress",
+            requestId: msg.requestId,
+            backend: "codex",
+            operation: "auth",
+            phase: "probe",
+            status: "completed",
+            message: "Codex sign-in completed.",
+          });
+        }
         break;
       }
 
@@ -4548,6 +4627,11 @@ function createConnectionHandler(
             || activeSessionId
             || "",
         ).trim();
+        if (transferArchiving.has(explicitPromptSessionId)) {
+          sendJson({ type: "error", sessionId: explicitPromptSessionId,
+            message: "Teleport is finishing this move. Open the session on the destination computer." });
+          break;
+        }
         const unlockedByUserPrompt = explicitPromptSessionId
           ? unlockSessionForUserPrompt(explicitPromptSessionId)
           : false;
@@ -5905,6 +5989,28 @@ function createConnectionHandler(
           console.log(`Archived session ${sid}`);
           sendJson({ type: "session_archived", sessionId: sid });
           broadcastSessionList();
+        }
+        break;
+      }
+
+      case "session_transfer_job": {
+        try {
+          let job;
+          if (msg.action === "start") {
+            if (!msg.config) throw new Error("Missing transfer configuration");
+            if (msg.config.role !== "local") {
+              const allowed = new URL(RELAY_URL || "wss://relay.jarofdirt.info");
+              const requested = new URL(msg.config.relayUrl || "");
+              if (requested.origin !== allowed.origin) throw new Error("Use this computer's configured relay for transfers");
+            }
+            job = transferJobs.start(msg.config);
+          } else if (msg.action === "status") job = transferJobs.status(msg.jobId || "");
+          else if (msg.action !== "list") throw new Error("Unknown transfer action");
+          sendJson({ type: "session_transfer_job_result", requestId: msg.requestId, ok: true,
+            job, ...(msg.action === "list" ? { jobs: transferJobs.list() } : {}) });
+        } catch (error) {
+          sendJson({ type: "session_transfer_job_result", requestId: msg.requestId, ok: false,
+            error: error instanceof Error ? error.message : String(error) });
         }
         break;
       }
@@ -9479,6 +9585,7 @@ async function initializeListeningServer(): Promise<void> {
   }
   restorePendingWorkReviewResultDeliveries();
   serverReady = true;
+  transferJobs.resume();
   recoverInterruptedSessions();
   const recoveryTimer = setInterval(recoverInterruptedSessions, 2_000);
   recoveryTimer.unref();

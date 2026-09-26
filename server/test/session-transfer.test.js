@@ -258,3 +258,25 @@ test("session remap preserves cached images and large tool output", () => {
     deleteSessionArtifacts(oldId, getSession(oldId));
   }
 });
+
+test('durable imports retain their bundle and return the same session after retries and native remapping', async () => {
+  const sourceId = crypto.randomUUID();
+  const transferId = crypto.randomUUID();
+  const cwd = path.join(testHome, 'durable-project');
+  fs.mkdirSync(cwd, { recursive: true });
+  saveSession(makeSession(sourceId, 'codex', cwd));
+  replaceHistory(sourceId, sampleHistory());
+  const exported = await exportSessionTransfer(sourceId);
+  const options = { bundlePath: exported.bundlePath, expectedSha256: exported.sha256,
+    targetCwd: cwd, targetBackend: 'claude', mode: 'clone', nativeMode: 'handoff', transferId };
+  const first = await importSessionTransfer(options);
+  const retry = await importSessionTransfer(options);
+  assert.equal(first.session.id, transferId);
+  assert.equal(retry.session.id, first.session.id);
+  assert.ok(fs.existsSync(exported.bundlePath));
+  assert.equal(getHistory(transferId).length, sampleHistory().length);
+  const nativeId = crypto.randomUUID();
+  remapSession(transferId, nativeId);
+  const afterRemap = await importSessionTransfer(options);
+  assert.equal(afterRemap.session.id, nativeId);
+});

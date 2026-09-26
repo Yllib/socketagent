@@ -12,6 +12,7 @@ import {
   getJsonlPath,
   getSdkEvents,
   getSession,
+  listSessions,
   getTodos,
   replaceHistory,
   replaceSdkEvents,
@@ -76,6 +77,8 @@ export interface SessionTransferImportOptions {
   targetBackend: Backend;
   mode: "move" | "clone";
   nativeMode: "exact" | "handoff";
+  /** Durable server jobs retain their bundle and reuse the same import identity. */
+  transferId?: string;
 }
 
 export interface SessionTransferImportResult {
@@ -313,10 +316,21 @@ export async function importSessionTransfer(
     throw new Error("Exact native transfer is available only for Claude-to-Claude moves");
   }
 
-  const sessionId = exactNativeResume ? bundle.source.sessionId : crypto.randomUUID();
-  if (getSession(sessionId)) throw new Error(`Destination already has session ${sessionId}`);
+  const sessionId = exactNativeResume ? bundle.source.sessionId : options.transferId || crypto.randomUUID();
+  const existing = (options.transferId
+    ? listSessions().find(session => session.transferLineage?.transferId === options.transferId)
+    : undefined) || getSession(sessionId);
+  if (options.transferId && existing?.transferLineage?.transferId === options.transferId) {
+    return { session: existing, sourceSessionId: bundle.source.sessionId, exactNativeResume };
+  }
+  if (existing) throw new Error(`Destination already has session ${sessionId}`);
   const nativePath = exactNativeResume ? getJsonlPath(sessionId, targetCwd) : undefined;
-  if (nativePath && fs.existsSync(nativePath)) {
+  // The intent permits recovery of a partially written import after a process exit.
+  const intentPath = options.transferId ? `${options.bundlePath}.import.json` : undefined;
+  const intent = JSON.stringify({ sessionId, sha256: options.expectedSha256, targetCwd });
+  const recovering = intentPath && fs.existsSync(intentPath)
+    && fs.readFileSync(intentPath, "utf8") === intent;
+  if (nativePath && fs.existsSync(nativePath) && !recovering) {
     throw new Error(`Destination already has the native Claude session ${sessionId}`);
   }
 
@@ -340,6 +354,7 @@ export async function importSessionTransfer(
       ? { contextClearedAt: undefined, pendingHandoffContext: undefined }
       : { contextClearedAt: now, pendingHandoffContext: bundle.handoffContext }),
     transferLineage: {
+      transferId: options.transferId,
       sourceSessionId: bundle.source.sessionId,
       sourceBackend,
       sourceServerLabel: bundle.source.serverLabel,
@@ -348,6 +363,10 @@ export async function importSessionTransfer(
     },
   };
 
+  if (intentPath && !recovering) {
+    const fd = fs.openSync(intentPath, "w", 0o600);
+    try { fs.writeFileSync(fd, intent); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  }
   try {
     if (nativePath) {
       validateClaudeJsonl(bundle.native!.content);
@@ -374,7 +393,9 @@ export async function importSessionTransfer(
     try { deleteHtmlPlansForSession(sessionId); } catch {}
     throw error;
   } finally {
-    try { fs.rmSync(options.bundlePath, { force: true }); } catch {}
+    if (!options.transferId) {
+      try { fs.rmSync(options.bundlePath, { force: true }); } catch {}
+    }
   }
 }
 

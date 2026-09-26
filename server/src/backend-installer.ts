@@ -1,3 +1,4 @@
+import { runCodexBrowserAuth } from "./codex-browser-auth";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
 import * as fs from "fs";
 import * as os from "os";
@@ -16,13 +17,16 @@ export interface BackendInstallProgress {
   output?: string;
   authUrl?: string;
   authCode?: string;
+  authMethod?: "device" | "browser";
 }
 
 export interface BackendInstallOptions {
   backend: Backend;
   reinstall: boolean;
   authenticate: boolean;
+  authMethod?: "device" | "browser";
   forceAuthenticate?: boolean;
+  onBrowserCallbackReady?: (acceptCallback: (callbackUrl: string) => Promise<void>) => void;
   signal?: AbortSignal;
   onProgress: (progress: BackendInstallProgress) => void;
 }
@@ -551,25 +555,46 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
           message: "Codex is already signed in on this server.",
         });
       } else {
-        options.onProgress({
-          phase: "auth",
-          status: "running",
-          message: "Open the OpenAI Codex device page and enter the one-time code.",
-          authUrl: CODEX_DEVICE_URL,
-        });
+        if (options.authMethod === "browser") {
+          options.onProgress({ phase: "auth", status: "running", message: "Opening ChatGPT sign-in..." });
+          await runCodexBrowserAuth({
+            command: managedCodex,
+            cwd: os.homedir(),
+            env,
+            shell: codexShell,
+            signal: options.signal,
+            onReady: (authUrl, acceptCallback) => {
+              options.onBrowserCallbackReady?.(acceptCallback);
+              options.onProgress({
+                phase: "auth",
+                status: "running",
+                message: "Finish signing in to ChatGPT in your browser.",
+                authUrl,
+                authMethod: "browser",
+              });
+            },
+          });
+        } else {
+          options.onProgress({
+            phase: "auth",
+            status: "running",
+            message: "Open the OpenAI Codex device page and enter the one-time code.",
+            authUrl: CODEX_DEVICE_URL,
+          });
 
-        await runCodexDeviceAuth({
-          command: managedCodex,
-          args: ["login", "--device-auth"],
-          env,
-          shell: codexShell,
-          timeoutMs: 15 * 60 * 1000,
-          signal: options.signal,
-          onProgress: options.onProgress,
-        });
+          await runCodexDeviceAuth({
+            command: managedCodex,
+            args: ["login", "--device-auth"],
+            env,
+            shell: codexShell,
+            timeoutMs: 15 * 60 * 1000,
+            signal: options.signal,
+            onProgress: options.onProgress,
+          });
 
-        if (!codexAuthFileExists()) {
-          throw new Error("Codex login finished, but ~/.codex/auth.json was not created");
+          if (!codexAuthFileExists()) {
+            throw new Error("Codex login finished, but ~/.codex/auth.json was not created");
+          }
         }
         options.onProgress({
           phase: "auth",

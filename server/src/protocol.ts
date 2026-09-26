@@ -402,6 +402,7 @@ export interface BackendInstallMessage {
   reinstall?: boolean;
   authenticate?: boolean;
   forceAuthenticate?: boolean;
+  authMethod?: "device" | "browser";
   operation?: "repair" | "auth";
   requestId?: string;
 }
@@ -646,6 +647,27 @@ export interface SetCodexCollaborationModeMessage {
 export interface ArchiveSessionMessage {
   type: "archive_session";
   sessionId: string;
+}
+
+export interface TransferJobConfig {
+  jobId: string;
+  role: "source" | "destination" | "local";
+  sessionId: string;
+  targetCwd: string;
+  targetBackend: Backend;
+  mode: "move" | "clone";
+  nativeMode: "exact" | "handoff";
+  relayUrl?: string;
+  ticket?: string;
+  peerPublicKey?: string;
+}
+
+export interface SessionTransferJobMessage {
+  type: "session_transfer_job";
+  requestId: string;
+  action: "start" | "status" | "list";
+  jobId?: string;
+  config?: TransferJobConfig;
 }
 
 export interface SessionTransferExportMessage {
@@ -1103,6 +1125,7 @@ export type ClientMessage =
   | GetServerSettingsMessage
   | SetCodexDriverMessage
   | SetServerSettingsMessage
+  | { type: "backend_auth_callback"; requestId: string; callbackUrl: string }
   | BackendInstallMessage
   | BackendInstallCancelMessage
   | CodexCollaborationModesMessage
@@ -1118,6 +1141,7 @@ export type ClientMessage =
   | RolloverSessionMemoryMessage
   | CodexRollbackThreadMessage
   | ArchiveSessionMessage
+  | SessionTransferJobMessage
   | SessionTransferExportMessage
   | SessionTransferImportMessage
   | SessionTransferDiscardMessage
@@ -1628,6 +1652,7 @@ export interface SessionInfo {
   pendingHandoffContext?: string;
   /** Transfer lineage retained independently of provider-native thread IDs. */
   transferLineage?: {
+    transferId?: string;
     sourceSessionId: string;
     sourceBackend: Backend;
     sourceServerLabel?: string;
@@ -1788,6 +1813,7 @@ export interface BackendInstallProgressServerMessage {
   output?: string;
   authUrl?: string;
   authCode?: string;
+  authMethod?: "device" | "browser";
 }
 
 export interface SessionCreatedServerMessage {
@@ -2802,6 +2828,7 @@ export type ServerMessage =
   | PushRegistrationStatusServerMessage
   | ServerCapabilitiesMessage
   | ServerSettingsMessage
+  | { type: "backend_auth_callback_result"; requestId: string; success: boolean; message?: string }
   | BackendInstallProgressServerMessage
   | SessionCreatedServerMessage
   | SessionArchiveFailedServerMessage

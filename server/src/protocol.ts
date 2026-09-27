@@ -30,7 +30,7 @@ export interface PromptMessage {
   text: string;
   /** Stable client identity used for acknowledgement and idempotent retry. */
   messageId?: string;
-  priority?: string;
+  priority?: "now" | "next" | "later";
   sessionId?: string;
   cwd?: string;
   backend?: Backend;
@@ -345,6 +345,9 @@ export interface NewSessionMessage {
 }
 
 export interface ResumeSessionMessage {
+  /** Supplied when resuming a native session not yet present in local metadata. */
+  cwd?: string;
+  backend?: Backend;
   /** Hash of the cached entries and revisions, not just the last position. */
   knownHistoryDigest?: string;
   type: "resume_session";
@@ -468,6 +471,7 @@ export interface RequestFileMessage {
   offsetBytes?: number;
   transferToken?: string;
   expectedFileVersion?: string;
+  downloadProtocolVersion?: number;
 }
 
 export interface LoadMoreHistoryMessage {
@@ -536,6 +540,7 @@ export interface FileManagerSetProtectedMessage {
 
 export interface FileManagerDownloadMessage {
   type: "file_manager_download";
+  downloadProtocolVersion?: number;
   requestId?: string;
   path: string;
   fileId?: string;
@@ -1237,7 +1242,7 @@ export type ClientMessage = { commandId?: string } & (
   | DeleteArchiveMessage
   | { type: "auth_code"; code: string; sessionId?: string; authRequestId?: string }
   | { type: "version_check" }
-  | { type: "force_update" }
+  | { type: "force_update"; forceRestart?: boolean }
   | { type: "get_status_sync" }
   | { type: "get_codex_status" }
   | { type: "get_claude_usage" }
@@ -1250,7 +1255,7 @@ export type ClientMessage = { commandId?: string } & (
   | CodexGoalGetMessage
   | CodexGoalSetMessage
   | CodexGoalClearMessage
-  | { type: "skills_save"; name: string; scope: string; format: string; agent?: "claude" | "codex"; frontmatter: Record<string, string>; body: string; filePath?: string }
+  | { type: "skills_save"; name: string; scope: "user" | "project"; format: "command" | "skill"; agent?: "claude" | "codex"; frontmatter: Record<string, string>; body: string; filePath?: string }
   | { type: "skills_delete"; filePath: string }
   | { type: "protected_files_list"; requestId?: string }
   | { type: "protected_files_add"; requestId?: string; path: string; label?: string }

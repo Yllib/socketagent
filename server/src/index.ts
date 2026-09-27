@@ -1,3 +1,4 @@
+import { errorMessage, isRecord } from "./value-guards";
 import type { ClientTransport } from "./client-transport";
 import { CommandReceipts } from "./command-receipts";
 import { SessionTransferJobs } from "./session-transfer-jobs";
@@ -5,8 +6,8 @@ import { modelDownloadArchive } from "./model-download-archive";
 import { serveDownloadFile } from "./http-file-download";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
 import * as dotenv from "dotenv";
-const bootstrapPath = require("path") as typeof import("path");
-const bootstrapFs = require("fs") as typeof import("fs");
+import * as bootstrapPath from "path";
+import * as bootstrapFs from "fs";
 const ENV_PATH = bootstrapPath.join(__dirname, "..", ".env");
 
 function secureSecretFileMode(filePath: string): void {
@@ -15,8 +16,8 @@ function secureSecretFileMode(filePath: string): void {
     if (bootstrapFs.existsSync(filePath)) {
       bootstrapFs.chmodSync(filePath, 0o600);
     }
-  } catch (e: any) {
-    console.warn(`[Security] Failed to restrict permissions on ${filePath}: ${e.message || e}`);
+  } catch (e: unknown) {
+    console.warn(`[Security] Failed to restrict permissions on ${filePath}: ${errorMessage(e) || e}`);
   }
 }
 
@@ -64,7 +65,6 @@ import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
 import { RelayClient, RelayStatus, relayPeerForMessage } from "./relay-client";
 import { parseClientMessage } from "./client-message";
-import { errorMessage, isRecord } from "./value-guards";
 import { KeyPair, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
@@ -163,7 +163,7 @@ import {
   SESSION_RUN_BACKFILL_VERSION,
   setSessionRunSupervisorSettled,
 } from "./session-run-store";
-import type { SessionRunOutcome } from "./protocol";
+import type { SessionRunOutcome, HistoryEntry } from "./protocol";
 import {
   archiveWorkReview,
   cancelWorkReview,
@@ -249,8 +249,8 @@ function logSlowWs(label: string, startedAt: number, details: Record<string, unk
 
 function parseAppVersionInfo(raw: string): AppVersionInfo | null {
   try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed.version !== "string" || typeof parsed.url !== "string") {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || typeof parsed.version !== "string" || typeof parsed.url !== "string") {
       return null;
     }
     return { version: parsed.version, url: parsed.url };
@@ -325,7 +325,7 @@ function readRemoteServerReleaseVersion(branch: string): string | null {
   }
 }
 
-function attachAppVersionInfo(info: Record<string, any>, appVersion: AppVersionInfo) {
+function attachAppVersionInfo(info: Record<string, unknown>, appVersion: AppVersionInfo) {
   info.app = appVersion;
   // Backward compatibility for app builds that read version metadata directly
   // from the server version payload before app checks moved to GitHub.
@@ -333,7 +333,7 @@ function attachAppVersionInfo(info: Record<string, any>, appVersion: AppVersionI
   info.url = appVersion.url;
 }
 
-function buildCwdCheck(rawPath: unknown, overrides: Record<string, any> = {}): Record<string, any> {
+function buildCwdCheck(rawPath: unknown, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const resolved = resolveClientPath(rawPath);
   const home = getProcessHome();
   let user: string | undefined;
@@ -370,17 +370,17 @@ function buildCwdCheck(rawPath: unknown, overrides: Record<string, any> = {}): R
       error: isDirectory ? undefined : "Path exists but is not a directory",
       ...overrides,
     };
-  } catch (e: any) {
+  } catch (e: unknown) {
     return {
       ...base,
-      error: e?.message || String(e),
-      errorCode: e?.code,
+      error: errorMessage(e) || String(e),
+      errorCode: (isRecord(e) ? e.code : undefined),
       ...overrides,
     };
   }
 }
 
-function sendCwdCheck(sendJson: (payload: any) => void, rawPath: unknown, overrides: Record<string, any> = {}): Record<string, any> {
+function sendCwdCheck(sendJson: (payload: Record<string, unknown>) => void, rawPath: unknown, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const payload = buildCwdCheck(rawPath, overrides);
   const ok = payload.exists === true && payload.isDirectory === true;
   const reason = payload.errorCode || payload.error || (payload.exists ? "not_directory" : "missing");
@@ -478,8 +478,8 @@ if (fs.existsSync(pluginsDir)) {
         plugins.push(plugin);
         console.log(`Loaded plugin: ${plugin.name}`);
       }
-    } catch (e: any) {
-      console.error(`Failed to load plugin ${file}: ${e.message}`);
+    } catch (e: unknown) {
+      console.error(`Failed to load plugin ${file}: ${errorMessage(e)}`);
     }
   }
 }
@@ -795,10 +795,10 @@ function persistedPromptSubmission(sessionId: string, messageId: string): boolea
   if (!sessionId || !messageId) return false;
   try {
     return hasPersistedUserMessage(sessionId, messageId);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.warn(
       `[Prompt] Could not check persisted submission ${messageId} for ${sessionId}:`
-      + ` ${error?.message || error}`,
+      + ` ${errorMessage(error) || error}`,
     );
     return false;
   }
@@ -1310,7 +1310,7 @@ const refreshNativeSessionListInBackground = createNativeRefreshCoordinator(asyn
     sendSessionListBroadcast(enrichSessions(sessions), `${reason}:native`);
   } catch (error: unknown) {
     console.warn(
-      `[Sessions] native refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+      `[Sessions] native refresh failed: ${error instanceof Error ? errorMessage(error) : String(error)}`,
     );
   }
 });
@@ -1321,8 +1321,8 @@ async function broadcastSessionListNow(reason = "manual"): Promise<void> {
   try {
     sendSessionListBroadcast(immediateEnrichedSessions(), reason, startedAt);
     refreshNativeSessionListInBackground(reason);
-  } catch (err: any) {
-    console.warn(`[Sessions] failed to broadcast session list: ${err?.message || err}`);
+  } catch (err: unknown) {
+    console.warn(`[Sessions] failed to broadcast session list: ${errorMessage(err) || err}`);
   }
 }
 
@@ -1344,8 +1344,8 @@ function flushSessionListBroadcast(reason: string): void {
   sessionListBroadcastQueued = false;
   sessionListBroadcastInFlight = true;
   broadcastSessionListNow(reason)
-    .catch((err: any) => {
-      console.warn(`[Sessions] failed to flush session list: ${err?.message || err}`);
+    .catch((err: unknown) => {
+      console.warn(`[Sessions] failed to flush session list: ${errorMessage(err) || err}`);
     })
     .finally(() => {
       sessionListBroadcastInFlight = false;
@@ -1516,8 +1516,8 @@ function maybeSendPushNotification(msg: {
     if (result.attempted > 0) {
       console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for session=${msg.sessionId || "none"} title=${msg.title.slice(0, 80)}`);
     }
-  }).catch((err) => {
-    console.warn(`[Push] FCM push error: ${err?.message || err}`);
+  }).catch((err: unknown) => {
+    console.warn(`[Push] FCM push error: ${errorMessage(err) || err}`);
   });
 }
 
@@ -1592,8 +1592,8 @@ function sendSessionStartedPush(session: Session): boolean {
     if (result.attempted > 0) {
       console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for prompt started session=${sessionId}`);
     }
-  }).catch((err) => {
-    console.warn(`[Push] Prompt started push error: ${err?.message || err}`);
+  }).catch((err: unknown) => {
+    console.warn(`[Push] Prompt started push error: ${errorMessage(err) || err}`);
   });
   return true;
 }
@@ -1626,8 +1626,8 @@ const runningPushRefreshTimer = setInterval(() => {
       sessionAgentIsWorking(session) && !sessionSuppressesOngoingNotification(session),
   );
   Promise.all(running.map((session) => sendSessionRunningPushRefresh(session)))
-    .catch((err) => {
-      console.warn(`[Push] Running-session refresh failed: ${err?.message || err}`);
+    .catch((err: unknown) => {
+      console.warn(`[Push] Running-session refresh failed: ${errorMessage(err) || err}`);
     })
     .finally(() => {
       runningPushRefreshInFlight = false;
@@ -1722,8 +1722,8 @@ function attachSessionLifecycleCallbacks(session: Session): void {
       } else {
         settleLogicalRun(session, "completed", sid);
       }
-    } catch (error: any) {
-      console.warn(`[SelfRun] Could not track run for ${sid}: ${error?.message || error}`);
+    } catch (error: unknown) {
+      console.warn(`[SelfRun] Could not track run for ${sid}: ${errorMessage(error) || error}`);
     }
     syncLiveSessionInstance(session);
     notifySessionActivity();
@@ -1784,8 +1784,7 @@ function delegationSupervisorForSession(session: Session): string {
   const currentSessionId = session.getSessionId() || "";
   return resolveDelegationSupervisorSessionId({
     currentSessionId,
-    runtimeSupervisorSessionId: (session as any)
-      ._delegationSupervisorSessionId,
+    runtimeSupervisorSessionId: session._delegationSupervisorSessionId,
     sessionInfo: currentSessionId ? getSession(currentSessionId) : undefined,
     scheduledTasks: listScheduledTasks(),
   });
@@ -1987,7 +1986,7 @@ function queueWorkReviewResultDelivery(
       if (retryTimer) clearTimeout(retryTimer);
       workReviewResultRetryTimers.delete(resultId);
     })
-    .catch((error) => {
+    .catch((error: unknown) => {
       workReviewResultDeliveries.delete(resultId);
       const attempt = (workReviewResultRetryAttempts.get(resultId) || 0) + 1;
       workReviewResultRetryAttempts.set(resultId, attempt);
@@ -1995,10 +1994,10 @@ function queueWorkReviewResultDelivery(
         const delayMs = Math.min(5 * 60_000, 5_000 * (2 ** (attempt - 1)));
         const timer = setTimeout(() => {
           workReviewResultRetryTimers.delete(resultId);
-          void queueWorkReviewResultDelivery(review, result).catch((retryError: any) => {
+          void queueWorkReviewResultDelivery(review, result).catch((retryError: unknown) => {
             console.error(
               `[WorkReview] result retry failed result=${resultId}`
-              + ` attempt=${attempt}: ${retryError?.message || String(retryError)}`,
+              + ` attempt=${attempt}: ${errorMessage(retryError) || String(retryError)}`,
             );
           });
         }, delayMs);
@@ -2044,15 +2043,15 @@ function restorePendingWorkReviewResultDeliveries(): void {
       void queueWorkReviewResultDelivery(
         published.review,
         published.result,
-      ).catch((error: any) => {
+      ).catch((error: unknown) => {
         console.error(
           `[WorkReview] pending result delivery failed result=${record.resultId}`
-          + ` session=${record.originSessionId || ""}: ${error?.message || String(error)}`,
+          + ` session=${record.originSessionId || ""}: ${errorMessage(error) || String(error)}`,
         );
       });
     }
-  } catch (error: any) {
-    console.warn(`[WorkReview] failed to rebuild result outbox: ${error?.message || String(error)}`);
+  } catch (error: unknown) {
+    console.warn(`[WorkReview] failed to rebuild result outbox: ${errorMessage(error) || String(error)}`);
   }
 }
 
@@ -2426,7 +2425,7 @@ async function runDelegatedSupervisorReport(
     delete supervisor._socketAgentInitialization;
     const sid = supervisor.getSessionId() || record.supervisorSessionId;
     if (supervisor.isWarmIdle) {
-      await (supervisor as any).closeWarmIdle?.();
+      await supervisor.closeWarmIdle();
     }
     if (activeSessions.get(sid) === supervisor && !sessionShouldRemainPooled(supervisor)) {
       activeSessions.delete(sid);
@@ -2466,11 +2465,11 @@ function deliverDelegatedAgentReport(record: DelegatedAgentRecord, run: Delegate
       maybeFinalizeLogicalRun(record.supervisorSessionId);
       console.log(`[DelegatedAgent] Report delivered delegation=${record.delegationId} run=${run.runId} supervisor=${record.supervisorSessionId}`);
     })()
-    .catch((err: any) => {
+    .catch((err: unknown) => {
       updateDelegatedAgentRun(record.delegationId, run.runId, {
         reportStatus: "pending",
       });
-      console.warn(`[DelegatedAgent] Report pending delegation=${record.delegationId} run=${run.runId}: ${err?.message || err}`);
+      console.warn(`[DelegatedAgent] Report pending delegation=${record.delegationId} run=${run.runId}: ${errorMessage(err) || err}`);
     });
   return delivery.finally(() => {
     delegatedReportDeliveries.delete(deliveryKey);
@@ -2614,7 +2613,7 @@ async function launchDelegatedAgentTurn(
         "completed",
       );
     })
-    .catch((err: any) => {
+    .catch((err: unknown) => {
       if (shuttingDown) return;
       if (turnAbortTracker.finish(child, turnAbortState)) return;
       launchFailure = err instanceof Error ? err : new Error(String(err));
@@ -2629,7 +2628,7 @@ async function launchDelegatedAgentTurn(
     .finally(async () => {
       const sid = child.getSessionId() || childSessionId || temporaryId;
       if (child.isWarmIdle) {
-        await (child as any).closeWarmIdle?.();
+        await child.closeWarmIdle();
       }
       if (activeSessions.get(sid) === child && !sessionShouldRemainPooled(child)) {
         activeSessions.delete(sid);
@@ -3039,7 +3038,7 @@ function isContextClearedSession(sessionInfo: SessionInfo | undefined, sessionId
   return !!sessionInfo?.contextClearedAt || clearedSessions.has(sessionId);
 }
 
-async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> {
+async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<HistoryEntry[]> {
   if (sessionInfo.backend !== "codex") return [];
   if (isCodexRewinding(sessionInfo.id)) return [];
   // App-server events are authoritative while SocketAgent owns a live turn.
@@ -3048,7 +3047,7 @@ async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> 
   if (hasBusyLiveSession(sessionInfo.id)) return [];
   const rolloutAdded = syncCodexRolloutHistory(sessionInfo);
   if (rolloutAdded.length > 0) return rolloutAdded;
-  let appServerHistory: any[] = [];
+  let appServerHistory: HistoryEntry[] = [];
   if (getHistoryCount(sessionInfo.id) === 0) {
     appServerHistory = await readCodexAppServerThreadHistory(sessionInfo.id);
   }
@@ -3063,7 +3062,7 @@ async function syncCodexNativeHistory(sessionInfo: SessionInfo): Promise<any[]> 
   return added;
 }
 
-function syncCodexRolloutHistory(sessionInfo: SessionInfo): any[] {
+function syncCodexRolloutHistory(sessionInfo: SessionInfo): HistoryEntry[] {
   if (sessionInfo.backend !== "codex") return [];
   if (isCodexRewinding(sessionInfo.id)) return [];
   if (hasBusyLiveSession(sessionInfo.id)) return [];
@@ -3144,7 +3143,7 @@ function hasExternalNativeActivity(now = Date.now()): boolean {
   return getExternalNativeRunningSessions(now).length > 0;
 }
 
-function syncClaudeNativeHistory(sessionInfo: SessionInfo): any[] {
+function syncClaudeNativeHistory(sessionInfo: SessionInfo): HistoryEntry[] {
   const cwd = sessionInfo.cwd || getDefaultCwd();
   if (!cwd) return [];
   const lastTimestamp = getLastHistoryTimestamp(sessionInfo.id) || "1970-01-01T00:00:00Z";
@@ -3159,7 +3158,7 @@ function syncClaudeNativeHistory(sessionInfo: SessionInfo): any[] {
   return added;
 }
 
-function syncExternalNativeHistory(sessionInfo: SessionInfo): any[] {
+function syncExternalNativeHistory(sessionInfo: SessionInfo): HistoryEntry[] {
   if (sessionInfo.backend === "codex") return syncCodexRolloutHistory(sessionInfo);
   if (sessionInfo.backend === "claude" || !sessionInfo.backend) return syncClaudeNativeHistory(sessionInfo);
   return [];
@@ -3412,7 +3411,7 @@ function createConnectionHandler(
     return process.cwd();
   }
 
-  function emitExternalNativeHistory(sessionInfo: SessionInfo, added: any[]): void {
+  function emitExternalNativeHistory(sessionInfo: SessionInfo, added: HistoryEntry[]): void {
     if (added.length === 0) return;
     const total = getHistoryCount(sessionInfo.id);
     sendJson({
@@ -3437,8 +3436,8 @@ function createConnectionHandler(
         if (added.length > 0) {
           emitExternalNativeHistory(sessionInfo, added);
         }
-      }).catch((err) => {
-        console.warn(`[CodexSync] ${reason} native history sync failed for ${sessionInfo.id}: ${err?.message || err}`);
+      }).catch((err: unknown) => {
+        console.warn(`[CodexSync] ${reason} native history sync failed for ${sessionInfo.id}: ${errorMessage(err) || err}`);
       });
     }, 0);
     scheduledCodexNativeSyncTimer.unref?.();
@@ -3735,7 +3734,7 @@ function createConnectionHandler(
   }
 
   async function handleMessage(msg: ClientMessage): Promise<void> {
-    let targetSessionId = String((msg as any).sessionId
+    let targetSessionId = String(("sessionId" in msg ? msg.sessionId : undefined)
       || (msg.type === "prompt" && msg.clientConversationId ? "" : activeSessionId) || "");
     if ((restartPreparing || shuttingDown || continuationStarting.has(targetSessionId))
         && ["prompt", "new_session", "answer", "compact_context"].includes(msg.type)) {
@@ -3744,7 +3743,7 @@ function createConnectionHandler(
     }
     // A stable command identity covers retries from another connection and
     // survives server restarts. Legacy clients still use prompt messageId.
-    const requestedId = (msg as ClientMessage & { commandId?: string }).commandId;
+    const requestedId = msg.commandId;
     const commandId = requestedId || (msg.type === "prompt" ? msg.messageId : undefined);
     const receipted = !!commandId && ["prompt", "answer", "abort", "rewind", "rewind_conversation", "compact_context"].includes(msg.type);
     const reply = (value: Record<string, unknown>) => sendJson(value,
@@ -3845,7 +3844,7 @@ function createConnectionHandler(
         // Keep the final direct replies, not streaming events. Commit before
         // delivery so a lost acknowledgment can be recovered after restart.
         if (value.type !== "session_history") replies.push(value);
-        const id = (msg as ClientMessage & { commandId?: string }).commandId
+        const id = msg.commandId
           || (msg.type === "prompt" ? msg.messageId : undefined);
         if (id && ["prompt_received", "prompt_failed", "injection_failed"].includes(String(value.type))) commandReceipts.accept(id, replies);
       }
@@ -3854,7 +3853,7 @@ function createConnectionHandler(
     // Wire-format handshake — relay path absorbs this earlier in relay-client,
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
-    if ((msg as any).type === "client_capabilities") {
+    if (msg.type === "client_capabilities") {
       transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       transport.setClientCapabilities?.(msg);
@@ -3867,26 +3866,26 @@ function createConnectionHandler(
 
     switch (msg.type) {
       case "set_raw_mode": {
-        transport.supportsRawSdkEvents = (msg as any).enabled === true;
+        transport.supportsRawSdkEvents = msg.enabled === true;
         break;
       }
 
       case "terminal_attach": {
         terminalSessionManager.attach(transport, {
-          cwd: resolveTerminalCwd((msg as any).cwd),
-          cols: (msg as any).cols,
-          rows: (msg as any).rows,
+          cwd: resolveTerminalCwd(msg.cwd),
+          cols: msg.cols,
+          rows: msg.rows,
         });
         break;
       }
 
       case "terminal_input": {
-        terminalSessionManager.input((msg as any).data);
+        terminalSessionManager.input(msg.data);
         break;
       }
 
       case "terminal_resize": {
-        terminalSessionManager.resize((msg as any).cols, (msg as any).rows);
+        terminalSessionManager.resize(msg.cols, msg.rows);
         break;
       }
 
@@ -3962,8 +3961,8 @@ function createConnectionHandler(
       }
 
       case "unregister_push_token": {
-        const token = typeof (msg as any).fcmToken === "string" ? (msg as any).fcmToken : "";
-        const appServerId = typeof (msg as any).appServerId === "string" ? (msg as any).appServerId : undefined;
+        const token = typeof msg.fcmToken === "string" ? msg.fcmToken : "";
+        const appServerId = typeof msg.appServerId === "string" ? msg.appServerId : undefined;
         if (token.trim()) {
           unregisterPushToken(token, appServerId);
           sendJson({ type: "push_token_unregistered", appServerId });
@@ -3974,10 +3973,10 @@ function createConnectionHandler(
       }
 
       case "get_push_registration": {
-        const token = typeof (msg as any).fcmToken === "string" ? (msg as any).fcmToken : "";
-        const appServerId = typeof (msg as any).appServerId === "string" ? (msg as any).appServerId : undefined;
-        const deliveryRoute = (msg as any).deliveryRoute === "relay" || (msg as any).deliveryRoute === "direct"
-          ? (msg as any).deliveryRoute
+        const token = typeof msg.fcmToken === "string" ? msg.fcmToken : "";
+        const appServerId = typeof msg.appServerId === "string" ? msg.appServerId : undefined;
+        const deliveryRoute = msg.deliveryRoute === "relay" || msg.deliveryRoute === "direct"
+          ? msg.deliveryRoute
           : undefined;
         sendJson({
           type: "push_registration_status",
@@ -3998,11 +3997,11 @@ function createConnectionHandler(
 
       case "backend_install": {
         const backend = msg.backend;
-        const requestId = ((msg as any).requestId as string | undefined) || `backend_${backend}_${Date.now()}`;
-        const reinstall = (msg as any).reinstall === true;
-        const authenticate = (msg as any).authenticate === true;
-        const forceAuthenticate = (msg as any).forceAuthenticate === true;
-        const operation = ((msg as any).operation === "auth" || (authenticate && !reinstall))
+        const requestId = (msg.requestId) || `backend_${backend}_${Date.now()}`;
+        const reinstall = msg.reinstall === true;
+        const authenticate = msg.authenticate === true;
+        const forceAuthenticate = msg.forceAuthenticate === true;
+        const operation = (msg.operation === "auth" || (authenticate && !reinstall))
           ? "auth"
           : "repair";
         const backendName = backend === "codex" ? "Codex" : "Claude";
@@ -4073,12 +4072,12 @@ function createConnectionHandler(
               message: "Open the Claude login page, finish sign-in, then paste the copied auth code here.",
               authUrl: authRequest.authUrl,
             });
-          } catch (e: any) {
+          } catch (e: unknown) {
             activeBackendInstalls.delete(backend);
             sendProgress({
               phase: "auth",
               status: "failed",
-              message: `Claude sign-in failed to start: ${e?.message || String(e)}`,
+              message: `Claude sign-in failed to start: ${errorMessage(e) || String(e)}`,
             });
           }
           break;
@@ -4130,7 +4129,7 @@ function createConnectionHandler(
             codexCollaborationMode: "default",
           });
           broadcastSessionList();
-        }).catch((e: any) => {
+        }).catch((e: unknown) => {
           const cancelled = abortController.signal.aborted;
           invalidateCodexAvailabilityCache();
           invalidateCodexDriverAvailabilityCache();
@@ -4140,7 +4139,7 @@ function createConnectionHandler(
             status: cancelled ? "cancelled" : "failed",
             message: cancelled
               ? `${backendName} backend ${operationName} stopped.`
-              : `${backendName} repair failed: ${e?.message || String(e)}`,
+              : `${backendName} repair failed: ${errorMessage(e) || String(e)}`,
           });
           broadcastServerCapabilities();
         }).finally(() => {
@@ -4186,7 +4185,7 @@ function createConnectionHandler(
 
       case "backend_install_cancel": {
         const backend = msg.backend;
-        const requestId = (msg as any).requestId as string | undefined;
+        const requestId = msg.requestId;
         const backendName = backend === "codex" ? "Codex" : "Claude";
         const active = activeBackendInstalls.get(backend);
         const operation = active?.operation || "repair";
@@ -4230,7 +4229,7 @@ function createConnectionHandler(
       }
 
       case "get_status_sync": {
-        sendStatusSyncTo(transport as WebSocket);
+        sendStatusSyncTo(transport);
         break;
       }
 
@@ -4245,15 +4244,15 @@ function createConnectionHandler(
 
       case "set_server_settings": {
         try {
-          if (typeof (msg as any).defaultCwd === "string") {
-            setDefaultCwd((msg as any).defaultCwd);
+          if (typeof msg.defaultCwd === "string") {
+            setDefaultCwd(msg.defaultCwd);
           }
           let systemPromptChanged = false;
-          if (typeof (msg as any).systemPrompt === "string") {
-            setServerSystemPrompt((msg as any).systemPrompt);
+          if (typeof msg.systemPrompt === "string") {
+            setServerSystemPrompt(msg.systemPrompt);
             systemPromptChanged = true;
-          } else if (typeof (msg as any).systemPromptIfUnset === "string" && !isServerSystemPromptInitialized()) {
-            setServerSystemPrompt((msg as any).systemPromptIfUnset);
+          } else if (typeof msg.systemPromptIfUnset === "string" && !isServerSystemPromptInitialized()) {
+            setServerSystemPrompt(msg.systemPromptIfUnset);
             systemPromptChanged = true;
           }
           if (systemPromptChanged) {
@@ -4267,7 +4266,7 @@ function createConnectionHandler(
           }
           if (Object.prototype.hasOwnProperty.call(msg, "claudeAutoCompactWindow")) {
             const window = normalizeClaudeAutoCompactWindow(
-              (msg as any).claudeAutoCompactWindow,
+              msg.claudeAutoCompactWindow,
             );
             setClaudeAutoCompactWindow(window);
             const applyDefault = (session: Session | null | undefined) => {
@@ -4290,10 +4289,10 @@ function createConnectionHandler(
             ...getAdvertisedServerSettings(),
             codexCollaborationMode: "default",
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "error",
-            message: `Failed to update server settings: ${e.message || String(e)}`,
+            message: `Failed to update server settings: ${errorMessage(e) || String(e)}`,
           });
         }
         break;
@@ -4316,19 +4315,19 @@ function createConnectionHandler(
             modes: modes.length > 0 ? modes : fallback,
             currentMode: codexSession.getCodexCollaborationMode(),
           });
-        }).catch((e: any) => {
+        }).catch((e: unknown) => {
           sendJson({
             type: "codex_collaboration_modes",
             modes: fallback,
             currentMode: codexSession.getCodexCollaborationMode(),
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
           });
         });
         break;
       }
 
       case "set_codex_collaboration_mode": {
-        const mode = String((msg as any).mode || "default").trim() || "default";
+        const mode = String(msg.mode || "default").trim() || "default";
         if (activeSession instanceof CodexSession) {
           activeSession.setCodexCollaborationMode(mode);
         }
@@ -4387,24 +4386,24 @@ function createConnectionHandler(
       }
 
       case "resume_session": {
-        const historyRequestId = typeof (msg as any).historyRequestId === "string"
-          ? (msg as any).historyRequestId as string
+        const historyRequestId = typeof msg.historyRequestId === "string"
+          ? msg.historyRequestId
           : undefined;
-        const openTraceId = typeof (msg as any).openTraceId === "string"
-          ? (msg as any).openTraceId as string
+        const openTraceId = typeof msg.openTraceId === "string"
+          ? msg.openTraceId
           : undefined;
         // Detach old session so it stops sending to this client
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
         }
-        const resumeCwd = (msg as any).cwd || getDefaultCwd();
+        const resumeCwd = msg.cwd || getDefaultCwd();
         let sessionInfo = getSession(msg.sessionId);
         // If not in SocketAgent store but cwd is provided, this is an SDK-only
         // session (claude or codex). The caller passes `backend` so we tag the
         // freshly-registered SessionInfo correctly — without it, codex SDK
         // resumes would default to claude and fail on the first prompt.
-        if (!sessionInfo && (msg as any).cwd) {
-          const sdkBackend = ((msg as any).backend as "claude" | "codex" | undefined);
+        if (!sessionInfo && msg.cwd) {
+          const sdkBackend = (msg.backend);
           sessionInfo = {
             id: msg.sessionId,
             title: "Untitled",
@@ -4517,9 +4516,9 @@ function createConnectionHandler(
           }
           backfillClaudeTasksFromHistory(msg.sessionId);
         }
-        const rawKnownSeq = Number((msg as any).knownSessionSeq);
-        const rawKnownOffset = Number((msg as any).knownHistoryOffset);
-        const rawKnownEntryCount = Number((msg as any).knownHistoryEntryCount);
+        const rawKnownSeq = Number(msg.knownSessionSeq);
+        const rawKnownOffset = Number(msg.knownHistoryOffset);
+        const rawKnownEntryCount = Number(msg.knownHistoryEntryCount);
         const page = getResumeHistoryPage(msg.sessionId, {
           knownHistoryDigest: msg.knownHistoryDigest,
           knownSessionSeq: Number.isSafeInteger(rawKnownSeq) && rawKnownSeq >= 0
@@ -4595,20 +4594,20 @@ function createConnectionHandler(
         }
 
         // Restore last usage data if available
-        if ((sessionInfo as any).lastUsage) {
+        if (sessionInfo.lastUsage) {
           sendJson({
             type: "usage_restore",
-            usage: (sessionInfo as any).lastUsage,
+            usage: sessionInfo.lastUsage,
           });
         }
 
         // Restore last context usage breakdown (persisted between sessions).
         // If there's a live query below, it'll overwrite this with fresh data.
-        if ((sessionInfo as any).lastContextUsage) {
+        if (sessionInfo.lastContextUsage) {
           sendJson({
             type: "context_usage",
             sessionId: msg.sessionId,
-            ...(sessionInfo as any).lastContextUsage,
+            ...sessionInfo.lastContextUsage,
           });
         }
 
@@ -4702,7 +4701,7 @@ function createConnectionHandler(
       }
 
       case "prompt": {
-        const promptMessageId = String((msg as any).messageId || "").trim();
+        const promptMessageId = String(msg.messageId || "").trim();
         const duplicateSubmission = acceptedPromptSubmission(promptMessageId);
         const persistedDuplicate = !duplicateSubmission
           && persistedPromptSubmission(String(msg.sessionId || ""), promptMessageId);
@@ -4755,10 +4754,10 @@ function createConnectionHandler(
         // messages and replacing tailored tool events with rollout entries.
         stopExternalNativeWatcher();
         cancelScheduledCodexNativeHistorySync();
-        const promptCodexFastMode = typeof (msg as any).codexFastMode === "boolean"
-          ? Boolean((msg as any).codexFastMode)
+        const promptCodexFastMode = typeof msg.codexFastMode === "boolean"
+          ? Boolean(msg.codexFastMode)
           : undefined;
-        if ((msg as ClientMessage & { commandId?: string }).commandId && !msg.sessionId) {
+        if (msg.commandId && !msg.sessionId) {
           if (activeSession?.isRunning) activeSession.detachWebSocket();
           activeSession = null;
           activeSessionId = null;
@@ -4846,13 +4845,13 @@ function createConnectionHandler(
 
         // If session is already running, inject the message inline between turns
         if (activeSession.isRunning) {
-          const priority = (msg as any).priority || 'now';
-          const messageId = (msg as any).messageId || '';
+          const priority = msg.priority || 'now';
+          const messageId = msg.messageId || '';
           console.log(`[Inject] Session running, injecting user message inline (priority=${priority}, messageId=${messageId})`);
           const injectOptions = activeSession instanceof CodexSession
             ? { fastMode: promptCodexFastMode ?? activeSession.getCodexFastMode() }
             : undefined;
-          const injectionPromise = (activeSession as any).injectMessage(
+          const injectionPromise = activeSession.injectMessage(
             msg.text,
             priority,
             messageId,
@@ -4863,8 +4862,8 @@ function createConnectionHandler(
             // Acknowledge injection so the app can promote the pending message
             sendJson({ type: "injection_ack", messageId });
             if (unlockedByUserPrompt) retryDeferredAutomationAfterUserPrompt();
-          }).catch((e: any) => {
-            if (e?.message === "Queued prompt retracted") {
+          }).catch((e: unknown) => {
+            if (errorMessage(e) === "Queued prompt retracted") {
               console.log(`[Inject] Queued prompt retracted (messageId=${messageId})`);
             } else {
               if (promptMessageId) acceptedPromptSubmissions.delete(promptMessageId);
@@ -4872,8 +4871,8 @@ function createConnectionHandler(
               sendJson({
                 type: "injection_failed",
                 messageId,
-                message: e?.message || String(e),
-              } as any);
+                message: errorMessage(e) || String(e),
+              });
             }
           });
           break;
@@ -4890,7 +4889,7 @@ function createConnectionHandler(
         // between the clear and the user's next prompt.
         const resumeSessionInfo = resumeId ? getSession(resumeId) : undefined;
         if (resumeSessionInfo?.pendingHandoffContext) {
-          (activeSession as any).setPendingTransferContext?.(
+          activeSession.setPendingTransferContext(
             resumeSessionInfo.pendingHandoffContext,
           );
         }
@@ -4911,8 +4910,8 @@ function createConnectionHandler(
               if (added.length > 0) {
                 emitExternalNativeHistory(resumeSessionInfo, added);
               }
-            } catch (err: any) {
-              console.warn(`[CodexSync] pre-prompt native history sync failed for ${resumeId}: ${err?.message || err}`);
+            } catch (err: unknown) {
+              console.warn(`[CodexSync] pre-prompt native history sync failed for ${resumeId}: ${errorMessage(err) || err}`);
             }
             if (
               activeSession instanceof CodexSession
@@ -4967,8 +4966,8 @@ function createConnectionHandler(
               }
               broadcastSessionList();
             },
-            onError: (error: any) => {
-              console.error(`[Monitor] Owning-session delivery failed: ${error?.message || error}`);
+            onError: (error: unknown) => {
+              console.error(`[Monitor] Owning-session delivery failed: ${errorMessage(error)}`);
             },
           });
         };
@@ -4984,12 +4983,12 @@ function createConnectionHandler(
         const runOptions = sessionForRun instanceof CodexSession
           ? {
               fastMode: promptCodexFastMode ?? sessionForRun.getCodexFastMode(),
-              messageId: (msg as any).messageId || undefined,
+              messageId: msg.messageId || undefined,
             }
           : undefined;
-        const runPromise = (sessionForRun as any).runQueryWithOptions
-          ? (sessionForRun as any).runQueryWithOptions(msg.text, resumeId, runOptions)
-          : (sessionForRun as any).runQuery(
+        const runPromise = sessionForRun instanceof CodexSession
+          ? sessionForRun.runQueryWithOptions(msg.text, resumeId, runOptions)
+          : sessionForRun.runQuery(
               msg.text,
               resumeId,
               promptMessageId || undefined,
@@ -5020,14 +5019,14 @@ function createConnectionHandler(
           }
           clearBackendHealthOverride(sessionForRun instanceof CodexSession ? "codex" : "claude");
           broadcastSessionList();
-        }).catch((err: any) => {
+        }).catch((err: unknown) => {
           bindClientConversation(sessionForRun);
           const sid = sessionForRun.getSessionId();
           sendJson({
             type: "prompt_failed",
             messageId: promptMessageId,
             ...(sid ? { sessionId: sid } : {}),
-            message: err?.message || "Query failed",
+            message: errorMessage(err) || "Query failed",
           });
           if (sid && activeSessions.get(sid) === sessionForRun && !sessionShouldRemainPooled(sessionForRun)) {
             activeSessions.delete(sid);
@@ -5036,13 +5035,13 @@ function createConnectionHandler(
             console.log(`[Abort] Suppressed completion handling for hard-stopped session ${sid || "(pending)"}`);
           } else if (sessionForRun instanceof CodexSession && isCodexAuthError(err)) {
             settleLogicalRun(sessionForRun, "failed", resumeId);
-            const detail = err?.message || String(err);
+            const detail = errorMessage(err) || String(err);
             markBackendAuthRequired("codex", detail);
             invalidateCodexAvailabilityCache();
             invalidateCodexDriverAvailabilityCache();
-            if (err?.codexMcpAuth === true) {
+            if (isRecord(err) && err.codexMcpAuth === true) {
               clearBackendHealthOverride("codex");
-            } else if (err?.codexPrimaryAuthSurfaced !== true) {
+            } else if (!isRecord(err) || err.codexPrimaryAuthSurfaced !== true) {
               sendJson({
                 type: "backend_auth_required",
                 backend: "codex",
@@ -5060,11 +5059,11 @@ function createConnectionHandler(
             broadcastServerCapabilities();
           } else if (sessionForRun instanceof ClaudeSession && isAuthFailureMessage(err)) {
             settleLogicalRun(sessionForRun, "failed", resumeId);
-            const detail = err?.message || String(err);
+            const detail = errorMessage(err) || String(err);
             markBackendAuthRequired("claude", detail);
             refreshClaudeExecutableInfo();
             invalidateBackendHealthCache();
-            if (err?.socketAgentSurfaced !== true) {
+            if (!isRecord(err) || err.socketAgentSurfaced !== true) {
               sendJson({
                 type: "backend_auth_required",
                 backend: "claude",
@@ -5079,11 +5078,11 @@ function createConnectionHandler(
               codexCollaborationMode: "default",
             });
             broadcastServerCapabilities();
-          } else if (!(err && typeof err === "object" && err.socketAgentSurfaced === true)) {
+          } else if (!(isRecord(err) && err.socketAgentSurfaced === true)) {
             settleLogicalRun(sessionForRun, "failed", resumeId);
             sendJson({
               type: "error",
-              message: err.message || "Query failed",
+              message: errorMessage(err) || "Query failed",
             });
           } else {
             settleLogicalRun(sessionForRun, "failed", resumeId);
@@ -5132,11 +5131,11 @@ function createConnectionHandler(
       }
 
       case "answer": {
-        const qId = msg.questionId as string;
+        const qId = msg.questionId;
         let answerHandled = false;
         const requestedSessionId =
-          typeof (msg as any).sessionId === "string" && (msg as any).sessionId.trim()
-            ? (msg as any).sessionId.trim()
+          typeof msg.sessionId === "string" && msg.sessionId.trim()
+            ? msg.sessionId.trim()
             : undefined;
         const activeSid = activeSession?.getSessionId()
           || activeSession?._resumeSessionId
@@ -5147,7 +5146,7 @@ function createConnectionHandler(
             || (activeSid === requestedSessionId ? activeSession : undefined)
           : activeSession;
         const answerSid = answerSession?.getSessionId()
-          || (answerSession as any)?._resumeSessionId
+          || answerSession?._resumeSessionId
           || requestedSessionId
           || activeSid
           || undefined;
@@ -5203,7 +5202,7 @@ function createConnectionHandler(
           const resolved = answerSession.resolveQuestion(qId, msg.answers);
           if (!resolved) {
             // Question promise is gone (e.g. after server restart) — inject as prompt
-            const answers = msg.answers as Record<string, string>;
+            const answers = msg.answers;
             const parts: string[] = [];
             for (const [question, answer] of Object.entries(answers)) {
               parts.push(`Q: ${question}\nA: ${answer}`);
@@ -5235,8 +5234,8 @@ function createConnectionHandler(
                   activeSessions.delete(s);
                 }
                 broadcastSessionList();
-              }).catch((err) => {
-                sendJson({ type: "error", message: err.message || "Query failed" });
+              }).catch((err: unknown) => {
+                sendJson({ type: "error", message: errorMessage(err) || "Query failed" });
               });
             }
           }
@@ -5285,7 +5284,7 @@ function createConnectionHandler(
               message: "Browser component installed.",
             });
           } catch (error) {
-            const detail = error instanceof Error ? error.message : "Browser component installation failed.";
+            const detail = error instanceof Error ? errorMessage(error) : "Browser component installation failed.";
             const message = process.platform === "linux"
               ? "Install Chrome or Chromium on this computer, then try again. Linux browser packages require administrator access and are not installed from the app."
               : detail;
@@ -5303,10 +5302,10 @@ function createConnectionHandler(
       case "browser_frame_request": {
         void browserSessionManager.frame(msg.profile)
           .then((frame) => sendJson({ type: "browser_frame", ...frame }))
-          .catch((error) => sendJson({
+          .catch((error: unknown) => sendJson({
             type: "browser_session_error",
             profile: msg.profile,
-            message: error instanceof Error ? error.message : "Browser frame request failed.",
+            message: error instanceof Error ? errorMessage(error) : "Browser frame request failed.",
           }));
         break;
       }
@@ -5314,10 +5313,10 @@ function createConnectionHandler(
       case "browser_viewport": {
         void browserSessionManager.setViewport(msg.profile, msg.width, msg.height)
           .then((session) => broadcastBrowserViewport(session))
-          .catch((error) => sendJson({
+          .catch((error: unknown) => sendJson({
             type: "browser_session_error",
             profile: msg.profile,
-            message: error instanceof Error ? error.message : "Browser resize failed.",
+            message: error instanceof Error ? errorMessage(error) : "Browser resize failed.",
           }));
         break;
       }
@@ -5378,7 +5377,7 @@ function createConnectionHandler(
             sendJson({
               type: "browser_session_error",
               profile: msg.profile,
-              message: error instanceof Error ? error.message : "Browser input failed.",
+              message: error instanceof Error ? errorMessage(error) : "Browser input failed.",
             });
           }
         })();
@@ -5400,7 +5399,7 @@ function createConnectionHandler(
       }
 
       case "add_recent_cwd": {
-        const cwd = (msg as any).cwd as string;
+        const cwd = msg.cwd;
         if (cwd) {
           const cwds = addRecentCwd(cwd);
           sendJson({ type: "recent_cwds", cwds });
@@ -5409,7 +5408,7 @@ function createConnectionHandler(
       }
 
       case "remove_recent_cwd": {
-        const cwd = (msg as any).cwd as string;
+        const cwd = msg.cwd;
         if (cwd) {
           const cwds = removeRecentCwd(cwd);
           sendJson({ type: "recent_cwds", cwds });
@@ -5418,12 +5417,12 @@ function createConnectionHandler(
       }
 
       case "list_sdk_sessions": {
-        const cwd = String((msg as any).cwd || "").trim();
-        const recursive = (msg as any).recursive === true;
-        const all = (msg as any).all === true;
-        const query = String((msg as any).query || "").trim();
-        const requestId = (msg as any).requestId as string | undefined;
-        const requestedLimit = Math.max(1, Math.min(2000, Math.floor(Number((msg as any).limit ?? 30))));
+        const cwd = String(msg.cwd || "").trim();
+        const recursive = msg.recursive === true;
+        const all = msg.all === true;
+        const query = String(msg.query || "").trim();
+        const requestId = msg.requestId;
+        const requestedLimit = Math.max(1, Math.min(2000, Math.floor(Number(msg.limit ?? 30))));
         const discoveryLimit = 2000;
         console.log(`[SdkSessions] Request cwd=${cwd || "*"} recursive=${recursive} all=${all} query=${query ? "yes" : "no"}`);
         if (!cwd && !all) {
@@ -5486,8 +5485,8 @@ function createConnectionHandler(
               ...session,
               cwd,
             }));
-          } catch (err: any) {
-            console.warn(`[SdkSessions] Codex native thread/list failed for ${cwd}: ${err?.message || err}`);
+          } catch (err: unknown) {
+            console.warn(`[SdkSessions] Codex native thread/list failed for ${cwd}: ${errorMessage(err) || err}`);
             codexSessions = listCodexSessions(cwd, discoveryLimit).map((session) => ({
               ...session,
               cwd,
@@ -5530,8 +5529,8 @@ function createConnectionHandler(
           }
           console.log(`Deleted session ${sid} (${result.removed.length} artifact(s) removed)`);
           sendJson({ type: "session_deleted", sessionId: sid });
-        } catch (err: any) {
-          const message = err?.message || String(err);
+        } catch (err: unknown) {
+          const message = errorMessage(err) || String(err);
           console.warn(`[DeleteSession] Failed to delete ${sid}: ${message}`);
           sendJson({ type: "session_delete_failed", sessionId: sid, error: message });
         }
@@ -5552,8 +5551,8 @@ function createConnectionHandler(
           session.title = msg.title;
           saveSession(session);
           if (session.backend === "codex" && getStoredCodexDriver(session) === "app-server") {
-            renameCodexNativeThread(msg.sessionId, session.cwd, msg.title).catch((err) => {
-              console.warn(`[Rename] Codex native thread/name/set failed for ${msg.sessionId}: ${err.message || err}`);
+            renameCodexNativeThread(msg.sessionId, session.cwd, msg.title).catch((err: unknown) => {
+              console.warn(`[Rename] Codex native thread/name/set failed for ${msg.sessionId}: ${errorMessage(err) || err}`);
             });
           }
           console.log(`Renamed session ${msg.sessionId} to "${msg.title}"`);
@@ -5565,35 +5564,35 @@ function createConnectionHandler(
       // ── Scheduled tasks ──
 
       case "schedule_task": {
-        const recurrence = (msg as any).recurrence;
-        const backend = ((msg as any).backend === "codex" ? "codex" : "claude") as Backend;
+        const recurrence = msg.recurrence;
+        const backend = (msg.backend === "codex" ? "codex" : "claude") as Backend;
         const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
-        const model = typeof (msg as any).model === "string" ? (msg as any).model.trim() : "";
-        const effort = AGENT_EFFORTS.has((msg as any).effort) ? (msg as any).effort as AgentEffort : undefined;
-        const permissionMode = SCHEDULED_PERMISSION_MODES.has((msg as any).permissionMode)
-          ? (msg as any).permissionMode as string
+        const model = typeof msg.model === "string" ? msg.model.trim() : "";
+        const effort = msg.effort && AGENT_EFFORTS.has(msg.effort) ? msg.effort : undefined;
+        const permissionMode = msg.permissionMode && SCHEDULED_PERMISSION_MODES.has(msg.permissionMode)
+          ? msg.permissionMode
           : undefined;
         const task: ScheduledTask = {
           id: crypto.randomUUID(),
-          ...(typeof (msg as any).name === "string" && (msg as any).name.trim()
-            ? { name: (msg as any).name.trim() }
+          ...(typeof msg.name === "string" && msg.name.trim()
+            ? { name: msg.name.trim() }
             : {}),
-          prompt: (msg as any).prompt,
-          cwd: (msg as any).cwd,
+          prompt: msg.prompt,
+          cwd: msg.cwd,
           backend,
           ...(codexDriver ? { codexDriver } : {}),
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
           ...(permissionMode ? { permissionMode } : {}),
-          scheduledTime: (msg as any).scheduledTime,
+          scheduledTime: msg.scheduledTime,
           createdAt: new Date().toISOString(),
           status: "pending",
           createdBySessionId: activeSessionId
             ? delegationSupervisorForSessionId(activeSessionId)
             : undefined,
           recurrence: recurrence && recurrence.type !== "once" ? recurrence : undefined,
-          reuseSession: (msg as any).reuseSession || false,
-          notificationMode: (msg as any).notificationMode === "quiet" ? "quiet" : "completion",
+          reuseSession: msg.reuseSession || false,
+          notificationMode: msg.notificationMode === "quiet" ? "quiet" : "completion",
           runCount: 0,
           runs: [],
         };
@@ -5613,7 +5612,7 @@ function createConnectionHandler(
       }
 
       case "cancel_scheduled_task": {
-        const task = getScheduledTask((msg as any).taskId);
+        const task = getScheduledTask(msg.taskId);
         if (task && task.status === "pending") {
           task.status = "cancelled";
           saveScheduledTask(task);
@@ -5624,7 +5623,7 @@ function createConnectionHandler(
       }
 
       case "execute_scheduled_task": {
-        const task = getScheduledTask((msg as any).taskId);
+        const task = getScheduledTask(msg.taskId);
         if (!task) {
           sendJson({ type: "error", message: "Scheduled task not found" });
           break;
@@ -5637,51 +5636,51 @@ function createConnectionHandler(
           sendJson({ type: "error", message: "Scheduled task is already running" });
           break;
         }
-        executeScheduledTask(task, "manual").catch((err: any) => {
-          console.error(`[Scheduler] Manual task ${task.id} failed before launch: ${err?.message || err}`);
+        executeScheduledTask(task, "manual").catch((err: unknown) => {
+          console.error(`[Scheduler] Manual task ${task.id} failed before launch: ${errorMessage(err) || err}`);
         });
         break;
       }
 
       case "update_scheduled_task": {
-        const task = getScheduledTask((msg as any).taskId);
+        const task = getScheduledTask(msg.taskId);
         if (task) {
-          if ((msg as any).name !== undefined) {
-            const name = typeof (msg as any).name === "string" ? (msg as any).name.trim() : "";
+          if (msg.name !== undefined) {
+            const name = typeof msg.name === "string" ? msg.name.trim() : "";
             task.name = name || undefined;
           }
-          if ((msg as any).prompt !== undefined) task.prompt = (msg as any).prompt;
-          if ((msg as any).cwd !== undefined) task.cwd = (msg as any).cwd;
-          if ((msg as any).backend !== undefined) {
-            const nextBackend = (msg as any).backend === "codex" ? "codex" : "claude";
+          if (msg.prompt !== undefined) task.prompt = msg.prompt;
+          if (msg.cwd !== undefined) task.cwd = msg.cwd;
+          if (msg.backend !== undefined) {
+            const nextBackend = msg.backend === "codex" ? "codex" : "claude";
             if (task.backend && task.backend !== nextBackend) {
               task.sessionId = undefined;
-              if ((msg as any).model === undefined) task.model = undefined;
+              if (msg.model === undefined) task.model = undefined;
             }
             task.backend = nextBackend;
             task.codexDriver = nextBackend === "codex" ? "app-server" : undefined;
           }
-          if ((msg as any).codexDriver !== undefined) {
+          if (msg.codexDriver !== undefined) {
             task.codexDriver = task.backend === "codex" ? "app-server" : undefined;
           }
-          if ((msg as any).model !== undefined) {
-            const model = (msg as any).model;
+          if (msg.model !== undefined) {
+            const model = msg.model;
             task.model = typeof model === "string" && model.trim() ? model.trim() : undefined;
           }
-          if (AGENT_EFFORTS.has((msg as any).effort)) {
-            task.effort = (msg as any).effort as AgentEffort;
+          if (msg.effort && AGENT_EFFORTS.has(msg.effort)) {
+            task.effort = msg.effort;
           }
-          if (SCHEDULED_PERMISSION_MODES.has((msg as any).permissionMode)) {
-            task.permissionMode = (msg as any).permissionMode as string;
+          if (msg.permissionMode && SCHEDULED_PERMISSION_MODES.has(msg.permissionMode)) {
+            task.permissionMode = msg.permissionMode;
           }
-          if ((msg as any).scheduledTime !== undefined) task.scheduledTime = (msg as any).scheduledTime;
-          if ((msg as any).recurrence !== undefined) {
-            const rec = (msg as any).recurrence;
+          if (msg.scheduledTime !== undefined) task.scheduledTime = msg.scheduledTime;
+          if (msg.recurrence !== undefined) {
+            const rec = msg.recurrence;
             task.recurrence = rec && rec.type !== "once" ? rec : undefined;
           }
-          if ((msg as any).reuseSession !== undefined) task.reuseSession = (msg as any).reuseSession;
-          if ((msg as any).notificationMode !== undefined) {
-            task.notificationMode = (msg as any).notificationMode === "quiet" ? "quiet" : "completion";
+          if (msg.reuseSession !== undefined) task.reuseSession = msg.reuseSession;
+          if (msg.notificationMode !== undefined) {
+            task.notificationMode = msg.notificationMode === "quiet" ? "quiet" : "completion";
           }
           // Allow re-activating a cancelled task
           if (task.status === "cancelled") task.status = "pending";
@@ -5701,21 +5700,21 @@ function createConnectionHandler(
       }
 
       case "delete_scheduled_task": {
-        deleteScheduledTask((msg as any).taskId);
-        console.log(`[Scheduler] Task deleted: ${(msg as any).taskId}`);
+        deleteScheduledTask(msg.taskId);
+        console.log(`[Scheduler] Task deleted: ${msg.taskId}`);
         broadcastScheduledTaskList();
         break;
       }
 
       case "mark_scheduled_task_read": {
-        const task = getScheduledTask((msg as any).taskId);
+        const task = getScheduledTask(msg.taskId);
         if (!task) {
           sendJson({ type: "error", message: "Scheduled task not found" });
           break;
         }
         const updated = setScheduledTaskReadState(
           task,
-          (msg as any).read !== false,
+          msg.read !== false,
         );
         saveScheduledTask(updated);
         broadcastScheduledTaskList();
@@ -5723,7 +5722,7 @@ function createConnectionHandler(
       }
 
       case "archive_scheduled_task": {
-        const task = getScheduledTask((msg as any).taskId);
+        const task = getScheduledTask(msg.taskId);
         if (!task) {
           sendJson({ type: "error", message: "Scheduled task not found" });
           break;
@@ -5741,7 +5740,7 @@ function createConnectionHandler(
       }
 
       case "restore_scheduled_task": {
-        const task = getScheduledTask((msg as any).taskId);
+        const task = getScheduledTask(msg.taskId);
         if (!task) {
           sendJson({ type: "error", message: "Scheduled task not found" });
           break;
@@ -5753,7 +5752,7 @@ function createConnectionHandler(
       }
 
       case "version_check": {
-        const info: any = {
+        const info: Record<string, unknown> = {
           type: "version_info",
           serverReleaseVersion: SERVER_RELEASE_VERSION,
           gitAvailable: !!GIT_ROOT,
@@ -5801,35 +5800,36 @@ function createConnectionHandler(
                 const remoteMsg = gitOutput(["log", remoteRef, "-1", "--format=%s"]);
                 const remoteDate = gitOutput(["log", remoteRef, "-1", "--format=%ci"]);
                 const commitsBehind = parseInt(gitOutput(["rev-list", "--count", `HEAD..${remoteRef}`]), 10);
-                info.remote = {
+                const remote: Record<string, unknown> = {
                   version: readRemoteServerReleaseVersion(branch),
                   hash: remoteHash,
                   message: remoteMsg,
                   date: remoteDate,
                 };
+                info.remote = remote;
                 info.updateAvailable = localHash !== remoteHash;
                 info.commitsBehind = commitsBehind;
                 if (autoUpdateVerifyMode() === "commit") {
                   try {
                     verifyAutoUpdateTarget(remoteHash);
-                    info.remote.verified = true;
-                  } catch (verifyErr: any) {
-                    info.remote.verified = false;
-                    info.remote.verifyError = verifyErr?.message || String(verifyErr);
+                    remote.verified = true;
+                  } catch (verifyErr: unknown) {
+                    remote.verified = false;
+                    remote.verifyError = errorMessage(verifyErr) || String(verifyErr);
                   }
                 }
                 const remoteAppVersion = readRemoteAppVersionInfo(branch);
                 if (remoteAppVersion) attachAppVersionInfo(info, remoteAppVersion);
-              } catch (e: any) {
-                info.fetchError = e.message;
+              } catch (e: unknown) {
+                info.fetchError = errorMessage(e);
               }
               sendJson(info);
-            }).catch((err: any) => {
-              info.fetchError = err.message;
+            }).catch((err: unknown) => {
+              info.fetchError = errorMessage(err);
               sendJson(info);
             });
-          } catch (e: any) {
-            info.error = e.message;
+          } catch (e: unknown) {
+            info.error = errorMessage(e);
             sendJson(info);
           }
         } else {
@@ -5856,8 +5856,8 @@ function createConnectionHandler(
             } catch {}
             try {
               armRestartRecoveryGuard("force-update", 300);
-            } catch (guardErr: any) {
-              sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}` });
+            } catch (guardErr: unknown) {
+              sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${errorMessage(guardErr) || String(guardErr)}` });
               break;
             }
             sendJson({
@@ -5898,17 +5898,17 @@ function createConnectionHandler(
           try {
             await runManagedBackendUpdateTracked();
             markManagedBackendUpdateChecked();
-          } catch (backendErr: any) {
-            console.warn(`[ForceUpdate] Managed backend version check failed; keeping installed versions: ${backendErr?.message || String(backendErr)}`);
+          } catch (backendErr: unknown) {
+            console.warn(`[ForceUpdate] Managed backend version check failed; keeping installed versions: ${errorMessage(backendErr) || String(backendErr)}`);
           }
           installSocketAgentCliFromRepo(GIT_ROOT);
 
           if (beforeHash === afterHash) {
-            if ((msg as any).forceRestart) {
+            if (msg.forceRestart) {
               try {
                 armRestartRecoveryGuard("force-update", 180);
-              } catch (guardErr: any) {
-                sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}` });
+              } catch (guardErr: unknown) {
+                sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${errorMessage(guardErr) || String(guardErr)}` });
                 break;
               }
               sendJson({ type: "update_result", success: true, message: "Recompiled and restarting", hash: afterHash, needsRestart: true });
@@ -5925,8 +5925,8 @@ function createConnectionHandler(
           const afterMsg = gitOutput(["log", "-1", "--format=%s"]);
           try {
             armRestartRecoveryGuard("force-update", 180);
-          } catch (guardErr: any) {
-            sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}` });
+          } catch (guardErr: unknown) {
+            sendJson({ type: "update_result", success: false, error: `Recovery guard could not be armed: ${errorMessage(guardErr) || String(guardErr)}` });
             break;
           }
           sendJson({ type: "update_result", success: true, message: `Updated to ${afterHash.substring(0, 7)}: ${afterMsg}`, hash: afterHash, needsRestart: true });
@@ -5936,8 +5936,8 @@ function createConnectionHandler(
             console.log(`[ForceUpdate] Restarting after update ${beforeHash.substring(0, 7)} → ${afterHash.substring(0, 7)}`);
             process.exit(1);
           }, 1000);
-        } catch (e: any) {
-          sendJson({ type: "update_result", success: false, error: e.message });
+        } catch (e: unknown) {
+          sendJson({ type: "update_result", success: false, error: errorMessage(e) });
         } finally {
           autoUpdateInProgress = false;
         }
@@ -5966,14 +5966,14 @@ function createConnectionHandler(
             let archivedByAppServer = false;
             await archiveCodexAppServerThread(sid, sessionInfo.cwd)
               .then(() => { archivedByAppServer = true; })
-              .catch((err) => {
-                console.warn(`[ClearContext] Codex app-server thread/archive failed for ${sid}: ${err.message || err}`);
+              .catch((err: unknown) => {
+                console.warn(`[ClearContext] Codex app-server thread/archive failed for ${sid}: ${errorMessage(err) || err}`);
               });
             if (archivedByAppServer) {
               invalidateCodexNativeListCache();
             }
-            if (archivedByAppServer && !(sessionInfo as any).codexDriver) {
-              (sessionInfo as any).codexDriver = "app-server";
+            if (archivedByAppServer && !sessionInfo.codexDriver) {
+              sessionInfo.codexDriver = "app-server";
               saveSession(sessionInfo);
             }
           }
@@ -5993,18 +5993,18 @@ function createConnectionHandler(
       }
 
       case "compact_context": {
-        const targetSid = (msg as any).sessionId || activeSession?.getSessionId() || activeSessionId;
+        const targetSid = msg.sessionId || activeSession?.getSessionId() || activeSessionId;
         const targetSession = targetSid
           ? activeSessions.get(targetSid) || (activeSession?.getSessionId() === targetSid ? activeSession : null)
           : activeSession;
         if (!targetSession) {
           const sessionInfo = targetSid ? getSession(targetSid) : undefined;
-          if (sessionInfo?.backend === "codex") {
+          if (targetSid && sessionInfo?.backend === "codex") {
             compactCodexAppServerThread(targetSid, sessionInfo.cwd).then(() => {
               sendJson({ type: "codex_compact_result", sessionId: targetSid, success: true });
-            }).catch((e: any) => {
-              sendJson({ type: "codex_compact_result", sessionId: targetSid, success: false, error: e.message || String(e) });
-              sendJson({ type: "error", message: `Codex compact failed: ${e.message || String(e)}` });
+            }).catch((e: unknown) => {
+              sendJson({ type: "codex_compact_result", sessionId: targetSid, success: false, error: errorMessage(e) || String(e) });
+              sendJson({ type: "error", message: `Codex compact failed: ${errorMessage(e) || String(e)}` });
             });
             break;
           }
@@ -6014,9 +6014,9 @@ function createConnectionHandler(
         if (targetSession instanceof CodexSession) {
           targetSession.compactAppServerThread(targetSid || undefined).then(() => {
             sendJson({ type: "codex_compact_result", sessionId: targetSid || "", success: true });
-          }).catch((e: any) => {
-            sendJson({ type: "codex_compact_result", sessionId: targetSid || "", success: false, error: e.message || String(e) });
-            sendJson({ type: "error", message: `Codex compact failed: ${e.message || String(e)}` });
+          }).catch((e: unknown) => {
+            sendJson({ type: "codex_compact_result", sessionId: targetSid || "", success: false, error: errorMessage(e) || String(e) });
+            sendJson({ type: "error", message: `Codex compact failed: ${errorMessage(e) || String(e)}` });
           });
           break;
         }
@@ -6025,8 +6025,8 @@ function createConnectionHandler(
       }
 
       case "codex_rollback_thread": {
-        const targetSid = (msg as any).sessionId || activeSession?.getSessionId() || activeSessionId;
-        const numTurns = Math.max(1, Math.floor(Number((msg as any).numTurns || 1)));
+        const targetSid = msg.sessionId || activeSession?.getSessionId() || activeSessionId;
+        const numTurns = Math.max(1, Math.floor(Number(msg.numTurns || 1)));
         if (!targetSid) {
           sendJson({ type: "codex_rollback_result", sessionId: "", success: false, error: "No Codex thread selected" });
           break;
@@ -6045,8 +6045,8 @@ function createConnectionHandler(
             timestamp: new Date().toISOString(),
           } as any);
           sendJson({ type: "codex_rollback_result", sessionId: targetSid, success: true, numTurns });
-        }).catch((e: any) => {
-          console.warn(`[CodexRewind] rollback failed session=${targetSid}: ${e.message || String(e)}`);
+        }).catch((e: unknown) => {
+          console.warn(`[CodexRewind] rollback failed session=${targetSid}: ${errorMessage(e) || String(e)}`);
           const error = codexRewindErrorMessage(e);
           sendJson({ type: "codex_rollback_result", sessionId: targetSid, success: false, numTurns, error });
           sendJson({ type: "error", message: `Codex rollback failed: ${error}` });
@@ -6055,7 +6055,7 @@ function createConnectionHandler(
       }
 
       case "archive_session": {
-        const sid = (msg as any).sessionId as string;
+        const sid = msg.sessionId;
         let sessionInfo = getSession(sid);
         let foundNativeOnly = false;
         if (!sessionInfo) {
@@ -6087,16 +6087,16 @@ function createConnectionHandler(
           if (sessionInfo.backend === "codex" && getStoredCodexDriver(sessionInfo) === "app-server") {
             try {
               await archiveCodexAppServerThread(sid, sessionInfo.cwd);
-            } catch (err: any) {
+            } catch (err: unknown) {
               if (isCodexThreadArchived(sid)) {
-                console.warn(`[Archive] Codex archive reported an error after ${sid} was archived: ${err.message || err}`);
+                console.warn(`[Archive] Codex archive reported an error after ${sid} was archived: ${errorMessage(err) || err}`);
                 invalidateCodexNativeListCache();
                 deleteSession(sid);
                 sendJson({ type: "session_archived", sessionId: sid });
                 broadcastSessionList();
                 break;
               }
-              const message = `Codex archive failed: ${err.message || err}`;
+              const message = `Codex archive failed: ${errorMessage(err) || err}`;
               console.warn(`[Archive] ${message} (${sid})`);
               sendJson({ type: "session_archive_failed", sessionId: sid, error: message });
               break;
@@ -6138,14 +6138,14 @@ function createConnectionHandler(
             job, ...(msg.action === "list" ? { jobs: transferJobs.list() } : {}) });
         } catch (error) {
           sendJson({ type: "session_transfer_job_result", requestId: msg.requestId, ok: false,
-            error: error instanceof Error ? error.message : String(error) });
+            error: error instanceof Error ? errorMessage(error) : String(error) });
         }
         break;
       }
 
       case "session_transfer_export": {
-        const requestId = String((msg as any).requestId || "");
-        const sessionId = String((msg as any).sessionId || "");
+        const requestId = String(msg.requestId || "");
+        const sessionId = String(msg.sessionId || "");
         try {
           const live = activeSessions.get(sessionId)
             || ((activeSession?.getSessionId?.() === sessionId
@@ -6162,24 +6162,24 @@ function createConnectionHandler(
             ok: true,
             ...result,
           });
-        } catch (error: any) {
+        } catch (error: unknown) {
           sendJson({
             type: "session_transfer_export_result",
             requestId,
             ok: false,
-            error: error?.message || String(error),
+            error: errorMessage(error) || String(error),
           });
         }
         break;
       }
 
       case "session_transfer_import": {
-        const requestId = String((msg as any).requestId || "");
+        const requestId = String(msg.requestId || "");
         try {
           const { resolvedPath } = resolveAllowedDownloadFile(
-            String((msg as any).bundlePath || ""),
+            String(msg.bundlePath || ""),
           );
-          const targetBackend = (msg as any).targetBackend === "codex"
+          const targetBackend = msg.targetBackend === "codex"
             ? "codex"
             : "claude";
           await waitForManagedBackendUpdate();
@@ -6188,11 +6188,11 @@ function createConnectionHandler(
           }
           const result = await importSessionTransfer({
             bundlePath: resolvedPath,
-            expectedSha256: String((msg as any).expectedSha256 || ""),
-            targetCwd: String((msg as any).targetCwd || ""),
+            expectedSha256: String(msg.expectedSha256 || ""),
+            targetCwd: String(msg.targetCwd || ""),
             targetBackend,
-            mode: (msg as any).mode === "clone" ? "clone" : "move",
-            nativeMode: (msg as any).nativeMode === "exact" ? "exact" : "handoff",
+            mode: msg.mode === "clone" ? "clone" : "move",
+            nativeMode: msg.nativeMode === "exact" ? "exact" : "handoff",
           });
           addRecentCwd(result.session.cwd);
           sendJson({
@@ -6204,20 +6204,20 @@ function createConnectionHandler(
             exactNativeResume: result.exactNativeResume,
           });
           broadcastSessionList();
-        } catch (error: any) {
+        } catch (error: unknown) {
           sendJson({
             type: "session_transfer_import_result",
             requestId,
             ok: false,
-            error: error?.message || String(error),
+            error: errorMessage(error) || String(error),
           });
         }
         break;
       }
 
       case "session_transfer_discard": {
-        const requestId = String((msg as any).requestId || "");
-        const discarded = discardSessionTransfer(String((msg as any).bundlePath || ""));
+        const requestId = String(msg.requestId || "");
+        const discarded = discardSessionTransfer(String(msg.bundlePath || ""));
         sendJson({
           type: "session_transfer_discard_result",
           requestId,
@@ -6233,7 +6233,7 @@ function createConnectionHandler(
       }
 
       case "get_archive_history": {
-        const { sid, ts } = msg as any;
+        const { sid, ts } = msg;
         const entries = isCodexNativeArchiveTs(ts)
           ? await readCodexAppServerThreadHistory(sid)
           : getArchiveHistory(sid, ts);
@@ -6242,7 +6242,7 @@ function createConnectionHandler(
       }
 
       case "restore_archive": {
-        const { sid, ts } = msg as any;
+        const { sid, ts } = msg;
         try {
           if (isCodexNativeArchiveTs(ts)) {
             const existing = getSession(sid);
@@ -6257,9 +6257,9 @@ function createConnectionHandler(
           }
           const result = restoreArchive(sid, ts);
           if (result.ok) {
-            if (result.session.backend === "codex" && (result.session as any).codexDriver === "app-server" && !isCodexNativeArchiveTs(ts)) {
-              await unarchiveCodexAppServerThread(sid, result.session.cwd).catch((err) => {
-                console.warn(`[RestoreArchive] Codex app-server thread/unarchive failed for ${sid}: ${err.message || err}`);
+            if (result.session.backend === "codex" && result.session.codexDriver === "app-server" && !isCodexNativeArchiveTs(ts)) {
+              await unarchiveCodexAppServerThread(sid, result.session.cwd).catch((err: unknown) => {
+                console.warn(`[RestoreArchive] Codex app-server thread/unarchive failed for ${sid}: ${errorMessage(err) || err}`);
               });
               invalidateCodexNativeListCache();
             }
@@ -6268,15 +6268,15 @@ function createConnectionHandler(
           } else {
             sendJson({ type: "archive_restore_failed", sid, ts, reason: result.reason });
           }
-        } catch (e: any) {
-          console.error(`[RestoreArchive] Exception: ${e.message}`, e.stack);
-          sendJson({ type: "archive_restore_failed", sid, ts, reason: e.message || String(e) });
+        } catch (e: unknown) {
+          console.error(`[RestoreArchive] Exception: ${errorMessage(e)}`, e instanceof Error ? e.stack : undefined);
+          sendJson({ type: "archive_restore_failed", sid, ts, reason: errorMessage(e) || String(e) });
         }
         break;
       }
 
       case "delete_archive": {
-        const { sid, ts } = msg as any;
+        const { sid, ts } = msg;
         if (isCodexNativeArchiveTs(ts)) {
           sendJson({ type: "error", message: "Codex native archives cannot be permanently deleted through SocketAgent yet. Unarchive or keep them archived." });
           sendJson({ type: "archive_list", archives: await listArchivesWithNativeCodex(false) });
@@ -6289,8 +6289,8 @@ function createConnectionHandler(
       }
 
       case "auth_code": {
-        const code = (msg as any).code as string;
-        const authRequestId = (msg as any).authRequestId as string | undefined;
+        const code = msg.code;
+        const authRequestId = msg.authRequestId;
         if (authRequestId && pendingClaudeBackendAuth.has(authRequestId)) {
           const pending = pendingClaudeBackendAuth.get(authRequestId)!;
           pending.sendProgress({
@@ -6315,17 +6315,17 @@ function createConnectionHandler(
               });
               broadcastSessionList();
             })
-            .catch((e: any) => {
+            .catch((e: unknown) => {
               finishClaudeBackendAuth(authRequestId, {
                 phase: "auth",
                 status: "failed",
-                message: `Claude sign-in failed: ${e?.message || String(e)}`,
+                message: `Claude sign-in failed: ${errorMessage(e) || String(e)}`,
               });
             });
           break;
         }
 
-        const targetSid = (msg as any).sessionId || activeSessionId;
+        const targetSid = msg.sessionId || activeSessionId;
         const session = targetSid ? activeSessions.get(targetSid) : null;
         if (session) {
           session.submitAuthCode(code);
@@ -6363,7 +6363,7 @@ function createConnectionHandler(
             // Install the latch before touching the backend. Any simultaneous
             // automated callback sees the lock and loses the race.
             sessionAutomationLocks.lock(targetSid);
-          } catch (error: any) {
+          } catch (error: unknown) {
             lockPersistenceError = error instanceof Error ? error : new Error(String(error));
             console.error(`[StopLock] Durable write failed for ${targetSid}: ${lockPersistenceError.message}`);
           }
@@ -6395,8 +6395,8 @@ function createConnectionHandler(
                 status: "cancelled",
                 timestamp: new Date().toISOString(),
               });
-            } catch (error: any) {
-              console.warn(`[Abort] Failed to persist cancellation marker for ${targetSid}: ${error?.message || error}`);
+            } catch (error: unknown) {
+              console.warn(`[Abort] Failed to persist cancellation marker for ${targetSid}: ${errorMessage(error) || error}`);
             }
           }
           console.log(`[Abort] Hard stop completed session=${targetSid} request=${requestId} alreadyStopped=${result.alreadyStopped}`);
@@ -6411,14 +6411,14 @@ function createConnectionHandler(
               ? { warning: `Stopped, but durable stop-lock persistence failed: ${lockPersistenceError.message}` }
               : {}),
           });
-        } catch (error: any) {
-          console.error(`[Abort] Hard stop failed session=${targetSid} request=${requestId}: ${error?.message || error}`);
+        } catch (error: unknown) {
+          console.error(`[Abort] Hard stop failed session=${targetSid} request=${requestId}: ${errorMessage(error) || error}`);
           sendJson({
             type: "abort_ack",
             requestId,
             sessionId: targetSid,
             stopped: false,
-            error: error?.message || String(error),
+            error: errorMessage(error) || String(error),
           });
         }
         break;
@@ -6433,13 +6433,13 @@ function createConnectionHandler(
       }
 
       case "secure_input_response": {
-        const requestId = (msg as any).requestId as string;
+        const requestId = msg.requestId;
         if (!requestId) {
           sendJson({ type: "error", message: "Missing secure input requestId" });
           break;
         }
-        const requestedSessionId = typeof (msg as any).sessionId === "string"
-          ? String((msg as any).sessionId).trim()
+        const requestedSessionId = typeof msg.sessionId === "string"
+          ? String(msg.sessionId).trim()
           : "";
         const localSessionId = activeSession?.getSessionId?.()
           || activeSession?._resumeSessionId
@@ -6453,7 +6453,7 @@ function createConnectionHandler(
         const sessionInfo = targetSessionId ? getSession(targetSessionId) : undefined;
         const cwd = targetSession?.getCwd?.() || sessionInfo?.cwd || getDefaultCwd();
 
-        if ((msg as any).cancelled) {
+        if (msg.cancelled) {
           if (isSecureInputPending(requestId)) {
             cancelSecureInputRequest(requestId);
           } else if (targetSessionId && getPersistedSecureInputRequest(targetSessionId, requestId)) {
@@ -6462,10 +6462,10 @@ function createConnectionHandler(
           sendJson({ type: "secure_input_cancelled", requestId });
           break;
         }
-        const secretId = typeof (msg as any).secretId === "string"
-          ? String((msg as any).secretId).trim()
+        const secretId = typeof msg.secretId === "string"
+          ? String(msg.secretId).trim()
           : "";
-        const value = (msg as any).value;
+        const value = msg.value ?? "";
         if (!secretId && (typeof value !== "string" || value.length === 0)) {
           sendJson({ type: "error", message: "Secure input value is empty" });
           break;
@@ -6556,23 +6556,23 @@ function createConnectionHandler(
                   activeSessions.delete(sid);
                 }
                 broadcastSessionList();
-              }).catch((error: any) => {
-                sendJson({ type: "error", message: error.message || "Failed to resume secure input request" });
+              }).catch((error: unknown) => {
+                sendJson({ type: "error", message: errorMessage(error) || "Failed to resume secure input request" });
               });
             }
           } else if (recoveredFromHistory && targetSessionId && sessionAutomationLocks.isLocked(targetSessionId)) {
             console.log(`[StopLock] Saved secure input without resuming stopped session ${targetSessionId}`);
           }
-        } catch (e: any) {
-          sendJson({ type: "error", message: `Secure input failed: ${e.message || String(e)}` });
+        } catch (e: unknown) {
+          sendJson({ type: "error", message: `Secure input failed: ${errorMessage(e) || String(e)}` });
         }
         break;
       }
 
       case "secure_input_store": {
-        const value = (msg as any).value;
-        const label = ((msg as any).label as string | undefined)?.trim() || "Secret";
-        const clientRequestId = ((msg as any).clientRequestId as string | undefined)?.trim();
+        const value = msg.value;
+        const label = (msg.label)?.trim() || "Secret";
+        const clientRequestId = (msg.clientRequestId)?.trim();
         if (typeof value !== "string" || value.length === 0) {
           if (clientRequestId) {
             sendJson({
@@ -6588,20 +6588,20 @@ function createConnectionHandler(
           break;
         }
         try {
-          const sessionId = ((msg as any).sessionId as string | undefined)?.trim()
+          const sessionId = (msg.sessionId)?.trim()
             || activeSession?.getSessionId?.()
             || activeSessionId
             || undefined;
-          const cwd = ((msg as any).cwd as string | undefined)?.trim()
+          const cwd = (msg.cwd)?.trim()
             || activeSession?.getCwd?.()
             || (sessionId ? getSession(sessionId)?.cwd : undefined)
             || getDefaultCwd();
           const saved = saveSecureInput({
             label,
             value,
-            reason: (msg as any).reason as string | undefined,
-            envHint: (msg as any).envHint as string | undefined,
-            scope: (msg as any).scope as any,
+            reason: msg.reason,
+            envHint: msg.envHint,
+            scope: msg.scope,
             sessionId,
             cwd,
           });
@@ -6633,29 +6633,29 @@ function createConnectionHandler(
               envHint: saved.envHint,
             });
           }
-        } catch (e: any) {
+        } catch (e: unknown) {
           if (clientRequestId) {
             sendJson({
               type: "secret_operation_result",
               requestId: clientRequestId,
               operation: "create",
               ok: false,
-              error: e.message || String(e),
+              error: errorMessage(e) || String(e),
             });
           } else {
-            sendJson({ type: "error", message: `Secure input failed: ${e.message || String(e)}` });
+            sendJson({ type: "error", message: `Secure input failed: ${errorMessage(e) || String(e)}` });
           }
         }
         break;
       }
 
       case "secret_inventory_request": {
-        const requestId = ((msg as any).requestId as string | undefined)?.trim() || undefined;
-        const sessionId = ((msg as any).sessionId as string | undefined)?.trim()
+        const requestId = (msg.requestId)?.trim() || undefined;
+        const sessionId = (msg.sessionId)?.trim()
           || activeSession?.getSessionId?.()
           || activeSessionId
           || undefined;
-        const cwd = ((msg as any).cwd as string | undefined)?.trim()
+        const cwd = (msg.cwd)?.trim()
           || activeSession?.getCwd?.()
           || (sessionId ? getSession(sessionId)?.cwd : undefined)
           || getDefaultCwd();
@@ -6664,21 +6664,21 @@ function createConnectionHandler(
       }
 
       case "secret_replace": {
-        const requestId = ((msg as any).requestId as string | undefined)?.trim() || "";
-        const sessionId = ((msg as any).sessionId as string | undefined)?.trim()
+        const requestId = (msg.requestId)?.trim() || "";
+        const sessionId = (msg.sessionId)?.trim()
           || activeSession?.getSessionId?.()
           || activeSessionId
           || undefined;
-        const cwd = ((msg as any).cwd as string | undefined)?.trim()
+        const cwd = (msg.cwd)?.trim()
           || activeSession?.getCwd?.()
           || (sessionId ? getSession(sessionId)?.cwd : undefined)
           || getDefaultCwd();
         try {
           const saved = replaceSecureInput({
-            secretId: String((msg as any).secretId || ""),
-            value: String((msg as any).value || ""),
-            label: (msg as any).label as string | undefined,
-            envHint: (msg as any).envHint as string | undefined,
+            secretId: String(msg.secretId || ""),
+            value: String(msg.value || ""),
+            label: msg.label,
+            envHint: msg.envHint,
             sessionId,
             cwd,
           });
@@ -6697,30 +6697,30 @@ function createConnectionHandler(
               ...(saved.updatedAt ? { updatedAt: saved.updatedAt } : {}),
             },
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "secret_operation_result",
             requestId,
             operation: "replace",
             ok: false,
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
           });
         }
         break;
       }
 
       case "secret_delete": {
-        const requestId = ((msg as any).requestId as string | undefined)?.trim() || "";
-        const sessionId = ((msg as any).sessionId as string | undefined)?.trim()
+        const requestId = (msg.requestId)?.trim() || "";
+        const sessionId = (msg.sessionId)?.trim()
           || activeSession?.getSessionId?.()
           || activeSessionId
           || undefined;
-        const cwd = ((msg as any).cwd as string | undefined)?.trim()
+        const cwd = (msg.cwd)?.trim()
           || activeSession?.getCwd?.()
           || (sessionId ? getSession(sessionId)?.cwd : undefined)
           || getDefaultCwd();
         try {
-          const deleted = deleteSecureInput(String((msg as any).secretId || ""), sessionId, cwd);
+          const deleted = deleteSecureInput(String(msg.secretId || ""), sessionId, cwd);
           sendJson({
             type: "secret_operation_result",
             requestId,
@@ -6728,13 +6728,13 @@ function createConnectionHandler(
             ok: deleted,
             ...(deleted ? {} : { error: "Secret not found in this session/project context" }),
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "secret_operation_result",
             requestId,
             operation: "delete",
             ok: false,
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
           });
         }
         break;
@@ -6742,26 +6742,26 @@ function createConnectionHandler(
 
       case "work_review_list": {
         const reviews = listWorkReviews({
-          ...((msg as any).sessionId
-            ? { originSessionId: String((msg as any).sessionId) }
+          ...(msg.sessionId
+            ? { originSessionId: String(msg.sessionId) }
             : {}),
-          includeArchived: (msg as any).includeArchived === true,
-        } as any);
+          includeArchived: msg.includeArchived === true,
+        });
         sendJson({
           type: "work_review_list_result",
-          requestId: (msg as any).requestId,
+          requestId: msg.requestId,
           reviews,
         });
         break;
       }
 
       case "work_review_get": {
-        const reviewId = String((msg as any).reviewId || "");
-        const snapshot = getWorkReviewClientSnapshot(reviewId) as any;
+        const reviewId = String(msg.reviewId || "");
+        const snapshot = getWorkReviewClientSnapshot(reviewId);
         if (!snapshot) {
           sendJson({
             type: "work_review_operation_result",
-            requestId: String((msg as any).requestId || ""),
+            requestId: String(msg.requestId || ""),
             operation: "get",
             reviewId,
             ok: false,
@@ -6771,35 +6771,35 @@ function createConnectionHandler(
         }
         sendJson(workReviewClientPayload(
           snapshot,
-          String((msg as any).requestId || ""),
+          String(msg.requestId || ""),
         ));
         break;
       }
 
       case "work_review_draft_update": {
-        const requestId = String((msg as any).requestId || "");
-        const reviewId = String((msg as any).reviewId || "");
-        const roundId = String((msg as any).roundId || "");
+        const requestId = String(msg.requestId || "");
+        const reviewId = String(msg.reviewId || "");
+        const roundId = String(msg.roundId || "");
         try {
-          const before = getWorkReviewClientSnapshot(reviewId) as any;
+          const before = getWorkReviewClientSnapshot(reviewId);
           if (!before) throw new Error(`Work review not found: ${reviewId}`);
           const currentRound = Array.isArray(before.rounds)
-            ? before.rounds.find((round: any) => Number(round.revision) === Number(before.currentRevision))
+            ? before.rounds.find((round) => Number(round.revision) === Number(before.currentRevision))
               || before.rounds[before.rounds.length - 1]
             : undefined;
           if (!currentRound || String(currentRound.roundId || "") !== roundId) {
             throw new Error("Draft update targets a stale Work Review round");
           }
-          const draft = (msg as any).draft || {};
-          const mutationId = String((msg as any).mutationId || "").trim();
+          const draft = msg.draft || {};
+          const mutationId = String(msg.mutationId || "").trim();
           if (!mutationId) throw new Error("Draft update requires mutationId");
           const snapshot = await updateWorkReviewDraft(reviewId, {
             mutationId,
-            expectedRevision: Number.isInteger((msg as any).baseRevision)
-              ? Number((msg as any).baseRevision)
+            expectedRevision: Number.isInteger(msg.baseRevision)
+              ? Number(msg.baseRevision)
               : undefined,
             itemUpdates: Array.isArray(draft.items)
-              ? draft.items.map((item: any) => ({
+              ? draft.items.map((item) => ({
                   itemId: String(item.itemId || ""),
                   status: item.status,
                   ...(typeof item.note === "string" ? { note: item.note } : {}),
@@ -6808,7 +6808,7 @@ function createConnectionHandler(
             ...(typeof draft.overallNote === "string"
               ? { overallNote: draft.overallNote }
               : {}),
-          } as any) as any;
+          });
           const payload = workReviewClientPayload(snapshot, requestId);
           sendJson(payload);
           sendJson({
@@ -6821,7 +6821,7 @@ function createConnectionHandler(
             review: payload.review,
             draft: payload.draft,
           });
-        } catch (error: any) {
+        } catch (error: unknown) {
           sendJson({
             type: "work_review_operation_result",
             requestId,
@@ -6829,37 +6829,37 @@ function createConnectionHandler(
             reviewId,
             roundId,
             ok: false,
-            error: error?.message || String(error),
+            error: errorMessage(error) || String(error),
           });
         }
         break;
       }
 
       case "work_review_finish": {
-        const requestId = String((msg as any).requestId || "");
-        const reviewId = String((msg as any).reviewId || "");
-        const roundId = String((msg as any).roundId || "");
+        const requestId = String(msg.requestId || "");
+        const reviewId = String(msg.reviewId || "");
+        const roundId = String(msg.roundId || "");
         try {
-          const before = getWorkReviewClientSnapshot(reviewId) as any;
+          const before = getWorkReviewClientSnapshot(reviewId);
           if (!before) throw new Error(`Work review not found: ${reviewId}`);
           const currentRound = Array.isArray(before.rounds)
-            ? before.rounds.find((round: any) => Number(round.revision) === Number(before.currentRevision))
+            ? before.rounds.find((round) => Number(round.revision) === Number(before.currentRevision))
               || before.rounds[before.rounds.length - 1]
             : undefined;
           if (!currentRound || String(currentRound.roundId || "") !== roundId) {
             throw new Error("Finish Review targets a stale Work Review round");
           }
-          const draft = (msg as any).draft || {};
-          const mutationId = String((msg as any).mutationId || "").trim();
+          const draft = msg.draft || {};
+          const mutationId = String(msg.mutationId || "").trim();
           if (!mutationId) throw new Error("Finish Review requires mutationId");
           const finished = await finishWorkReview(reviewId, {
             draft: {
               mutationId,
-              expectedRevision: Number.isInteger((msg as any).baseRevision)
-                ? Number((msg as any).baseRevision)
+              expectedRevision: Number.isInteger(msg.baseRevision)
+                ? Number(msg.baseRevision)
                 : undefined,
               itemUpdates: Array.isArray(draft.items)
-                ? draft.items.map((item: any) => ({
+                ? draft.items.map((item) => ({
                     itemId: String(item.itemId || ""),
                     status: item.status,
                     ...(typeof item.note === "string" ? { note: item.note } : {}),
@@ -6869,13 +6869,13 @@ function createConnectionHandler(
                 ? { overallNote: draft.overallNote }
                 : {}),
             },
-          } as any) as any;
-          broadcastWorkReviewCard(finished.review as any);
+          });
+          broadcastWorkReviewCard(finished.review);
           const resultDelivery = queueWorkReviewResultDelivery(
-            finished.review as any,
-            finished.result as any,
+            finished.review,
+            finished.result,
           );
-          const snapshot = getWorkReviewClientSnapshot(reviewId) as any;
+          const snapshot = getWorkReviewClientSnapshot(reviewId);
           const payload = snapshot
             ? workReviewClientPayload(snapshot, requestId)
             : { review: finished.review };
@@ -6892,13 +6892,13 @@ function createConnectionHandler(
             resultId: finished.result.resultId,
             published: finished.published,
           });
-          void resultDelivery.catch((error: any) => {
+          void resultDelivery.catch((error: unknown) => {
             console.error(
               `[WorkReview] result delivery failed result=${finished.result.resultId}`
-              + ` session=${finished.review.originSessionId}: ${error?.message || String(error)}`,
+              + ` session=${finished.review.originSessionId}: ${errorMessage(error) || String(error)}`,
             );
           });
-        } catch (error: any) {
+        } catch (error: unknown) {
           sendJson({
             type: "work_review_operation_result",
             requestId,
@@ -6906,27 +6906,27 @@ function createConnectionHandler(
             reviewId,
             roundId,
             ok: false,
-            error: error?.message || String(error),
+            error: errorMessage(error) || String(error),
           });
         }
         break;
       }
 
       case "work_review_cancel": {
-        const requestId = String((msg as any).requestId || "");
-        const reviewId = String((msg as any).reviewId || "");
-        const roundId = String((msg as any).roundId || "");
+        const requestId = String(msg.requestId || "");
+        const reviewId = String(msg.reviewId || "");
+        const roundId = String(msg.roundId || "");
         try {
-          const before = getWorkReviewClientSnapshot(reviewId) as any;
+          const before = getWorkReviewClientSnapshot(reviewId);
           if (!before) throw new Error(`Work review not found: ${reviewId}`);
           const currentRound = Array.isArray(before.rounds)
-            ? before.rounds.find((round: any) => Number(round.revision) === Number(before.currentRevision))
+            ? before.rounds.find((round) => Number(round.revision) === Number(before.currentRevision))
               || before.rounds[before.rounds.length - 1]
             : undefined;
           if (!currentRound || String(currentRound.roundId || "") !== roundId) {
             throw new Error("Cancel targets a stale Work Review round");
           }
-          const review = await cancelWorkReview(reviewId) as any;
+          const review = await cancelWorkReview(reviewId);
           // Keep the durable phone card truthful without publishing a result
           // or injecting any message into the originating agent session.
           broadcastWorkReviewCard(review);
@@ -6939,7 +6939,7 @@ function createConnectionHandler(
             ok: true,
             review,
           });
-        } catch (error: any) {
+        } catch (error: unknown) {
           sendJson({
             type: "work_review_operation_result",
             requestId,
@@ -6947,7 +6947,7 @@ function createConnectionHandler(
             reviewId,
             roundId,
             ok: false,
-            error: error?.message || String(error),
+            error: errorMessage(error) || String(error),
           });
         }
         break;
@@ -6955,19 +6955,19 @@ function createConnectionHandler(
 
       case "work_review_archive":
       case "work_review_restore": {
-        const requestId = String((msg as any).requestId || "");
-        const reviewId = String((msg as any).reviewId || "");
-        const operation = (msg as any).type === "work_review_archive"
+        const requestId = String(msg.requestId || "");
+        const reviewId = String(msg.reviewId || "");
+        const operation = msg.type === "work_review_archive"
           ? "archive"
           : "restore";
         try {
           const review = operation === "archive"
-            ? await archiveWorkReview(reviewId) as any
-            : await restoreWorkReview(reviewId) as any;
+            ? await archiveWorkReview(reviewId)
+            : await restoreWorkReview(reviewId);
           // This revises only the stable app/history card. Lifecycle actions
           // never enter queueWorkReviewResultDelivery or the agent session.
           broadcastWorkReviewCard(review);
-          const snapshot = getWorkReviewClientSnapshot(reviewId) as any;
+          const snapshot = getWorkReviewClientSnapshot(reviewId);
           const payload = snapshot
             ? workReviewClientPayload(snapshot, requestId)
             : { review };
@@ -6980,22 +6980,22 @@ function createConnectionHandler(
             review: payload.review,
             ...(payload.draft ? { draft: payload.draft } : {}),
           });
-        } catch (error: any) {
+        } catch (error: unknown) {
           sendJson({
             type: "work_review_operation_result",
             requestId,
             operation,
             reviewId,
             ok: false,
-            error: error?.message || String(error),
+            error: errorMessage(error) || String(error),
           });
         }
         break;
       }
 
       case "html_plan_list": {
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const requestId = String((msg as any).requestId || "").trim() || undefined;
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const requestId = String(msg.requestId || "").trim() || undefined;
         if (!sessionId) {
           sendJson({ type: "error", message: "HTML plan list requires a session ID" });
           break;
@@ -7005,23 +7005,23 @@ function createConnectionHandler(
       }
 
       case "html_plan_rename": {
-        const requestId = String((msg as any).requestId || "").trim();
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const planId = String((msg as any).planId || "").trim();
+        const requestId = String(msg.requestId || "").trim();
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const planId = String(msg.planId || "").trim();
         try {
-          const plan = renameHtmlPlan(sessionId, planId, String((msg as any).title || ""));
+          const plan = renameHtmlPlan(sessionId, planId, String(msg.title || ""));
           updateHtmlPlanHistoryEntry(sessionId, plan);
           sendJson({ type: "html_plan_operation_result", requestId, operation: "rename", ok: true, sessionId, planId, plan });
-        } catch (e: any) {
-          sendJson({ type: "html_plan_operation_result", requestId, operation: "rename", ok: false, sessionId, planId, error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "html_plan_operation_result", requestId, operation: "rename", ok: false, sessionId, planId, error: errorMessage(e) || String(e) });
         }
         break;
       }
 
       case "html_plan_delete": {
-        const requestId = String((msg as any).requestId || "").trim();
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const planId = String((msg as any).planId || "").trim();
+        const requestId = String(msg.requestId || "").trim();
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const planId = String(msg.planId || "").trim();
         try {
           const deleted = deleteHtmlPlan(sessionId, planId);
           if (deleted) removeHtmlPlanHistoryEntries(sessionId, planId);
@@ -7034,16 +7034,16 @@ function createConnectionHandler(
             planId,
             ...(deleted ? {} : { error: "HTML plan not found in this session" }),
           });
-        } catch (e: any) {
-          sendJson({ type: "html_plan_operation_result", requestId, operation: "delete", ok: false, sessionId, planId, error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "html_plan_operation_result", requestId, operation: "delete", ok: false, sessionId, planId, error: errorMessage(e) || String(e) });
         }
         break;
       }
 
       case "html_plan_revision_list": {
-        const requestId = String((msg as any).requestId || "").trim();
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const planId = String((msg as any).planId || "").trim();
+        const requestId = String(msg.requestId || "").trim();
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const planId = String(msg.planId || "").trim();
         try {
           sendJson({
             type: "html_plan_revision_list",
@@ -7053,18 +7053,18 @@ function createConnectionHandler(
             ok: true,
             revisions: listHtmlPlanRevisions(sessionId, planId),
           });
-        } catch (e: any) {
-          sendJson({ type: "html_plan_revision_list", requestId, sessionId, planId, ok: false, revisions: [], error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "html_plan_revision_list", requestId, sessionId, planId, ok: false, revisions: [], error: errorMessage(e) || String(e) });
         }
         break;
       }
 
       case "html_plan_revision_get": {
-        const requestId = String((msg as any).requestId || "").trim();
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const planId = String((msg as any).planId || "").trim();
-        const revisionNumber = Number((msg as any).revision);
-        const requestedBase = (msg as any).baseRevision;
+        const requestId = String(msg.requestId || "").trim();
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const planId = String(msg.planId || "").trim();
+        const revisionNumber = Number(msg.revision);
+        const requestedBase = msg.baseRevision;
         try {
           const revision = getHtmlPlanRevision(sessionId, planId, revisionNumber);
           const diff = diffHtmlPlanRevisions(
@@ -7083,7 +7083,7 @@ function createConnectionHandler(
             ...(diff.baseRevision !== undefined ? { baseRevision: diff.baseRevision } : {}),
             diff: diff.segments,
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "html_plan_revision",
             requestId,
@@ -7091,29 +7091,29 @@ function createConnectionHandler(
             planId,
             ok: false,
             diff: [],
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
           });
         }
         break;
       }
 
       case "html_plan_rollback": {
-        const requestId = String((msg as any).requestId || "").trim();
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const planId = String((msg as any).planId || "").trim();
-        const revisionNumber = Number((msg as any).revision);
+        const requestId = String(msg.requestId || "").trim();
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const planId = String(msg.planId || "").trim();
+        const revisionNumber = Number(msg.revision);
         try {
           const plan = rollbackHtmlPlan(sessionId, planId, revisionNumber);
           updateHtmlPlanHistoryEntry(sessionId, plan);
           sendJson({ type: "html_plan_operation_result", requestId, operation: "rollback", ok: true, sessionId, planId, plan });
-        } catch (e: any) {
-          sendJson({ type: "html_plan_operation_result", requestId, operation: "rollback", ok: false, sessionId, planId, error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "html_plan_operation_result", requestId, operation: "rollback", ok: false, sessionId, planId, error: errorMessage(e) || String(e) });
         }
         break;
       }
 
       case "set_tts": {
-        const enabled = (msg as any).enabled === true;
+        const enabled = msg.enabled === true;
         pendingTtsEnabled = enabled;
         if (activeSession) {
           activeSession.setTtsEnabled(enabled);
@@ -7123,15 +7123,15 @@ function createConnectionHandler(
       }
 
       case "set_tts_engine": {
-        const engine = (msg as any).engine as string;
+        const engine = msg.engine;
         if (["system", "kokoro_server", "kokoro_device"].includes(engine)) {
-          pendingTtsEngine = engine as any;
-          if ((msg as any).voice) pendingKokoroVoice = (msg as any).voice;
-          if ((msg as any).speed) pendingKokoroSpeed = (msg as any).speed;
+          pendingTtsEngine = engine;
+          if (msg.voice) pendingKokoroVoice = msg.voice;
+          if (msg.speed) pendingKokoroSpeed = msg.speed;
           if (activeSession) {
-            activeSession.setTtsEngine(engine as any);
-            if ((msg as any).voice) activeSession.setKokoroVoice((msg as any).voice);
-            if ((msg as any).speed) activeSession.setKokoroSpeed((msg as any).speed);
+            activeSession.setTtsEngine(engine);
+            if (msg.voice) activeSession.setKokoroVoice(msg.voice);
+            if (msg.speed) activeSession.setKokoroSpeed(msg.speed);
           }
           console.log(`TTS engine set to ${engine} voice=${pendingKokoroVoice} (session ${activeSession ? 'active' : 'pending'})`);
         }
@@ -7139,9 +7139,9 @@ function createConnectionHandler(
       }
 
       case "request_tts_audio": {
-        const text = (msg as any).text as string;
-        const voice = (msg as any).voice as string || pendingKokoroVoice;
-        const speed = (msg as any).speed as number || pendingKokoroSpeed;
+        const text = msg.text;
+        const voice = msg.voice || pendingKokoroVoice;
+        const speed = msg.speed || pendingKokoroSpeed;
         if (text) {
           try {
             const { generateKokoroAudio } = require("./kokoro-tts");
@@ -7156,16 +7156,16 @@ function createConnectionHandler(
             } else {
               sendJson({ type: "error", message: "Kokoro TTS model not available" });
             }
-          } catch (e: any) {
+          } catch (e: unknown) {
             console.error("[KokoroTTS] request_tts_audio error:", e);
-            sendJson({ type: "error", message: `TTS generation failed: ${e.message || e}` });
+            sendJson({ type: "error", message: `TTS generation failed: ${errorMessage(e) || e}` });
           }
         }
         break;
       }
 
       case "set_effort": {
-        const effort = (msg as any).effort as string;
+        const effort = msg.effort;
         if (['minimal', 'low', 'medium', 'high', 'max', 'xhigh', 'ultra'].includes(effort)) {
           if (activeSession) {
             activeSession.setEffort(effort as any);
@@ -7176,7 +7176,7 @@ function createConnectionHandler(
       }
 
       case "set_codex_fast_mode": {
-        const enabled = Boolean((msg as any).enabled);
+        const enabled = Boolean(msg.enabled);
         if (activeSession instanceof CodexSession) {
           activeSession.setCodexFastMode(enabled);
         }
@@ -7185,9 +7185,9 @@ function createConnectionHandler(
       }
 
       case "set_claude_auto_compact": {
-        const enabled = Boolean((msg as any).enabled);
+        const enabled = Boolean(msg.enabled);
         if (activeSession && !(activeSession instanceof CodexSession)) {
-          (activeSession as any).setClaudeAutoCompact?.(enabled);
+          activeSession.setClaudeAutoCompact(enabled);
         }
         console.log(`Claude auto-compact ${enabled ? "enabled" : "disabled"} (session ${activeSession ? 'active' : 'none'})`);
         break;
@@ -7199,13 +7199,13 @@ function createConnectionHandler(
           break;
         }
         try {
-          if ((msg as any).clearOverride === true) {
+          if (msg.clearOverride === true) {
             (activeSession as any).setClaudeAutoCompactWindow?.(
               getClaudeAutoCompactWindow(),
               { clearOverride: true },
             );
           } else {
-            const window = normalizeClaudeAutoCompactWindow((msg as any).window);
+            const window = normalizeClaudeAutoCompactWindow(msg.window);
             if (window === null) {
               throw new Error("A session override requires a token window");
             }
@@ -7215,17 +7215,17 @@ function createConnectionHandler(
             activeSession,
             activeSession.getSessionId() || activeSessionId || "",
           ));
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "error",
-            message: `Failed to update Claude auto-compact window: ${e.message || String(e)}`,
+            message: `Failed to update Claude auto-compact window: ${errorMessage(e) || String(e)}`,
           });
         }
         break;
       }
 
       case "set_thinking": {
-        const thinking = (msg as any).thinking;
+        const thinking = msg.thinking;
         if (thinking && ['adaptive', 'enabled', 'disabled'].includes(thinking.type)) {
           if (activeSession) {
             activeSession.setThinking(thinking);
@@ -7236,9 +7236,9 @@ function createConnectionHandler(
       }
 
       case "set_disallowed_tools": {
-        const tools = (msg as any).tools as string[];
+        const tools = msg.tools;
         if (Array.isArray(tools)) {
-          const targetSessionId = String((msg as any).sessionId || "");
+          const targetSessionId = String(msg.sessionId || "");
           const targetSession = targetSessionId
             ? (targetSessionId === activeSessionId ? activeSession : activeSessions.get(targetSessionId))
             : activeSession;
@@ -7253,11 +7253,11 @@ function createConnectionHandler(
       }
 
       case "set_system_prompt": {
-        const prompt = (msg as any).prompt as string;
+        const prompt = msg.prompt;
         if (typeof prompt === 'string') {
-          const targetSessionId = String((msg as any).sessionId || "");
-          const inherited = (msg as any).inherited === true;
-          const clearOverride = (msg as any).clearOverride === true;
+          const targetSessionId = String(msg.sessionId || "");
+          const inherited = msg.inherited === true;
+          const clearOverride = msg.clearOverride === true;
           const targetSession = targetSessionId
             ? (targetSessionId === activeSessionId ? activeSession : activeSessions.get(targetSessionId))
             : activeSession;
@@ -7277,16 +7277,16 @@ function createConnectionHandler(
       }
 
       case "stop_task": {
-        const taskId = (msg as any).taskId as string;
+        const taskId = msg.taskId;
         console.log(`[stop_task] received: taskId=${taskId} activeSession=${!!activeSession}`);
         if (activeSession && taskId) {
-          activeSession.stopTask(taskId).catch(e => console.error(`[stop_task] error: ${e}`));
+          activeSession.stopTask(taskId).catch((e: unknown) => console.error(`[stop_task] error: ${e}`));
         }
         break;
       }
 
       case "stop_monitor": {
-        const monitorTaskId = (msg as any).taskId as string;
+        const monitorTaskId = msg.taskId;
         console.log(`[stop_monitor] received: taskId=${monitorTaskId} activeSession=${!!activeSession}`);
         if (activeSession && monitorTaskId) {
           activeSession.stopMonitoring(monitorTaskId);
@@ -7295,22 +7295,22 @@ function createConnectionHandler(
       }
 
       case "set_model": {
-        const model = (msg as any).model as string | undefined;
+        const model = msg.model;
         if (activeSession) {
-          activeSession.setModel(model).catch(e => {
+          activeSession.setModel(model).catch((e: unknown) => {
             console.error(`[set_model] error: ${e}`);
-            sendJson({ type: "error", message: `Failed to set model: ${e.message || e}` });
+            sendJson({ type: "error", message: `Failed to set model: ${errorMessage(e) || e}` });
           });
         }
         break;
       }
 
       case "set_permission_mode": {
-        const mode = (msg as any).mode as string;
+        const mode = msg.mode;
         if (activeSession && mode) {
-          activeSession.setPermissionMode(mode).catch(e => {
+          activeSession.setPermissionMode(mode).catch((e: unknown) => {
             console.error(`[set_permission_mode] error: ${e}`);
-            sendJson({ type: "error", message: `Failed to set permission mode: ${(e as any).message || e}` });
+            sendJson({ type: "error", message: `Failed to set permission mode: ${errorMessage(e)}` });
           });
         }
         break;
@@ -7328,9 +7328,9 @@ function createConnectionHandler(
           const skills = listSkills(projectCwd);
           console.log(`[skills_list] Found ${skills.length} skills, sending response`);
           sendJson({ type: "skills_list", skills, projectCwd, codexSlashCommands: CODEX_NATIVE_SLASH_COMMANDS });
-        } catch (e: any) {
-          console.error(`[skills_list] Error: ${e.message || e}`);
-          sendJson({ type: "skills_list", skills: [], projectCwd: "", codexSlashCommands: CODEX_NATIVE_SLASH_COMMANDS, error: e.message || String(e) });
+        } catch (e: unknown) {
+          console.error(`[skills_list] Error: ${errorMessage(e) || e}`);
+          sendJson({ type: "skills_list", skills: [], projectCwd: "", codexSlashCommands: CODEX_NATIVE_SLASH_COMMANDS, error: errorMessage(e) || String(e) });
         }
         break;
       }
@@ -7338,8 +7338,8 @@ function createConnectionHandler(
       case "codex_goal_get":
       case "codex_goal_set":
       case "codex_goal_clear": {
-        const requestId = String((msg as any).requestId || "");
-        const targetSid = String((msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId || "");
+        const requestId = String(msg.requestId || "");
+        const targetSid = String(msg.sessionId || activeSession?.getSessionId?.() || activeSessionId || "");
         const fail = (error: unknown): void => {
           const message = error instanceof Error ? error.message : String(error);
           sendJson({
@@ -7401,8 +7401,8 @@ function createConnectionHandler(
             return;
           }
 
-          const rawObjective = (msg as any).objective;
-          const rawStatus = (msg as any).status;
+          const rawObjective = msg.objective;
+          const rawStatus = msg.status;
           const hasTokenBudget = Object.prototype.hasOwnProperty.call(msg, "tokenBudget");
           const update: { objective?: string; status?: CodexGoalStatus; tokenBudget?: number | null } = {};
           if (rawObjective !== undefined) {
@@ -7425,10 +7425,10 @@ function createConnectionHandler(
             update.status = rawStatus as CodexGoalStatus;
           }
           if (hasTokenBudget) {
-            if ((msg as any).tokenBudget == null) {
+            if (msg.tokenBudget == null) {
               update.tokenBudget = null;
             } else {
-              const tokenBudget = Number((msg as any).tokenBudget);
+              const tokenBudget = Number(msg.tokenBudget);
               if (!Number.isSafeInteger(tokenBudget) || tokenBudget <= 0) {
                 throw new Error("Goal token budget must be a positive whole number");
               }
@@ -7450,17 +7450,17 @@ function createConnectionHandler(
           });
         };
 
-        void run().catch((error) => {
-          console.error(`[codex_goal] ${msg.type} failed session=${targetSid}: ${error instanceof Error ? error.message : error}`);
+        void run().catch((error: unknown) => {
+          console.error(`[codex_goal] ${msg.type} failed session=${targetSid}: ${error instanceof Error ? errorMessage(error) : error}`);
           fail(error);
         });
         break;
       }
 
       case "codex_slash_command": {
-        const name = String((msg as any).name || "").replace(/^\//, "").trim();
-        const args = String((msg as any).args || "");
-        const targetSid = String((msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId || "");
+        const name = String(msg.name || "").replace(/^\//, "").trim();
+        const args = String(msg.args || "");
+        const targetSid = String(msg.sessionId || activeSession?.getSessionId?.() || activeSessionId || "");
         const activeMatchesTarget = !!activeSession && (
           activeSession.getSessionId?.() === targetSid ||
           activeSessionId === targetSid ||
@@ -7473,12 +7473,12 @@ function createConnectionHandler(
           sendJson({ type: "error", message: "No active Codex session for slash command" });
           break;
         }
-        const resultSessionId = targetSid || target.getSessionId?.() || (target as any)._resumeSessionId || "";
+        const resultSessionId = targetSid || target.getSessionId?.() || target._resumeSessionId || "";
         target.executeCodexSlashCommand(name, args).then(() => {
           sendJson({ type: "codex_slash_command_result", sessionId: resultSessionId, name, success: true });
           broadcastSessionList();
-        }).catch((e: any) => {
-          const message = e.message || String(e);
+        }).catch((e: unknown) => {
+          const message = errorMessage(e) || String(e);
           console.error(`[codex_slash_command] /${name} failed: ${message}`);
           const sessionId = resultSessionId;
           if (sessionId) {
@@ -7508,7 +7508,7 @@ function createConnectionHandler(
       }
 
       case "skills_save": {
-        const data = msg as any;
+        const data = msg;
         if (!data.name || !data.format || !data.scope) {
           sendJson({ type: "skills_save_result", ok: false, error: "Missing required fields" });
           break;
@@ -7528,14 +7528,14 @@ function createConnectionHandler(
             projectCwd,
           });
           sendJson({ type: "skills_save_result", ok: true, filePath: savedPath });
-        } catch (err: any) {
-          sendJson({ type: "skills_save_result", ok: false, error: err.message || "Save failed" });
+        } catch (err: unknown) {
+          sendJson({ type: "skills_save_result", ok: false, error: errorMessage(err) || "Save failed" });
         }
         break;
       }
 
       case "skills_delete": {
-        const data = msg as any;
+        const data = msg;
         if (!data.filePath) {
           sendJson({ type: "skills_delete_result", ok: false, error: "Missing filePath" });
           break;
@@ -7563,7 +7563,7 @@ function createConnectionHandler(
       }
 
       case "protected_files_list": {
-        const requestId = (msg as any).requestId;
+        const requestId = msg.requestId;
         sendJson({
           type: "protected_files_list",
           requestId,
@@ -7573,9 +7573,9 @@ function createConnectionHandler(
       }
 
       case "protected_files_add": {
-        const requestId = (msg as any).requestId;
-        const filePath = String((msg as any).path || "").trim();
-        const label = String((msg as any).label || "").trim();
+        const requestId = msg.requestId;
+        const filePath = String(msg.path || "").trim();
+        const label = String(msg.label || "").trim();
         if (!filePath) {
           sendJson({
             type: "protected_files_result",
@@ -7597,20 +7597,20 @@ function createConnectionHandler(
             ok: true,
             entries,
           });
-        } catch (err: any) {
+        } catch (err: unknown) {
           sendJson({
             type: "protected_files_result",
             requestId,
             ok: false,
-            error: err.message || "Failed to add protected file",
+            error: errorMessage(err) || "Failed to add protected file",
           });
         }
         break;
       }
 
       case "protected_files_delete": {
-        const requestId = (msg as any).requestId;
-        const filePath = String((msg as any).path || "");
+        const requestId = msg.requestId;
+        const filePath = String(msg.path || "");
         if (!filePath) {
           sendJson({
             type: "protected_files_result",
@@ -7629,12 +7629,12 @@ function createConnectionHandler(
             ok: true,
             entries,
           });
-        } catch (err: any) {
+        } catch (err: unknown) {
           sendJson({
             type: "protected_files_result",
             requestId,
             ok: false,
-            error: err.message || "Failed to delete protected file",
+            error: errorMessage(err) || "Failed to delete protected file",
           });
         }
         break;
@@ -7644,8 +7644,8 @@ function createConnectionHandler(
         try {
           const mpPlugins = listMarketplacePlugins();
           sendJson({ type: "plugins_list", plugins: mpPlugins });
-        } catch (e: any) {
-          sendJson({ type: "plugins_list", plugins: [], error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "plugins_list", plugins: [], error: errorMessage(e) || String(e) });
         }
         break;
       }
@@ -7654,18 +7654,20 @@ function createConnectionHandler(
       case "plugins_uninstall":
       case "plugins_enable":
       case "plugins_disable": {
-        const data = msg as any;
+        const data = msg;
         const pluginId = data.pluginId as string;
-        const action = (msg.type as string).replace("plugins_", "") as "install" | "uninstall" | "enable" | "disable";
+        const action = { plugins_install: "install", plugins_uninstall: "uninstall",
+          plugins_enable: "enable", plugins_disable: "disable" } as const;
+        const pluginAction = action[msg.type];
         if (!pluginId) {
-          sendJson({ type: `plugins_${action}_result`, ok: false, error: "Missing pluginId" });
+          sendJson({ type: `plugins_${pluginAction}_result`, ok: false, error: "Missing pluginId" });
           break;
         }
-        runPluginCommand(action, pluginId).then(() => {
+        runPluginCommand(pluginAction, pluginId).then(() => {
           const mpPlugins = listMarketplacePlugins();
-          sendJson({ type: `plugins_${action}_result`, pluginId, ok: true, plugins: mpPlugins });
-        }).catch((e: any) => {
-          sendJson({ type: `plugins_${action}_result`, pluginId, ok: false, error: e.message || String(e) });
+          sendJson({ type: `plugins_${pluginAction}_result`, pluginId, ok: true, plugins: mpPlugins });
+        }).catch((e: unknown) => {
+          sendJson({ type: `plugins_${pluginAction}_result`, pluginId, ok: false, error: errorMessage(e) || String(e) });
         });
         break;
       }
@@ -7673,42 +7675,42 @@ function createConnectionHandler(
       case "marketplaces_list": {
         try {
           sendJson({ type: "marketplaces_list", marketplaces: listMarketplaces() });
-        } catch (e: any) {
-          sendJson({ type: "marketplaces_list", marketplaces: [], error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "marketplaces_list", marketplaces: [], error: errorMessage(e) || String(e) });
         }
         break;
       }
 
       case "marketplaces_add": {
-        const url = (msg as any).url as string;
+        const url = msg.url;
         if (!url) {
           sendJson({ type: "marketplaces_add_result", ok: false, error: "Missing url" });
           break;
         }
         addMarketplace(url).then((info) => {
           sendJson({ type: "marketplaces_add_result", ok: true, marketplace: info, marketplaces: listMarketplaces() });
-        }).catch((e: any) => {
-          sendJson({ type: "marketplaces_add_result", ok: false, error: e.message || String(e) });
+        }).catch((e: unknown) => {
+          sendJson({ type: "marketplaces_add_result", ok: false, error: errorMessage(e) || String(e) });
         });
         break;
       }
 
       case "marketplaces_update": {
-        const mpName = (msg as any).name as string;
+        const mpName = msg.name;
         if (!mpName) {
           sendJson({ type: "marketplaces_update_result", ok: false, error: "Missing name" });
           break;
         }
         updateMarketplace(mpName).then((info) => {
           sendJson({ type: "marketplaces_update_result", ok: true, marketplace: info, marketplaces: listMarketplaces() });
-        }).catch((e: any) => {
-          sendJson({ type: "marketplaces_update_result", ok: false, error: e.message || String(e) });
+        }).catch((e: unknown) => {
+          sendJson({ type: "marketplaces_update_result", ok: false, error: errorMessage(e) || String(e) });
         });
         break;
       }
 
       case "marketplaces_remove": {
-        const rmName = (msg as any).name as string;
+        const rmName = msg.name;
         if (!rmName) {
           sendJson({ type: "marketplaces_remove_result", ok: false, error: "Missing name" });
           break;
@@ -7716,8 +7718,8 @@ function createConnectionHandler(
         try {
           removeMarketplace(rmName);
           sendJson({ type: "marketplaces_remove_result", ok: true, name: rmName, marketplaces: listMarketplaces() });
-        } catch (e: any) {
-          sendJson({ type: "marketplaces_remove_result", ok: false, error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "marketplaces_remove_result", ok: false, error: errorMessage(e) || String(e) });
         }
         break;
       }
@@ -7726,8 +7728,8 @@ function createConnectionHandler(
         if (activeSession) {
           activeSession.mcpServerStatus().then(status => {
             sendJson({ type: "mcp_status", servers: status || [] });
-          }).catch(e => {
-            sendJson({ type: "error", message: `Failed to get MCP status: ${e.message || e}` });
+          }).catch((e: unknown) => {
+            sendJson({ type: "error", message: `Failed to get MCP status: ${errorMessage(e) || e}` });
           });
         }
         break;
@@ -7765,8 +7767,8 @@ function createConnectionHandler(
       }
 
       case "get_session_memory": {
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const requestId = (msg as any).requestId;
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const requestId = msg.requestId;
         if (!sessionId || !getSession(sessionId)) {
           sendJson({ type: "session_memory_error", sessionId, requestId, message: "Session was not found" });
           break;
@@ -7776,61 +7778,61 @@ function createConnectionHandler(
       }
 
       case "upsert_session_memory": {
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const requestId = (msg as any).requestId;
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const requestId = msg.requestId;
         try {
           const state = upsertSessionMemoryEntry(sessionId, {
-            id: (msg as any).entryId,
-            kind: (msg as any).kind,
-            text: String((msg as any).text || ""),
-            pinned: (msg as any).pinned === true,
-            status: (msg as any).status,
-            sourceSessionSeq: Number.isSafeInteger((msg as any).sourceSessionSeq)
-              ? (msg as any).sourceSessionSeq
+            id: msg.entryId,
+            kind: msg.kind,
+            text: String(msg.text || ""),
+            pinned: msg.pinned === true,
+            status: msg.status,
+            sourceSessionSeq: Number.isSafeInteger(msg.sourceSessionSeq)
+              ? msg.sourceSessionSeq
               : undefined,
-            sourceEntryId: (msg as any).sourceEntryId,
+            sourceEntryId: msg.sourceEntryId,
           });
           sendJson({ type: "session_memory_state", sessionId, requestId, state });
-        } catch (error: any) {
-          sendJson({ type: "session_memory_error", sessionId, requestId, message: error.message || String(error) });
+        } catch (error: unknown) {
+          sendJson({ type: "session_memory_error", sessionId, requestId, message: errorMessage(error) || String(error) });
         }
         break;
       }
 
       case "delete_session_memory": {
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const requestId = (msg as any).requestId;
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const requestId = msg.requestId;
         try {
-          const state = deleteSessionMemoryEntry(sessionId, String((msg as any).entryId || ""));
+          const state = deleteSessionMemoryEntry(sessionId, String(msg.entryId || ""));
           sendJson({ type: "session_memory_state", sessionId, requestId, state });
-        } catch (error: any) {
-          sendJson({ type: "session_memory_error", sessionId, requestId, message: error.message || String(error) });
+        } catch (error: unknown) {
+          sendJson({ type: "session_memory_error", sessionId, requestId, message: errorMessage(error) || String(error) });
         }
         break;
       }
 
       case "set_session_memory_settings": {
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const requestId = (msg as any).requestId;
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const requestId = msg.requestId;
         try {
           const state = updateSessionMemorySettings(sessionId, {
-            autoRollover: typeof (msg as any).autoRollover === "boolean"
-              ? (msg as any).autoRollover
+            autoRollover: typeof msg.autoRollover === "boolean"
+              ? msg.autoRollover
               : undefined,
-            maxCompactions: (msg as any).maxCompactions,
-            maxPostCompactionTokens: (msg as any).maxPostCompactionTokens,
-            recentRuns: (msg as any).recentRuns,
+            maxCompactions: msg.maxCompactions,
+            maxPostCompactionTokens: msg.maxPostCompactionTokens,
+            recentRuns: msg.recentRuns,
           });
           sendJson({ type: "session_memory_state", sessionId, requestId, state });
-        } catch (error: any) {
-          sendJson({ type: "session_memory_error", sessionId, requestId, message: error.message || String(error) });
+        } catch (error: unknown) {
+          sendJson({ type: "session_memory_error", sessionId, requestId, message: errorMessage(error) || String(error) });
         }
         break;
       }
 
       case "rollover_session_memory": {
-        const sessionId = String((msg as any).sessionId || activeSessionId || "").trim();
-        const requestId = (msg as any).requestId;
+        const sessionId = String(msg.sessionId || activeSessionId || "").trim();
+        const requestId = msg.requestId;
         try {
           const session = getSession(sessionId);
           if (!session) throw new Error("Session was not found");
@@ -7840,8 +7842,8 @@ function createConnectionHandler(
           const state = requestSessionMemoryRollover(sessionId);
           sendJson({ type: "session_memory_state", sessionId, requestId, state });
           broadcastSessionList(0, "fresh-thread-requested");
-        } catch (error: any) {
-          sendJson({ type: "session_memory_error", sessionId, requestId, message: error.message || String(error) });
+        } catch (error: unknown) {
+          sendJson({ type: "session_memory_error", sessionId, requestId, message: errorMessage(error) || String(error) });
         }
         break;
       }
@@ -7863,8 +7865,8 @@ function createConnectionHandler(
           const refreshed = await session.buildStatusResult(sessionId);
           sendJson({ type: "codex_reset_result", requestId, sessionId,
             outcome: result?.outcome, payload: refreshed.payload });
-        } catch (error: any) {
-          sendJson({ type: "codex_reset_result", requestId, sessionId, error: error.message || String(error) });
+        } catch (error: unknown) {
+          sendJson({ type: "codex_reset_result", requestId, sessionId, error: errorMessage(error) || String(error) });
         }
         break;
       }
@@ -7874,8 +7876,8 @@ function createConnectionHandler(
         if (activeSession instanceof ClaudeSession) {
           try {
             sendJson({ type: "claude_usage", sessionId: sid, usage: await activeSession.getPlanUsage() });
-          } catch (e: any) {
-            sendJson({ type: "claude_usage", sessionId: sid, error: e?.message || String(e) });
+          } catch (e: unknown) {
+            sendJson({ type: "claude_usage", sessionId: sid, error: errorMessage(e) || String(e) });
           }
         } else {
           sendJson({ type: "claude_usage", sessionId: sid, usage: null });
@@ -7894,11 +7896,11 @@ function createConnectionHandler(
               summary: result.summary,
               payload: result.payload,
             });
-          } catch (e: any) {
+          } catch (e: unknown) {
             sendJson({
               type: "codex_status",
               sessionId: activeSession.getSessionId() || activeSessionId || "",
-              error: e.message || String(e),
+              error: errorMessage(e) || String(e),
             });
           }
         }
@@ -7909,12 +7911,12 @@ function createConnectionHandler(
         // Requesting raw history is also the backwards-compatible live
         // subscription signal for clients that predate set_raw_mode.
         transport.supportsRawSdkEvents = true;
-        const targetSid = (msg as any).sessionId || activeSession?.getSessionId?.() || activeSessionId;
+        const targetSid = msg.sessionId || activeSession?.getSessionId?.() || activeSessionId;
         if (!targetSid) {
-          sendJson({ type: "sdk_event_history", sessionId: "", events: [], total: 0, limit: 0 } as any);
+          sendJson({ type: "sdk_event_history", sessionId: "", events: [], total: 0, limit: 0 });
           break;
         }
-        const rawLimit = Number((msg as any).limit || 300);
+        const rawLimit = Number(msg.limit || 300);
         const limit = Math.max(1, Math.min(1000, Math.floor(rawLimit)));
         sendJson({
           type: "sdk_event_history",
@@ -7922,38 +7924,38 @@ function createConnectionHandler(
           events: getSdkEvents(targetSid, limit),
           total: getSdkEventCount(targetSid),
           limit,
-        } as any);
+        });
         break;
       }
 
       case "mcp_reconnect": {
-        const serverName = (msg as any).serverName as string;
+        const serverName = msg.serverName;
         if (activeSession && serverName) {
           activeSession.reconnectMcpServer(serverName).then(result => {
             sendJson({ type: "mcp_reconnect_result", serverName, success: true });
-          }).catch(e => {
-            sendJson({ type: "error", message: `Failed to reconnect ${serverName}: ${e.message || e}` });
+          }).catch((e: unknown) => {
+            sendJson({ type: "error", message: `Failed to reconnect ${serverName}: ${errorMessage(e) || e}` });
           });
         }
         break;
       }
 
       case "mcp_toggle": {
-        const serverName = (msg as any).serverName as string;
-        const enabled = (msg as any).enabled as boolean;
+        const serverName = msg.serverName;
+        const enabled = msg.enabled;
         if (activeSession && serverName) {
           activeSession.toggleMcpServer(serverName, enabled).then(() => {
             sendJson({ type: "mcp_toggle_result", serverName, enabled });
-          }).catch(e => {
-            sendJson({ type: "error", message: `Failed to toggle ${serverName}: ${e.message || e}` });
+          }).catch((e: unknown) => {
+            sendJson({ type: "error", message: `Failed to toggle ${serverName}: ${errorMessage(e) || e}` });
           });
         }
         break;
       }
 
       case "rewind": {
-        const uuid = (msg as any).userMessageUuid as string;
-        const dryRun = (msg as any).dryRun === true;
+        const uuid = msg.userMessageUuid;
+        const dryRun = msg.dryRun === true;
         if (!activeSession) {
           sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: "No active session" });
         } else if (activeSession instanceof CodexSession) {
@@ -7970,17 +7972,17 @@ function createConnectionHandler(
             } else {
               sendJson({ type: "rewind_result", uuid, dryRun, success: true, ...result });
             }
-          }).catch(e => {
-            sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: e.message || String(e) });
+          }).catch((e: unknown) => {
+            sendJson({ type: "rewind_result", uuid, dryRun, success: false, error: errorMessage(e) || String(e) });
           });
         }
         break;
       }
 
       case "rewind_conversation": {
-        const uuid = (msg as any).userMessageUuid as string;
-        const dryRun = (msg as any).dryRun === true;
-        const shouldRewindFiles = (msg as any).rewindFiles !== false; // default true
+        const uuid = msg.userMessageUuid;
+        const dryRun = msg.dryRun === true;
+        const shouldRewindFiles = msg.rewindFiles !== false; // default true
         const sessionId = msg.sessionId || activeSession?.getSessionId() || activeSession?._resumeSessionId;
 
         if (!sessionId) {
@@ -8028,8 +8030,8 @@ function createConnectionHandler(
               broadcastStatusSync();
             }
             console.log(`[CodexRewind] completed session=${sessionId} turns=${result.numTurns} ms=${Date.now() - rewindStartedAt} dryRun=${dryRun}`);
-          } catch (error: any) {
-            console.warn(`[CodexRewind] failed session=${sessionId} ms=${Date.now() - rewindStartedAt}: ${error.message || String(error)}`);
+          } catch (error: unknown) {
+            console.warn(`[CodexRewind] failed session=${sessionId} ms=${Date.now() - rewindStartedAt}: ${errorMessage(error) || String(error)}`);
             sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, dryRun, error: codexRewindErrorMessage(error) });
           }
           break;
@@ -8065,8 +8067,8 @@ function createConnectionHandler(
             if (shouldRewindFiles) {
               try {
                 await activeSession.rewindFiles(uuid, false);
-              } catch (e: any) {
-                console.log(`[RewindConversation] File rewind failed (non-fatal): ${e.message || e}`);
+              } catch (e: unknown) {
+                console.log(`[RewindConversation] File rewind failed (non-fatal): ${errorMessage(e) || e}`);
               }
             }
             // Abort the current query
@@ -8111,15 +8113,15 @@ function createConnectionHandler(
           });
 
           broadcastSessionList();
-        } catch (e: any) {
-          sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: errorMessage(e) || String(e) });
         }
         break;
       }
 
       case "branch_from_message": {
-        const sourceId = (msg as any).sessionId as string;
-        const branchUuid = (msg as any).userMessageUuid as string;
+        const sourceId = msg.sessionId;
+        const branchUuid = msg.userMessageUuid;
         if (!sourceId) {
           sendJson({ type: "branch_result", success: false, originalSessionId: "", branchPointUuid: branchUuid, error: "No session ID" });
           break;
@@ -8210,15 +8212,15 @@ function createConnectionHandler(
 
           broadcastSessionList();
           console.log(`Branched session ${sourceId} at message ${branchUuid} → new session ${newSessionId}`);
-        } catch (e: any) {
-          console.error(`[Branch] Failed: ${e.message || e}`);
-          sendJson({ type: "branch_result", success: false, originalSessionId: sourceId, branchPointUuid: branchUuid, error: e.message || String(e) });
+        } catch (e: unknown) {
+          console.error(`[Branch] Failed: ${errorMessage(e) || e}`);
+          sendJson({ type: "branch_result", success: false, originalSessionId: sourceId, branchPointUuid: branchUuid, error: errorMessage(e) || String(e) });
         }
         break;
       }
 
       case "fork_session": {
-        const sourceId = (msg as any).sessionId as string;
+        const sourceId = msg.sessionId;
         if (!sourceId) {
           sendJson({ type: "error", message: "No session ID to fork" });
           break;
@@ -8275,9 +8277,9 @@ function createConnectionHandler(
             });
             broadcastSessionList();
             console.log(`Forked Codex App Server session ${sourceId} → ${newSessionId}`);
-          } catch (e: any) {
-            console.error(`[Fork] Codex app-server fork failed: ${e.message || e}`);
-            sendJson({ type: "error", message: `Codex fork failed: ${e.message || String(e)}` });
+          } catch (e: unknown) {
+            console.error(`[Fork] Codex app-server fork failed: ${errorMessage(e) || e}`);
+            sendJson({ type: "error", message: `Codex fork failed: ${errorMessage(e) || String(e)}` });
           }
           break;
         }
@@ -8312,11 +8314,11 @@ function createConnectionHandler(
       }
 
       case "load_more_history": {
-        const sessionId = (msg as any).sessionId as string;
-        const offset = (msg as any).offset as number;
-        const limit = (msg as any).limit as number || 50;
-        const requestId = typeof (msg as any).requestId === "string"
-          ? (msg as any).requestId as string
+        const sessionId = msg.sessionId;
+        const offset = msg.offset;
+        const limit = msg.limit || 50;
+        const requestId = typeof msg.requestId === "string"
+          ? msg.requestId
           : undefined;
         if (!sessionId) break;
         const page = getHistoryPage(sessionId, limit, offset);
@@ -8333,15 +8335,15 @@ function createConnectionHandler(
       }
 
       case "check_cwd": {
-        const checkPath = (msg as any).path as string;
-        const requestId = (msg as any).requestId;
+        const checkPath = msg.path;
+        const requestId = msg.requestId;
         sendCwdCheck(sendJson, checkPath, typeof requestId === "string" ? { requestId } : {});
         break;
       }
 
       case "create_cwd": {
-        const createPath = (msg as any).path as string;
-        const requestId = (msg as any).requestId;
+        const createPath = msg.path;
+        const requestId = msg.requestId;
         const responseMeta = typeof requestId === "string" ? { requestId } : {};
         const resolved = resolveClientPath(createPath);
         if (!resolved.inputPath) {
@@ -8351,20 +8353,20 @@ function createConnectionHandler(
         try {
           fs.mkdirSync(resolved.resolvedPath, { recursive: true });
           sendCwdCheck(sendJson, createPath, { ...responseMeta, created: true });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendCwdCheck(sendJson, createPath, {
             ...responseMeta,
             createFailed: true,
-            error: `Failed to create directory: ${e?.message || String(e)}`,
-            errorCode: e?.code,
+            error: `Failed to create directory: ${errorMessage(e) || String(e)}`,
+            errorCode: (isRecord(e) ? e.code : undefined),
           });
         }
         break;
       }
 
-      case "list_directory" as any: {
-        const listPath = (msg as any).path as string || getDefaultCwd();
-        const requestId = (msg as any).requestId as string | undefined;
+      case "list_directory": {
+        const listPath = msg.path || getDefaultCwd();
+        const requestId = msg.requestId;
         try {
           const resolvedPath = path.resolve(listPath);
           if (isMacosProtectedUserPath(resolvedPath)) {
@@ -8389,30 +8391,30 @@ function createConnectionHandler(
             path: resolvedPath,
             directories: dirs,
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           const permission = macosPrivacyErrorDetails(listPath, e);
           sendJson({
             type: "directory_listing",
             ...(requestId ? { requestId } : {}),
             path: listPath,
             directories: [],
-            error: e.message,
+            error: errorMessage(e),
             ...(permission ? { errorCode: "macos_privacy_denied", permission } : {}),
           });
         }
         break;
       }
 
-      case "file_manager_list" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
+      case "file_manager_list": {
+        const requestId = msg.requestId;
         try {
           const listing = await listFileManagerDirectory({
-            dirPath: (msg as any).path as string | undefined,
-            includeHidden: (msg as any).includeHidden === true,
+            dirPath: msg.path,
+            includeHidden: msg.includeHidden === true,
             defaultCwd: getDefaultCwd(),
-            offset: (msg as any).offset as number | undefined,
-            limit: (msg as any).limit as number | undefined,
-            anchorPath: (msg as any).anchorPath as string | undefined,
+            offset: msg.offset,
+            limit: msg.limit,
+            anchorPath: msg.anchorPath,
           });
           sendJson({
             type: "file_manager_list_result",
@@ -8420,8 +8422,8 @@ function createConnectionHandler(
             ok: true,
             ...listing,
           });
-        } catch (e: any) {
-          const requestedPath = (msg as any).path as string | undefined;
+        } catch (e: unknown) {
+          const requestedPath = msg.path;
           const resolvedPath = resolveFileManagerPath(requestedPath, getDefaultCwd());
           const permission = macosPrivacyErrorDetails(resolvedPath, e);
           sendJson({
@@ -8431,16 +8433,16 @@ function createConnectionHandler(
             path: requestedPath || getDefaultCwd(),
             entries: [],
             roots: [],
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
             ...(permission ? { errorCode: "macos_privacy_denied", permission } : {}),
           });
         }
         break;
       }
 
-      case "file_manager_stat" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const requestedPath = String((msg as any).path || "");
+      case "file_manager_stat": {
+        const requestId = msg.requestId;
+        const requestedPath = String(msg.path || "");
         try {
           const entry = await statFileManagerPath({
             filePath: requestedPath,
@@ -8453,7 +8455,7 @@ function createConnectionHandler(
             path: entry.path,
             entry,
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           const resolvedPath = resolveFileManagerPath(requestedPath, getDefaultCwd());
           const permission = macosPrivacyErrorDetails(resolvedPath, e);
           sendJson({
@@ -8461,23 +8463,23 @@ function createConnectionHandler(
             requestId,
             ok: false,
             path: requestedPath,
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
             ...(permission ? { errorCode: "macos_privacy_denied", permission } : {}),
           });
         }
         break;
       }
 
-      case "macos_permission_status" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const status = await checkMacosFileAccess((msg as any).path as string | undefined);
+      case "macos_permission_status": {
+        const requestId = msg.requestId;
+        const status = await checkMacosFileAccess(msg.path);
         sendJson({ type: "macos_permission_status_result", requestId, ...status });
         break;
       }
 
-      case "macos_permission_action" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const action = (msg as any).action as string;
+      case "macos_permission_action": {
+        const requestId = msg.requestId;
+        const action = msg.action;
         if (action === "restart") {
           sendJson({
             type: "macos_permission_action_result",
@@ -8513,12 +8515,12 @@ function createConnectionHandler(
         break;
       }
 
-      case "file_manager_set_protected" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const filePath = String((msg as any).path || "").trim();
-        const protect = (msg as any).protected === true;
-        const label = String((msg as any).label || "").trim();
-        const pattern = (msg as any).pattern === "directory" ? "directory" : "exact";
+      case "file_manager_set_protected": {
+        const requestId = msg.requestId;
+        const filePath = String(msg.path || "").trim();
+        const protect = msg.protected === true;
+        const label = String(msg.label || "").trim();
+        const pattern = msg.pattern === "directory" ? "directory" : "exact";
         if (!filePath) {
           sendJson({
             type: "file_manager_protected_result",
@@ -8544,30 +8546,30 @@ function createConnectionHandler(
             ...(result.removed ? { removed: result.removed } : {}),
             entries: result.entries,
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "file_manager_protected_result",
             requestId,
             ok: false,
             path: filePath,
             protected: !protect,
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
           });
         }
         break;
       }
 
       case "request_file": {
-        const filePath = (msg as any).filePath as string;
-        const fileId = (msg as any).fileId as string;
-        const offsetBytes = Number((msg as any).offsetBytes || 0);
+        const filePath = msg.filePath;
+        const fileId = msg.fileId;
+        const offsetBytes = Number(msg.offsetBytes || 0);
         const transferToken =
-          typeof (msg as any).transferToken === "string"
-            ? (msg as any).transferToken
+          typeof msg.transferToken === "string"
+            ? msg.transferToken
             : undefined;
         const expectedFileVersion =
-          typeof (msg as any).expectedFileVersion === "string"
-            ? (msg as any).expectedFileVersion
+          typeof msg.expectedFileVersion === "string"
+            ? msg.expectedFileVersion
             : undefined;
         const peerId = fileTransferPeerId(msg);
         try {
@@ -8579,20 +8581,20 @@ function createConnectionHandler(
             transferToken,
             peerId,
             expectedFileVersion,
-            Number((msg as any).downloadProtocolVersion || 1),
-          ).catch((e: any) => {
+            Number(msg.downloadProtocolVersion || 1),
+          ).catch((e: unknown) => {
             sendJson({
               type: "file_error",
               fileId,
-              message: e.message || String(e),
+              message: errorMessage(e) || String(e),
               ...(transferToken ? { transferToken } : {}),
             });
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "file_error",
             fileId,
-            message: e.message || String(e),
+            message: errorMessage(e) || String(e),
             ...(transferToken ? { transferToken } : {}),
           });
         }
@@ -8600,17 +8602,17 @@ function createConnectionHandler(
       }
 
       case "file_download_ack": {
-        const fileId = String((msg as any).fileId || "");
-        const transferToken = typeof (msg as any).transferToken === "string"
-          ? (msg as any).transferToken
+        const fileId = String(msg.fileId || "");
+        const transferToken = typeof msg.transferToken === "string"
+          ? msg.transferToken
           : undefined;
         const peerId = fileTransferPeerId(msg);
-        const receivedBytes = Number((msg as any).receivedBytes);
+        const receivedBytes = Number(msg.receivedBytes);
         if (fileId && Number.isSafeInteger(receivedBytes) && receivedBytes >= 0) {
           const state = activeFileDownloadAcks.get(
             fileDownloadAckKey(fileId, transferToken, peerId),
           );
-          if (state && (msg as any).ready === true && receivedBytes === state.receivedBytes) state.ready = true;
+          if (state && msg.ready === true && receivedBytes === state.receivedBytes) state.ready = true;
           if (state && receivedBytes > state.receivedBytes) {
             state.receivedBytes = receivedBytes;
           }
@@ -8618,10 +8620,10 @@ function createConnectionHandler(
         break;
       }
 
-      case "file_manager_download" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const filePath = String((msg as any).path || "");
-        const fileId = (msg as any).fileId as string || `fm_${crypto.randomUUID()}`;
+      case "file_manager_download": {
+        const requestId = msg.requestId;
+        const filePath = String(msg.path || "");
+        const fileId = msg.fileId || `fm_${crypto.randomUUID()}`;
         const peerId = fileTransferPeerId(msg);
         try {
           const { resolvedPath } = resolveAllowedDownloadFile(filePath);
@@ -8633,14 +8635,14 @@ function createConnectionHandler(
             path: resolvedPath,
             fileId,
           });
-          const offsetBytes = Number((msg as any).offsetBytes || 0);
+          const offsetBytes = Number(msg.offsetBytes || 0);
           const transferToken =
-            typeof (msg as any).transferToken === "string"
-              ? (msg as any).transferToken
+            typeof msg.transferToken === "string"
+              ? msg.transferToken
               : undefined;
           const expectedFileVersion =
-            typeof (msg as any).expectedFileVersion === "string"
-              ? (msg as any).expectedFileVersion
+            typeof msg.expectedFileVersion === "string"
+              ? msg.expectedFileVersion
               : undefined;
           void sendFileChunks(
             resolvedPath,
@@ -8649,38 +8651,38 @@ function createConnectionHandler(
             transferToken,
             peerId,
             expectedFileVersion,
-            Number((msg as any).downloadProtocolVersion || 1),
-          ).catch((e: any) => {
+            Number(msg.downloadProtocolVersion || 1),
+          ).catch((e: unknown) => {
             sendJson({
               type: "file_error",
               fileId,
-              message: e.message || String(e),
+              message: errorMessage(e) || String(e),
               ...(transferToken ? { transferToken } : {}),
             });
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "file_manager_operation_result",
             requestId,
             operation: "download",
             ok: false,
             path: filePath,
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
           });
         }
         break;
       }
 
-      case "file_manager_read_text" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const filePath = String((msg as any).path || "");
+      case "file_manager_read_text": {
+        const requestId = msg.requestId;
+        const filePath = String(msg.path || "");
         try {
           const roots = getFileManagerRoots(getDefaultCwd());
           const resolved = resolveFileManagerPath(filePath, getDefaultCwd());
           assertFileManagerPathAllowed(resolved, roots);
           const stat = fs.statSync(resolved);
           if (!stat.isFile()) throw new Error(`Not a file: ${resolved}`);
-          const requestedMax = Number((msg as any).maxBytes || 512 * 1024);
+          const requestedMax = Number(msg.maxBytes || 512 * 1024);
           const maxBytes = Math.min(Math.max(requestedMax, 1024), 1024 * 1024);
           const fd = fs.openSync(resolved, "r");
           try {
@@ -8700,23 +8702,23 @@ function createConnectionHandler(
           } finally {
             fs.closeSync(fd);
           }
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "file_manager_text_result",
             requestId,
             ok: false,
             path: filePath,
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
           });
         }
         break;
       }
 
-      case "file_manager_write_text" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const filePath = String((msg as any).path || "");
-        const content = typeof (msg as any).content === "string"
-          ? (msg as any).content as string
+      case "file_manager_write_text": {
+        const requestId = msg.requestId;
+        const filePath = String(msg.path || "");
+        const content = typeof msg.content === "string"
+          ? msg.content
           : "";
         try {
           const saved = writeFileManagerText({
@@ -8731,38 +8733,38 @@ function createConnectionHandler(
             ok: true,
             path: saved.path,
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "file_manager_operation_result",
             requestId,
             operation: "write_text",
             ok: false,
             path: filePath,
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
           });
         }
         break;
       }
 
-      case "file_manager_mkdir" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const targetPath = String((msg as any).path || "");
+      case "file_manager_mkdir": {
+        const requestId = msg.requestId;
+        const targetPath = String(msg.path || "");
         try {
           const roots = getFileManagerRoots(getDefaultCwd());
           const resolved = resolveFileManagerPath(targetPath, getDefaultCwd());
           assertFileManagerPathAllowed(resolved, roots);
           fs.mkdirSync(resolved, { recursive: true });
           sendJson({ type: "file_manager_operation_result", requestId, operation: "mkdir", ok: true, path: resolved });
-        } catch (e: any) {
-          sendJson({ type: "file_manager_operation_result", requestId, operation: "mkdir", ok: false, path: targetPath, error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "mkdir", ok: false, path: targetPath, error: errorMessage(e) || String(e) });
         }
         break;
       }
 
-      case "file_manager_rename" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const fromPath = String((msg as any).fromPath || "");
-        const toName = String((msg as any).toName || "");
+      case "file_manager_rename": {
+        const requestId = msg.requestId;
+        const fromPath = String(msg.fromPath || "");
+        const toName = String(msg.toName || "");
         try {
           const roots = getFileManagerRoots(getDefaultCwd());
           const resolvedFrom = resolveFileManagerPath(fromPath, getDefaultCwd());
@@ -8776,16 +8778,16 @@ function createConnectionHandler(
           if (fs.existsSync(resolvedTo)) throw new Error(`Destination already exists: ${resolvedTo}`);
           fs.renameSync(resolvedFrom, resolvedTo);
           sendJson({ type: "file_manager_operation_result", requestId, operation: "rename", ok: true, path: resolvedFrom, newPath: resolvedTo });
-        } catch (e: any) {
-          sendJson({ type: "file_manager_operation_result", requestId, operation: "rename", ok: false, path: fromPath, error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "rename", ok: false, path: fromPath, error: errorMessage(e) || String(e) });
         }
         break;
       }
 
-      case "file_manager_delete" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const targetPath = String((msg as any).path || "");
-        const recursive = (msg as any).recursive === true;
+      case "file_manager_delete": {
+        const requestId = msg.requestId;
+        const targetPath = String(msg.path || "");
+        const recursive = msg.recursive === true;
         try {
           const roots = getFileManagerRoots(getDefaultCwd());
           const resolved = resolveFileManagerPath(targetPath, getDefaultCwd());
@@ -8799,20 +8801,20 @@ function createConnectionHandler(
             fs.unlinkSync(resolved);
           }
           sendJson({ type: "file_manager_operation_result", requestId, operation: "delete", ok: true, path: resolved });
-        } catch (e: any) {
-          sendJson({ type: "file_manager_operation_result", requestId, operation: "delete", ok: false, path: targetPath, error: e.message || String(e) });
+        } catch (e: unknown) {
+          sendJson({ type: "file_manager_operation_result", requestId, operation: "delete", ok: false, path: targetPath, error: errorMessage(e) || String(e) });
         }
         break;
       }
 
-      case "file_manager_upload_start" as any: {
-        const requestId = (msg as any).requestId as string | undefined;
-        const uploadId = String((msg as any).uploadId || "");
+      case "file_manager_upload_start": {
+        const requestId = msg.requestId;
+        const uploadId = String(msg.uploadId || "");
         try {
           const filePath = resolveUploadTarget(
-            String((msg as any).targetDir || ""),
-            String((msg as any).fileName || "upload"),
-            String((msg as any).conflictPolicy || "rename"),
+            String(msg.targetDir || ""),
+            String(msg.fileName || "upload"),
+            String(msg.conflictPolicy || "rename"),
           );
           const fd = fs.openSync(filePath, "w");
           const activityId = beginFileTransfer("upload", path.basename(filePath));
@@ -8822,9 +8824,9 @@ function createConnectionHandler(
             filePath,
             fileName: path.basename(filePath),
             receivedChunks: 0,
-            totalChunks: (msg as any).totalChunks,
-            chunkSize: (msg as any).chunkSize || 512 * 1024,
-            totalBytes: (msg as any).fileSize,
+            totalChunks: msg.totalChunks,
+            chunkSize: msg.chunkSize || 512 * 1024,
+            totalBytes: msg.fileSize,
             bytesReceived: 0,
             lastProgressEmit: 0,
           });
@@ -8836,13 +8838,13 @@ function createConnectionHandler(
             path: filePath,
             uploadId,
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           sendJson({
             type: "file_manager_operation_result",
             requestId,
             operation: "upload_start",
             ok: false,
-            error: e.message || String(e),
+            error: errorMessage(e) || String(e),
             uploadId,
           });
         }
@@ -8854,15 +8856,15 @@ function createConnectionHandler(
         const fileName = path.basename(msg.fileName || "upload"); // sanitize: strip path traversal
         const fileSize = msg.fileSize;
         const totalChunks = msg.totalChunks;
-        const chunkSize = (msg as any).chunkSize || 512 * 1024;
+        const chunkSize = msg.chunkSize || 512 * 1024;
 
         const requestedSessionId =
-          typeof (msg as any).sessionId === "string"
-            ? String((msg as any).sessionId).trim()
+          typeof msg.sessionId === "string"
+            ? String(msg.sessionId).trim()
             : "";
         const requestedCwd =
-          typeof (msg as any).cwd === "string"
-            ? String((msg as any).cwd).trim()
+          typeof msg.cwd === "string"
+            ? String(msg.cwd).trim()
             : "";
         const storedSessionCwd = requestedSessionId
           ? getSession(requestedSessionId)?.cwd
@@ -8907,7 +8909,7 @@ function createConnectionHandler(
       case "upload_chunk": {
         const uploadId = msg.uploadId;
         const chunkIndex = msg.chunkIndex;
-        const data = msg.data as string;
+        const data = msg.data;
         const upload = activeUploads.get(uploadId);
         if (!upload) {
           sendJson({ type: "error", message: `Unknown upload: ${uploadId}` });
@@ -8938,9 +8940,9 @@ function createConnectionHandler(
       }
 
       case "upload_chunk_bin": {
-        const uploadId = (msg as any).uploadId as string;
-        const chunkIndex = (msg as any).chunkIndex as number;
-        const bytes = (msg as any).data as Buffer;
+        const uploadId = msg.uploadId;
+        const chunkIndex = msg.chunkIndex;
+        const bytes = msg.data;
         const upload = activeUploads.get(uploadId);
         if (!upload) {
           sendJson({ type: "error", message: `Unknown upload: ${uploadId}` });
@@ -9086,11 +9088,11 @@ async function continueSession(sessionId: string, prompt: string, recoveryId?: s
           settleLogicalRun(session, "completed", sessionId);
         }
         broadcastSessionList();
-      }).catch((err) => {
+      }).catch((err: unknown) => {
         if (shuttingDown) return;
-        settleRecoveredSchedule(sessionId, "failed", String(err.message || err));
+        settleRecoveredSchedule(sessionId, "failed", String(errorMessage(err) || err));
         if (recoveryId) appendRecoveryNotice(sessionId, "Recovery run failed. Open the session to review the error and retry.");
-        console.error(`[Continue] Query error: ${err.message}`);
+        console.error(`[Continue] Query error: ${errorMessage(err)}`);
         if (delegatedContinuation) {
           finishDelegatedAgentTurn(
             delegatedContinuation.record.delegationId,
@@ -9104,7 +9106,7 @@ async function continueSession(sessionId: string, prompt: string, recoveryId?: s
         if (!turnAbortTracker.finish(session, turnAbortState)) {
           settleLogicalRun(session, "failed", sessionId);
         }
-      }).catch(error => console.error("[Recovery] Completion reporting failed:", error));
+      }).catch((error: unknown) => console.error("[Recovery] Completion reporting failed:", error));
       try { sendSessionStartedPush(session); } catch (error) { console.error("[Recovery] Notification failed:", error); }
     } catch (error) {
       abandonedRecoveryInstances.add(session);
@@ -9184,8 +9186,8 @@ const httpServer = http.createServer((req, res) => {
     }
   }
   if (isCodexAppMcpRequest(req)) {
-    void handleCodexAppMcpRequest(req, res).catch((err) => {
-      console.error(`[Codex MCP] Unhandled request error: ${err.message}`, err.stack);
+    void handleCodexAppMcpRequest(req, res).catch((err: unknown) => {
+      console.error(`[Codex MCP] Unhandled request error: ${errorMessage(err)}`, err instanceof Error ? err.stack : undefined);
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -9255,7 +9257,7 @@ const httpServer = http.createServer((req, res) => {
         }));
       } catch (error: unknown) {
         res.writeHead(400);
-        res.end(error instanceof Error ? error.message : "Invalid request");
+        res.end(error instanceof Error ? errorMessage(error) : "Invalid request");
       }
     });
     return;
@@ -9309,16 +9311,16 @@ const httpServer = http.createServer((req, res) => {
         }
         restartRecovery.start(sessionId, requestId);
         try { await continueSession(sessionId, prompt, requestId); }
-        catch (error: any) {
-          restartRecovery.retry(sessionId, requestId, String(error?.message || error));
+        catch (error: unknown) {
+          restartRecovery.retry(sessionId, requestId, String(errorMessage(error) || error));
           throw error;
         }
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
-        res.end(err.message || "Server error");
+        res.end(errorMessage(err) || "Server error");
       }
     });
     return;
@@ -9359,9 +9361,9 @@ const httpServer = http.createServer((req, res) => {
       const resolved = resolveAllowedDownloadFile(url.searchParams.get("path") || "");
       filePath = resolved.resolvedPath;
       stat = resolved.stat;
-    } catch (e: any) {
+    } catch (e: unknown) {
       res.writeHead(403);
-      res.end(e.message || "File download not allowed");
+      res.end(errorMessage(e) || "File download not allowed");
       return;
     }
 
@@ -9497,9 +9499,9 @@ const httpServer = http.createServer((req, res) => {
         });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, filePath: savedPath }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
-        res.end(err.message || "Server error");
+        res.end(errorMessage(err) || "Server error");
       }
     });
     return;
@@ -9549,9 +9551,9 @@ const httpServer = http.createServer((req, res) => {
         const ok = deleteSkill(normalized);
         res.writeHead(ok ? 200 : 404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
-        res.end(err.message || "Server error");
+        res.end(errorMessage(err) || "Server error");
       }
     });
     return;
@@ -9583,11 +9585,11 @@ const BULK_LANE_CLIENT_MESSAGE_TYPES = new Set<string>([
 ]);
 
 function isBulkLaneClientMessage(msg: ClientMessage): boolean {
-  return BULK_LANE_CLIENT_MESSAGE_TYPES.has(String((msg as any)?.type || ""));
+  return BULK_LANE_CLIENT_MESSAGE_TYPES.has(String(msg?.type || ""));
 }
 
 function isSafetyCriticalControlMessage(msg: ClientMessage): boolean {
-  return (msg as any)?.type === "abort";
+  return msg?.type === "abort";
 }
 
 function getBearerToken(req: http.IncomingMessage): string | null {
@@ -9597,6 +9599,12 @@ function getBearerToken(req: http.IncomingMessage): string | null {
   const match = value.match(/^Bearer\s+(.+)$/i);
   return match ? match[1].trim() : null;
 }
+
+const directUpgradeAuth = new WeakMap<http.IncomingMessage, {
+  authenticated: boolean;
+  wantsEncryptedDirectAuth: boolean;
+  transportLane: TransportLane;
+}>();
 
 // Handle WebSocket upgrade with auth
 httpServer.on("upgrade", (req, socket, head) => {
@@ -9617,9 +9625,11 @@ httpServer.on("upgrade", (req, socket, head) => {
     socket.destroy();
     return;
   }
-  (req as any).socketAgentAuthenticated = token === AUTH_TOKEN;
-  (req as any).socketAgentWantsEncryptedDirectAuth = wantsEncryptedDirectAuth;
-  (req as any).socketAgentTransportLane = transportLane;
+  directUpgradeAuth.set(req, {
+    authenticated: token === AUTH_TOKEN,
+    wantsEncryptedDirectAuth,
+    transportLane,
+  });
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req);
   });
@@ -9665,9 +9675,9 @@ async function backfillDiscoveredSessionRunStatsInBackground(): Promise<void> {
         `[RunBackfill] ${completed}/${pending.length} session=${session.id} `
         + `runs=${stats?.completedCount || 0} ms=${Date.now() - startedAt}`,
       );
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.warn(
-        `[RunBackfill] failed session=${session.id}: ${error?.message || String(error)}`,
+        `[RunBackfill] failed session=${session.id}: ${errorMessage(error) || String(error)}`,
       );
     }
     await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -9709,8 +9719,8 @@ async function initializeListeningServer(): Promise<void> {
     if (plugin.init) {
       try {
         await plugin.init(pluginContext);
-      } catch (e: any) {
-        console.error(`Plugin ${plugin.name} init failed: ${e.message}`);
+      } catch (e: unknown) {
+        console.error(`Plugin ${plugin.name} init failed: ${errorMessage(e)}`);
       }
     }
   }
@@ -9719,8 +9729,8 @@ async function initializeListeningServer(): Promise<void> {
   if (RELAY_URL) {
     try {
       startRelayClient();
-    } catch (e: any) {
-      console.error(`[Relay] Failed to start relay client: ${e?.message || String(e)}`);
+    } catch (e: unknown) {
+      console.error(`[Relay] Failed to start relay client: ${errorMessage(e) || String(e)}`);
     }
   }
   const restoredMonitors = restoreAppMonitors(durableMonitorContext);
@@ -9754,8 +9764,8 @@ if (process.env.SOCKETAGENT_HISTORY_COMPACT_ON_STARTUP !== "0") {
           `after=${(result.afterBytes / 1024 / 1024).toFixed(1)}MB warnings=${result.warnings.length}`,
         );
       }
-    } catch (err: any) {
-      console.warn(`[HistoryCompact] startup compaction failed: ${err?.message || String(err)}`);
+    } catch (err: unknown) {
+      console.warn(`[HistoryCompact] startup compaction failed: ${errorMessage(err) || String(err)}`);
     }
   };
   setTimeout(runStartupHistoryCompaction, 15_000).unref();
@@ -10131,7 +10141,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       applyLatestScheduledTaskEditableFields(task);
 
       if (session.isWarmIdle) {
-        void (session as any).closeWarmIdle?.();
+        void session.closeWarmIdle();
       }
       if (activeSessions.get(sid) === session) activeSessions.delete(sid);
       if (activeSessions.get(tempId) === session) activeSessions.delete(tempId);
@@ -10181,7 +10191,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         );
       }
       console.log(`[Scheduler] Task ${task.id} run #${runNumber} completed, session ${sid}`);
-    }).catch((err) => {
+    }).catch((err: unknown) => {
       clearInterval(registerInterval);
       if (shuttingDown) return;
       const sid = session.getSessionId() || tempId;
@@ -10192,7 +10202,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       }
       currentRun.completedAt = new Date().toISOString();
       currentRun.status = "failed";
-      currentRun.error = err.message || "Unknown error";
+      currentRun.error = errorMessage(err) || "Unknown error";
 
       task.error = currentRun.error;
       task.runCount = runNumber;
@@ -10200,7 +10210,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       applyLatestScheduledTaskEditableFields(task);
 
       if (session.isWarmIdle) {
-        void (session as any).closeWarmIdle?.();
+        void session.closeWarmIdle();
       }
       activeSessions.delete(tempId);
       if (sid !== tempId) activeSessions.delete(sid);
@@ -10248,17 +10258,17 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
           },
         );
       }
-      console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${err.message}`);
+      console.error(`[Scheduler] Task ${task.id} run #${runNumber} failed: ${errorMessage(err)}`);
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     if (currentRun.status === "running") {
       currentRun.status = "failed";
       currentRun.completedAt = new Date().toISOString();
-      currentRun.error = err.message || "Unknown error";
+      currentRun.error = errorMessage(err) || "Unknown error";
       task.runCount = runNumber;
       task.lastRunAt = currentRun.completedAt;
     }
-    task.error = err.message;
+    task.error = errorMessage(err);
     if (manualRun) finishManualScheduledTask(task, originalStatus, false);
     else task.status = "failed";
     saveScheduledTask(task);
@@ -10279,8 +10289,8 @@ async function checkScheduledTasks(): Promise<void> {
   if (!serverReady || restartPreparing || shuttingDown) return;
   const dueTasks = getDueTasks();
   for (const task of dueTasks) {
-    executeScheduledTask(task).catch((err: any) => {
-      console.error(`[Scheduler] Task ${task.id} failed before launch: ${err?.message || err}`);
+    executeScheduledTask(task).catch((err: unknown) => {
+      console.error(`[Scheduler] Task ${task.id} failed before launch: ${errorMessage(err) || err}`);
     });
   }
 }
@@ -10301,11 +10311,14 @@ setTimeout(checkScheduledTasks, 5000);
 
 // ── Direct WebSocket connections ──
 wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
-  const wantsEncryptedDirectAuth = (req as any).socketAgentWantsEncryptedDirectAuth === true;
-  const transportLane: TransportLane =
-    (req as any).socketAgentTransportLane === "bulk" ? "bulk" : "control";
+  const auth = directUpgradeAuth.get(req);
+  if (!auth) {
+    ws.close(1008, "Missing upgrade authentication");
+    return;
+  }
+  const { wantsEncryptedDirectAuth, transportLane } = auth;
   const transport = new DirectClientTransport(ws, loadServerKeyPair(), {
-    authenticated: (req as any).socketAgentAuthenticated === true,
+    authenticated: auth.authenticated,
     requireEncryptedAuth: wantsEncryptedDirectAuth,
   });
   console.log(
@@ -10409,14 +10422,14 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
     }
 
     const receivedAt = Date.now();
-    const msgType = (msg as any)?.type || "unknown";
+    const msgType = msg?.type || "unknown";
     if (transportLane === "control" && isSafetyCriticalControlMessage(msg)) {
       const startedAt = Date.now();
       void handler.handleMessage(msg)
-        .catch((err: any) => {
+        .catch((err: unknown) => {
           transport.send(JSON.stringify({
             type: "error",
-            message: err.message || "Hard stop failed",
+            message: errorMessage(err) || "Hard stop failed",
           }));
         })
         .finally(() => {
@@ -10448,20 +10461,20 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       scheduled = bulkMessageQueue.then(runHandler);
       bulkMessageQueue = scheduled.catch(() => undefined);
     }
-    void scheduled.catch((err: any) => {
-      if (msgType === "prompt") {
+    void scheduled.catch((err: unknown) => {
+      if (msg.type === "prompt") {
         transport.send(JSON.stringify({
           type: "prompt_failed",
-          messageId: String((msg as any)?.messageId || ""),
-          sessionId: String((msg as any)?.sessionId || ""),
-          message: err.message || "Prompt could not be started",
+          messageId: String(msg?.messageId || ""),
+          sessionId: String(msg?.sessionId || ""),
+          message: errorMessage(err) || "Prompt could not be started",
         }));
       }
       if (msgType !== "prompt") {
         transport.send(
           JSON.stringify({
             type: "error",
-            message: err.message || "Server error",
+            message: errorMessage(err) || "Server error",
           })
         );
       }
@@ -10534,14 +10547,14 @@ function startRelayClient(): void {
       }
       const handler = relayConnectionHandler;
       const receivedAt = Date.now();
-      const msgType = (msg as any)?.type || "unknown";
+      const msgType = msg?.type || "unknown";
       if (isSafetyCriticalControlMessage(msg)) {
         const startedAt = Date.now();
         void handler.handleMessage(msg)
-          .catch((err: any) => {
+          .catch((err: unknown) => {
             handler.sendJson({
               type: "error",
-              message: err.message || "Hard stop failed",
+              message: errorMessage(err) || "Hard stop failed",
             });
           })
           .finally(() => {
@@ -10560,20 +10573,20 @@ function startRelayClient(): void {
         } finally {
           logSlowWs("relay_handler", startedAt, { type: msgType, scope });
         }
-      }).catch((err: any) => {
-        console.error(`[Relay] Message handler error: ${err.message}`);
-        if (msgType === "prompt") {
+      }).catch((err: unknown) => {
+        console.error(`[Relay] Message handler error: ${errorMessage(err)}`);
+        if (msg.type === "prompt") {
           handler.sendJson({
             type: "prompt_failed",
-            messageId: String((msg as any)?.messageId || ""),
-            sessionId: String((msg as any)?.sessionId || ""),
-            message: err.message || "Prompt could not be started",
+            messageId: String(msg?.messageId || ""),
+            sessionId: String(msg?.sessionId || ""),
+            message: errorMessage(err) || "Prompt could not be started",
           });
         }
         if (msgType !== "prompt") {
           handler.sendJson({
             type: "error",
-            message: err.message || "Server error",
+            message: errorMessage(err) || "Server error",
           });
         }
       });
@@ -10613,7 +10626,7 @@ function startRelayClient(): void {
       }
       const handler = relayBulkConnectionHandler;
       const receivedAt = Date.now();
-      const msgType = String((msg as any)?.type || "unknown");
+      const msgType = String(msg?.type || "unknown");
       relayBulkMessageQueue = relayBulkMessageQueue
         .then(async () => {
           const startedAt = Date.now();
@@ -10627,11 +10640,11 @@ function startRelayClient(): void {
             logSlowWs("relay_bulk_handler", startedAt, { type: msgType });
           }
         })
-        .catch((err: any) => {
-          console.error(`[Relay:bulk] Message handler error: ${err.message}`);
+        .catch((err: unknown) => {
+          console.error(`[Relay:bulk] Message handler error: ${errorMessage(err)}`);
           handler.sendJson({
             type: "error",
-            message: err.message || "Bulk transport error",
+            message: errorMessage(err) || "Bulk transport error",
           });
         });
     },
@@ -10762,7 +10775,7 @@ function verifyAutoUpdateTarget(commit: string): void {
       "verify-commit",
       commit,
     ], { timeout: 15000 });
-  } catch (e: any) {
+  } catch (e: unknown) {
     throw new Error(
       `Auto-update target ${commit.substring(0, 7)} does not have a valid trusted git commit signature`
     );
@@ -11152,8 +11165,8 @@ async function ensureManagedBackendsCurrent(reason: string): Promise<void> {
     await runManagedBackendUpdateTracked();
     markManagedBackendUpdateChecked();
     managedBackendRetry.clear();
-  } catch (e: any) {
-    lastAutoUpdateError = `Managed backend update failed: ${e?.message || String(e)}`;
+  } catch (e: unknown) {
+    lastAutoUpdateError = `Managed backend update failed: ${errorMessage(e) || String(e)}`;
     console.error(`[Auto-update] ${lastAutoUpdateError}`);
     managedBackendRetry.schedule(300000, () => void ensureManagedBackendsCurrent("retry"));
   }
@@ -11195,8 +11208,8 @@ function replaceSymlink(linkPath: string, targetPath: string): void {
       return;
     }
     fs.rmSync(linkPath, { force: true });
-  } catch (e: any) {
-    if (e?.code !== "ENOENT") throw e;
+  } catch (e: unknown) {
+    if ((isRecord(e) ? e.code : undefined) !== "ENOENT") throw e;
   }
   fs.symlinkSync(targetPath, linkPath);
 }
@@ -11261,8 +11274,8 @@ function installSocketAgentCliFromRepo(gitRoot: string): void {
     } else {
       installSocketAgentCliUnix(gitRoot);
     }
-  } catch (e: any) {
-    console.error(`[CLI] Failed to install socketagent command: ${e?.message || String(e)}`);
+  } catch (e: unknown) {
+    console.error(`[CLI] Failed to install socketagent command: ${errorMessage(e) || String(e)}`);
   }
 }
 
@@ -11428,8 +11441,8 @@ function ensureWindowsServiceWrapper(): void {
       fs.writeFileSync(recoveryFile, recoveryContent, "ascii");
       console.log(`[Startup] Updated Windows recovery wrapper at ${recoveryFile}`);
     }
-  } catch (e: any) {
-    console.warn(`[Startup] Could not update Windows service wrapper: ${e?.message || String(e)}`);
+  } catch (e: unknown) {
+    console.warn(`[Startup] Could not update Windows service wrapper: ${errorMessage(e) || String(e)}`);
   }
 }
 
@@ -11486,8 +11499,8 @@ function ensureStartupPreflightService(): void {
     if (changed) {
       execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe" });
     }
-  } catch (e: any) {
-    console.warn(`[Startup] Could not update systemd service wrapper: ${e?.message || String(e)}`);
+  } catch (e: unknown) {
+    console.warn(`[Startup] Could not update systemd service wrapper: ${errorMessage(e) || String(e)}`);
   }
 }
 
@@ -11625,8 +11638,8 @@ async function checkForUpdates(): Promise<void> {
       console.log(`[Auto-update] Update available (${remote.substring(0, 7)}); restarting for Windows wrapper update...`);
       try {
         armRestartRecoveryGuard("windows-auto-update", 300);
-      } catch (guardErr: any) {
-        lastAutoUpdateError = `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}`;
+      } catch (guardErr: unknown) {
+        lastAutoUpdateError = `Recovery guard could not be armed: ${errorMessage(guardErr) || String(guardErr)}`;
         console.error(`[Auto-update] ${lastAutoUpdateError}`);
         return;
       }
@@ -11667,8 +11680,8 @@ async function checkForUpdates(): Promise<void> {
     try {
       await runManagedBackendUpdateTracked();
       markManagedBackendUpdateChecked();
-    } catch (backendErr: any) {
-      console.warn(`[Auto-update] Managed backend version check failed; keeping installed versions: ${backendErr?.message || String(backendErr)}`);
+    } catch (backendErr: unknown) {
+      console.warn(`[Auto-update] Managed backend version check failed; keeping installed versions: ${errorMessage(backendErr) || String(backendErr)}`);
     }
     installSocketAgentCliFromRepo(GIT_ROOT);
 
@@ -11680,17 +11693,17 @@ async function checkForUpdates(): Promise<void> {
     console.log(`[Auto-update] Compiled successfully, restarting for ${remote.substring(0, 7)}...`);
     try {
       armRestartRecoveryGuard("auto-update", 180);
-    } catch (guardErr: any) {
-      lastAutoUpdateError = `Recovery guard could not be armed: ${guardErr?.message || String(guardErr)}`;
+    } catch (guardErr: unknown) {
+      lastAutoUpdateError = `Recovery guard could not be armed: ${errorMessage(guardErr) || String(guardErr)}`;
       console.error(`[Auto-update] ${lastAutoUpdateError}`);
       return;
     }
 
     // Exit with non-zero so systemd/launchd or the Windows wrapper restarts us.
     process.exit(1);
-  } catch (e: any) {
-    lastAutoUpdateError = e.message;
-    console.error(`[Auto-update] Error: ${e.message}`);
+  } catch (e: unknown) {
+    lastAutoUpdateError = errorMessage(e);
+    console.error(`[Auto-update] Error: ${errorMessage(e)}`);
   } finally {
     autoUpdateInProgress = false;
   }

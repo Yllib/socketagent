@@ -21,7 +21,12 @@
               "type": "string"
             },
             "priority": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "now",
+                "next",
+                "later"
+              ]
             },
             "sessionId": {
               "type": "string"
@@ -834,6 +839,12 @@
         {
           "type": "object",
           "properties": {
+            "cwd": {
+              "type": "string"
+            },
+            "backend": {
+              "$ref": "#/definitions/Backend"
+            },
             "knownHistoryDigest": {
               "type": "string"
             },
@@ -2181,6 +2192,9 @@
             "expectedFileVersion": {
               "type": "string"
             },
+            "downloadProtocolVersion": {
+              "type": "number"
+            },
             "commandId": {
               "type": "string"
             }
@@ -2430,6 +2444,9 @@
             "type": {
               "type": "string",
               "const": "file_manager_download"
+            },
+            "downloadProtocolVersion": {
+              "type": "number"
             },
             "requestId": {
               "type": "string"
@@ -3442,6 +3459,9 @@
               "type": "string",
               "const": "force_update"
             },
+            "forceRestart": {
+              "type": "boolean"
+            },
             "commandId": {
               "type": "string"
             }
@@ -3711,10 +3731,18 @@
               "type": "string"
             },
             "scope": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "user",
+                "project"
+              ]
             },
             "format": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "command",
+                "skill"
+              ]
             },
             "agent": {
               "type": "string",

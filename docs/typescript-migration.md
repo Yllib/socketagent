@@ -205,3 +205,15 @@ not a new auto-update policy.
   malformed-then-valid traffic, peer routing, and binary upload delivery. Full
   suite: 548 passed, one skipped. Baseline: 4,545. Output:
   `/tmp/sa-client-protocol-full-tests.log`.
+
+- Server `eaaea43`: generated client validation and relay boundary checkpoint.
+- Command routing checkpoint: handlers use the validated ClientMessage union;
+  missing resume metadata, download version, and force-update fields are declared.
+  Prompt priorities and skill formats/scopes have their actual supported types.
+  Native-history helpers carry HistoryEntry arrays; errors remain unknown and
+  are checked before reading messages or provider flags. Work Review commands
+  use service contracts. Direct upgrade authentication uses server-owned metadata.
+- Command routing validation: full suite 548 passed, one skipped. Baseline:
+  2,487, including 311 remaining diagnostics in index.ts (provider settings,
+  durable tool delivery, HTTP endpoints, and update helpers). Output:
+  `/tmp/sa-router-full-tests.log`.

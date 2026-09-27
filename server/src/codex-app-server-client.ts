@@ -1,6 +1,8 @@
 import { execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
 import { promisify } from "util";
+import { z } from "zod";
+import { isCodexRecord, parseRewindResponse } from "./codex-rewind-contract";
 
 const execFileAsync = promisify(execFile);
 
@@ -11,7 +13,7 @@ export class CodexAppServerProtocolError extends Error {
   constructor(readonly method: string, error: unknown, message: string) {
     super(message);
     this.name = "CodexAppServerProtocolError";
-    const data = error && typeof error === "object" ? error as Record<string, unknown> : {};
+    const data = isCodexRecord(error) ? error : {};
     this.code = typeof data.code === "number" ? data.code : undefined;
     this.detail = typeof data.message === "string" ? data.message : message;
   }
@@ -22,22 +24,17 @@ export class CodexAppServerProtocolError extends Error {
   }
 }
 
-interface RewindThread {
-  id: string;
-  historyMode?: string;
-  status?: { type: string };
-  turns: Array<{ id: string }>;
-}
-
-function rewindThreadFrom(response: unknown): RewindThread {
-  const thread = (response as { thread?: RewindThread } | null)?.thread;
-  if (!thread || !Array.isArray(thread.turns)
-      || thread.turns.some(turn => !turn || typeof turn.id !== "string")) {
-    throw new Error("Codex did not return the conversation turns");
-  }
-  if (thread.status?.type === "active") throw new Error("Stop the running Codex turn before rewinding");
-  return thread;
-}
+const compactionNotificationSchema = z.object({
+  threadId: z.string(),
+  turn: z.object({
+    id: z.string(), status: z.string().optional(),
+    error: z.object({ message: z.string() }).nullish(),
+  }).optional(),
+  item: z.object({ type: z.string() }).optional(),
+  error: z.object({ message: z.string() }).nullish(),
+  message: z.string().optional(),
+  willRetry: z.boolean().optional(),
+});
 
 export type CodexAppServerSandbox =
   | "read-only"
@@ -213,9 +210,9 @@ export type CodexAppServerRequestResponder = (response:
   | { error: unknown; result?: never }
 ) => void;
 
-interface PendingRequest<T> {
+interface PendingRequest {
   method: string;
-  resolve: (value: T) => void;
+  resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 }
@@ -233,7 +230,7 @@ export class CodexAppServerRequestTimeoutError extends Error {
 export class CodexAppServerClient extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private nextId = 1;
-  private pending = new Map<string | number, PendingRequest<unknown>>();
+  private pending = new Map<string | number, PendingRequest>();
   private stdoutChunks: string[] = [];
   private stderrTail = "";
   private closed = false;
@@ -356,8 +353,17 @@ export class CodexAppServerClient extends EventEmitter {
       let turnId: string | undefined;
       let itemCompleted = false;
       const finish = (error?: Error) => { cleanup(); error ? reject(error) : resolve(); };
-      const onNotification = ({ method, params }: CodexAppServerNotification<any>) => {
-        if (params?.threadId !== threadId) return;
+      const onNotification = ({ method, params: value }: CodexAppServerNotification) => {
+        if (!isCodexRecord(value) || value.threadId !== threadId) return;
+        if (!["turn/started", "item/completed", "thread/compacted", "turn/completed", "error"].includes(method)) return;
+        const parsed = compactionNotificationSchema.safeParse(value);
+        if (!parsed.success) { finish(new Error(`Codex returned an invalid ${method} event during compaction`)); return; }
+        const params = parsed.data;
+        if (((method === "turn/started" || method === "turn/completed") && !params.turn)
+            || (method === "item/completed" && !params.item)) {
+          finish(new Error(`Codex returned an incomplete ${method} event during compaction`));
+          return;
+        }
         if (method === "turn/started") {
           turnId = params.turn?.id;
         } else if (method === "item/completed" && params.item?.type === "contextCompaction") {
@@ -366,7 +372,7 @@ export class CodexAppServerClient extends EventEmitter {
         } else if (method === "thread/compacted") {
           finish();
         } else if (method === "turn/completed" && (!turnId || params.turn?.id === turnId)) {
-          if (["failed", "interrupted"].includes(params.turn?.status)) finish(new Error(params.turn?.error?.message || "Codex compaction interrupted"));
+          if (params.turn?.status === "failed" || params.turn?.status === "interrupted") finish(new Error(params.turn.error?.message || "Codex compaction interrupted"));
           else if (itemCompleted) finish();
         } else if (method === "error" && params.willRetry !== true) {
           finish(new Error(params.error?.message || params.message || "Codex compaction failed"));
@@ -450,13 +456,13 @@ export class CodexAppServerClient extends EventEmitter {
       // A timeout or transport failure could mean the original rollback succeeded.
       if (!(error instanceof CodexAppServerProtocolError) || !error.unsupportedMethod) throw error;
     }
-    const original = rewindThreadFrom(await this.readThread({ threadId, includeTurns: true }));
+    const original = parseRewindResponse(await this.readThread({ threadId, includeTurns: true }));
     const keep = original.turns.length - numTurns;
     if (keep < 0) throw new Error("Rollback exceeds the number of conversation turns");
     if (original.historyMode !== "paginated") {
       await this.migrateLegacyThread(threadId);
       await this.resumeThread({ threadId });
-      const migrated = rewindThreadFrom(await this.readThread({ threadId, includeTurns: true }));
+      const migrated = parseRewindResponse(await this.readThread({ threadId, includeTurns: true }));
       if (migrated.historyMode !== "paginated" || migrated.turns.length !== original.turns.length
           || migrated.turns.some((turn, i) => turn.id !== original.turns[i].id)) {
         throw new Error("Codex history changed during preparation. Nothing was rewound. Reconnect before trying again");
@@ -464,7 +470,7 @@ export class CodexAppServerClient extends EventEmitter {
     }
     await this.revertThread(threadId, original.turns[keep].id);
     const result = await this.readThread({ threadId, includeTurns: true });
-    const retained = rewindThreadFrom(result);
+    const retained = parseRewindResponse(result);
     if (retained.turns.length !== keep || retained.turns.some((turn, i) => turn.id !== original.turns[i].id)) {
       throw new Error("Codex returned an unexpected rewind result. Reconnect to check the conversation before trying again");
     }
@@ -486,8 +492,8 @@ export class CodexAppServerClient extends EventEmitter {
           shell: this.options.shell, windowsHide: true, timeout: 120_000, maxBuffer: 1024 * 1024,
         });
       const report: unknown = JSON.parse(stdout);
-      const outcomes = (report as { outcomes?: Array<{ thread_id?: string; status?: string }> } | null)?.outcomes;
-      const outcome = Array.isArray(outcomes) ? outcomes.find(item => item.thread_id === threadId) : undefined;
+      const parsed = z.object({ outcomes: z.array(z.object({ thread_id: z.string(), status: z.string() })) }).safeParse(report);
+      const outcome = parsed.success ? parsed.data.outcomes.find(item => item.thread_id === threadId) : undefined;
       if (outcome?.status === "skipped_busy") {
         throw new Error("This conversation is open in another Codex process. Close it there before rewinding");
       }
@@ -538,11 +544,11 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("collaborationMode/list", {});
   }
 
-  async request<T = unknown>(
+  async request(
     method: string,
     params: object | undefined,
     timeoutMs = this.options.requestTimeoutMs ?? 30_000,
-  ): Promise<T> {
+  ): Promise<unknown> {
     this.start();
     if (!this.proc || !this.proc.stdin.writable) {
       throw new Error("codex app-server stdin is not writable");
@@ -550,14 +556,13 @@ export class CodexAppServerClient extends EventEmitter {
 
     const id = this.nextId++;
     const line = JSON.stringify({ id, method, params: params ?? {} });
-    this.proc.stdin.write(line + "\n");
-
-    return new Promise<T>((resolve, reject) => {
+    return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new CodexAppServerRequestTimeoutError(method, timeoutMs));
       }, timeoutMs);
-      this.pending.set(id, { method, resolve: resolve as (value: unknown) => void, reject, timer });
+      this.pending.set(id, { method, resolve, reject, timer });
+      this.proc?.stdin.write(line + "\n");
     });
   }
 
@@ -747,23 +752,20 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   private isResponse(value: unknown): value is WireResponse {
-    return !!value
-      && typeof value === "object"
-      && (typeof (value as { id?: unknown }).id === "number" || typeof (value as { id?: unknown }).id === "string");
+    return isCodexRecord(value)
+      && (typeof value.id === "number" || typeof value.id === "string");
   }
 
   private isServerRequest(value: unknown): value is WireServerRequest {
-    return !!value
-      && typeof value === "object"
-      && (typeof (value as { id?: unknown }).id === "number" || typeof (value as { id?: unknown }).id === "string")
-      && typeof (value as { method?: unknown }).method === "string";
+    return isCodexRecord(value)
+      && (typeof value.id === "number" || typeof value.id === "string")
+      && typeof value.method === "string";
   }
 
   private isNotification(value: unknown): value is CodexAppServerNotification {
-    return !!value
-      && typeof value === "object"
+    return isCodexRecord(value)
       && !("id" in value)
-      && typeof (value as { method?: unknown }).method === "string";
+      && typeof value.method === "string";
   }
 
   private formatProtocolError(method: string, error: unknown): string {

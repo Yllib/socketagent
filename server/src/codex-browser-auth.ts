@@ -1,15 +1,9 @@
 import * as os from "node:os";
-import { CodexAppServerClient, type CodexAppServerOptions } from "./codex-app-server-client";
+import { z } from "zod";
+import { CodexAppServerClient, type CodexAppServerOptions, type CodexAppServerNotification } from "./codex-app-server-client";
 
-interface LoginResult {
-  type: string;
-  loginId?: string;
-  authUrl?: string;
-}
-interface LoginCompleted {
-  loginId?: string;
-  success?: boolean;
-}
+const loginResultSchema = z.object({ type: z.literal("chatgpt"), loginId: z.string().min(1), authUrl: z.string().min(1) });
+const loginCompletedSchema = z.object({ loginId: z.string(), success: z.boolean() });
 
 interface BrowserAuthOptions extends CodexAppServerOptions {
   signal?: AbortSignal;
@@ -23,7 +17,7 @@ export async function runCodexBrowserAuth(options: BrowserAuthOptions): Promise<
   if (options.signal?.aborted) throw new Error("Operation cancelled");
   const client = new CodexAppServerClient({ ...options, cwd: options.cwd || os.homedir() });
   let loginId: string | undefined;
-  let completed: LoginCompleted | undefined;
+  let completed: z.infer<typeof loginCompletedSchema> | undefined;
   let succeeded = false;
   let resolveCompletion!: () => void;
   let rejectCompletion!: (error: Error) => void;
@@ -38,9 +32,14 @@ export async function runCodexBrowserAuth(options: BrowserAuthOptions): Promise<
     if (completed.success) resolveCompletion();
     else rejectCompletion(new Error("Browser sign-in was not completed. Try again or use a device code."));
   };
-  client.on("notification", ({ method, params }: { method: string; params: LoginCompleted }) => {
+  client.on("notification", ({ method, params }: CodexAppServerNotification) => {
     if (method !== "account/login/completed") return;
-    completed = params;
+    const parsed = loginCompletedSchema.safeParse(params);
+    if (!parsed.success) {
+      rejectCompletion(new Error("Codex returned an invalid sign-in result. Try again or use a device code."));
+      return;
+    }
+    completed = parsed.data;
     checkCompletion();
   });
   client.on("error", () => rejectCompletion(new Error("Codex sign-in could not start.")));
@@ -51,11 +50,12 @@ export async function runCodexBrowserAuth(options: BrowserAuthOptions): Promise<
   try {
     await client.initialize({ clientInfo: { name: "socketagent_login", title: "SocketAgent", version: "1.0.0" } });
     if (options.signal?.aborted) throw new Error("Operation cancelled");
-    const result = await client.request<LoginResult>("account/login/start", { type: "chatgpt" });
-    loginId = result.loginId;
-    if (result.type !== "chatgpt" || !loginId || !result.authUrl) {
+    const parsed = loginResultSchema.safeParse(await client.request("account/login/start", { type: "chatgpt" }));
+    if (!parsed.success) {
       throw new Error("This Codex version did not return a browser sign-in. Use a device code or repair Codex.");
     }
+    const result = parsed.data;
+    loginId = result.loginId;
     const url = new URL(result.authUrl);
     if (url.protocol !== "https:" || !["auth.openai.com", "auth0.openai.com", "chatgpt.com"].includes(url.hostname)) {
       throw new Error("Codex returned an unexpected sign-in address.");

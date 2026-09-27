@@ -1,0 +1,104 @@
+# TypeScript safety migration
+
+Started 2026-09-27. Work stays local on master until deployment is requested.
+
+## Goal and scope
+
+Remove explicit and inferred `any` from our code, validate external data as
+`unknown`, and replace narrowing casts with checked types. Do not change product
+behavior just to satisfy a type checker. Preserve older supported provider formats.
+
+The enforced initial scope is `server/src/**/*.ts`, JavaScript/MJS under
+`server/test` and `server/scripts`, and the ESLint configuration. Dependencies,
+build output, ignored private plugins, the separate relay repository, and scripts
+outside `server` are not covered yet. Flutter is Dart and needs a separate audit.
+
+Existing functional changes in both repositories predate this migration. Keep
+them intact and distinguish them when staging. No app changes or deployment are
+part of this batch. The server's starting HEAD is `64a82b1`.
+
+## Checks and baseline
+
+From `server`:
+
+```sh
+npm run build
+npm run type-safety
+npm run type-safety:report
+npm run type-safety:prune
+npm test
+```
+
+`npm test` builds, checks type safety, then runs both JS and MJS tests. The pre-push
+hook also builds and checks type safety when dependencies are installed. Hooks
+must be enabled with `git config core.hooksPath .githooks` in each pushing checkout.
+Run the build first in fresh checkouts: existing JS tests import `dist` modules.
+
+ESLint checks explicit `any`, unsafe assignments, arguments, calls, member access,
+returns, narrowing assertions, and TypeScript suppression comments. Inline ESLint
+configuration cannot disable these checks. TypeScript strict compilation remains
+enabled for production source. Existing JavaScript tests have typed linting but
+are not yet subject to full `checkJs` compiler diagnostics.
+
+The baseline identifies diagnostics by file, rule, and a hash of the offending
+source line and range, with multiplicity for duplicates. It is not a per-file
+error budget. Adding an unsafe expression elsewhere fails even if another was
+removed. Moving unchanged lines within a file does not require baseline churn.
+Changing an unsafe line requires fixing its diagnostics, not refreshing allowances.
+
+`type-safety:prune` refuses new violations and only removes resolved entries.
+Normal checks fail if resolved entries remain, so old allowances cannot linger.
+The one-time bootstrap uses exclusive file creation and refuses to overwrite an
+existing baseline. Do not manually grow the baseline or disable rules. Changes to
+the check configuration and baseline still require code review.
+
+Initial inventory: 1,503 explicit `any` nodes in 42 TypeScript files; 664
+unannotated declarations inferred as `any`; 43 double assertions. These are
+different, overlapping measurements, not additive totals. The initial ESLint
+baseline contained 9,349 diagnostics across production code, scripts, and tests.
+Use the report command for current rule and file counts.
+
+## Batches
+
+| Batch | Status | Scope and exit condition |
+| --- | --- | --- |
+| Enforcement | Implemented | Checks in tests and pre-push; shrinking source-specific baseline; test rejection of new debt and bypasses. |
+| Codex transport, rewind, sign-in | Complete | Raw RPC responses stay unknown; validate consumed rewind, compaction, migration, and login fields. No baseline entries in these modules. |
+| Generated Codex contracts | Next | Generate from a recorded CLI version; typed method/response map for used APIs; verify schema drift. Keep runtime validation. |
+| Provider adapters | Pending | Migrate `codex-session.ts` and `claude-session.ts` using generated Codex and exported Claude types. Test streaming, completion, approvals, cancellation, and subagents. |
+| Persisted history | Pending | Validate JSON and database rows, including supported legacy records, in `session-store.ts` and `transcript-database.ts`. Test recovery, pagination, rewind, and archive reads. |
+| WebSocket routing | Pending | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
+| Remaining code and tests | Pending | MCP tools, plugins API, relay client, helpers, JS fixtures and scripts. Audit additional repositories and ignored private plugins separately. |
+| Final enforcement | Pending | Zero baseline; remove baseline handling; review lingering assertions and inferred unsafe types, not just the explicit-any count. |
+
+Work shared definitions before consumers to avoid repeated edits. Keep each batch
+reviewable and test it before moving to the next. If work is delegated later,
+assign nonoverlapping file ownership and give shared protocol types one owner.
+
+## First batch details
+
+- Removed the generic RPC return assertion. A caller cannot make an unvalidated
+  response typed just by supplying a generic argument.
+- Rewind validates native turn IDs, prompt fields, and pagination cursors before
+  relying on them; malformed input cannot authorize truncating local history.
+- Compaction validates relevant events and retains matching-thread completion
+  behavior. Additional provider fields are accepted.
+- Browser sign-in validates both the login response and completion event.
+- Added boundary and enforcement tests using typed imports, without new baseline
+  allowances. Existing provider behavior tests remain in place.
+
+Generated provider types and staged backend-update compatibility checks are not
+implemented in this batch. The targeted validators describe only fields actually
+consumed here, not the entire provider protocol.
+
+## Validation log
+
+- Initial focused run: 33 tests passed for client transport, rewind, browser auth,
+  malformed data, compaction lifecycle, and baseline enforcement.
+- Final `npm test`: build and type-safety check passed; 536 tests passed, one
+  skipped, zero failures. Output: `/tmp/sa-type-migration-full-tests.log`.
+- Baseline reduced from 9,349 to 9,266 diagnostics, a reduction of 83. Explicit
+  `any` reduced from 1,503 to 1,486. These are overlapping measures, not totals
+  to add together. All four first-batch source modules have zero diagnostics.
+- `git diff --check` passed in both repositories. No push, deployment, server
+  restart, or app rebuild was performed.

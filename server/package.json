@@ -5,7 +5,10 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test test/*.test.js",
+    "test": "npm run build && npm run type-safety && node --test test/*.test.js test/*.test.mjs",
+    "type-safety": "node scripts/check-type-safety.mjs",
+    "type-safety:prune": "node scripts/check-type-safety.mjs --prune",
+    "type-safety:report": "node scripts/check-type-safety.mjs --report",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
     "release:patch": "npm version patch --no-git-tag-version"
@@ -27,6 +30,8 @@
   "devDependencies": {
     "@types/node": "^22.20.0",
     "@types/ws": "^8.5.14",
-    "typescript": "^5.7.0"
+    "eslint": "10.11.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "8.70.1"
   }
 }

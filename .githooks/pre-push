@@ -18,6 +18,12 @@ PACKAGES=(@anthropic-ai/claude-agent-sdk @anthropic-ai/sdk)
 command -v npm >/dev/null 2>&1 || exit 0
 [ -d "$SERVER_DIR/node_modules" ] || exit 0
 
+# Check the same source and built module types used by the test suite.
+if ! (cd "$SERVER_DIR" && npm run build && npm run type-safety); then
+  echo "Push refused: build or type-safety checks failed." >&2
+  exit 1
+fi
+
 stale=()
 for pkg in "${PACKAGES[@]}"; do
   have="$(node -p "require('$SERVER_DIR/node_modules/$pkg/package.json').version" 2>/dev/null)"

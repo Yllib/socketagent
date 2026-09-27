@@ -65,7 +65,7 @@ Use the report command for current rule and file counts.
 | Enforcement | Implemented | Checks in tests and pre-push; shrinking source-specific baseline; test rejection of new debt and bypasses. |
 | Codex transport, rewind, sign-in | Complete | Raw RPC responses stay unknown; validate consumed rewind, compaction, migration, and login fields. No baseline entries in these modules. |
 | Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
-| Provider adapters | In progress | Codex session, native history, and elicitation helpers have zero diagnostics. Remaining work: Claude adapter. Test streaming, completion, approvals, cancellation, and subagents. |
+| Provider adapters | Complete | Codex and Claude sessions, stream identity, native history, elicitation, and interactive answer helpers have zero diagnostics. Test streaming, completion, approvals, cancellation, and subagents. |
 | Persisted history | Pending | Validate JSON and database rows, including supported legacy records, in `session-store.ts` and `transcript-database.ts`. Test recovery, pagination, rewind, and archive reads. |
 | WebSocket routing | Pending | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
 | Remaining code and tests | Pending | MCP tools, plugins API, relay client, helpers, JS fixtures and scripts. Audit additional repositories and ignored private plugins separately. |
@@ -114,10 +114,10 @@ not a new auto-update policy.
   concrete protocol type. Effort names advertised by Codex remain extensible,
   following the generated provider type instead of asserting a fixed enum.
 - Server `1fefd9d`: Codex history and elicitation helper validation.
-- Claude foundations: declared outgoing SDK-derived protocol messages, typed
+- Server `b652097`: Claude foundations; declared outgoing SDK-derived protocol messages, typed
   delivery/replay, workflow/task reducers, async input queue completion, and
   usage/MCP/rewind results. File rewind callers now distinguish provider result
-  shapes. Main Claude stream handling remains in progress.
+  shapes. Main Claude stream handling was completed in the next checkpoint.
 
 ## Validation log
 
@@ -145,3 +145,13 @@ not a new auto-update policy.
   have zero diagnostics. Baseline: 7,416.
 - Claude foundations: build/lint passed; full suite 539 passed, one skipped.
   Baseline: 6,953. Output: `/tmp/sa-claude-foundation-full-tests.log`.
+
+- Claude stream checkpoint: SDK discriminated events and hooks replace untyped
+  payloads. Tool input and legacy output fields are validated before use. SDK
+  elicitation responses use the MCP response schema. Interactive cards use the
+  server protocol. Descriptive delivery IDs map to deterministic native UUIDs;
+  original client IDs remain on delivery receipts/history and UUIDs stay intact.
+  The Claude adapter and stream identity helper now have zero diagnostics.
+- Claude stream validation: build/lint passed; 107 focused tests passed; full
+  suite 540 passed, one skipped. Baseline: 5,617 (1,336 removed this checkpoint).
+  Output: `/tmp/sa-claude-provider-full-tests.log`.

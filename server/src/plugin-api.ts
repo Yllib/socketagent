@@ -80,7 +80,7 @@ export interface SocketAgentPlugin {
   requestAuthorization?(sessionCtx: SessionContext): boolean | Promise<boolean>;
 
   /** Additional MCP servers to register with the SDK */
-  mcpServers?(): Record<string, any>;
+  mcpServers?(): Record<string, import("@anthropic-ai/claude-agent-sdk").McpServerConfig>;
 
   /** Additional tool patterns to allow (e.g. ["mcp__my-tools__*"]) */
   allowedTools?(): string[];

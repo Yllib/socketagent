@@ -1,7 +1,9 @@
+import type { ServerMessage } from "./protocol";
+
 /** Shared lifecycle for SDK callbacks that wait for a phone response. */
 export interface PendingInteractiveAnswer {
   questionId: string;
-  questionData?: any;
+  questionData?: ServerMessage;
   resolve: (answers: Record<string, string>) => void;
   cancel?: () => void;
 }
@@ -9,7 +11,7 @@ export interface PendingInteractiveAnswer {
 export function waitForInteractiveAnswer(
   pending: Map<string, PendingInteractiveAnswer>,
   questionId: string,
-  questionData: any,
+  questionData: ServerMessage,
   signal: AbortSignal | undefined,
   onCancel: () => void,
 ): Promise<Record<string, string> | null> {

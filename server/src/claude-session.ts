@@ -1,7 +1,8 @@
 import { isRecord, unknownArray } from "./value-guards";
 import { requestTranscriptAccess } from "./transcript-access-approval";
-import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type Settings } from "@anthropic-ai/claude-agent-sdk";
+import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type ElicitationRequest, type ElicitationResult, type Settings, type PermissionMode, type SDKTaskStartedMessage, type SDKTaskProgressMessage, type SDKTaskUpdatedMessage, type McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ClaudeStreamIdentity } from "./claude-stream-identity";
 import { claudeTotalUsage } from "./claude-usage";
 import { readClaudeSupportedModels } from "./claude-model-discovery";
@@ -19,6 +20,7 @@ import {
   ServerMessage,
   ActiveSubagentsServerMessage,
   SupportedModelsServerMessage,
+  SdkEventServerMessage,
   QuestionServerMessage,
   HistoryEntry,
   QuestionItem,
@@ -398,6 +400,10 @@ export function replaceClaudeTodoWriteTodos(current: unknown[], todos: unknown[]
   return [...retained, ...replacement];
 }
 
+function claudeErrorMessage(error: unknown): string {
+  return isRecord(error) && typeof error.message === "string" ? error.message : String(error);
+}
+
 function existingFile(filePath: string | undefined): string | undefined {
   if (!filePath) return undefined;
   try {
@@ -419,11 +425,11 @@ function resolveClaudePackageBin(prefix: string): string | undefined {
   const packageDir = npmGlobalPackageDir(prefix, "@anthropic-ai/claude-code");
   const packageJsonPath = path.join(packageDir, "package.json");
   try {
-    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { bin?: string | Record<string, string> };
-    const binValue = typeof pkg.bin === "string"
-      ? pkg.bin
-      : pkg.bin?.claude || Object.values(pkg.bin || {})[0];
-    if (!binValue) return undefined;
+    const pkg: unknown = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    if (!isRecord(pkg)) return undefined;
+    const bins = isRecord(pkg.bin) ? pkg.bin : {};
+    const binValue = typeof pkg.bin === "string" ? pkg.bin : bins.claude || Object.values(bins)[0];
+    if (typeof binValue !== "string" || !binValue) return undefined;
     return existingFile(path.resolve(packageDir, binValue));
   } catch {
     return undefined;
@@ -808,7 +814,7 @@ export function getClaudeAvailability(): ClaudeAvailability {
   });
 
   if (result.error) {
-    const code = (result.error as NodeJS.ErrnoException).code;
+    const code = "code" in result.error ? result.error.code : undefined;
     return cache({
       available: false,
       reason: code === "ENOENT"
@@ -899,9 +905,21 @@ const CLAUDE_WARM_IDLE_TIMEOUT_MS = (() => {
  *  a second or two; anything waiting this long is a hung stream, not slow work. */
 const CLAUDE_STALE_CONTINUATION_TIMEOUT_MS = 60 * 1000;
 
+/** Preserve UUIDs; map durable non-UUID delivery IDs to stable native UUIDs. */
+function claudeMessageUuid(value: string): NonNullable<import("@anthropic-ai/claude-agent-sdk").SDKUserMessage["uuid"]> {
+  const isUuid = (candidate: string): candidate is `${string}-${string}-${string}-${string}-${string}` =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate);
+  if (isUuid(value)) return value;
+  // Delegated reports use descriptive delivery IDs. UUIDv8 retains their
+  // deterministic identity without passing invalid UUIDs into the SDK.
+  const hash = crypto.createHash("sha256").update(`socketagent:claude-message:${value}`).digest("hex");
+  const variant = ((parseInt(hash[16], 16) & 3) | 8).toString(16);
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-${variant}${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
 type ClaudeQueuedUserMessage = {
   type: "user";
-  uuid: string;
+  uuid: NonNullable<import("@anthropic-ai/claude-agent-sdk").SDKUserMessage["uuid"]>;
   session_id: string;
   message: {
     role: "user";
@@ -938,7 +956,7 @@ export function createClaudeContinuationMessages(
 ): ClaudeQueuedUserMessage[] {
   return pending.map((entry, index) => ({
     type: "user",
-    uuid: entry.uuid,
+    uuid: claudeMessageUuid(entry.uuid),
     session_id: sessionId,
     message: { role: "user", content: entry.text },
     parent_tool_use_id: null,
@@ -960,7 +978,7 @@ export function claudeApiRetryDelayMs(message: unknown): number {
   return Number.isFinite(delay) && delay >= 0 ? delay : 0;
 }
 
-class ClaudeInputQueue implements AsyncIterable<ClaudeQueuedUserMessage> {
+class ClaudeInputQueue implements AsyncIterable<ClaudeQueuedUserMessage, undefined, unknown> {
   private messages: ClaudeQueuedUserMessage[] = [];
   private waiters: Array<(result: IteratorResult<ClaudeQueuedUserMessage, undefined>) => void> = [];
   private closed = false;
@@ -984,7 +1002,7 @@ class ClaudeInputQueue implements AsyncIterable<ClaudeQueuedUserMessage> {
     }
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<ClaudeQueuedUserMessage, undefined> {
+  [Symbol.asyncIterator](): AsyncIterator<ClaudeQueuedUserMessage, undefined, unknown> {
     return {
       next: () => {
         const message = this.messages.shift();
@@ -1064,7 +1082,8 @@ export class ClaudeSession {
   private _toolParentIds: Map<string, string> = new Map();  // toolUseId → owning subagent toolUseId
   private _isCompacting = false;  // whether context compaction is in progress
   private _compactStartedAt: string | null = null;
-  private _permissionMode: string | null = null;  // current permission mode (e.g., "plan")
+  public _delegationSupervisorSessionId?: string;
+  private _permissionMode: PermissionMode | null = null;  // current permission mode (e.g., "plan")
   private _authErrorSent = false;  // suppress duplicate exit-code error after auth failure
   private _authRequest: ClaudeAuthRequest | null = null;
   private _lastContextWindow = 0;  // last known context window size from modelUsage
@@ -1190,9 +1209,9 @@ export class ClaudeSession {
     if (this.activeQuery) {
       void this.activeQuery
         .applyFlagSettings({ autoCompactEnabled: enabled })
-        .catch((err: any) => {
+        .catch((err: unknown) => {
           console.warn(
-            `Failed to apply Claude auto-compact setting live: ${err?.message || String(err)}`,
+            `Failed to apply Claude auto-compact setting live: ${claudeErrorMessage(err)}`,
           );
         });
     }
@@ -1215,9 +1234,9 @@ export class ClaudeSession {
     if (this.activeQuery) {
       void this.activeQuery
         .applyFlagSettings({ autoCompactWindow: normalized ?? null })
-        .catch((err: any) => {
+        .catch((err: unknown) => {
           console.warn(
-            `Failed to apply Claude auto-compact window live: ${err?.message || String(err)}`,
+            `Failed to apply Claude auto-compact window live: ${claudeErrorMessage(err)}`,
           );
         });
     }
@@ -1725,7 +1744,7 @@ export class ClaudeSession {
   ): ClaudeQueuedUserMessage {
     return {
       type: "user",
-      uuid,
+      uuid: claudeMessageUuid(uuid),
       session_id: sessionId,
       message: { role: "user", content: text },
       parent_tool_use_id: null,
@@ -2042,7 +2061,7 @@ export class ClaudeSession {
     }
   }
 
-  private _handleSdkTaskStarted(ts: any): void {
+  private _handleSdkTaskStarted(ts: SDKTaskStartedMessage): void {
     if (ts.ambient === true) return;
     const taskId = String(ts.task_id || "");
     const directToolUseId = String(ts.tool_use_id || "") || undefined;
@@ -2126,7 +2145,7 @@ export class ClaudeSession {
     this.onActivity?.();
   }
 
-  private _handleSdkTaskProgress(tp: any): void {
+  private _handleSdkTaskProgress(tp: SDKTaskProgressMessage): void {
     const taskId = String(tp.task_id || "");
     const toolUseId = String(tp.tool_use_id || "")
       || this._taskIdToToolUseId.get(taskId)
@@ -2194,7 +2213,7 @@ export class ClaudeSession {
     this.onActivity?.();
   }
 
-  private _handleSdkTaskUpdated(tu: any): void {
+  private _handleSdkTaskUpdated(tu: SDKTaskUpdatedMessage): void {
     const taskId = String(tu.task_id || "");
     const toolUseId = this._taskIdToToolUseId.get(taskId)
       || this._findSubagentByTaskId(taskId)?.[0];
@@ -2452,7 +2471,7 @@ export class ClaudeSession {
 
   private _publishClaudeTaskUpdate(update: ClaudeTaskStateUpdate): void {
     if (!this.sessionId) return;
-    const current = getTodos(this.sessionId);
+    const current = unknownArray(getTodos(this.sessionId)).filter(isRecord);
     const next = reduceClaudeTaskTodos(current, update);
     const task = next.find(
       (item) => item?.source === "claude_tasks"
@@ -2464,11 +2483,11 @@ export class ClaudeSession {
     this._persistTaskState({
       taskId: update.taskId,
       taskKind: "claude_task",
-      status: update.status || task?.status || "pending",
-      content: update.subject || task?.content || `Task #${update.taskId}`,
-      taskSubject: update.subject || task?.content,
-      taskDescription: update.description ?? task?.description,
-      teammateName: update.teammateName ?? task?.teammateName,
+      status: update.status || String(task?.status || "pending"),
+      content: update.subject || String(task?.content || `Task #${update.taskId}`),
+      taskSubject: update.subject || (typeof task?.content === "string" ? task.content : undefined),
+      taskDescription: update.description ?? (typeof task?.description === "string" ? task.description : undefined),
+      teammateName: update.teammateName ?? (typeof task?.teammateName === "string" ? task.teammateName : undefined),
       isBackgrounded: false,
     });
     if (JSON.stringify(current) !== JSON.stringify(next)) {
@@ -2484,7 +2503,7 @@ export class ClaudeSession {
 
   private _publishClaudeTaskSnapshot(tasks: unknown[]): void {
     if (!this.sessionId) return;
-    const current = getTodos(this.sessionId);
+    const current = unknownArray(getTodos(this.sessionId)).filter(isRecord);
     const next = replaceClaudeTaskTodos(current, tasks);
     const nextNativeIds = new Set(
       next
@@ -2500,8 +2519,8 @@ export class ClaudeSession {
           status: "deleted",
           content: String(previous.content || `Task #${taskId}`),
           taskSubject: String(previous.content || "") || undefined,
-          taskDescription: previous.description,
-          teammateName: previous.teammateName,
+          taskDescription: typeof previous.description === "string" ? previous.description : undefined,
+          teammateName: typeof previous.teammateName === "string" ? previous.teammateName : undefined,
           isBackgrounded: false,
         });
       }
@@ -2530,26 +2549,27 @@ export class ClaudeSession {
     this.onActivity?.();
   }
 
-  private _streamLane(message: any): string {
-    return String(message?.parent_tool_use_id || "") || "main";
+  private _streamLane(message: unknown): string {
+    return String((isRecord(message) ? message.parent_tool_use_id : "") || "") || "main";
   }
 
-  private _streamKey(message: any): string {
+  private _streamKey(message: unknown): string {
     return this._streamIdentity.streamKey(message);
   }
 
-  private _finishSdkMessageStream(_message: any): void {
+  private _finishSdkMessageStream(_message: unknown): void {
     // Completed block snapshots may follow message_stop. Retain their mappings.
   }
 
   private _appendLiveStream(
     streams: Map<string, { content: string; parentToolUseId?: string; uuid?: string; startedAtMs?: number }>,
-    message: any,
+    message: unknown,
     content: string,
   ): string {
     const key = this._streamKey(message);
-    const parentToolUseId = String(message?.parent_tool_use_id || "") || undefined;
-    const uuid = String(message?.uuid || "") || undefined;
+    const record = isRecord(message) ? message : {};
+    const parentToolUseId = String(record.parent_tool_use_id || "") || undefined;
+    const uuid = String(record.uuid || "") || undefined;
     const existing = streams.get(key);
     streams.set(key, {
       content: (existing?.content || "") + content,
@@ -2560,18 +2580,18 @@ export class ClaudeSession {
     return key;
   }
 
-  private _clearLiveStreamsForMessage(message: any): void {
+  private _clearLiveStreamsForMessage(message: unknown): void {
     const key = this._streamKey(message);
     this._streamingText.delete(key);
     this._streamingThinking.delete(key);
   }
 
-  private _publishCompletedClaudeBlocks(message: any): string[] {
+  private _publishCompletedClaudeBlocks(message: import("@anthropic-ai/claude-agent-sdk").SDKAssistantMessage): string[] {
     const keys = this._streamIdentity.completedKeys(message);
-    const blocks = Array.isArray(message.message?.content) ? [...message.message.content] : [];
+    const blocks: Array<{ type: string; text?: string; thinking?: string }> = [...message.message.content];
     const textParts: string[] = [];
     const isRoot = !message.parent_tool_use_id;
-    if (isRoot && this._thinkingProgress && !blocks.some((block: any) => block.type === "thinking")) {
+    if (isRoot && this._thinkingProgress && !blocks.some((block) => block.type === "thinking")) {
       blocks.push({ type: "thinking", thinking: "" });
       keys.push(`main:${message.message?.id || message.uuid}:thinking-progress`);
     }
@@ -2647,12 +2667,13 @@ export class ClaudeSession {
       : { behavior: "deny" as const, message: answers ? "User declined the tool request" : "Request cancelled" };
   }
 
-  private async _handleClaudeElicitation(request: any, signal?: AbortSignal): Promise<any> {
+  private async _handleClaudeElicitation(request: ElicitationRequest, signal?: AbortSignal): Promise<ElicitationResult> {
     if (signal?.aborted) return { action: "cancel" };
     const prepared = prepareCodexMcpElicitation(request);
     const questionId = createInteractiveRequestId("elicit");
     const sessionId = this.sessionId || "";
-    const message: any = prepared.mode === "url" ? {
+    if (prepared.mode === "url" && !prepared.url) return { action: "decline" };
+    const message: ServerMessage = prepared.mode === "url" && prepared.url ? {
       type: "elicitation_url", questionId, sessionId, mcpServerName: prepared.serverName,
       message: prepared.message, url: prepared.url, elicitationId: prepared.elicitationId,
     } : {
@@ -2673,7 +2694,7 @@ export class ClaudeSession {
     }
     try {
       const response = resolveCodexMcpElicitation(prepared, answers);
-      return { action: response.action, ...(response.action === "accept" ? { content: response.content } : {}) };
+      return ElicitResultSchema.parse({ action: response.action, ...(response.action === "accept" ? { content: response.content } : {}) });
     } catch (error) {
       this.send({ type: "error", message: `Form response was invalid: ${String(error)}`, sessionId });
       return { action: "decline" };
@@ -2893,7 +2914,7 @@ export class ClaudeSession {
     return {
       sessionId: sid,
       cwd: this.cwd,
-      send: (msg) => this.send(msg as ServerMessage),
+      send: (msg) => this.send(msg),
       appendHistory: (entry) => { if (sid) appendHistory(sid, entry); },
       pendingQuestions: this.pendingQuestions,
       questionCounter: { next: () => createInteractiveRequestId("q") },
@@ -3068,8 +3089,8 @@ export class ClaudeSession {
       if (models.length === 0) return;
       const saved = saveCachedModelCatalog("claude", models);
       this.publishSupportedModels(saved.models, { updatedAt: saved.updatedAt });
-    } catch (err: any) {
-      console.warn(`[ClaudeModels] Failed to discover models before a turn: ${err?.message || err}`);
+    } catch (err: unknown) {
+      console.warn(`[ClaudeModels] Failed to discover models before a turn: ${claudeErrorMessage(err)}`);
     }
   }
 
@@ -3094,10 +3115,14 @@ export class ClaudeSession {
 
   /** Switch permission mode mid-session (e.g., 'plan', 'default', 'acceptEdits'). */
   async setPermissionMode(mode: string): Promise<void> {
+    if (mode !== "default" && mode !== "acceptEdits" && mode !== "bypassPermissions"
+      && mode !== "plan" && mode !== "dontAsk" && mode !== "auto") {
+      throw new Error(`Unsupported Claude permission mode: ${mode}`);
+    }
     this._permissionMode = mode;
     this.persistPermissionMode(mode);
     if (this.activeQuery) {
-      await this.activeQuery.setPermissionMode(mode as any);
+      await this.activeQuery.setPermissionMode(mode);
       console.log(`[PermissionMode] Set to ${mode} for session ${this.sessionId || '(pending)'}`);
     }
   }
@@ -3172,7 +3197,7 @@ export class ClaudeSession {
     const sessionId = this.sessionId || "";
     // Stable caller IDs let durable external events (such as a completed Work
     // Review) reuse one transcript/backend identity when delivery is replayed.
-    const userMsgUuid = messageId || crypto.randomUUID();
+    const userMsgUuid = claudeMessageUuid(messageId || crypto.randomUUID());
 
     // Log injected message to history so it persists across sessions
     if (sessionId) {
@@ -3201,7 +3226,7 @@ export class ClaudeSession {
     };
 
     try {
-      await this.activeQuery.streamInput(singleMessageStream() as any);
+      await this.activeQuery.streamInput(singleMessageStream());
       console.log(`[Inject] Message injected successfully`);
     } catch (e) {
       console.error(`[Inject] streamInput error: ${e}`);
@@ -3227,7 +3252,7 @@ export class ClaudeSession {
     this.onActivity?.();
 
     const sid = resumeSessionId || this.sessionId || "";
-    const userMsgUuid = messageId || crypto.randomUUID();
+    const userMsgUuid = claudeMessageUuid(messageId || crypto.randomUUID());
     const turnPromise = this._trackPendingTurn();
 
     if (sid) {
@@ -3344,16 +3369,16 @@ export class ClaudeSession {
         getSessionId: () => this.sessionId || "",
         getDelegationSupervisorSessionId: () =>
           String(
-            (this as any)._delegationSupervisorSessionId ||
+            this._delegationSupervisorSessionId ||
               getSession(this.sessionId || "")?.delegationSupervisorSessionId ||
               this.sessionId ||
               "",
           ),
         getCwd: () => this.cwd,
         getBackend: () => "claude",
-        send: (msg) => this.send(msg as ServerMessage),
+        send: (msg) => this.send(msg),
         appendHistory: (entry) => {
-          if (this.sessionId) return appendHistory(this.sessionId, entry as HistoryEntry);
+          if (this.sessionId) return appendHistory(this.sessionId, entry);
         },
         getTtsEngine: () => this._ttsEngine,
         getKokoroVoice: () => this._kokoroVoice,
@@ -3423,7 +3448,7 @@ export class ClaudeSession {
               })).optional().describe("Required non-empty list for create and new_round"),
               include_archived: z.boolean().optional().describe("Include archived reviews for list/export"),
             },
-            async (args) => handleWorkReviewTool(appToolContext, args as any)
+            async (args) => handleWorkReviewTool(appToolContext, args)
           ),
           tool(
             "BrowserSession",
@@ -3468,7 +3493,7 @@ export class ClaudeSession {
               scope: z.enum(["session", "project", "global"]).optional().describe("Where to store it. Default: session"),
               timeoutSeconds: z.number().optional().describe("How long to wait for the user, 30-3600 seconds. Default: 600"),
             },
-            async (args) => handleRequestSecureInputTool(appToolContext, args as any)
+            async (args) => handleRequestSecureInputTool(appToolContext, args)
           ),
           tool(
             "ScheduleReminder",
@@ -3521,7 +3546,7 @@ export class ClaudeSession {
                 intervalMs: recurrenceType === "custom" ? args.customIntervalMs : undefined,
               } : undefined;
 
-              const backend = (args.backend || "claude") as Backend;
+              const backend = args.backend || "claude";
               const task: ScheduledTask = {
                 id: crypto.randomUUID(),
                 ...(args.name?.trim() ? { name: args.name.trim() } : {}),
@@ -3577,7 +3602,7 @@ export class ClaudeSession {
               })).max(200).optional().describe("Tasks for replace or upsert"),
               task_ids: z.array(z.string()).max(200).optional().describe("Task IDs for delete"),
             },
-            async (args) => handleTaskBatchTool(appToolContext, args as any)
+            async (args) => handleTaskBatchTool(appToolContext, args)
           ),
           tool(
             "AgentSession",
@@ -3596,7 +3621,7 @@ export class ClaudeSession {
               effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Optional reasoning effort for start"),
               permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
             },
-            async (args) => handleAgentSessionTool(appToolContext, args as any)
+            async (args) => handleAgentSessionTool(appToolContext, args)
           ),
           tool(
             "Remember",
@@ -3618,7 +3643,7 @@ export class ClaudeSession {
               offset: z.number().int().nonnegative().optional().describe("Search pagination offset"),
               max_chars: z.number().int().min(2000).max(200000).optional().describe("Maximum returned text size. Default 60000"),
             },
-            async (args) => handleRememberTool(appToolContext, args as any)
+            async (args) => handleRememberTool(appToolContext, args)
           ),
           tool(
             "Monitor",
@@ -3828,9 +3853,9 @@ export class ClaudeSession {
                 });
 
                 return { content: [{ type: "text" as const, text: `Process started and monitoring enabled. Task ID: ${taskId}. PID: ${child.pid || "unknown"}.${args.timeoutSeconds ? ` Monitoring timeout: ${args.timeoutSeconds}s.` : ""}` }] };
-              } catch (e: any) {
-                console.error(`[Monitor] Error: ${e.message}`, e.stack);
-                return { content: [{ type: "text" as const, text: `Monitor error: ${e.message}` }], isError: true };
+              } catch (e: unknown) {
+                console.error(`[Monitor] Error: ${claudeErrorMessage(e)}`, e instanceof Error ? e.stack : undefined);
+                return { content: [{ type: "text" as const, text: `Monitor error: ${claudeErrorMessage(e)}` }], isError: true };
               }
             }
           ),
@@ -3893,7 +3918,7 @@ export class ClaudeSession {
       // emitting a `user` message echo for string prompts; we control the UUID here
       // and pass it via streaming-input mode so it lands in the SDK transcript with
       // the same ID we hand to the app.)
-      const userMsgUuid = messageId || crypto.randomUUID();
+      const userMsgUuid = claudeMessageUuid(messageId || crypto.randomUUID());
       this._turnCorrelation = {};
       const promptSessionId = resumeTarget || this.sessionId || "";
       const transferContext = this._pendingTransferContext;
@@ -3925,11 +3950,11 @@ export class ClaudeSession {
       const initialPermissionMode = this._permissionMode || "bypassPermissions";
 
       const q = this.activeQuery = query({
-        prompt: promptStream as any,
+        prompt: promptStream,
         options: {
           cwd: this.cwd,
           ...claudeExecutableQueryOptions(),
-          permissionMode: initialPermissionMode as any,
+          permissionMode: initialPermissionMode,
           allowDangerouslySkipPermissions: initialPermissionMode === "bypassPermissions",
           includePartialMessages: true,
           includeHookEvents: true,
@@ -3941,8 +3966,8 @@ export class ClaudeSession {
           forkSession: shouldFork || undefined,
           resumeSessionAt: resumeAt,
           abortController: this.abortController,
-          effort: this._effort as any,
-          thinking: this._thinking as any,
+          effort: this._effort,
+          thinking: this._thinking,
           ...(this._requestedModel ? { model: this._requestedModel } : {}),
           systemPrompt: { type: "preset", preset: "claude_code", append: this._appendSystemPrompt ? toolContext + '\n\n' + this._appendSystemPrompt : toolContext },
           tools: { type: "preset", preset: "claude_code" },
@@ -3955,7 +3980,7 @@ export class ClaudeSession {
           toolConfig: { askUserQuestion: { previewFormat: 'markdown' } },
           settingSources: ["user", "project", "local"],
           mcpServers: (() => {
-            const servers: Record<string, any> = { "app": appTools };
+            const servers: Record<string, McpServerConfig> = { "app": appTools };
             for (const plugin of this.plugins) {
               if (plugin.mcpServers) Object.assign(servers, plugin.mcpServers());
             }
@@ -3971,9 +3996,10 @@ export class ClaudeSession {
           env: cleanEnv,
           hooks: {
             PreToolUse: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "PreToolUse") return { continue: true };
                 const toolName = input.tool_name || "";
-                const toolInput = input.tool_input || {};
+                const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
 
                 // Run plugin interceptors
                 const sessionCtx = this.getSessionContext();
@@ -4041,17 +4067,18 @@ export class ClaudeSession {
               }],
             }],
             PostToolUse: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "PostToolUse") return { continue: true };
                 try {
                   const toolName = String(input.tool_name || "");
-                  const toolInput = input.tool_input && typeof input.tool_input === "object"
+                  const toolInput = isRecord(input.tool_input)
                     ? input.tool_input
                     : {};
-                  const toolResponse = input.tool_response && typeof input.tool_response === "object"
+                  const toolResponse = isRecord(input.tool_response)
                     ? input.tool_response
                     : {};
                   if (toolName === "TaskCreate") {
-                    const task = toolResponse.task && typeof toolResponse.task === "object"
+                    const task = isRecord(toolResponse.task)
                       ? toolResponse.task
                       : {};
                     this._publishClaudeTaskUpdate({
@@ -4062,7 +4089,7 @@ export class ClaudeSession {
                     });
                   } else if (toolName === "TaskUpdate" && toolResponse.success !== false) {
                     const status = String(
-                      toolResponse.statusChange?.to
+                      (isRecord(toolResponse.statusChange) ? toolResponse.statusChange.to : undefined)
                       || toolInput.status
                       || "",
                     );
@@ -4076,14 +4103,14 @@ export class ClaudeSession {
                         ? status
                         : undefined,
                     });
-                  } else if (toolName === "TaskGet" && toolResponse.task) {
+                  } else if (toolName === "TaskGet" && isRecord(toolResponse.task)) {
                     const task = toolResponse.task;
                     this._publishClaudeTaskUpdate({
                       taskId: String(task.id || ""),
                       subject: String(task.subject || ""),
                       description: String(task.description || "") || undefined,
                       teammateName: String(task.owner || "") || undefined,
-                      status: task.status,
+                      status: claudeTaskStatus(task.status),
                     });
                   } else if (toolName === "TaskList" && Array.isArray(toolResponse.tasks)) {
                     this._publishClaudeTaskSnapshot(toolResponse.tasks);
@@ -4095,7 +4122,8 @@ export class ClaudeSession {
               }],
             }],
             PostToolBatch: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "PostToolBatch") return { continue: true };
                 // Subagent batches belong to their own context. Only feed
                 // phone-authored context into the main thread.
                 if (input.agent_id) return { continue: true };
@@ -4114,7 +4142,8 @@ export class ClaudeSession {
               }],
             }],
             SubagentStart: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "SubagentStart") return { continue: true };
                 try {
                   const agentId = input.agent_id || "";
                   const agentType = input.agent_type || "";
@@ -4124,7 +4153,8 @@ export class ClaudeSession {
               }],
             }],
             SubagentStop: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "SubagentStop") return { continue: true };
                 try {
                   const agentId = input.agent_id || "";
                   const agentType = input.agent_type || "";
@@ -4134,7 +4164,8 @@ export class ClaudeSession {
               }],
             }],
             SessionStart: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "SessionStart") return { continue: true };
                 try {
                   const source = input.source || "unknown";
                   const model = input.model || "";
@@ -4163,7 +4194,8 @@ export class ClaudeSession {
               }],
             }],
             SessionEnd: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "SessionEnd") return { continue: true };
                 try {
                   const reason = input.reason || "unknown";
                   console.log(`[Hook] SessionEnd: reason=${reason}`);
@@ -4186,7 +4218,8 @@ export class ClaudeSession {
               }],
             }],
             TaskCreated: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "TaskCreated") return { continue: true };
                 try {
                   const taskId = input.task_id || "";
                   const subject = input.task_subject || "";
@@ -4205,7 +4238,8 @@ export class ClaudeSession {
               }],
             }],
             TaskCompleted: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input) => {
+                if (input.hook_event_name !== "TaskCompleted") return { continue: true };
                 try {
                   const taskId = input.task_id || "";
                   const subject = input.task_subject || "";
@@ -4254,23 +4288,17 @@ export class ClaudeSession {
             if (toolName === "AskUserQuestion") {
               const qId = createInteractiveRequestId("q");
               const questions: QuestionItem[] = [];
-              const inputQuestions = (input as any).questions;
-
-              if (Array.isArray(inputQuestions)) {
-                for (const q of inputQuestions) {
-                  questions.push({
-                    question: q.question || "",
-                    header: q.header,
-                    options: Array.isArray(q.options)
-                      ? q.options.map((o: any) => ({
-                          label: o.label || "",
-                          description: o.description,
-                          preview: o.preview || undefined,
-                        }))
-                      : [],
-                    multiSelect: q.multiSelect,
-                  });
-                }
+              for (const q of unknownArray(input.questions).filter(isRecord)) {
+                questions.push({
+                  question: typeof q.question === "string" ? q.question : "",
+                  header: typeof q.header === "string" ? q.header : undefined,
+                  options: unknownArray(q.options).filter(isRecord).map((option) => ({
+                    label: typeof option.label === "string" ? option.label : "",
+                    description: typeof option.description === "string" ? option.description : undefined,
+                    preview: typeof option.preview === "string" ? option.preview || undefined : undefined,
+                  })),
+                  multiSelect: q.multiSelect === true,
+                });
               }
 
               const questionMsg: ServerMessage = {
@@ -4306,7 +4334,7 @@ export class ClaudeSession {
             // Intercept ExitPlanMode — show plan to user for approval
             if (toolName === "ExitPlanMode") {
               // Use planFilePath from SDK input (v0.2.76+), fall back to directory search
-              const planFilePath = (input as any).planFilePath;
+              const planFilePath = typeof input.planFilePath === "string" ? input.planFilePath : undefined;
               let planContent = "";
               try {
                 if (planFilePath && fs.existsSync(planFilePath)) {
@@ -4314,7 +4342,7 @@ export class ClaudeSession {
                   console.log(`[Plan] Read plan from SDK planFilePath: ${planFilePath}`);
                 } else {
                   // Fallback: search plans directory for most recent .md file
-                  const homeDir = process.env.HOME || require("os").homedir();
+                  const homeDir = process.env.HOME || os.homedir();
                   const plansDir = path.join(homeDir, ".claude", "plans");
                   if (fs.existsSync(plansDir)) {
                     const files = fs.readdirSync(plansDir)
@@ -4435,6 +4463,8 @@ export class ClaudeSession {
       const consumeQuery = async () => {
         try {
           for await (const message of q) {
+        const rawMessage: Record<string, unknown> = message;
+        const nativeParentToolUseId = typeof rawMessage.parent_tool_use_id === "string" ? rawMessage.parent_tool_use_id : null;
         // The SDK sent something, so a previously claimed queued turn is
         // making progress after all — the stale-continuation watchdog no
         // longer applies to this wait.
@@ -4442,30 +4472,30 @@ export class ClaudeSession {
           clearTimeout(this._staleContinuationTimer);
           this._staleContinuationTimer = null;
         }
-        if (!(message as { parent_tool_use_id?: unknown }).parent_tool_use_id) {
+        if (!nativeParentToolUseId) {
           const correlation = claudeTurnCorrelation(message);
           if (correlation.triggerUserMessageUuid) this._turnCorrelation = correlation;
         }
         // Debug: log all message types to understand SDK event flow
         const msgType = message.type;
-        const subtype = (message as any).subtype || (message as any).event?.type || '';
+        const subtype = ("subtype" in message ? message.subtype : message.type === "stream_event" ? message.event.type : "");
         if (msgType === 'stream_event') {
-          const evt = (message as any).event;
+          const evt = message.event;
           if (evt?.type && evt.type !== 'content_block_delta' && evt.type !== 'message_start' && evt.type !== 'message_delta') {
             console.log(`[SDK stream] event=${evt.type} ${JSON.stringify(evt).slice(0, 200)}`);
           }
         } else if (msgType === 'tool_progress') {
-          const tp = message as any;
+          const tp = message;
           console.log(`[SDK msg] type=tool_progress tool=${tp.tool_name} elapsed=${tp.elapsed_time_seconds}s id=${tp.tool_use_id}`);
         } else {
           console.log(`[SDK msg] type=${msgType} subtype=${subtype}`);
         }
 
         if (message.type === "assistant") {
-          this._retractClaudeMessages((message as any).supersedes);
+          this._retractClaudeMessages(message.supersedes);
         }
-        if (message.type === "system" && (message as any).subtype === "model_refusal_fallback") {
-          this._retractClaudeMessages((message as any).retracted_message_uuids);
+        if (message.type === "system" && message.subtype === "model_refusal_fallback") {
+          this._retractClaudeMessages(message.retracted_message_uuids);
         }
         if (message.type === "conversation_reset") {
           this._handleClaudeConversationReset(message);
@@ -4473,24 +4503,24 @@ export class ClaudeSession {
 
         // Forward raw SDK event to app for debug mode + persist to JSONL
         try {
-          const sdkPayload: any = { type: "sdk_event", sdkType: msgType };
+          const sdkPayload: SdkEventServerMessage = { type: "sdk_event", sdkType: msgType };
           if (msgType === "stream_event") {
-            const evt = (message as any).event;
+            const evt = message.event;
             sdkPayload.event = evt;
 
             // Coalesced persistence: accumulate deltas, write on block_stop
             const sid = this.sessionId;
             if (sid && evt) {
               const evtType = evt.type;
-              const blockKey = `${this._streamKey(message)}:${evt.index ?? "current"}`;
+              const blockKey = `${this._streamKey(message)}:${"index" in evt ? evt.index : "current"}`;
               if (evtType === "content_block_start") {
                 const cb = evt.content_block || {};
                 sdkBlocks.set(blockKey, {
                   text: "",
                   index: evt.index ?? null,
                   type: cb.type || null,
-                  toolName: cb.name || null,
-                  toolUseId: cb.id || null,
+                  toolName: "name" in cb ? cb.name : null,
+                  toolUseId: "id" in cb ? cb.id : null,
                   deltaCount: 0,
                 });
               } else if (evtType === "content_block_delta") {
@@ -4545,15 +4575,15 @@ export class ClaudeSession {
             }
           } else {
             // Shallow copy, skip huge fields
-            const raw = message as any;
+            const raw = rawMessage;
             sdkPayload.subtype = raw.subtype;
-            if (raw.session_id) sdkPayload.sessionId = raw.session_id;
+            if (typeof raw.session_id === "string") sdkPayload.sessionId = raw.session_id;
             // assistant/user messages store content under .message.content
-            const contentSource = raw.content || raw.message?.content;
+            const contentSource = raw.content || (isRecord(raw.message) ? raw.message.content : undefined);
             if (contentSource) {
-              const blocks = Array.isArray(contentSource) ? contentSource : [];
-              sdkPayload.blocks = blocks.map((b: any) => {
-                if (b.type === "text") return { type: "text", text: b.text?.slice(0, 200) };
+              const blocks = unknownArray(contentSource).filter(isRecord);
+              sdkPayload.blocks = blocks.map((b) => {
+                if (b.type === "text") return { type: "text", text: typeof b.text === "string" ? b.text.slice(0, 200) : undefined };
                 if (b.type === "tool_use") return { type: "tool_use", name: b.name, id: b.id };
                 if (b.type === "tool_result") return { type: "tool_result", tool_use_id: b.tool_use_id, content: typeof b.content === 'string' ? b.content.slice(0, 200) : '(structured)' };
                 return { type: b.type };
@@ -4571,7 +4601,7 @@ export class ClaudeSession {
             if (raw.status) sdkPayload.status = raw.status;
             if (raw.compact_metadata) sdkPayload.compactMetadata = raw.compact_metadata;
             if (raw.task_id) sdkPayload.taskId = raw.task_id;
-            if (raw.summary) sdkPayload.summary = raw.summary?.slice(0, 300);
+            if (typeof raw.summary === "string") sdkPayload.summary = raw.summary.slice(0, 300);
             if (raw.trigger) sdkPayload.trigger = raw.trigger;
 
             // Persist non-stream events directly
@@ -4580,10 +4610,10 @@ export class ClaudeSession {
               appendSdkEvent(sid, { ts: now(), ...sdkPayload, type: undefined });
             }
           }
-          this.sendSdkEvent(sdkPayload as any);
+          this.sendSdkEvent(sdkPayload);
         } catch (_) {}
 
-        if (message.type === "system" && (message as any).subtype === "init") {
+        if (message.type === "system" && message.subtype === "init") {
           this.sessionId = message.session_id;
           const replacesSessionId = this.replacesSessionId;
           this.send({
@@ -4622,7 +4652,7 @@ export class ClaudeSession {
           });
 
           // Forward init data to app (available agents, tools, MCP servers, model, etc.)
-          const initMsg = message as any;
+          const initMsg = message;
           this._terminalSlashCommands = new Set(
             (Array.isArray(initMsg.terminal_slash_commands)
               ? initMsg.terminal_slash_commands
@@ -4630,7 +4660,7 @@ export class ClaudeSession {
               .map((command: unknown) => String(command).replace(/^\//, "").trim())
               .filter(Boolean),
           );
-          const initPermissionMode = initMsg.permissionMode as string | undefined;
+          const initPermissionMode = initMsg.permissionMode;
           if (initPermissionMode) {
             this._permissionMode = initPermissionMode;
             const session = getSession(this.sessionId || "");
@@ -4661,12 +4691,12 @@ export class ClaudeSession {
 
           // Query available models and forward to app for model picker
           if (this.activeQuery) {
-            this.activeQuery.supportedModels().then((models: any) => {
+            this.activeQuery.supportedModels().then((models) => {
               if (Array.isArray(models) && models.length > 0) {
                 const saved = saveCachedModelCatalog("claude", models);
                 this.publishSupportedModels(saved.models, { updatedAt: saved.updatedAt });
               }
-            }).catch((e: any) => {
+            }).catch((e: unknown) => {
               console.error(`[Init] Failed to get supported models: ${e}`);
             });
 
@@ -4675,7 +4705,7 @@ export class ClaudeSession {
             // and a synchronous TypeError would crash the message processing loop.
             try {
               console.log(`[Init] Querying supportedCommands...`);
-              this.activeQuery.supportedCommands().then((commands: any) => {
+              this.activeQuery.supportedCommands().then((commands) => {
                 console.log(`[Init] supportedCommands returned: ${Array.isArray(commands) ? commands.length + ' commands' : typeof commands}`);
                 if (commands && Array.isArray(commands) && commands.length > 0) {
                   const phoneCommands = filterClaudePhoneCommands(
@@ -4689,7 +4719,7 @@ export class ClaudeSession {
                   };
                   this.send(this._lastSupportedCommands!);
                 }
-              }).catch((e: any) => {
+              }).catch((e: unknown) => {
                 console.error(`[Init] Failed to get supported commands: ${e}`);
               });
             } catch (e) {
@@ -4708,7 +4738,7 @@ export class ClaudeSession {
                   };
                   this.send(this._lastSupportedAgents!);
                 }
-              }).catch((e: any) => {
+              }).catch((e: unknown) => {
                 console.error(`[Init] Failed to get supported agents: ${e}`);
               });
             } catch (e) {
@@ -4745,7 +4775,7 @@ export class ClaudeSession {
 
         // Forward tool_progress to the app — shows elapsed time while tools run
         if (message.type === "tool_progress") {
-          const tp = message as any;
+          const tp = message;
           this.send({
             type: "tool_progress",
             toolUseId: tp.tool_use_id || "",
@@ -4771,8 +4801,8 @@ export class ClaudeSession {
         }
 
         // Forward files_persisted events — tells the app which files were written
-        if (message.type === "system" && (message as any).subtype === "files_persisted") {
-          const fp = message as any;
+        if (message.type === "system" && message.subtype === "files_persisted") {
+          const fp = message;
           console.log(`[SDK] Files persisted: ${fp.files?.length || 0} files, ${fp.failed?.length || 0} failed`);
           this.send({
             type: "files_persisted",
@@ -4782,9 +4812,9 @@ export class ClaudeSession {
           });
         }
 
-        if (message.type === "system" && (message as any).subtype === "commands_changed") {
-          const rawCommands = Array.isArray((message as any).commands)
-            ? (message as any).commands as Array<Record<string, unknown>>
+        if (message.type === "system" && message.subtype === "commands_changed") {
+          const rawCommands = Array.isArray(message.commands)
+            ? message.commands
             : [];
           const phoneCommands = filterClaudePhoneCommands(
             rawCommands,
@@ -4803,8 +4833,8 @@ export class ClaudeSession {
         // the only signal that reasoning is happening is this running token
         // estimate. Forward it so the app can show progress instead of either an
         // empty bubble or nothing at all.
-        if (message.type === "system" && (message as any).subtype === "thinking_tokens") {
-          const tt = message as any;
+        if (message.type === "system" && message.subtype === "thinking_tokens") {
+          const tt = message;
           this._thinkingProgress ??= {
             startedAtMs: Date.now(),
             estimatedTokens: 0,
@@ -4832,7 +4862,7 @@ export class ClaudeSession {
 
         // Forward auth status changes (authenticating state)
         if (message.type === "auth_status") {
-          const auth = message as any;
+          const auth = message;
           console.log(`[SDK] Auth status: isAuthenticating=${auth.isAuthenticating}`);
           this.send({
             type: "auth_status",
@@ -4844,9 +4874,9 @@ export class ClaudeSession {
         }
 
         // Detect context compaction status changes
-        if (message.type === "system" && (message as any).subtype === "status") {
-          const status = (message as any).status as string | null;
-          const permMode = (message as any).permissionMode as string | undefined;
+        if (message.type === "system" && message.subtype === "status") {
+          const status = message.status;
+          const permMode = message.permissionMode;
           console.log(`[SDK] Status change: ${status}${permMode ? ` permissionMode=${permMode}` : ''}`);
           this._isCompacting = status === "compacting";
           if (this._isCompacting) {
@@ -4875,8 +4905,8 @@ export class ClaudeSession {
         }
 
         // Forward compact boundary events (token count before compaction)
-        if (message.type === "system" && (message as any).subtype === "compact_boundary") {
-          const meta = (message as any).compact_metadata || {};
+        if (message.type === "system" && message.subtype === "compact_boundary") {
+          const meta = message.compact_metadata || {};
           console.log(`[SDK] Compact boundary: trigger=${meta.trigger} preTokens=${meta.pre_tokens}`);
           this.send({
             type: "compact_boundary",
@@ -4894,8 +4924,8 @@ export class ClaudeSession {
         }
 
         // Forward background task notifications (type=system, subtype=task_notification)
-        if (message.type === "system" && (message as any).subtype === "task_notification") {
-          const tn = message as any;
+        if (message.type === "system" && message.subtype === "task_notification") {
+          const tn = message;
           const sdkTaskId = tn.task_id || "";
           // Prefer SDK's direct tool_use_id, fall back to our mapping
           const originToolUseId = tn.tool_use_id || this._taskIdToToolUseId.get(sdkTaskId) || undefined;
@@ -5065,13 +5095,13 @@ export class ClaudeSession {
 
         // Handle tool use summaries — clean human-readable summaries of tool groups
         if (message.type === "tool_use_summary") {
-          const summary = message as any;
+          const summary = message;
           console.log(`[SDK] Tool use summary: ${summary.summary?.slice(0, 100)}`);
           this.send({
             type: "tool_summary",
             summary: summary.summary || "",
             precedingToolUseIds: summary.preceding_tool_use_ids || [],
-            parentToolUseId: summary.parent_tool_use_id || null,
+            parentToolUseId: nativeParentToolUseId,
             sessionId: this.sessionId || "",
             uuid: summary.uuid || undefined,
           });
@@ -5081,7 +5111,7 @@ export class ClaudeSession {
               content: summary.summary || "",
               toolSummary: true,
               precedingToolUseIds: summary.preceding_tool_use_ids || [],
-              parentToolUseId: summary.parent_tool_use_id || null,
+              parentToolUseId: nativeParentToolUseId,
               uuid: summary.uuid || undefined,
               timestamp: now(),
             });
@@ -5090,41 +5120,41 @@ export class ClaudeSession {
 
         // Forward rate limit events to app (#7)
         if (message.type === "rate_limit_event") {
-          const info = (message as any).rate_limit_info || {};
-          console.log(`[SDK] Rate limit raw: ${JSON.stringify((message as any).rate_limit_info)}`);
+          const info = message.rate_limit_info || {};
+          console.log(`[SDK] Rate limit raw: ${JSON.stringify(message.rate_limit_info)}`);
           const event = buildClaudeRateLimitEvent(info, this.sessionId || "");
           recordRateLimitEvent(event);
           this.send(event);
         }
 
         // Forward background task lifecycle events (#8, #9)
-        if (message.type === "system" && (message as any).subtype === "task_started") {
-          const ts = message as any;
+        if (message.type === "system" && message.subtype === "task_started") {
+          const ts = message;
           console.log(`[SDK] Task started: id=${ts.task_id} toolUseId=${ts.tool_use_id} desc=${ts.description} type=${ts.task_type}`);
           this._handleSdkTaskStarted(ts);
         }
 
-        if (message.type === "system" && (message as any).subtype === "task_progress") {
-          const tp = message as any;
+        if (message.type === "system" && message.subtype === "task_progress") {
+          const tp = message;
           console.log(`[SDK] Task progress: id=${tp.task_id} toolUseId=${tp.tool_use_id || this._taskIdToToolUseId.get(tp.task_id)} tool=${tp.last_tool_name} summary=${tp.summary?.slice(0, 60)}`);
           this._handleSdkTaskProgress(tp);
         }
 
-        if (message.type === "system" && (message as any).subtype === "task_updated") {
-          const tu = message as any;
+        if (message.type === "system" && message.subtype === "task_updated") {
+          const tu = message;
           console.log(`[SDK] Task updated: id=${tu.task_id} patch=${JSON.stringify(tu.patch || {}).slice(0, 160)}`);
           this._handleSdkTaskUpdated(tu);
         }
 
-        if (message.type === "system" && (message as any).subtype === "background_tasks_changed") {
-          const btc = message as any;
+        if (message.type === "system" && message.subtype === "background_tasks_changed") {
+          const btc = message;
           console.log(`[SDK] Background task snapshot: count=${Array.isArray(btc.tasks) ? btc.tasks.length : 0}`);
           this._handleSdkBackgroundTasksChanged(btc);
         }
 
         // Forward API retry events (#10 — defensive, needs SDK v0.2.77+)
-        if (message.type === "system" && (message as any).subtype === "api_retry") {
-          const ar = message as any;
+        if (message.type === "system" && message.subtype === "api_retry") {
+          const ar = message;
           const delayMs = claudeApiRetryDelayMs(ar);
           console.log(`[SDK] API retry: attempt=${ar.attempt}/${ar.max_retries} delay=${delayMs}ms`);
           this.send({
@@ -5138,8 +5168,8 @@ export class ClaudeSession {
         }
 
         // Forward hook lifecycle messages
-        if (message.type === "system" && (message as any).subtype === "hook_started") {
-          const hs = message as any;
+        if (message.type === "system" && message.subtype === "hook_started") {
+          const hs = message;
           console.log(`[SDK] Hook started: ${hs.hook_name} (${hs.hook_event})`);
           this.send({
             type: "hook_started",
@@ -5150,8 +5180,8 @@ export class ClaudeSession {
           });
         }
 
-        if (message.type === "system" && (message as any).subtype === "hook_progress") {
-          const hp = message as any;
+        if (message.type === "system" && message.subtype === "hook_progress") {
+          const hp = message;
           this.send({
             type: "hook_progress",
             hookId: hp.hook_id || "",
@@ -5163,8 +5193,8 @@ export class ClaudeSession {
           });
         }
 
-        if (message.type === "system" && (message as any).subtype === "hook_response") {
-          const hr = message as any;
+        if (message.type === "system" && message.subtype === "hook_response") {
+          const hr = message;
           console.log(`[SDK] Hook response: ${hr.hook_name} (${hr.hook_event}) outcome=${hr.outcome}`);
           this.send({
             type: "hook_response",
@@ -5180,8 +5210,8 @@ export class ClaudeSession {
         }
 
         // Forward session state changes (idle/running/requires_action)
-        if (message.type === "system" && (message as any).subtype === "session_state_changed") {
-          const sc = message as any;
+        if (message.type === "system" && message.subtype === "session_state_changed") {
+          const sc = message;
           const state = sc.state || "idle";
           console.log(`[SDK] Session state: ${state} (${this.sessionId || "pending"})`);
           // The harness also starts turns nobody prompted for: a background
@@ -5221,10 +5251,9 @@ export class ClaudeSession {
         }
 
         // Forward CWD changes to app
-        if (message.type === "system" && (message as any).subtype === "cwd_changed") {
-          const cc = message as any;
-          const oldCwd = cc.old_cwd || "";
-          const newCwd = cc.new_cwd || cc.cwd || "";
+        if (message.type === "system" && rawMessage.subtype === "cwd_changed") {
+          const oldCwd = typeof rawMessage.old_cwd === "string" ? rawMessage.old_cwd : "";
+          const newCwd = typeof rawMessage.new_cwd === "string" && rawMessage.new_cwd ? rawMessage.new_cwd : typeof rawMessage.cwd === "string" ? rawMessage.cwd : "";
           if (newCwd) {
             console.log(`[SDK] CWD changed: ${oldCwd} → ${newCwd}`);
             this.cwd = newCwd;
@@ -5252,8 +5281,8 @@ export class ClaudeSession {
         }
 
         // Forward local command output (#11)
-        if (message.type === "system" && (message as any).subtype === "local_command_output") {
-          const lco = message as any;
+        if (message.type === "system" && message.subtype === "local_command_output") {
+          const lco = message;
           console.log(`[SDK] Local command output: ${lco.content?.slice(0, 80)}`);
           this.send({
             type: "local_command_output",
@@ -5264,7 +5293,7 @@ export class ClaudeSession {
 
         // Forward prompt suggestions (#12)
         if (message.type === "prompt_suggestion") {
-          const ps = message as any;
+          const ps = message;
           const suggestion = ps.suggestion || "";
           console.log(`[SDK] Prompt suggestion: ${suggestion.slice(0, 80)}`);
           this.send({
@@ -5283,12 +5312,12 @@ export class ClaudeSession {
         }
 
         if (message.type === "stream_event") {
-          const event = (message as any).event;
+          const event = message.event;
           if (
             event?.type === "content_block_delta" &&
             event.delta?.type === "text_delta"
           ) {
-            const parentToolUseId = (message as any).parent_tool_use_id || null;
+            const parentToolUseId = message.parent_tool_use_id || null;
             if (!parentToolUseId) currentText += event.delta.text;
             const streamId = this._appendLiveStream(
               this._streamingText,
@@ -5304,7 +5333,7 @@ export class ClaudeSession {
               streamId,
               snapshot: true,
               parentToolUseId,
-              uuid: (message as any).uuid || undefined,
+              uuid: message.uuid || undefined,
               ...(!parentToolUseId ? this._turnCorrelation : {}),
             });
           }
@@ -5332,16 +5361,16 @@ export class ClaudeSession {
                 sessionId: this.sessionId || "",
                 streamId,
                 snapshot: true,
-                parentToolUseId: (message as any).parent_tool_use_id || null,
-                uuid: (message as any).uuid || undefined,
-                ...(!(message as any).parent_tool_use_id ? this._turnCorrelation : {}),
+                parentToolUseId: message.parent_tool_use_id || null,
+                uuid: message.uuid || undefined,
+                ...(!message.parent_tool_use_id ? this._turnCorrelation : {}),
               });
             }
           }
 
           // Track per-turn usage from message_start (input tokens for this turn)
           if (
-            !(message as any).parent_tool_use_id &&
+            !message.parent_tool_use_id &&
             event?.type === "message_start" &&
             event.message?.usage
           ) {
@@ -5365,7 +5394,7 @@ export class ClaudeSession {
 
           // Track output tokens from message_delta (end of turn)
           if (
-            !(message as any).parent_tool_use_id &&
+            !message.parent_tool_use_id &&
             event?.type === "message_delta" &&
             event.usage
           ) {
@@ -5390,7 +5419,7 @@ export class ClaudeSession {
 
         if (message.type === "assistant") {
           // Surface per-message error types (rate_limit, auth_failed, billing_error, etc.)
-          const assistantError = (message as any).error;
+          const assistantError = message.error;
           if (assistantError) {
             console.error(`[SDK] Assistant error: ${assistantError}`);
             if (assistantError === 'authentication_failed') {
@@ -5435,9 +5464,9 @@ export class ClaudeSession {
             }
           }
 
-          const apiMessage = (message as any).message;
+          const apiMessage = message.message;
           const completedTextParts = this._publishCompletedClaudeBlocks(message);
-          if (completedTextParts.length && !(message as any).parent_tool_use_id) {
+          if (completedTextParts.length && !message.parent_tool_use_id) {
             sawMainAssistantText = true;
             this._lastPreview = completedTextParts.join("").slice(0, 200);
             this.onActivity?.();
@@ -5445,8 +5474,9 @@ export class ClaudeSession {
           if (apiMessage?.content && Array.isArray(apiMessage.content)) {
             for (const block of apiMessage.content) {
               if (block.type === "tool_use") {
-                if ((message as any).parent_tool_use_id) {
-                  this._toolParentIds.set(block.id, (message as any).parent_tool_use_id);
+                const toolInput = isRecord(block.input) ? block.input : {};
+                if (message.parent_tool_use_id) {
+                  this._toolParentIds.set(block.id, message.parent_tool_use_id);
                 }
                 // Don't send AskUserQuestion as a tool_call — it's handled
                 // via canUseTool and rendered as a proper question card
@@ -5458,7 +5488,7 @@ export class ClaudeSession {
                 // Intercept TodoWrite — diff against stored state, only send if changed
                 if (block.name === "TodoWrite") {
                   this._suppressedToolResultIds.add(block.id);
-                  const todos = (block.input as any)?.todos;
+                  const todos = toolInput.todos;
                   if (Array.isArray(todos)) {
                     const prev = this.sessionId ? getTodos(this.sessionId) : [];
                     const next = replaceClaudeTodoWriteTodos(prev, todos);
@@ -5490,21 +5520,21 @@ export class ClaudeSession {
                   this.send({
                     type: "tool_call",
                     tool: mcpName,
-                    input: block.input as Record<string, unknown>,
+                    input: toolInput,
                     toolUseId: block.id,
                     sessionId: this.sessionId || "",
-                    parentToolUseId: (message as any).parent_tool_use_id || null,
-                    uuid: (message as any).uuid || undefined,
+                    parentToolUseId: message.parent_tool_use_id || null,
+                    uuid: message.uuid || undefined,
                   });
                   if (this.sessionId) {
                     appendHistory(this.sessionId, {
                       role: "tool_call",
                       content: "",
                       toolName: mcpName,
-                      toolInput: block.input as Record<string, unknown>,
+                      toolInput: toolInput,
                       toolUseId: block.id,
-                      parentToolUseId: (message as any).parent_tool_use_id || null,
-                      uuid: (message as any).uuid || undefined,
+                      parentToolUseId: message.parent_tool_use_id || null,
+                      uuid: message.uuid || undefined,
                       timestamp: now(),
                     });
                   }
@@ -5518,22 +5548,22 @@ export class ClaudeSession {
                 this.send({
                   type: "tool_call",
                   tool: block.name,
-                  input: block.input as Record<string, unknown>,
+                  input: toolInput,
                   toolUseId: block.id,
                   sessionId: this.sessionId || "",
-                  parentToolUseId: (message as any).parent_tool_use_id || null,
-                  uuid: (message as any).uuid || undefined,
+                  parentToolUseId: message.parent_tool_use_id || null,
+                  uuid: message.uuid || undefined,
                 });
 
                 // Update preview with tool call description
-                const inp = block.input as Record<string, unknown>;
-                const previewDesc = (inp.file_path as string) || (inp.command as string) || (inp.pattern as string) || (inp.query as string) || (inp.prompt as string) || "";
+                const inp = toolInput;
+                const previewDesc = [inp.file_path, inp.command, inp.pattern, inp.query, inp.prompt].find((value) => typeof value === "string" && value.length > 0) || "";
                 this._lastPreview = `[${block.name}] ${previewDesc}`.slice(0, 200);
                 this.onActivity?.();
 
                 // Track Read tool file paths for image extraction
                 if (block.name === "Read") {
-                  const filePath = (block.input as any)?.file_path || "";
+                  const filePath = typeof toolInput.file_path === "string" ? toolInput.file_path : "";
                   if (filePath) {
                     this._readToolPaths.set(block.id, filePath);
                   }
@@ -5548,8 +5578,8 @@ export class ClaudeSession {
 
                 // Track all Agent (subagent) tool calls (renamed from "Task" in SDK 0.2.76)
                 if (block.name === "Agent" || block.name === "Task") {
-                  const desc = (block.input as any)?.description || "Agent";
-                  const subagentType = (block.input as any)?.subagent_type || "";
+                  const desc = String(toolInput.description || "Agent");
+                  const subagentType = String(toolInput.subagent_type || "");
                   // Claude Code 2.1.198+ backgrounds Agent calls by default.
                   // Only an explicit false means this invocation is foreground.
                   const isBackgrounded = claudeAgentRunsInBackground(block.input);
@@ -5561,11 +5591,11 @@ export class ClaudeSession {
                     description: desc,
                     subagentType,
                     startedAt: now(),
-                    prompt: String((block.input as any)?.prompt || ""),
+                    prompt: String(toolInput.prompt || ""),
                     isBackgrounded,
                     status: "running",
-                    ...((message as any).parent_tool_use_id
-                      ? { parentToolUseId: (message as any).parent_tool_use_id }
+                    ...(message.parent_tool_use_id
+                      ? { parentToolUseId: message.parent_tool_use_id }
                       : {}),
                   });
                   console.log(`[SDK] Subagent started: ${desc} (toolUseId=${block.id}, type=${subagentType}, background=${isBackgrounded})`);
@@ -5576,10 +5606,10 @@ export class ClaudeSession {
                     role: "tool_call",
                     content: "",
                     toolName: block.name,
-                    toolInput: block.input as Record<string, unknown>,
+                    toolInput: toolInput,
                     toolUseId: block.id,
-                    parentToolUseId: (message as any).parent_tool_use_id || null,
-                    uuid: (message as any).uuid || undefined,
+                    parentToolUseId: message.parent_tool_use_id || null,
+                    uuid: message.uuid || undefined,
                     timestamp: now(),
                   });
                 }
@@ -5591,7 +5621,7 @@ export class ClaudeSession {
         if (message.type === "user") {
           // Forward user message UUID to app for rewind support
           // Only for real user prompts, not synthetic tool result messages
-          const userMsgUuid = (message as any).uuid || undefined;
+          const userMsgUuid = message.uuid || undefined;
           if (userMsgUuid && isLiveClaudeUserEcho(message)) {
             // The prompt itself was already announced with its text when it
             // was written to history; this only confirms the backend's UUID.
@@ -5601,7 +5631,7 @@ export class ClaudeSession {
               sessionId: this.sessionId || "",
             });
           }
-          const apiMessage = (message as any).message;
+          const apiMessage = message.message;
           if (apiMessage?.content && Array.isArray(apiMessage.content)) {
             for (const block of apiMessage.content) {
               if (block.type === "tool_result") {
@@ -5618,23 +5648,22 @@ export class ClaudeSession {
                     ? block.content
                     : Array.isArray(block.content)
                       ? block.content
-                          .filter((c: any) => c.type === "text")
-                          .map((c: any) => c.text)
+                          .filter((c) => c.type === "text")
+                          .map((c) => c.text)
                           .join("\n")
                       : JSON.stringify(block.content);
                 const subagentState = this._activeSubagents.get(toolUseId);
-                const structuredToolOutput = (message as any).tool_use_result
-                  && typeof (message as any).tool_use_result === "object"
-                  ? (message as any).tool_use_result as any
+                const structuredToolOutput = isRecord(message.tool_use_result)
+                  ? message.tool_use_result
                   : undefined;
                 const structuredAgentOutput = subagentState
                   ? structuredToolOutput
                   : undefined;
                 let backgroundPending = false;
-                if (isClaudeWorkflowLaunchOutput(structuredToolOutput)) {
+                if (structuredToolOutput && isClaudeWorkflowLaunchOutput(structuredToolOutput)) {
                   this._trackWorkflowLaunch(structuredToolOutput, toolUseId);
                   backgroundPending = true;
-                } else if (subagentState && isClaudeAgentLaunchOutput(structuredAgentOutput)) {
+                } else if (subagentState && structuredAgentOutput && isClaudeAgentLaunchOutput(structuredAgentOutput)) {
                   const isRemote = structuredAgentOutput.status === "remote_launched";
                   const agentId = String(
                     (isRemote ? structuredAgentOutput.taskId : structuredAgentOutput.agentId)
@@ -5661,9 +5690,9 @@ export class ClaudeSession {
                   backgroundPending = true;
                 } else if (subagentState && structuredAgentOutput?.status === "completed") {
                   const report = Array.isArray(structuredAgentOutput.content)
-                    ? structuredAgentOutput.content
-                      .filter((part: any) => part?.type === "text")
-                      .map((part: any) => String(part.text || ""))
+                    ? unknownArray(structuredAgentOutput.content).filter(isRecord)
+                      .filter((part) => part.type === "text")
+                      .map((part) => String(part.text || ""))
                       .join("\n")
                     : "";
                   if (report) output = report;
@@ -5686,7 +5715,7 @@ export class ClaudeSession {
 
                 // Extract image blocks from tool results (e.g., Read on image files)
                 if (Array.isArray(block.content)) {
-                  for (const c of block.content as any[]) {
+                  for (const c of block.content) {
                     if (c.type === "image" && c.source?.type === "base64") {
                       const sourcePath = this._readToolPaths.get(toolUseId) || "";
                       const mimeType = c.source.media_type || "image/png";
@@ -5702,8 +5731,8 @@ export class ClaudeSession {
                             sourcePath,
                           );
                         }
-                      } catch (err: any) {
-                        console.warn(`[SDK] Failed to cache tool image: ${err?.message || String(err)}`);
+                      } catch (err: unknown) {
+                        console.warn(`[SDK] Failed to cache tool image: ${claudeErrorMessage(err)}`);
                       }
                       console.log(`[SDK] Image block found in tool result: ${sourcePath || toolUseId}`);
                       this.send({
@@ -5786,8 +5815,8 @@ export class ClaudeSession {
                 // Stream large tool output in chunks for progressive rendering
                 const CHUNK_THRESHOLD = 500; // Only chunk if output > 500 chars
                 const CHUNK_SIZE = 200; // ~200 chars per chunk (roughly 3-4 lines)
-                const parentId = (message as any).parent_tool_use_id || null;
-                const msgUuid = (message as any).uuid || undefined;
+                const parentId = message.parent_tool_use_id || null;
+                const msgUuid = message.uuid || undefined;
                 // The card this result lands in is the one BgBashWatcher
                 // streams the command's real output into, so the harness's
                 // backgrounding notice would only be in the way.
@@ -5850,15 +5879,17 @@ export class ClaudeSession {
         }
 
         if (message.type === "result") {
-          const result = message as any;
-          const resultParentId = result.parent_tool_use_id || null;
+          const result = message;
+          const resultText = "result" in result && typeof result.result === "string" ? result.result : "";
+          const resultErrors = "errors" in result ? result.errors : undefined;
+          const resultParentId = nativeParentToolUseId;
           if (resultParentId) {
             console.log(`[SDK] Subagent result (parent_tool_use_id=${resultParentId}), subtype=${result.subtype}, cost=${result.total_cost_usd}, turns=${result.num_turns}`);
             // Send as subagent_result so the app can track it without mistaking it for the main query result
             this.send({
               type: "subagent_result",
               parentToolUseId: resultParentId,
-              content: result.result || "",
+              content: resultText || "",
               costUsd: result.total_cost_usd,
               durationMs: result.duration_ms,
               numTurns: result.num_turns,
@@ -5882,27 +5913,27 @@ export class ClaudeSession {
             continue;
           }
           lastResultContent =
-            result.result || currentText || "Task completed.";
-          console.log(`[SDK] Result: subtype=${result.subtype} num_turns=${result.num_turns} result_len=${result.result?.length || 0} currentText_len=${currentText.length}`);
+            resultText || currentText || "Task completed.";
+          console.log(`[SDK] Result: subtype=${result.subtype} num_turns=${result.num_turns} result_len=${resultText?.length || 0} currentText_len=${currentText.length}`);
 
           // For slash commands / local commands: if result has content but no text
           // was streamed during this query, send the result as a text message
           if (shouldEmitClaudeResultFallback(
-            result.result,
+            resultText,
             currentText,
             sawMainAssistantText,
           )) {
-            console.log(`[SDK] Slash command result: ${result.result.slice(0, 100)}`);
+            console.log(`[SDK] Slash command result: ${resultText.slice(0, 100)}`);
             this.send({
               type: "text",
-              content: result.result,
+              content: resultText,
               sessionId: this.sessionId || "",
               ...this._turnCorrelation,
             });
             if (this.sessionId) {
               appendHistory(this.sessionId, {
                 role: "assistant",
-                content: result.result,
+                content: resultText,
                 ...this._turnCorrelation,
                 timestamp: now(),
               });
@@ -5913,7 +5944,7 @@ export class ClaudeSession {
           // modelUsage contains cumulative totals across ALL turns — not useful for context fill.
           let contextWindow = 0;
           if (result.modelUsage) {
-            for (const model of Object.values(result.modelUsage) as any[]) {
+            for (const model of Object.values(result.modelUsage)) {
               if (model.contextWindow > contextWindow) {
                 contextWindow = model.contextWindow;
               }
@@ -5994,7 +6025,7 @@ export class ClaudeSession {
             resultSubtype: result.is_error && result.subtype === "success" ? "error_during_execution" : result.subtype || undefined,
             terminalReason: result.terminal_reason || undefined,
             fastModeState: result.fast_mode_state || undefined,
-            errors: result.errors?.length ? result.errors : result.is_error ? [result.result || "Claude turn failed"] : undefined,
+            errors: resultErrors?.length ? resultErrors : result.is_error ? [resultText || "Claude turn failed"] : undefined,
             permissionDenials: result.permission_denials?.length ? result.permission_denials : undefined,
             ...this._turnCorrelation,
           });
@@ -6159,9 +6190,9 @@ export class ClaudeSession {
       console.log("[Auth] Saved Claude OAuth tokens");
       this._sendAuthResult(true);
     })
-      .catch((e: any) => {
-      console.error(`[Auth] Claude auth failed: ${e.message}`);
-      this.send({ type: "error", message: `Authentication failed: ${e.message}` });
+      .catch((e: unknown) => {
+      console.error(`[Auth] Claude auth failed: ${claudeErrorMessage(e)}`);
+      this.send({ type: "error", message: `Authentication failed: ${claudeErrorMessage(e)}` });
       this._sendAuthResult(false);
     });
   }

@@ -1,3 +1,4 @@
+import type { ServerMessage, HistoryEntry, QuestionServerMessage } from "./protocol";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { waitForInteractiveAnswer, type PendingInteractiveAnswer } from "./interactive-answer";
 import { markQuestionAnswered } from "./session-store";
@@ -7,8 +8,8 @@ export async function requestTranscriptAccess(
   ctx: {
     sessionId: string;
     pendingQuestions: Map<string, PendingInteractiveAnswer>;
-    send(message: any): void;
-    appendHistory(entry: any): void;
+    send(message: ServerMessage): void;
+    appendHistory(entry: HistoryEntry): void;
   },
   detail: string,
   signal?: AbortSignal,
@@ -17,7 +18,7 @@ export async function requestTranscriptAccess(
   const questionId = createInteractiveRequestId("transcript_access");
   const question = "The agent would like to access historical transcripts from all sessions on this server, including cleared-context archives.\n\n"
     + detail + "\n\nAllow this request only? Later searches and reads require approval again.";
-  const message = {
+  const message: QuestionServerMessage = {
     type: "question", questionId, sessionId: ctx.sessionId,
     questions: [{ question, header: "Transcript access", multiSelect: false,
       options: [{ label: "Allow once" }, { label: "Deny" }] }],

@@ -1,3 +1,4 @@
+import type { ClientTransport } from "./client-transport";
 import { isRecord, unknownArray } from "./value-guards";
 import { requestTranscriptAccess } from "./transcript-access-approval";
 import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type ElicitationRequest, type ElicitationResult, type Settings, type PermissionMode, type SDKTaskStartedMessage, type SDKTaskProgressMessage, type SDKTaskUpdatedMessage, type McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -1103,7 +1104,7 @@ export class ClaudeSession {
   private _lastSupportedModels: ServerMessage | null = null;
   private _lastSupportedCommands: ServerMessage | null = null;
   private _lastSupportedAgents: ServerMessage | null = null;
-  private clientSockets = new Set<WebSocket>();
+  private clientSockets = new Set<ClientTransport>();
   private sessionEventDelivery = new SessionEventDelivery<ServerMessage>((message) => {
     this.dispatchToClients(message);
   });
@@ -1124,7 +1125,7 @@ export class ClaudeSession {
   // Queue for injecting user messages mid-conversation
 
   constructor(
-    private ws: WebSocket,
+    private ws: ClientTransport,
     private cwd: string,
     private plugins: SocketAgentPlugin[] = []
   ) {
@@ -1639,6 +1640,14 @@ export class ClaudeSession {
 
   get isWarmIdle(): boolean {
     return this._isWarmIdle;
+  }
+
+  get hasLiveBackend(): boolean {
+    return this.activeQuery !== null;
+  }
+
+  get isAwaitingAuthentication(): boolean {
+    return this._authRequest !== null;
   }
 
   private _hasClaudeBackgroundWork(): boolean {
@@ -2730,7 +2739,7 @@ export class ClaudeSession {
   }
 
   /** Swap the WebSocket so a reconnecting client receives future messages */
-  setWebSocket(ws: WebSocket, deferLiveReplay = false): void {
+  setWebSocket(ws: ClientTransport, deferLiveReplay = false): void {
     this.attachWebSocket(ws);
     // Re-send cached session init and models so app UI populates immediately
     if (this._lastSessionInit) this.sendTo(ws, this._lastSessionInit);
@@ -2749,7 +2758,7 @@ export class ClaudeSession {
     return this.sessionEventDelivery.acknowledge(deliveryId);
   }
 
-  replayLiveState(ws: WebSocket = this.ws): void {
+  replayLiveState(ws: ClientTransport = this.ws): void {
     this.sessionEventDelivery.replayTo((message) => {
       this.sendTo(ws, message);
     });
@@ -2792,7 +2801,7 @@ export class ClaudeSession {
     this.replayPendingInteractions(ws);
   }
 
-  private replayPendingInteractions(ws: WebSocket = this.ws): void {
+  private replayPendingInteractions(ws: ClientTransport = this.ws): void {
     // Re-send any pending (unanswered) questions so the reconnecting client can respond
     for (const [, pending] of this.pendingQuestions) {
       if (pending.questionData) {
@@ -2836,12 +2845,12 @@ export class ClaudeSession {
     // stream from another visible client.
   }
 
-  private attachWebSocket(ws: WebSocket): void {
+  private attachWebSocket(ws: ClientTransport): void {
     this.ws = ws;
     this.clientSockets.add(ws);
   }
 
-  private sendTo(ws: WebSocket, msg: ServerMessage): void {
+  private sendTo(ws: ClientTransport, msg: ServerMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(redactSecretsDeep(msg)));
     }
@@ -2885,7 +2894,7 @@ export class ClaudeSession {
   }
 
   private sendSdkEvent(msg: ServerMessage): void {
-    const recipients: WebSocket[] = [];
+    const recipients: ClientTransport[] = [];
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN && "supportsRawSdkEvents" in socket && socket.supportsRawSdkEvents === true) {
         recipients.push(socket);

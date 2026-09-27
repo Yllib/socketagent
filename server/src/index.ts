@@ -1,3 +1,4 @@
+import type { ClientTransport } from "./client-transport";
 import { CommandReceipts } from "./command-receipts";
 import { SessionTransferJobs } from "./session-transfer-jobs";
 import { modelDownloadArchive } from "./model-download-archive";
@@ -79,7 +80,7 @@ import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInp
 import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHtmlPlanRevision, listHtmlPlanRevisions, listHtmlPlans, renameHtmlPlan, rollbackHtmlPlan } from "./html-plan-store";
-import { HardAbortCoordinator } from "./hard-abort";
+import { HardAbortCoordinator, type AbortableSession } from "./hard-abort";
 import { ControlMessageScheduler, controlMessageQueueScope } from "./control-message-scheduler";
 import { SessionInstanceRegistry } from "./session-instance-registry";
 import { SessionAutomationLockedError, SessionAutomationLockStore } from "./session-automation-lock";
@@ -485,25 +486,6 @@ if (fs.existsSync(pluginsDir)) {
 const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
 const BIN_MARKER_UPLOAD_CHUNK = 0x42;  // 'B' — upload chunk: [1 idLen][idBytes][4 chunkIdx BE][bytes]
 
-/**
- * Transport interface — abstracts over real WebSocket and relay virtual socket.
- * ClaudeSession needs readyState + send(). Connection handler needs send().
- */
-interface ClientTransport {
-  readonly readyState: number;
-  readonly bufferedAmount?: number;
-  readonly connectionGeneration?: number;
-  supportsRawSdkEvents?: boolean;
-  send(data: string): void;
-  sendReply?(peerId: string, data: string): void;
-  supportsBinaryFileDownload?(peerId?: string): boolean;
-  sendFileDownloadChunk?(
-    metadata: BinaryFileDownloadChunkMetadata,
-    bytes: Buffer,
-    peerId?: string,
-  ): boolean;
-}
-
 class DirectClientTransport implements ClientTransport {
   private peerPublicKey: Uint8Array | null = null;
   private binaryEnabled = false;
@@ -511,6 +493,8 @@ class DirectClientTransport implements ClientTransport {
   private binaryFileDownloadEnabled = false;
   private authTimer: ReturnType<typeof setTimeout> | null = null;
   supportsRawSdkEvents = false;
+  supportsSessionEventAck = false;
+  supportsMonitorOutputAck = false;
 
   constructor(
     private readonly ws: WebSocket,
@@ -735,7 +719,7 @@ function trackRecoverableRun(session: Session, fallbackSessionId?: string): void
   if (shuttingDown || abandonedRecoveryInstances.has(session) || recoveryOwners.has(session)) return;
   const sessionId = sessionInstanceId(session) || fallbackSessionId;
   if (!sessionId || !getSession(sessionId)) return;
-  const taskId = (session as any)._scheduledTaskId;
+  const taskId = session._scheduledTaskId;
   if (taskId) {
     const task = getScheduledTask(taskId);
     const run = task?.runs?.at(-1);
@@ -882,8 +866,8 @@ function finishClaudeBackendAuth(requestId: string, progress: Record<string, unk
 const clearedSessions: Set<string> = new Set();
 
 function sessionIsBusy(session: Session): boolean {
-  if (typeof (session as any).isBusy === "boolean") return (session as any).isBusy;
-  return session.isRunning || (session as any).isCompacting === true;
+  if (typeof session.isBusy === "boolean") return session.isBusy;
+  return session.isRunning || session.isCompacting === true;
 }
 
 /**
@@ -895,7 +879,7 @@ function sessionIsBusy(session: Session): boolean {
  * here leaves the session spinning with nobody home.
  */
 function sessionAgentIsWorking(session: Session): boolean {
-  return session.isRunning || (session as any).isCompacting === true;
+  return session.isRunning || session.isCompacting === true;
 }
 
 function hasBusyLiveSession(sessionId: string): boolean {
@@ -908,7 +892,7 @@ function hasBusyLiveSession(sessionId: string): boolean {
 function sessionInstanceId(session: Session): string {
   return String(
     session.getSessionId?.()
-      || (session as any)._resumeSessionId
+      || session._resumeSessionId
       || "",
   ).trim();
 }
@@ -922,9 +906,8 @@ function syncLiveSessionInstance(session: Session): void {
   // only the runner currently exposed through activeSessions. Plain dormant
   // objects with no backend are dropped so browsing history cannot leak them.
   const ownsLiveBackend = sessionIsBusy(session)
-    || (session as any).isWarmIdle === true
-    || !!(session as any).appServer
-    || !!(session as any).activeQuery;
+    || session.isWarmIdle === true
+    || session.hasLiveBackend;
   liveSessionInstances.setActive(sessionId, session, ownsLiveBackend);
   // A harness can resume with no prompt behind it — a Monitor's output, a
   // finished background task, a subagent report. Those runners are absent
@@ -988,7 +971,7 @@ async function invalidateCodexAuthenticationForLiveSessions(): Promise<void> {
 function abortGroupForSession(
   sessionId: string,
   extras: Iterable<Session | null | undefined> = [],
-): (Session & { abortTargets: Session[] }) | null {
+): (AbortableSession & { abortTargets: Session[] }) | null {
   const exactExtras = [...extras].filter(
     (candidate): candidate is Session => !!candidate && sessionInstanceId(candidate) === sessionId,
   );
@@ -1005,7 +988,7 @@ function abortGroupForSession(
       );
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-        .map((result) => result.reason);
+        .map((result): unknown => result.reason);
       if (failures.length > 0) {
         throw new AggregateError(
           failures,
@@ -1013,11 +996,7 @@ function abortGroupForSession(
         );
       }
     },
-  } as Session & { abortTargets: Session[] };
-}
-
-function abortTargets(target: Session): Session[] {
-  return (target as Session & { abortTargets?: Session[] }).abortTargets || [target];
+  };
 }
 
 function assertSessionAutomationAllowed(sessionId: string, source: string): void {
@@ -1172,19 +1151,19 @@ function reactivateLogicalRun(sessionId: string): void {
 }
 
 function getSessionActiveStartedAt(session: Session): string | undefined {
-  const value = (session as any).activeStartedAt;
+  const value = session.activeStartedAt;
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function sessionSuppressesOngoingNotification(session: Session): boolean {
-  return (session as any)._suppressOngoingNotification === true;
+  return session._suppressOngoingNotification === true;
 }
 
 function sessionShouldRemainPooled(session: Session): boolean {
   // Busy covers outstanding background tasks and subagents, which outlive the
   // turn that started them. Dropping such a runner hides work the app should
   // still be showing and lets auto-update restart underneath it.
-  return Boolean((session as any)._authRequest || (session as any).isWarmIdle === true)
+  return Boolean((session instanceof ClaudeSession && session.isAwaitingAuthentication) || session.isWarmIdle === true)
     || sessionIsBusy(session);
 }
 
@@ -1544,7 +1523,7 @@ function notificationText(value: unknown, fallback: string): string {
 }
 
 function sessionNotificationTitle(sessionId: string, session: Session): string {
-  const scheduledTaskName = (session as any)._scheduledTaskName;
+  const scheduledTaskName = session._scheduledTaskName;
   if (typeof scheduledTaskName === "string" && scheduledTaskName.trim()) {
     return notificationText(scheduledTaskName, "Scheduled task");
   }
@@ -1565,12 +1544,12 @@ function storedSessionNotificationTitle(sessionId: string): string | undefined {
 }
 
 function sessionNotificationBody(sessionId: string, session: Session, fallback: string): string {
-  const preview = (session as any).lastPreview || getSession(sessionId)?.messagePreview || "";
+  const preview = session.lastPreview || getSession(sessionId)?.messagePreview || "";
   return notificationText(preview, fallback);
 }
 
 function scheduledSessionPushData(session: Session): Record<string, string> {
-  const scheduledTaskId = String((session as any)._scheduledTaskId || "").trim();
+  const scheduledTaskId = String(session._scheduledTaskId || "").trim();
   return scheduledTaskId
     ? { navigationTarget: "scheduled_tasks", scheduledTaskId }
     : {};
@@ -1728,7 +1707,7 @@ function attachSessionLifecycleCallbacks(session: Session): void {
     if (!sessionIsBusy(session)) completeRecoverableRun(session);
     notifySessionActivity();
   };
-  (session as any).onHarnessRunStateChanged = (running: boolean) => {
+  session.onHarnessRunStateChanged = (running: boolean) => {
     const sid = sessionInstanceId(session);
     if (!sid) return;
     try {
@@ -1745,7 +1724,7 @@ function attachSessionLifecycleCallbacks(session: Session): void {
     notifySessionActivity();
   };
   session.onAgentSessionRequest = (args) => manageAgentSession(session, args);
-  (session as any).onSessionIdChanged = (previousSessionId: string, nextSessionId: string) => {
+  session.onSessionIdChanged = (previousSessionId: string, nextSessionId: string) => {
     commandReceipts.remapConversation(previousSessionId, nextSessionId);
     const owner = recoveryOwners.get(session);
     if (owner) {
@@ -1766,7 +1745,7 @@ function attachSessionLifecycleCallbacks(session: Session): void {
     console.log(`[SessionPool] Rekeyed session ${previousSessionId} -> ${nextSessionId}`);
     notifySessionActivity();
   };
-  (session as any).onClose = () => {
+  session.onClose = () => {
     if (!sessionIsBusy(session)) completeRecoverableRun(session);
     liveSessionInstances.remove(session);
     let removed = false;
@@ -1815,7 +1794,7 @@ function persistDelegationSupervisorLineage(
   if (!cleanSessionId) return;
   const supervisorSessionId = delegationSupervisorForSession(session);
   if (!supervisorSessionId) return;
-  (session as any)._delegationSupervisorSessionId = supervisorSessionId;
+  session._delegationSupervisorSessionId = supervisorSessionId;
   if (supervisorSessionId === cleanSessionId) return;
   const info = getSession(cleanSessionId);
   if (!info || info.delegationSupervisorSessionId === supervisorSessionId) {
@@ -1899,7 +1878,7 @@ function broadcastWorkReviewCard(review: Record<string, any>): void {
     appendHistory: (entry) => appendHistory(sessionId, entry as any),
     send: (message) => {
       const outgoing = [...connectedClients].some(
-        (client) => (client as any).supportsSessionEventAck === true,
+        (client) => client.supportsSessionEventAck === true,
       ) ? delivery!.prepare(message as Record<string, any>) : message;
       dispatchDurableSessionMessage(outgoing as Record<string, any>);
     },
@@ -1934,7 +1913,7 @@ async function runWorkReviewResultDelivery(
   const headlessSocket = {
     readyState: WebSocket.OPEN,
     send: (data: string) => broadcastHeadlessSessionMessage(data, sessionId),
-  } as any;
+  };
   const session = createSession(
     sessionInfo.backend,
     headlessSocket,
@@ -1943,7 +1922,7 @@ async function runWorkReviewResultDelivery(
     getStoredCodexDriver(sessionInfo),
   );
   await restorePersistedPermissionMode(session, sessionInfo);
-  (session as any)._resumeSessionId = sessionId;
+  session._resumeSessionId = sessionId;
   await restorePersistedAgentSettings(session, sessionInfo);
   attachSessionLifecycleCallbacks(session);
   activeSessions.set(sessionId, session);
@@ -2075,7 +2054,7 @@ function restorePendingWorkReviewResultDeliveries(): void {
 function broadcastDurableMonitorMessage(message: Record<string, any>): void {
   const sessionId = String(message.sessionId || "");
   const deliveryAware = connectedClients.size > 0 && [...connectedClients].every(
-    (client) => (client as any).supportsMonitorOutputAck === true,
+    (client) => client.supportsMonitorOutputAck === true,
   );
   if (!sessionId || !deliveryAware) {
     dispatchDurableSessionMessage(message);
@@ -2114,7 +2093,7 @@ async function runDurableMonitorPrompt(record: DurableMonitorRecord, text: strin
         broadcastDurableMonitorMessage(message);
       } catch {}
     },
-  } as any;
+  };
   session = createSession(
     sessionInfo.backend,
     headlessSocket,
@@ -2123,7 +2102,7 @@ async function runDurableMonitorPrompt(record: DurableMonitorRecord, text: strin
     getStoredCodexDriver(sessionInfo),
   );
   await restorePersistedPermissionMode(session, sessionInfo);
-  (session as any)._resumeSessionId = record.sessionId;
+  session._resumeSessionId = record.sessionId;
   await restorePersistedAgentSettings(session, sessionInfo);
   attachSessionLifecycleCallbacks(session);
   activeSessions.set(record.sessionId, session);
@@ -2348,7 +2327,7 @@ function publishDelegatedAgentResultCard(
     durableSessionEventDeliveries.set(sessionId, delivery);
   }
   const deliveryAware = [...connectedClients].some(
-    (client) => (client as any).supportsSessionEventAck === true,
+    (client) => client.supportsSessionEventAck === true,
   );
   const dispatch = (message: Record<string, any>) => {
     dispatchDurableSessionMessage(
@@ -2388,7 +2367,7 @@ async function runDelegatedSupervisorReport(
   const text = delegatedReportPrompt(record, run);
   const existing = activeSessions.get(record.supervisorSessionId);
   if (existing) {
-    const initialization = (existing as any)._socketAgentInitialization as Promise<void> | undefined;
+    const initialization = existing._socketAgentInitialization;
     if (initialization) await initialization;
     assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
     if (existing.isRunning) {
@@ -2400,7 +2379,7 @@ async function runDelegatedSupervisorReport(
         prompt: text,
         messageId: `delegated-report:${record.delegationId}:${run.runId}`,
       });
-    } else if ((existing as any).isCompacting === true) {
+    } else if (existing.isCompacting === true) {
       throw new Error(`Supervisor session ${record.supervisorSessionId} is compacting`);
     } else {
       await existing.runQuery(text, record.supervisorSessionId);
@@ -2417,7 +2396,7 @@ async function runDelegatedSupervisorReport(
     readyState: WebSocket.OPEN,
     send: (data: string) =>
       broadcastHeadlessSessionMessage(data, supervisor?.getSessionId() || record.supervisorSessionId),
-  } as any;
+  };
   supervisor = createSession(
     supervisorInfo.backend,
     headlessSocket,
@@ -2425,23 +2404,23 @@ async function runDelegatedSupervisorReport(
     plugins,
     getStoredCodexDriver(supervisorInfo),
   );
-  (supervisor as any)._resumeSessionId = record.supervisorSessionId;
+  supervisor._resumeSessionId = record.supervisorSessionId;
   attachSessionLifecycleCallbacks(supervisor);
   const initialization = (async () => {
     await restorePersistedPermissionMode(supervisor, supervisorInfo);
     await restorePersistedAgentSettings(supervisor, supervisorInfo);
   })();
-  (supervisor as any)._socketAgentInitialization = initialization;
+  supervisor._socketAgentInitialization = initialization;
   activeSessions.set(record.supervisorSessionId, supervisor);
   try {
     await initialization;
-    delete (supervisor as any)._socketAgentInitialization;
+    delete supervisor._socketAgentInitialization;
     assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
     await supervisor.runQuery(text, record.supervisorSessionId);
   } finally {
-    delete (supervisor as any)._socketAgentInitialization;
+    delete supervisor._socketAgentInitialization;
     const sid = supervisor.getSessionId() || record.supervisorSessionId;
-    if ((supervisor as any).isWarmIdle) {
+    if (supervisor.isWarmIdle) {
       await (supervisor as any).closeWarmIdle?.();
     }
     if (activeSessions.get(sid) === supervisor && !sessionShouldRemainPooled(supervisor)) {
@@ -2577,7 +2556,7 @@ async function launchDelegatedAgentTurn(
     readyState: WebSocket.OPEN,
     send: (data: string) =>
       broadcastHeadlessSessionMessage(data, child?.getSessionId() || childSessionId || temporaryId),
-  } as any;
+  };
 
   if (activeChild) {
     child = activeChild;
@@ -2591,7 +2570,7 @@ async function launchDelegatedAgentTurn(
     );
     if (childInfo) {
       await restorePersistedPermissionMode(child, childInfo);
-      (child as any)._resumeSessionId = childInfo.id;
+      child._resumeSessionId = childInfo.id;
       await restorePersistedAgentSettings(child, childInfo);
     } else {
       await restorePersistedAgentSettings(child, undefined);
@@ -2644,7 +2623,7 @@ async function launchDelegatedAgentTurn(
     })
     .finally(async () => {
       const sid = child.getSessionId() || childSessionId || temporaryId;
-      if ((child as any).isWarmIdle) {
+      if (child.isWarmIdle) {
         await (child as any).closeWarmIdle?.();
       }
       if (activeSessions.get(sid) === child && !sessionShouldRemainPooled(child)) {
@@ -2679,7 +2658,7 @@ async function stopDelegatedAgent(record: DelegatedAgentRecord): Promise<Delegat
       sessionId,
       () => abortGroupForSession(sessionId, [activeSessions.get(sessionId)]),
       (target) => {
-        for (const runner of abortTargets(target as Session)) {
+        for (const runner of target.abortTargets) {
           turnAbortTracker.markHardAborted(runner);
           liveSessionInstances.remove(runner, sessionId);
           if (activeSessions.get(sessionId) === runner) activeSessions.delete(sessionId);
@@ -3233,7 +3212,7 @@ async function restorePersistedAgentSettings(session: Session, sessionInfo?: Ses
   if (sessionInfo?.id) {
     const supervisorSessionId = delegationSupervisorForSessionId(sessionInfo.id);
     if (supervisorSessionId) {
-      (session as any)._delegationSupervisorSessionId = supervisorSessionId;
+      session._delegationSupervisorSessionId = supervisorSessionId;
       if (
         supervisorSessionId !== sessionInfo.id &&
         sessionInfo.delegationSupervisorSessionId !== supervisorSessionId
@@ -3537,7 +3516,7 @@ function createConnectionHandler(
   async function waitForFileSendBackpressure(): Promise<void> {
     const maxBufferedBytes = 4 * 1024 * 1024;
     while (transport.readyState === WebSocket.OPEN) {
-      const bufferedAmount = Number((transport as any).bufferedAmount || 0);
+      const bufferedAmount = Number(transport.bufferedAmount || 0);
       if (!Number.isFinite(bufferedAmount) || bufferedAmount <= maxBufferedBytes) {
         return;
       }
@@ -3871,9 +3850,9 @@ function createConnectionHandler(
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
     if ((msg as any).type === "client_capabilities") {
-      (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
-      (transport as any).supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
-      (transport as any).setClientCapabilities?.(msg);
+      transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
+      transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
+      transport.setClientCapabilities?.(msg);
       sendJson({
         ...serverCapabilitiesPayload(true, transportLane),
         codexCollaborationMode: "default",
@@ -4377,7 +4356,7 @@ function createConnectionHandler(
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
         }
-        activeSession = createSession(msg.backend, transport as any, cwd, plugins);
+        activeSession = createSession(msg.backend, transport, cwd, plugins);
         activeSessionId = null;
         activeSession.setTtsEnabled(pendingTtsEnabled);
         activeSession.setTtsEngine(pendingTtsEngine);
@@ -4483,13 +4462,13 @@ function createConnectionHandler(
         const existing = await recoverCanonicalLiveSession(msg.sessionId);
         if (existing) {
           // Reattach the transport to the running session
-          existing.setWebSocket(transport as any, true);
+          existing.setWebSocket(transport, true);
           activeSession = existing;
           console.log(`Reconnected to running session ${msg.sessionId}`);
         } else {
-          activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
+          activeSession = createSession(sessionInfo.backend, transport, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
           await restorePersistedPermissionMode(activeSession, sessionInfo);
-          (activeSession as any)._resumeSessionId = msg.sessionId;
+          activeSession._resumeSessionId = msg.sessionId;
           await restorePersistedAgentSettings(activeSession, sessionInfo);
         }
         activeSessionId = msg.sessionId;
@@ -4659,7 +4638,7 @@ function createConnectionHandler(
         // root turn's isRunning flag clears, so replay any existing session;
         // idle sessions have empty caches and this is a no-op.
         if (existing) {
-          existing.replayLiveState?.(transport as any);
+          existing.replayLiveState?.(transport);
         }
         durableSessionEventDeliveries.get(msg.sessionId)?.replayTo((message) => {
           sendJson(message);
@@ -4688,7 +4667,7 @@ function createConnectionHandler(
         // deliveries across both edges, so accept acknowledgements there too.
         // Otherwise the server retries cards the phone already applied.
         const localSessionId = activeSession?.getSessionId()
-          || (activeSession as any)?._resumeSessionId
+          || activeSession?._resumeSessionId
           || activeSessionId
           || undefined;
         const session = activeSessions.get(msg.sessionId)
@@ -4749,7 +4728,7 @@ function createConnectionHandler(
         const explicitPromptSessionId = String(
           msg.sessionId
             || activeSession?.getSessionId?.()
-            || (activeSession as any)?._resumeSessionId
+            || activeSession?._resumeSessionId
             || activeSessionId
             || "",
         ).trim();
@@ -4787,7 +4766,7 @@ function createConnectionHandler(
         if (msg.sessionId) {
           const runningForPrompt = await recoverCanonicalLiveSession(msg.sessionId);
           if (runningForPrompt && activeSession !== runningForPrompt) {
-            runningForPrompt.setWebSocket(transport as any);
+            runningForPrompt.setWebSocket(transport);
             activeSession = runningForPrompt;
             activeSessionId = msg.sessionId;
             sessionClients.set(msg.sessionId, {
@@ -4839,9 +4818,9 @@ function createConnectionHandler(
             });
             break;
           }
-          activeSession = createSession(promptBackend, transport as any, cwd, plugins, getStoredCodexDriver(savedPromptSession));
+          activeSession = createSession(promptBackend, transport, cwd, plugins, getStoredCodexDriver(savedPromptSession));
           await restorePersistedPermissionMode(activeSession, savedPromptSession);
-          if (savedResumeId) (activeSession as any)._resumeSessionId = savedResumeId;
+          if (savedResumeId) activeSession._resumeSessionId = savedResumeId;
           await restorePersistedAgentSettings(activeSession, savedPromptSession);
           activeSessionId = savedResumeId || null;
           activeSession.setTtsEnabled(pendingTtsEnabled);
@@ -4897,7 +4876,7 @@ function createConnectionHandler(
 
         let resumeId: string | undefined =
           msg.sessionId ||
-          (activeSession as any)._resumeSessionId ||
+          activeSession._resumeSessionId ||
           activeSession.getSessionId() ||
           undefined;
 
@@ -4945,7 +4924,7 @@ function createConnectionHandler(
           }
         }
 
-        (activeSession as any)._resumeSessionId = undefined;
+        activeSession._resumeSessionId = undefined;
 
         attachSessionLifecycleCallbacks(activeSession);
         if (resumeId) {
@@ -5155,7 +5134,7 @@ function createConnectionHandler(
             ? (msg as any).sessionId.trim()
             : undefined;
         const activeSid = activeSession?.getSessionId()
-          || (activeSession as any)?._resumeSessionId
+          || activeSession?._resumeSessionId
           || activeSessionId
           || undefined;
         const answerSession = requestedSessionId
@@ -5703,9 +5682,9 @@ function createConnectionHandler(
           if (task.status === "cancelled") task.status = "pending";
           saveScheduledTask(task);
           for (const session of activeSessions.values()) {
-            if ((session as any)._scheduledTaskId === task.id) {
-              (session as any)._scheduledTaskName = scheduledTaskDisplayName(task);
-              (session as any)._suppressOngoingNotification =
+            if (session._scheduledTaskId === task.id) {
+              session._scheduledTaskName = scheduledTaskDisplayName(task);
+              session._suppressOngoingNotification =
                 !scheduledTaskUsesAutomaticNotifications(task);
             }
           }
@@ -5972,7 +5951,7 @@ function createConnectionHandler(
           }
           sessionClients.delete(sid);
           const handlerSessionId = activeSession?.getSessionId()
-            || (activeSession as any)?._resumeSessionId
+            || activeSession?._resumeSessionId
             || activeSessionId;
           if (handlerSessionId === sid) {
             activeSession = null;
@@ -6165,7 +6144,7 @@ function createConnectionHandler(
         try {
           const live = activeSessions.get(sessionId)
             || ((activeSession?.getSessionId?.() === sessionId
-              || (activeSession as any)?._resumeSessionId === sessionId)
+              || activeSession?._resumeSessionId === sessionId)
               ? activeSession
               : undefined);
           if (live && sessionIsBusy(live)) {
@@ -6391,7 +6370,7 @@ function createConnectionHandler(
               activeSession && activeSessionId === targetSid ? activeSession : null,
             ]),
             (target) => {
-              const runners = abortTargets(target as Session);
+              const runners = target.abortTargets;
               for (const runner of runners) {
                 turnAbortTracker.markHardAborted(runner);
                 liveSessionInstances.remove(runner, targetSid);
@@ -6458,7 +6437,7 @@ function createConnectionHandler(
           ? String((msg as any).sessionId).trim()
           : "";
         const localSessionId = activeSession?.getSessionId?.()
-          || (activeSession as any)?._resumeSessionId
+          || activeSession?._resumeSessionId
           || activeSessionId
           || "";
         const targetSessionId = requestedSessionId || localSessionId;
@@ -6537,13 +6516,13 @@ function createConnectionHandler(
             if (!targetSession) {
               targetSession = createSession(
                 sessionInfo.backend,
-                transport as any,
+                transport,
                 sessionInfo.cwd,
                 plugins,
                 getStoredCodexDriver(sessionInfo),
               );
               await restorePersistedPermissionMode(targetSession, sessionInfo);
-              (targetSession as any)._resumeSessionId = targetSessionId;
+              targetSession._resumeSessionId = targetSessionId;
               await restorePersistedAgentSettings(targetSession, sessionInfo);
               activeSession = targetSession;
               activeSessionId = targetSessionId;
@@ -7380,7 +7359,7 @@ function createConnectionHandler(
         const activeMatchesTarget = !!activeSession && (
           activeSession.getSessionId?.() === targetSid ||
           activeSessionId === targetSid ||
-          (activeSession as any)._resumeSessionId === targetSid
+          activeSession._resumeSessionId === targetSid
         );
         const target = activeSessions.get(targetSid)
           || (activeMatchesTarget ? activeSession : null);
@@ -7480,7 +7459,7 @@ function createConnectionHandler(
         const activeMatchesTarget = !!activeSession && (
           activeSession.getSessionId?.() === targetSid ||
           activeSessionId === targetSid ||
-          (activeSession as any)._resumeSessionId === targetSid
+          activeSession._resumeSessionId === targetSid
         );
         const target = targetSid
           ? activeSessions.get(targetSid) || (activeMatchesTarget ? activeSession : null)
@@ -7997,7 +7976,7 @@ function createConnectionHandler(
         const uuid = (msg as any).userMessageUuid as string;
         const dryRun = (msg as any).dryRun === true;
         const shouldRewindFiles = (msg as any).rewindFiles !== false; // default true
-        const sessionId = (msg as any).sessionId || activeSession?.getSessionId() || (activeSession as any)?._resumeSessionId;
+        const sessionId = msg.sessionId || activeSession?.getSessionId() || activeSession?._resumeSessionId;
 
         if (!sessionId) {
           sendJson({ type: "rewind_conversation_result", sessionId: "", success: false, userMessageUuid: uuid, error: "No active session" });
@@ -8010,7 +7989,7 @@ function createConnectionHandler(
         const removedThroughSeq = getLastHistorySessionSeq(sessionId);
         const rewindSessionInfo = getSession(sessionId);
         const target = activeSessions.get(sessionId)
-          || ((activeSession?.getSessionId() || (activeSession as any)?._resumeSessionId) === sessionId ? activeSession : undefined);
+          || ((activeSession?.getSessionId() || activeSession?._resumeSessionId) === sessionId ? activeSession : undefined);
         if (rewindSessionInfo?.backend === "codex" || target instanceof CodexSession) {
           const rewindStartedAt = Date.now();
           console.log(`[CodexRewind] started session=${sessionId} dryRun=${dryRun}`);
@@ -8096,9 +8075,9 @@ function createConnectionHandler(
           // Step 3: Create a new session primed to resume-at this point
           const sessionInfo = getSession(sessionId);
           const cwd = sessionInfo?.cwd || activeSession?.getCwd() || getDefaultCwd() || process.env.HOME || "/";
-          activeSession = createSession(sessionInfo?.backend, transport as any, cwd, plugins, getStoredCodexDriver(sessionInfo));
+          activeSession = createSession(sessionInfo?.backend, transport, cwd, plugins, getStoredCodexDriver(sessionInfo));
           await restorePersistedPermissionMode(activeSession, sessionInfo);
-          (activeSession as any)._resumeSessionId = sessionId;
+          activeSession._resumeSessionId = sessionId;
           await restorePersistedAgentSettings(activeSession, sessionInfo);
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setTtsEngine(pendingTtsEngine);
@@ -8157,7 +8136,7 @@ function createConnectionHandler(
 
         try {
           // Use SDK's forkSession with upToMessageId to create a branch at the specific message
-          const { forkSession: sdkFork } = require("@anthropic-ai/claude-agent-sdk");
+          const { forkSession: sdkFork } = await import("@anthropic-ai/claude-agent-sdk");
           const result = await sdkFork(sourceId, {
             upToMessageId: branchUuid,
             dir: sessionInfo.cwd,
@@ -8191,8 +8170,8 @@ function createConnectionHandler(
           }
 
           // Set up new session ready to resume the fork
-          activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
-          (activeSession as any)._resumeSessionId = newSessionId;
+          activeSession = createSession(sessionInfo.backend, transport, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
+          activeSession._resumeSessionId = newSessionId;
           await restorePersistedAgentSettings(activeSession, sessionInfo);
           activeSession.setTtsEnabled(pendingTtsEnabled);
           activeSession.setTtsEngine(pendingTtsEngine);
@@ -8249,7 +8228,7 @@ function createConnectionHandler(
             if (activeSession && activeSession.isRunning) {
               activeSession.detachWebSocket();
             }
-            const forked = new CodexSession(transport as any, sessionInfo.cwd, plugins);
+            const forked = new CodexSession(transport, sessionInfo.cwd, plugins);
             await restorePersistedAgentSettings(forked, sessionInfo);
             forked.setTtsEnabled(pendingTtsEnabled);
             forked.setTtsEngine(pendingTtsEngine);
@@ -8300,7 +8279,7 @@ function createConnectionHandler(
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
         }
-        activeSession = createSession(sessionInfo.backend, transport as any, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
+        activeSession = createSession(sessionInfo.backend, transport, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
         await restorePersistedPermissionMode(activeSession, sessionInfo);
         await restorePersistedAgentSettings(activeSession, sessionInfo);
         activeSession.setTtsEnabled(pendingTtsEnabled);
@@ -9035,19 +9014,19 @@ async function continueSession(sessionId: string, prompt: string, recoveryId?: s
     const existingClient = sessionClients.get(sessionId);
     const ws = existingClient?.ws?.readyState === WebSocket.OPEN
       ? existingClient.ws
-      : { readyState: WebSocket.CLOSED, send: () => {} } as any;
+      : { readyState: WebSocket.CLOSED, send: () => {} };
     const session = createSession(sessionInfo.backend, ws, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
     try {
       const scheduled = listScheduledTasks().find(task => task.status === "running"
         && task.runs?.some(run => run.sessionId === sessionId && run.status === "running"));
       if (scheduled) {
-        (session as any)._scheduledTaskId = scheduled.id;
-        (session as any)._scheduledTaskName = scheduledTaskDisplayName(scheduled);
-        (session as any)._suppressOngoingNotification = !scheduledTaskUsesAutomaticNotifications(scheduled);
+        session._scheduledTaskId = scheduled.id;
+        session._scheduledTaskName = scheduledTaskDisplayName(scheduled);
+        session._suppressOngoingNotification = !scheduledTaskUsesAutomaticNotifications(scheduled);
       }
       await boundedRecoverySetup(restorePersistedPermissionMode(session, sessionInfo));
 
-      (session as any)._resumeSessionId = sessionId;
+      session._resumeSessionId = sessionId;
       await boundedRecoverySetup(restorePersistedAgentSettings(session, sessionInfo));
       if (restartPreparing || shuttingDown || sessionAutomationLocks.isLocked(sessionId)) {
         throw new Error("Continuation cancelled before launch");
@@ -9829,7 +9808,7 @@ function buildStatusSyncMessage(): string {
   const sessionModels: Record<string, string> = {};
   for (const [sid, session] of activeSessions) {
     const busy = sessionAgentIsWorking(session);
-    const placeholderId = (session as any)._scheduledPlaceholderSessionId;
+    const placeholderId = session._scheduledPlaceholderSessionId;
     const exposeSession = typeof placeholderId !== "string" || sid !== placeholderId;
     if (busy) {
       anyRunning = true;
@@ -10064,19 +10043,19 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     const ws = {
       readyState: WebSocket.OPEN,
       send: (data: string) => forwardHeadlessScheduledAgentMessage(data, session?.getSessionId() || task.sessionId || ""),
-    } as any;
+    };
     session = createSession(backend, ws, task.cwd, plugins, codexDriver);
     const scheduledSupervisorSessionId = task.createdBySessionId
       ? delegationSupervisorForSessionId(task.createdBySessionId)
       : "";
     if (scheduledSupervisorSessionId) {
-      (session as any)._delegationSupervisorSessionId =
+      session._delegationSupervisorSessionId =
         scheduledSupervisorSessionId;
     }
-    (session as any)._suppressOngoingNotification =
+    session._suppressOngoingNotification =
       !scheduledTaskUsesAutomaticNotifications(task);
-    (session as any)._scheduledTaskId = task.id;
-    (session as any)._scheduledTaskName = scheduledTaskDisplayName(task);
+    session._scheduledTaskId = task.id;
+    session._scheduledTaskName = scheduledTaskDisplayName(task);
     await restorePersistedPermissionMode(session, previousSessionInfo || undefined);
     await restorePersistedAgentSettings(session, previousSessionInfo || undefined);
     if (task.permissionMode) {
@@ -10099,7 +10078,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     }
 
     const tempId = `scheduled-${task.id}`;
-    (session as any)._scheduledPlaceholderSessionId = tempId;
+    session._scheduledPlaceholderSessionId = tempId;
     activeSessions.set(tempId, session);
     let scheduledStartPushSent = false;
     const maybeSendScheduledStartPush = () => {
@@ -10146,7 +10125,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.lastRunAt = new Date().toISOString();
       applyLatestScheduledTaskEditableFields(task);
 
-      if ((session as any).isWarmIdle) {
+      if (session.isWarmIdle) {
         void (session as any).closeWarmIdle?.();
       }
       if (activeSessions.get(sid) === session) activeSessions.delete(sid);
@@ -10215,7 +10194,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.lastRunAt = new Date().toISOString();
       applyLatestScheduledTaskEditableFields(task);
 
-      if ((session as any).isWarmIdle) {
+      if (session.isWarmIdle) {
         void (session as any).closeWarmIdle?.();
       }
       activeSessions.delete(tempId);
@@ -10403,8 +10382,8 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       }
       transport.authenticate((msg as any).binaryEnvelope === true);
       transport.setClientCapabilities(msg);
-      (transport as any).supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
-      (transport as any).supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
+      transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
+      transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       console.log(
         `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane})`,
       );
@@ -10545,7 +10524,7 @@ function startRelayClient(): void {
     onMessage: (msg: ClientMessage) => {
       if (!relayConnectionHandler) {
         // Create handler on first message (phone just paired)
-        relayConnectionHandler = createConnectionHandler(relayClient!.getVirtualSocket() as any);
+        relayConnectionHandler = createConnectionHandler(relayClient!.getVirtualSocket());
         console.log(`[Relay] Created connection handler for phone`);
       }
       const handler = relayConnectionHandler;
@@ -10599,7 +10578,7 @@ function startRelayClient(): void {
       if (status === "paired") {
         // Reset handler when phone reconnects so it gets a fresh state
         relayConnectionHandler?.close();
-        relayConnectionHandler = createConnectionHandler(relayClient!.getVirtualSocket() as any);
+        relayConnectionHandler = createConnectionHandler(relayClient!.getVirtualSocket());
         relayControlMessageScheduler.reset();
         console.log(`[Relay] Phone paired — ready for messages`);
       }
@@ -10622,7 +10601,7 @@ function startRelayClient(): void {
     onMessage: (msg: ClientMessage) => {
       if (!relayBulkConnectionHandler) {
         relayBulkConnectionHandler = createConnectionHandler(
-          relayBulkClient!.getVirtualSocket() as any,
+          relayBulkClient!.getVirtualSocket(),
           "bulk",
         );
         console.log("[Relay:bulk] Created bulk connection handler");
@@ -10656,7 +10635,7 @@ function startRelayClient(): void {
       if (status === "paired") {
         relayBulkConnectionHandler?.close();
         relayBulkConnectionHandler = createConnectionHandler(
-          relayBulkClient!.getVirtualSocket() as any,
+          relayBulkClient!.getVirtualSocket(),
           "bulk",
         );
         relayBulkMessageQueue = Promise.resolve();

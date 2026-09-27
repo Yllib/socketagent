@@ -1,3 +1,4 @@
+import type { ClientTransport } from "./client-transport";
 import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
 import type { JsonValue } from "./generated/codex/types/serde_json/JsonValue";
 import type { CollaborationMode } from "./generated/codex/types/CollaborationMode";
@@ -652,7 +653,7 @@ export class CodexSession {
   private pendingQuestions = new Map<string, PendingQuestion>();
   private appServerQuestionByRequestId = new Map<string, string>();
   private connectedAppApprovals = new Set<string>();
-  private clientSockets = new Set<WebSocket>();
+  private clientSockets = new Set<ClientTransport>();
   private sessionEventDelivery = new SessionEventDelivery<ServerMessage>((message) => {
     this.dispatchToClients(message);
   });
@@ -675,7 +676,7 @@ export class CodexSession {
   public _resumeSessionId?: string;
 
   constructor(
-    private ws: WebSocket,
+    private ws: ClientTransport,
     private cwd: string,
     private _plugins: SocketAgentPlugin[] = [],
   ) {
@@ -720,6 +721,9 @@ export class CodexSession {
   }
   get isWarmIdle(): boolean {
     return !!this.appServer && !this.isBusy;
+  }
+  get hasLiveBackend(): boolean {
+    return this.appServer !== null;
   }
   private get hasRunningSubagents(): boolean {
     return [...this.codexSubagents.values()].some(
@@ -966,7 +970,7 @@ export class CodexSession {
     });
   }
 
-  setWebSocket(ws: WebSocket, deferLiveReplay = false): void {
+  setWebSocket(ws: ClientTransport, deferLiveReplay = false): void {
     this.attachWebSocket(ws);
     if (this._lastSupportedModels) this.sendTo(ws, this._lastSupportedModels);
     if (!deferLiveReplay) {
@@ -979,7 +983,7 @@ export class CodexSession {
   acknowledgeSessionEvent(deliveryId: string): boolean {
     return this.sessionEventDelivery.acknowledge(deliveryId);
   }
-  replayLiveState(ws: WebSocket = this.ws): void {
+  replayLiveState(ws: ClientTransport = this.ws): void {
     const sid = this.sessionId || "";
     if (!sid) return;
 
@@ -1051,7 +1055,7 @@ export class CodexSession {
     return readable || `Codex agent ${agentId.slice(0, 8)}`;
   }
 
-  private sendSubagentSnapshot(ws?: WebSocket): void {
+  private sendSubagentSnapshot(ws?: ClientTransport): void {
     const sessionId = this.sessionId;
     if (!sessionId) return;
     // Terminal children carry their outcome through reconnects too.
@@ -2264,12 +2268,12 @@ export class CodexSession {
   }
 
   /** Mirrors ClaudeSession.send — sends a ServerMessage over the WS. */
-  private attachWebSocket(ws: WebSocket): void {
+  private attachWebSocket(ws: ClientTransport): void {
     this.ws = ws;
     this.clientSockets.add(ws);
   }
 
-  private sendTo(ws: WebSocket, msg: ServerMessage): void {
+  private sendTo(ws: ClientTransport, msg: ServerMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(redactSecretsDeep(msg)));
     }
@@ -2313,7 +2317,7 @@ export class CodexSession {
   }
 
   private sendSdkEvent(msg: ServerMessage): void {
-    const recipients: WebSocket[] = [];
+    const recipients: ClientTransport[] = [];
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN && "supportsRawSdkEvents" in socket && socket.supportsRawSdkEvents === true) {
         recipients.push(socket);
@@ -5828,14 +5832,24 @@ export class CodexSession {
  * methods it doesn't implement. Reach for `instanceof` only when a code path
  * needs a feature one backend doesn't support (e.g., MCP tools, fork, rewind).
  */
-export type Session = ClaudeSession | CodexSession;
+/** Routing state owned by the server, separate from either provider's query state. */
+export interface SessionRuntimeMetadata {
+  _scheduledTaskId?: string;
+  _scheduledTaskName?: string;
+  _scheduledPlaceholderSessionId?: string;
+  _suppressOngoingNotification?: boolean;
+  _socketAgentInitialization?: Promise<void>;
+  onHarnessRunStateChanged?: (running: boolean) => void;
+}
+
+export type Session = (ClaudeSession | CodexSession) & SessionRuntimeMetadata;
 
 /**
  * Picks the right session implementation after checking backend availability.
  */
 export function createSession(
   backend: Backend | undefined,
-  ws: WebSocket,
+  ws: ClientTransport,
   cwd: string,
   plugins: SocketAgentPlugin[],
   _codexDriver?: CodexDriver,

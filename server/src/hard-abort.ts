@@ -7,9 +7,6 @@ export interface HardAbortResult {
   alreadyStopped: boolean;
 }
 
-type AbortLookup = () => AbortableSession | null | undefined;
-type AbortRemove = (target: AbortableSession) => void;
-
 /**
  * Makes hard-abort requests idempotent. Retransmitted requests join the same
  * operation and receive the same completion result; failures are not cached,
@@ -21,11 +18,11 @@ export class HardAbortCoordinator {
 
   constructor(private readonly retentionMs = 5 * 60_000) {}
 
-  abort(
+  abort<T extends AbortableSession>(
     requestId: string,
     sessionId: string,
-    lookup: AbortLookup,
-    remove: AbortRemove,
+    lookup: () => T | null | undefined,
+    remove: (target: T) => void,
   ): Promise<HardAbortResult> {
     const key = `${sessionId}\u0001${requestId}`;
     const completed = this.completed.get(key);

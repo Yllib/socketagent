@@ -1,14 +1,13 @@
+import type { ClientTransport } from "./client-transport";
+import type { Session } from "./codex-session";
 import { ServerMessage, HistoryEntry } from "./protocol";
 import * as http from "http";
 
-export interface PluginClientTransport {
-  readonly readyState: number;
-  send(data: string): void;
-}
+export type PluginClientTransport = ClientTransport;
 
 /** Context provided to plugins at init time (server-level state) */
 export interface PluginContext {
-  getActiveSessions: () => Map<string, any>;
+  getActiveSessions: () => ReadonlyMap<string, Session>;
   getConnectedClients: () => Set<PluginClientTransport>;
   /** Broadcast a message to all connected clients (direct + relay) */
   broadcast: (msg: string) => void;
@@ -29,7 +28,7 @@ export interface SessionContext {
 
 /** canUseTool interceptor result — return null to pass to next handler */
 export type CanUseToolResult =
-  | { behavior: "allow"; updatedInput?: any; message?: string }
+  | { behavior: "allow"; updatedInput?: Record<string, unknown>; message?: string }
   | { behavior: "deny"; message: string }
   | null;
 
@@ -61,7 +60,7 @@ export interface SocketAgentPlugin {
   /** canUseTool interceptor — called before built-in handlers. Return null to pass through. */
   canUseToolInterceptor?(
     toolName: string,
-    input: Record<string, any>,
+    input: Record<string, unknown>,
     sessionCtx: SessionContext
   ): Promise<CanUseToolResult>;
 

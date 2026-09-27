@@ -67,7 +67,7 @@ Use the report command for current rule and file counts.
 | Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
 | Provider adapters | Complete | Codex and Claude sessions, stream identity, native history, elicitation, and interactive answer helpers have zero diagnostics. Test streaming, completion, approvals, cancellation, and subagents. |
 | Persisted history | Complete | SQLite rows, history JSON, session metadata, task lists, native history readers, and transfer bundles are validated. `session-store.ts`, `transcript-database.ts`, and `session-transfer.ts` have zero diagnostics. Test recovery, pagination, rewind, and archive reads. |
-| WebSocket routing | Pending | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
+| WebSocket routing | In progress | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
 | Remaining code and tests | Pending | MCP tools, plugins API, relay client, helpers, JS fixtures and scripts. Audit additional repositories and ignored private plugins separately. |
 | Final enforcement | Pending | Zero baseline; remove baseline handling; review lingering assertions and inferred unsafe types, not just the explicit-any count. |
 
@@ -177,3 +177,14 @@ not a new auto-update policy.
   malformed-bundle import test passed. Full suite: 546 passed, one skipped.
   All 154 local session metadata records validated read-only. Baseline: 5,003.
   Output: `/tmp/sa-session-store-full-tests.log`.
+
+- Server `0feb23b`: session metadata/native readers/transfer validation checkpoint.
+- Routing foundations: one ClientTransport contract covers direct, relay, and
+  headless delivery. Provider constructors and plugin APIs accept that contract;
+  server-owned runtime metadata is declared separately. Live-backend and auth
+  state are exposed through getters instead of private-property casts. Hard abort
+  preserves its concrete target type through lookup/removal, so abort groups no
+  longer masquerade as full Session instances. SDK fork uses a typed lazy import.
+- Routing foundation validation: 32 focused delivery/lifecycle tests passed;
+  full suite 546 passed, one skipped. Baseline: 4,644. Output:
+  `/tmp/sa-routing-foundation-full-tests.log`.

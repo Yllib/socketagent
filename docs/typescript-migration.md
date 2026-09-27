@@ -66,7 +66,7 @@ Use the report command for current rule and file counts.
 | Codex transport, rewind, sign-in | Complete | Raw RPC responses stay unknown; validate consumed rewind, compaction, migration, and login fields. No baseline entries in these modules. |
 | Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
 | Provider adapters | Complete | Codex and Claude sessions, stream identity, native history, elicitation, and interactive answer helpers have zero diagnostics. Test streaming, completion, approvals, cancellation, and subagents. |
-| Persisted history | Pending | Validate JSON and database rows, including supported legacy records, in `session-store.ts` and `transcript-database.ts`. Test recovery, pagination, rewind, and archive reads. |
+| Persisted history | In progress | SQLite rows and history JSON now validate all declared fields; `transcript-database.ts` has zero diagnostics. Session metadata and native history readers remain. Test recovery, pagination, rewind, and archive reads. |
 | WebSocket routing | Pending | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
 | Remaining code and tests | Pending | MCP tools, plugins API, relay client, helpers, JS fixtures and scripts. Audit additional repositories and ignored private plugins separately. |
 | Final enforcement | Pending | Zero baseline; remove baseline handling; review lingering assertions and inferred unsafe types, not just the explicit-any count. |
@@ -155,3 +155,13 @@ not a new auto-update policy.
 - Claude stream validation: build/lint passed; 107 focused tests passed; full
   suite 540 passed, one skipped. Baseline: 5,617 (1,336 removed this checkpoint).
   Output: `/tmp/sa-claude-provider-full-tests.log`.
+
+- History reader checkpoint: SQLite row schemas replace narrowing assertions;
+  stored HistoryEntry schemas validate optional/nested fields and retain future
+  fields. Missing legacy text/timestamp becomes an empty display value, never an
+  invented date. Snapshot/archive readers validate arrays without dropping bad
+  entries. Existing snapshot recovery remains in place.
+- History reader validation: 43 focused tests and the full suite passed (543
+  passed, one skipped). Read-only validation of 25,000 recent local database
+  entries found zero failures. Baseline: 5,548. Output:
+  `/tmp/sa-history-reader-full-tests.log`.

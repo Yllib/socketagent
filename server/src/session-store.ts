@@ -1,3 +1,4 @@
+import { parseHistoryEntries } from "./history-schema";
 import { hasInlineImages, snapshotInlineImages } from "./inline-image-markdown";
 import * as fs from "fs";
 import * as path from "path";
@@ -1167,15 +1168,12 @@ export function normalizeClaudeResultFallbackHistoryEntries(
 }
 
 function parseHistorySnapshot(file: string): HistoryEntry[] {
-  const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-  if (!Array.isArray(parsed)) {
-    throw new Error(`History snapshot is not an array: ${file}`);
-  }
+  const parsed = parseHistoryEntries(JSON.parse(fs.readFileSync(file, "utf-8")));
   return normalizeClaudeResultFallbackHistoryEntries(
     normalizeSocketAgentAppToolEntries(
       normalizeMisclassifiedCodexItemEntries(
         normalizeSpeakHistoryEntries(
-          normalizeSendFileHistoryEntries(parsed as HistoryEntry[]),
+          normalizeSendFileHistoryEntries(parsed),
         ),
       ),
     ),
@@ -1279,7 +1277,7 @@ function safeHistoryEntriesForStorage(
     ? positioned.map((entry, index) => dirtyEntries.has(entry)
       ? compactHistoryEntryForStorage(sessionId, redactSecretsDeep(entry), index)
       : entry)
-    : (redactSecretsDeep(positioned) as HistoryEntry[])
+    : redactSecretsDeep(positioned)
       .map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
 }
 
@@ -3427,9 +3425,9 @@ export function listArchives(): ArchiveEntry[] {
     const histName = group.files.get("history");
     if (histName) {
       try {
-        const hist = JSON.parse(fs.readFileSync(path.join(ARCHIVE_DIR, histName), "utf-8")) as any[];
+        const hist = parseHistoryEntries(JSON.parse(fs.readFileSync(path.join(ARCHIVE_DIR, histName), "utf-8")));
         messageCount = Array.isArray(hist) ? hist.length : 0;
-        const firstUser = (hist as any[]).find((e) => e.role === "user");
+        const firstUser = hist.find((e) => e.role === "user");
         if (firstUser) messagePreview = String(firstUser.content || "").slice(0, 200);
       } catch {}
     }
@@ -3509,7 +3507,7 @@ export function getArchiveHistory(sid: string, ts: string): HistoryEntry[] {
   const p = path.join(ARCHIVE_DIR, `${sid}_${ts}_history.json`);
   if (!fs.existsSync(p)) return [];
   try {
-    return hydrateHistoryEntries(JSON.parse(fs.readFileSync(p, "utf-8")) as HistoryEntry[]);
+    return hydrateHistoryEntries(parseHistoryEntries(JSON.parse(fs.readFileSync(p, "utf-8"))));
   } catch {
     return [];
   }
@@ -3639,11 +3637,11 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
   let titleFallback = "";
   let turnCount = 0;
   try {
-    const hist = JSON.parse(fs.readFileSync(liveHist, "utf-8")) as any[];
-    turnCount = Array.isArray(hist) ? conversationTurnCountFromEntries(hist as HistoryEntry[]) : 0;
+    const hist = parseHistoryEntries(JSON.parse(fs.readFileSync(liveHist, "utf-8")));
+    turnCount = conversationTurnCountFromEntries(hist);
     const lastUser = [...hist].reverse().find((e) => e.role === "user");
     if (lastUser) messagePreview = String(lastUser.content || "").slice(0, 200);
-    const firstUser = (hist as any[]).find((e) => e.role === "user");
+    const firstUser = hist.find((e) => e.role === "user");
     if (firstUser) {
       const line = String(firstUser.content || "").split(/\r?\n/)[0].trim();
       titleFallback = line.length > 60 ? line.slice(0, 60) + "…" : line;

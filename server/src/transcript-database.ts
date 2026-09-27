@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { historyEntrySchema } from "./history-schema";
 import { createHash } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import * as fs from "fs";
@@ -77,6 +79,63 @@ interface StoredSummaryRow {
   updated_at: string;
 }
 
+const storedTranscriptRowSchema = z.object({
+  session_seq: z.number(),
+  entry_id: z.string(),
+  revision: z.number(),
+  role: z.string(),
+  timestamp: z.string().nullable(),
+  tool_name: z.string().nullable(),
+  position_key: z.string().nullable(),
+  entry_json: z.string(),
+} satisfies { [K in keyof StoredTranscriptRow]-?: z.ZodType<StoredTranscriptRow[K]> });
+
+const storedSummaryRowSchema = z.object({
+  session_id: z.string(),
+  entry_count: z.number(),
+  user_prompt_count: z.number(),
+  latest_timestamp: z.string().nullable(),
+  message_preview: z.string().nullable(),
+  latest_conversation_seq: z.number().nullable(),
+  legacy_path: z.string().nullable(),
+  legacy_size: z.number().nullable(),
+  legacy_mtime_ms: z.number().nullable(),
+  migrated_at: z.string().nullable(),
+  updated_at: z.string(),
+} satisfies { [K in keyof StoredSummaryRow]-?: z.ZodType<StoredSummaryRow[K]> });
+
+const schemaVersionRowSchema = z.object({ user_version: z.number() });
+const tableColumnsSchema = z.array(z.object({ name: z.string() }));
+const sessionIdRowsSchema = z.array(z.object({ session_id: z.string() }));
+const optionalSummaryRowSchema = storedSummaryRowSchema.optional();
+const scalarRowSchema = z.object({ value: z.number() });
+const entryPositionRowSchema = z.object({ entry_id: z.string(), session_seq: z.number(), revision: z.number() });
+const optionalEntryRowSchema = storedTranscriptRowSchema.optional();
+const entryRowsSchema = z.array(storedTranscriptRowSchema);
+const countRowSchema = z.object({ count: z.number() });
+const uuidRowsSchema = z.array(z.object({ uuid: z.string() }));
+const optionalSequenceRowSchema = z.object({ session_seq: z.number() }).optional();
+const rowIdRowSchema = z.object({ rowid: z.number() });
+const aggregateRowSchema = z.object({
+  entry_count: z.number(), user_prompt_count: z.number().nullable(),
+  latest_timestamp: z.string().nullable(),
+});
+const optionalConversationRowSchema = z.object({
+  session_seq: z.number(), entry_json: z.string(),
+}).optional();
+const optionalEntrySummaryRowSchema = storedTranscriptRowSchema.pick({
+  session_seq: true, role: true, timestamp: true, entry_json: true,
+}).optional();
+const timestampRowSchema = z.object({ latest_timestamp: z.string().nullable() });
+const deletionRowsSchema = z.array(z.object({ rowid: z.number(), entry_id: z.string() }));
+const searchRowSchema = z.object({
+  session_id: z.string(), session_seq: z.number(), entry_id: z.string(),
+  revision: z.number(), role: z.string(), timestamp: z.string().nullable(),
+  tool_name: z.string().nullable(), preview: z.string(),
+});
+const rankedSearchRowsSchema = z.array(searchRowSchema.extend({ rank: z.number() }));
+const searchRowsSchema = z.array(searchRowSchema);
+
 interface EntrySummaryState {
   sessionSeq: number;
   role: string;
@@ -122,7 +181,7 @@ function safeFtsQuery(query: string): string {
 }
 
 function parseEntry(row: StoredTranscriptRow): HistoryEntry {
-  return JSON.parse(row.entry_json) as HistoryEntry;
+  return historyEntrySchema.parse(JSON.parse(row.entry_json));
 }
 
 function summaryFromRow(row: StoredSummaryRow): TranscriptSummary {
@@ -215,9 +274,7 @@ export class TranscriptDatabase {
         ON transcript_entries(session_id, json_extract(entry_json, '$.reviewId'))
         WHERE role = 'work_review';
     `);
-    const schemaVersion = Number((this.db.prepare("PRAGMA user_version").get() as unknown as {
-      user_version: number;
-    }).user_version);
+    const schemaVersion = Number((schemaVersionRowSchema.parse(this.db.prepare("PRAGMA user_version").get())).user_version);
     const hadFtsTable = !!this.db.prepare(
       "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transcript_fts'",
     ).get();
@@ -300,8 +357,8 @@ export class TranscriptDatabase {
     }
     this.ftsEnabled = ftsEnabled;
     this.searchTable = ftsEnabled ? "transcript_fts" : "transcript_search";
-    const entryColumns = this.db.prepare("PRAGMA table_info(transcript_entries)")
-      .all() as unknown as Array<{ name: string }>;
+    const entryColumns = tableColumnsSchema.parse(this.db.prepare("PRAGMA table_info(transcript_entries)")
+      .all());
     if (!entryColumns.some((column) => column.name === "tool_use_id")) {
       this.db.exec("ALTER TABLE transcript_entries ADD COLUMN tool_use_id TEXT");
       this.db.exec(`UPDATE transcript_entries
@@ -360,15 +417,15 @@ export class TranscriptDatabase {
   }
 
   listSessionIds(): string[] {
-    return (this.db.prepare(
+    return (sessionIdRowsSchema.parse(this.db.prepare(
       "SELECT session_id FROM transcript_sessions ORDER BY updated_at DESC",
-    ).all() as Array<{ session_id: string }>).map((row) => row.session_id);
+    ).all())).map((row) => row.session_id);
   }
 
   summary(sessionId: string): TranscriptSummary | undefined {
-    const row = this.db.prepare(
+    const row = optionalSummaryRowSchema.parse(this.db.prepare(
       "SELECT * FROM transcript_sessions WHERE session_id = ?",
-    ).get(sessionId) as unknown as StoredSummaryRow | undefined;
+    ).get(sessionId));
     return row ? summaryFromRow(row) : undefined;
   }
 
@@ -381,9 +438,9 @@ export class TranscriptDatabase {
   }
 
   maxSessionSeq(sessionId: string): number {
-    const row = this.db.prepare(
+    const row = scalarRowSchema.parse(this.db.prepare(
       "SELECT COALESCE(MAX(session_seq), 0) AS value FROM transcript_entries WHERE session_id = ?",
-    ).get(sessionId) as unknown as { value: number };
+    ).get(sessionId));
     return Number(row.value);
   }
 
@@ -404,7 +461,7 @@ export class TranscriptDatabase {
           `).get(sessionId, positionKey)
         : undefined;
     if (!row) return undefined;
-    const typed = row as unknown as { entry_id: string; session_seq: number; revision: number };
+    const typed = entryPositionRowSchema.parse(row);
     return {
       entryId: typed.entry_id,
       sessionSeq: Number(typed.session_seq),
@@ -413,23 +470,23 @@ export class TranscriptDatabase {
   }
 
   getByEntryId(sessionId: string, entryId: string): HistoryEntry | undefined {
-    const row = this.db.prepare(`
+    const row = optionalEntryRowSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries WHERE session_id = ? AND entry_id = ?
-    `).get(sessionId, entryId) as unknown as StoredTranscriptRow | undefined;
+    `).get(sessionId, entryId));
     return row ? parseEntry(row) : undefined;
   }
 
   getBySessionSeq(sessionId: string, sessionSeq: number): HistoryEntry | undefined {
-    const row = this.db.prepare(`
+    const row = optionalEntryRowSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries WHERE session_id = ? AND session_seq = ?
-    `).get(sessionId, sessionSeq) as unknown as StoredTranscriptRow | undefined;
+    `).get(sessionId, sessionSeq));
     return row ? parseEntry(row) : undefined;
   }
 
   getAll(sessionId: string): HistoryEntry[] {
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries WHERE session_id = ? ORDER BY session_seq
-    `).all(sessionId) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId))).map(parseEntry);
   }
 
   count(sessionId: string): number {
@@ -437,13 +494,13 @@ export class TranscriptDatabase {
   }
 
   countCompactionBoundaries(sessionId: string): number {
-    const row = this.db.prepare(`
+    const row = scalarRowSchema.parse(this.db.prepare(`
       SELECT COUNT(*) AS value
       FROM transcript_entries
       WHERE session_id = ?
         AND role = 'assistant'
         AND json_extract(entry_json, '$.content') LIKE '[compact_boundary:%'
-    `).get(sessionId) as unknown as { value: number };
+    `).get(sessionId));
     return Number(row.value);
   }
 
@@ -455,17 +512,17 @@ export class TranscriptDatabase {
   }
 
   getPage(sessionId: string, offset: number, limit: number): HistoryEntry[] {
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? ORDER BY session_seq LIMIT ? OFFSET ?
-    `).all(sessionId, limit, offset) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId, limit, offset))).map(parseEntry);
   }
 
   getTail(sessionId: string, limit: number): HistoryEntry[] {
-    const rows = this.db.prepare(`
+    const rows = entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? ORDER BY session_seq DESC LIMIT ?
-    `).all(sessionId, limit) as unknown as StoredTranscriptRow[];
+    `).all(sessionId, limit));
     return rows.reverse().map(parseEntry);
   }
 
@@ -478,19 +535,19 @@ export class TranscriptDatabase {
     const boundedLimit = Math.max(1, Math.min(50, limit));
     if (cursor === undefined) return this.getTail(sessionId, boundedLimit);
     if (direction === "after") return this.getAfter(sessionId, cursor, boundedLimit);
-    const rows = this.db.prepare(`
+    const rows = entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND session_seq < ?
       ORDER BY session_seq DESC LIMIT ?
-    `).all(sessionId, cursor, boundedLimit) as unknown as StoredTranscriptRow[];
+    `).all(sessionId, cursor, boundedLimit));
     return rows.reverse().map(parseEntry);
   }
 
   getAfter(sessionId: string, sessionSeq: number, limit: number): HistoryEntry[] {
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND session_seq > ? ORDER BY session_seq LIMIT ?
-    `).all(sessionId, sessionSeq, limit) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId, sessionSeq, limit))).map(parseEntry);
   }
 
   getRevisedInteractionsBetween(
@@ -499,7 +556,7 @@ export class TranscriptDatabase {
     endSessionSeq: number,
     limit: number,
   ): HistoryEntry[] {
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ?
         AND session_seq >= ?
@@ -519,22 +576,22 @@ export class TranscriptDatabase {
       startSessionSeq,
       endSessionSeq,
       limit,
-    ) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    ))).map(parseEntry);
   }
 
   getByRole(sessionId: string, role: string): HistoryEntry[] {
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND role = ? ORDER BY session_seq
-    `).all(sessionId, role) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId, role))).map(parseEntry);
   }
 
   getLatestByRole(sessionId: string, role: string): HistoryEntry | undefined {
-    const row = this.db.prepare(`
+    const row = optionalEntryRowSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND role = ?
       ORDER BY session_seq DESC LIMIT 1
-    `).get(sessionId, role) as unknown as StoredTranscriptRow | undefined;
+    `).get(sessionId, role));
     return row ? parseEntry(row) : undefined;
   }
 
@@ -554,7 +611,7 @@ export class TranscriptDatabase {
           WHERE session_id = ? AND role = ?
           ORDER BY session_seq DESC LIMIT 1
         `).get(sessionId, role);
-    return row ? parseEntry(row as unknown as StoredTranscriptRow) : undefined;
+    return row ? parseEntry(storedTranscriptRowSchema.parse(row)) : undefined;
   }
 
   hasUserUuid(sessionId: string, uuid: string): boolean {
@@ -571,14 +628,14 @@ export class TranscriptDatabase {
       SELECT * FROM transcript_entries WHERE session_id = ? AND role = 'user'
         AND json_extract(entry_json, '$.uuid') = ? LIMIT 1
     `).get(sessionId, uuid);
-    return row ? parseEntry(row as unknown as StoredTranscriptRow) : undefined;
+    return row ? parseEntry(storedTranscriptRowSchema.parse(row)) : undefined;
   }
 
   countFrom(sessionId: string, sessionSeq: number): number {
-    return Number((this.db.prepare(`
+    return Number((countRowSchema.parse(this.db.prepare(`
       SELECT COUNT(*) AS count FROM transcript_entries
       WHERE session_id = ? AND session_seq >= ?
-    `).get(sessionId, sessionSeq) as { count: number }).count);
+    `).get(sessionId, sessionSeq))).count);
   }
 
   /** Stream a consistent backup without hydrating every entry or blocking writers. */
@@ -639,21 +696,21 @@ export class TranscriptDatabase {
     role: string,
     toolUseId: string,
   ): HistoryEntry | undefined {
-    const row = this.db.prepare(`
+    const row = optionalEntryRowSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND tool_use_id = ? AND role = ?
       ORDER BY session_seq DESC LIMIT 1
-    `).get(sessionId, toolUseId, role) as unknown as StoredTranscriptRow | undefined;
+    `).get(sessionId, toolUseId, role));
     return row ? parseEntry(row) : undefined;
   }
 
   getWorkReview(sessionId: string, reviewId: string): HistoryEntry | undefined {
-    const row = this.db.prepare(`
+    const row = optionalEntryRowSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND role = 'work_review'
         AND json_extract(entry_json, '$.reviewId') = ?
       ORDER BY session_seq DESC LIMIT 1
-    `).get(sessionId, reviewId) as unknown as StoredTranscriptRow | undefined;
+    `).get(sessionId, reviewId));
     return row ? parseEntry(row) : undefined;
   }
 
@@ -669,11 +726,11 @@ export class TranscriptDatabase {
   getByToolNames(sessionId: string, toolNames: string[]): HistoryEntry[] {
     if (toolNames.length === 0) return [];
     const placeholders = toolNames.map(() => "?").join(", ");
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND tool_name IN (${placeholders})
       ORDER BY session_seq
-    `).all(sessionId, ...toolNames) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId, ...toolNames))).map(parseEntry);
   }
 
   getToolResultsByUseIds(sessionId: string, toolUseIds: string[]): HistoryEntry[] {
@@ -682,77 +739,77 @@ export class TranscriptDatabase {
     for (let offset = 0; offset < toolUseIds.length; offset += 500) {
       const chunk = toolUseIds.slice(offset, offset + 500);
       const placeholders = chunk.map(() => "?").join(", ");
-      const rows = this.db.prepare(`
+      const rows = entryRowsSchema.parse(this.db.prepare(`
         SELECT * FROM transcript_entries
         WHERE session_id = ? AND role = 'tool_result'
           AND tool_use_id IN (${placeholders})
         ORDER BY session_seq
-      `).all(sessionId, ...chunk) as unknown as StoredTranscriptRow[];
+      `).all(sessionId, ...chunk));
       results.push(...rows.map(parseEntry));
     }
     return results.sort((left, right) => Number(left.sessionSeq || 0) - Number(right.sessionSeq || 0));
   }
 
   getUsersMissingUuid(sessionId: string): HistoryEntry[] {
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND role = 'user'
         AND COALESCE(json_extract(entry_json, '$.uuid'), '') = ''
       ORDER BY session_seq
-    `).all(sessionId) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId))).map(parseEntry);
   }
 
   getUserUuids(sessionId: string): string[] {
-    return (this.db.prepare(`
+    return (uuidRowsSchema.parse(this.db.prepare(`
       SELECT json_extract(entry_json, '$.uuid') AS uuid
       FROM transcript_entries
       WHERE session_id = ? AND role = 'user'
         AND COALESCE(json_extract(entry_json, '$.uuid'), '') != ''
-    `).all(sessionId) as unknown as Array<{ uuid: string }>).map((row) => row.uuid);
+    `).all(sessionId))).map((row) => row.uuid);
   }
 
   getSinceTimestamp(sessionId: string, timestamp: string): HistoryEntry[] {
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND timestamp >= ?
       ORDER BY session_seq
-    `).all(sessionId, timestamp) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId, timestamp))).map(parseEntry);
   }
 
   getRunBoundary(sessionId: string, runId: string): HistoryEntry | undefined {
-    const row = this.db.prepare(`
+    const row = optionalEntryRowSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND role = 'run_boundary'
         AND json_extract(entry_json, '$.runId') = ?
       ORDER BY session_seq DESC LIMIT 1
-    `).get(sessionId, runId) as unknown as StoredTranscriptRow | undefined;
+    `).get(sessionId, runId));
     return row ? parseEntry(row) : undefined;
   }
 
   countThroughSessionSeq(sessionId: string, sessionSeq: number): number {
-    const row = this.db.prepare(`
+    const row = scalarRowSchema.parse(this.db.prepare(`
       SELECT COUNT(*) AS value FROM transcript_entries
       WHERE session_id = ? AND session_seq <= ?
-    `).get(sessionId, sessionSeq) as unknown as { value: number };
+    `).get(sessionId, sessionSeq));
     return Number(row.value);
   }
 
   offsetForSessionSeq(sessionId: string, sessionSeq: number): number | undefined {
     if (!this.getBySessionSeq(sessionId, sessionSeq)) return undefined;
-    const row = this.db.prepare(`
+    const row = scalarRowSchema.parse(this.db.prepare(`
       SELECT COUNT(*) AS value FROM transcript_entries
       WHERE session_id = ? AND session_seq < ?
-    `).get(sessionId, sessionSeq) as unknown as { value: number };
+    `).get(sessionId, sessionSeq));
     return Number(row.value);
   }
 
   recentUserPromptOffset(sessionId: string, promptCount: number): number | undefined {
     if (promptCount <= 0) return undefined;
-    const row = this.db.prepare(`
+    const row = optionalSequenceRowSchema.parse(this.db.prepare(`
       SELECT session_seq FROM transcript_entries
       WHERE session_id = ? AND role = 'user'
       ORDER BY session_seq DESC LIMIT 1 OFFSET ?
-    `).get(sessionId, promptCount - 1) as unknown as { session_seq: number } | undefined;
+    `).get(sessionId, promptCount - 1));
     return row ? this.offsetForSessionSeq(sessionId, Number(row.session_seq)) : undefined;
   }
 
@@ -789,7 +846,7 @@ export class TranscriptDatabase {
       JSON.stringify(entry),
     );
     const rowId = this.ftsEnabled
-      ? Number((this.entryRowId.get(sessionId, entryId) as unknown as { rowid: number }).rowid)
+      ? Number((rowIdRowSchema.parse(this.entryRowId.get(sessionId, entryId))).rowid)
       : 0;
     if (indexSearch) {
       if (this.ftsEnabled) this.deleteSearchEntry.run(rowId);
@@ -810,23 +867,19 @@ export class TranscriptDatabase {
   }
 
   private recomputeSummary(sessionId: string): void {
-    const aggregate = this.db.prepare(`
+    const aggregate = aggregateRowSchema.parse(this.db.prepare(`
       SELECT COUNT(*) AS entry_count,
         SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END) AS user_prompt_count,
         MAX(timestamp) AS latest_timestamp
       FROM transcript_entries WHERE session_id = ?
-    `).get(sessionId) as unknown as {
-      entry_count: number;
-      user_prompt_count: number | null;
-      latest_timestamp: string | null;
-    };
-    const conversation = this.db.prepare(`
+    `).get(sessionId));
+    const conversation = optionalConversationRowSchema.parse(this.db.prepare(`
       SELECT session_seq, entry_json FROM transcript_entries
       WHERE session_id = ? AND role IN ('user', 'assistant')
       ORDER BY session_seq DESC LIMIT 1
-    `).get(sessionId) as unknown as { session_seq: number; entry_json: string } | undefined;
+    `).get(sessionId));
     const preview = conversation
-      ? cleanPreview((JSON.parse(conversation.entry_json) as HistoryEntry).content)
+      ? cleanPreview((historyEntrySchema.parse(JSON.parse(conversation.entry_json))).content)
       : "";
     this.db.prepare(`
       UPDATE transcript_sessions SET
@@ -845,15 +898,12 @@ export class TranscriptDatabase {
   }
 
   private entrySummaryState(sessionId: string, entryId: string): EntrySummaryState | undefined {
-    const row = this.db.prepare(`
+    const row = optionalEntrySummaryRowSchema.parse(this.db.prepare(`
       SELECT session_seq, role, timestamp, entry_json
       FROM transcript_entries WHERE session_id = ? AND entry_id = ?
-    `).get(sessionId, entryId) as unknown as Pick<
-      StoredTranscriptRow,
-      "session_seq" | "role" | "timestamp" | "entry_json"
-    > | undefined;
+    `).get(sessionId, entryId));
     if (!row) return undefined;
-    const entry = JSON.parse(row.entry_json) as HistoryEntry;
+    const entry = historyEntrySchema.parse(JSON.parse(row.entry_json));
     return {
       sessionSeq: Number(row.session_seq),
       role: row.role,
@@ -863,17 +913,14 @@ export class TranscriptDatabase {
   }
 
   private latestConversationState(sessionId: string): EntrySummaryState | undefined {
-    const row = this.db.prepare(`
+    const row = optionalEntrySummaryRowSchema.parse(this.db.prepare(`
       SELECT session_seq, role, timestamp, entry_json
       FROM transcript_entries
       WHERE session_id = ? AND role IN ('user', 'assistant')
       ORDER BY session_seq DESC LIMIT 1
-    `).get(sessionId) as unknown as Pick<
-      StoredTranscriptRow,
-      "session_seq" | "role" | "timestamp" | "entry_json"
-    > | undefined;
+    `).get(sessionId));
     if (!row) return undefined;
-    const entry = JSON.parse(row.entry_json) as HistoryEntry;
+    const entry = historyEntrySchema.parse(JSON.parse(row.entry_json));
     return {
       sessionSeq: Number(row.session_seq),
       role: row.role,
@@ -938,10 +985,10 @@ export class TranscriptDatabase {
     }
 
     if (timestampNeedsRefresh) {
-      const row = this.db.prepare(`
+      const row = timestampRowSchema.parse(this.db.prepare(`
         SELECT MAX(timestamp) AS latest_timestamp
         FROM transcript_entries WHERE session_id = ?
-      `).get(sessionId) as unknown as { latest_timestamp: string | null };
+      `).get(sessionId));
       latestTimestamp = row.latest_timestamp || undefined;
     }
 
@@ -1151,14 +1198,11 @@ export class TranscriptDatabase {
     if (uniqueUuids.length === 0) return 0;
 
     const placeholders = uniqueUuids.map(() => "?").join(",");
-    const rows = this.db.prepare(`
+    const rows = deletionRowsSchema.parse(this.db.prepare(`
       SELECT rowid, entry_id FROM transcript_entries
       WHERE session_id = ?
         AND json_extract(entry_json, '$.uuid') IN (${placeholders})
-    `).all(sessionId, ...uniqueUuids) as unknown as Array<{
-      rowid: number;
-      entry_id: string;
-    }>;
+    `).all(sessionId, ...uniqueUuids));
     if (rows.length === 0) return 0;
 
     const deleteEntry = this.db.prepare(
@@ -1193,7 +1237,7 @@ export class TranscriptDatabase {
   }
 
   sessionIds(): string[] {
-    return (this.db.prepare("SELECT session_id FROM transcript_sessions").all() as unknown as Array<{ session_id: string }>).map(row => row.session_id);
+    return (sessionIdRowsSchema.parse(this.db.prepare("SELECT session_id FROM transcript_sessions").all())).map(row => row.session_id);
   }
 
   searchAll(options: TranscriptSearchOptions): TranscriptSearchHit[] {
@@ -1228,7 +1272,7 @@ export class TranscriptDatabase {
       params.push(options.until);
     }
     params.push(limit, offset);
-    const rows = this.db.prepare(`
+    const rows = rankedSearchRowsSchema.parse(this.db.prepare(`
       SELECT e.session_id, e.session_seq, e.entry_id, e.revision, f.role, e.timestamp,
         e.tool_name,
         snippet(transcript_fts, 5, '[', ']', '…', 24) AS preview,
@@ -1239,17 +1283,7 @@ export class TranscriptDatabase {
       WHERE ${where.join(" AND ")}
       ORDER BY rank, e.timestamp DESC, e.session_id, e.session_seq DESC
       LIMIT ? OFFSET ?
-    `).all(...params) as unknown as Array<{
-      session_id: string;
-      session_seq: number;
-      entry_id: string;
-      revision: number;
-      role: string;
-      timestamp: string | null;
-      tool_name: string | null;
-      preview: string;
-      rank: number;
-    }>;
+    `).all(...params));
     return rows.map((row) => ({
       sessionId: row.session_id,
       sessionSeq: Number(row.session_seq),
@@ -1290,7 +1324,7 @@ export class TranscriptDatabase {
       params.push(options.until);
     }
     params.push(limit, offset);
-    const rows = this.db.prepare(`
+    const rows = searchRowsSchema.parse(this.db.prepare(`
       SELECT e.session_id, e.session_seq, e.entry_id, e.revision, s.role, e.timestamp,
         e.tool_name, substr(s.body, 1, 240) AS preview
       FROM transcript_search AS s
@@ -1299,16 +1333,7 @@ export class TranscriptDatabase {
       WHERE ${where.join(" AND ")}
       ORDER BY e.timestamp DESC, e.session_id, e.session_seq DESC
       LIMIT ? OFFSET ?
-    `).all(...params) as unknown as Array<{
-      session_id: string;
-      session_seq: number;
-      entry_id: string;
-      revision: number;
-      role: string;
-      timestamp: string | null;
-      tool_name: string | null;
-      preview: string;
-    }>;
+    `).all(...params));
     return rows.map((row) => ({
       sessionId: row.session_id,
       sessionSeq: Number(row.session_seq),
@@ -1325,35 +1350,35 @@ export class TranscriptDatabase {
   context(sessionId: string, sessionSeq: number, before: number, after: number): HistoryEntry[] {
     const lower = Math.max(1, sessionSeq - Math.max(0, before));
     const upper = sessionSeq + Math.max(0, after);
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND session_seq BETWEEN ? AND ?
       ORDER BY session_seq
-    `).all(sessionId, lower, upper) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId, lower, upper))).map(parseEntry);
   }
 
   recentRuns(sessionId: string, limit: number): Array<{
     prompt: HistoryEntry;
     boundary?: HistoryEntry;
   }> {
-    const prompts = (this.db.prepare(`
+    const prompts = (entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries
       WHERE session_id = ? AND role = 'user'
       ORDER BY session_seq DESC LIMIT ?
-    `).all(sessionId, Math.max(1, Math.min(50, limit))) as unknown as StoredTranscriptRow[])
+    `).all(sessionId, Math.max(1, Math.min(50, limit)))))
       .map(parseEntry);
     return prompts.map((prompt) => {
-      const boundaryRow = this.db.prepare(`
+      const boundaryRow = optionalEntryRowSchema.parse(this.db.prepare(`
         SELECT * FROM transcript_entries
         WHERE session_id = ? AND role = 'run_boundary' AND session_seq > ?
         ORDER BY session_seq LIMIT 1
-      `).get(sessionId, prompt.sessionSeq!) as unknown as StoredTranscriptRow | undefined;
+      `).get(sessionId, prompt.sessionSeq!));
       return { prompt, ...(boundaryRow ? { boundary: parseEntry(boundaryRow) } : {}) };
     });
   }
 
   pendingToolCalls(sessionId: string): HistoryEntry[] {
-    return (this.db.prepare(`
+    return (entryRowsSchema.parse(this.db.prepare(`
       SELECT call.* FROM transcript_entries AS call
       WHERE call.session_id = ? AND call.role = 'tool_call' AND call.tool_use_id IS NOT NULL
         AND NOT EXISTS (
@@ -1363,7 +1388,7 @@ export class TranscriptDatabase {
             AND result.tool_use_id = call.tool_use_id
         )
       ORDER BY call.session_seq
-    `).all(sessionId) as unknown as StoredTranscriptRow[]).map(parseEntry);
+    `).all(sessionId))).map(parseEntry);
   }
 }
 

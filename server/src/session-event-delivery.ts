@@ -1,9 +1,23 @@
 import { randomUUID } from "crypto";
 
-type SessionEvent = Record<string, any>;
+interface SessionEvent {
+  type?: unknown;
+  sessionId?: unknown;
+  toolUseId?: unknown;
+  streamId?: unknown;
+  entryId?: unknown;
+  finalSnapshot?: unknown;
+  deliveryId?: unknown;
+}
 
-interface PendingDelivery {
-  message: SessionEvent;
+interface DeliveryMetadata {
+  deliveryId?: string;
+  replay?: boolean;
+  deliveryAttempt?: number;
+}
+
+interface PendingDelivery<T> {
+  message: T;
   attempts: number;
   createdAt: number;
 }
@@ -29,19 +43,19 @@ function requiresAcknowledgement(message: SessionEvent): boolean {
  * reducer applied them. WebSocket delivery alone is not sufficient: a frame
  * can reach the phone while a session/provider transition discards it.
  */
-export class SessionEventDelivery {
-  private pending = new Map<string, PendingDelivery>();
+export class SessionEventDelivery<T extends SessionEvent = SessionEvent & Record<string, unknown>> {
+  private pending = new Map<string, PendingDelivery<T & DeliveryMetadata>>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
-    private readonly dispatch: (message: SessionEvent) => void,
+    private readonly dispatch: (message: T & DeliveryMetadata) => void,
     private readonly retryMs = 750,
     private readonly maxPending = 1_000,
     private readonly maxAgeMs = 10 * 60_000,
     private readonly maxRetryAttempts = 3,
   ) {}
 
-  prepare(message: SessionEvent): SessionEvent {
+  prepare(message: T & DeliveryMetadata): T & DeliveryMetadata {
     if (!requiresAcknowledgement(message)) return message;
     if (typeof message.deliveryId === "string" && message.deliveryId) {
       return message;
@@ -85,7 +99,7 @@ export class SessionEventDelivery {
     return removed;
   }
 
-  replayTo(dispatch: (message: SessionEvent) => void): void {
+  replayTo(dispatch: (message: T & DeliveryMetadata) => void): void {
     for (const entry of this.pending.values()) {
       // A reattached client is a new delivery opportunity. Reset the small
       // automatic retry budget, but retain the original delivery identity so
@@ -165,7 +179,7 @@ export class SessionEventDelivery {
 
   private trim(): void {
     while (this.pending.size > this.maxPending) {
-      const oldest = this.pending.keys().next().value as string | undefined;
+      const oldest = this.pending.keys().next().value;
       if (!oldest) break;
       this.pending.delete(oldest);
     }

@@ -65,7 +65,7 @@ Use the report command for current rule and file counts.
 | Enforcement | Implemented | Checks in tests and pre-push; shrinking source-specific baseline; test rejection of new debt and bypasses. |
 | Codex transport, rewind, sign-in | Complete | Raw RPC responses stay unknown; validate consumed rewind, compaction, migration, and login fields. No baseline entries in these modules. |
 | Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
-| Provider adapters | Pending | Migrate `codex-session.ts` and `claude-session.ts` using generated Codex and exported Claude types. Test streaming, completion, approvals, cancellation, and subagents. |
+| Provider adapters | In progress | Codex account/model/error helpers and outbound messages migrated; generic delivery retains message types. Remaining work: native notifications, requests, item translation, Claude adapter. Test streaming, completion, approvals, cancellation, and subagents. |
 | Persisted history | Pending | Validate JSON and database rows, including supported legacy records, in `session-store.ts` and `transcript-database.ts`. Test recovery, pagination, rewind, and archive reads. |
 | WebSocket routing | Pending | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
 | Remaining code and tests | Pending | MCP tools, plugins API, relay client, helpers, JS fixtures and scripts. Audit additional repositories and ignored private plugins separately. |
@@ -98,11 +98,15 @@ not a new auto-update policy.
 - Server `735ae1c`: pending reliability, resume, and rewind UX work preserved.
 - App `d49b94d`: pending voice, auth, and reliable delivery work preserved.
 - Server `dbd064c`: initial type-safety gate and Codex boundary migration.
-- Generated contracts: validated locally before the next checkpoint. Request
+- Server `0b98c6d`: generated contracts. Request
   aliases now follow the exported API. Config values use JSON types, collaboration
   mode settings validate their supported values, and raw results remain unknown
   unless a runtime decoder validates them. Tests that inspect collaboration
   settings now select a model, as the real send path does.
+- Codex adapter foundations: typed existing wire events, validated account and
+  model records, subagent reconciliation, error handling, and file-change helpers.
+  Session delivery preserves its caller's message type across acknowledgement,
+  retry, and replay. Plugin session sends now use the declared server protocol.
 
 ## Validation log
 
@@ -118,3 +122,6 @@ not a new auto-update policy.
 - Contract checkpoint: build, lint, exported-protocol drift check, and full suite
   passed; 539 tests passed, one skipped. Baseline is 9,258 diagnostics.
   Output: `/tmp/sa-contract-full-tests.log`.
+- Adapter foundations: build and type-safety checks passed; full suite 539 passed,
+  one skipped. Baseline reduced to 8,354 diagnostics, 904 fewer than the previous
+  checkpoint. Output: `/tmp/sa-adapter-foundation-full-tests.log`.

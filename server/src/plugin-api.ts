@@ -20,7 +20,7 @@ export interface PluginContext {
 export interface SessionContext {
   sessionId: string;
   cwd: string;
-  send: (msg: ServerMessage | Record<string, any>) => void;
+  send: (msg: ServerMessage) => void;
   /** Persist a message to session history (survives reconnects/restarts) */
   appendHistory: (entry: HistoryEntry) => void;
   pendingQuestions: Map<string, { questionId: string; resolve: (answers: Record<string, string>) => void }>;

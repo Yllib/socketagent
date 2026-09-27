@@ -1282,6 +1282,7 @@ export interface ToolCallServerMessage {
   toolUseId: string;
   sessionId: string;
   parentToolUseId?: string | null;
+  replay?: boolean;
   uuid?: string;
   entryId?: string;
   sessionSeq?: number;
@@ -1302,6 +1303,77 @@ export interface ToolResultServerMessage {
   sessionSeq?: number;
   revision?: number;
 }
+
+export interface ToolResultChunkServerMessage {
+  type: "tool_result_chunk";
+  toolUseId: string;
+  content: string;
+  chunkIndex: number;
+  done: boolean;
+  sessionId: string;
+  parentToolUseId?: string | null;
+}
+
+export interface SubagentResultServerMessage {
+  type: "subagent_result";
+  parentToolUseId: string;
+  content: string;
+  sessionId: string;
+  subagentStatus?: import("./codex-subagent-state").CodexSubagentStatus;
+  costUsd?: number;
+  durationMs?: number;
+  numTurns?: number;
+  stopReason?: string;
+  subtype?: string;
+  terminalReason?: string;
+}
+
+export interface PermissionModeChangedServerMessage {
+  type: "permission_mode_changed";
+  permissionMode: string | null;
+  sessionId?: string;
+}
+
+export interface SessionStateChangedServerMessage {
+  type: "session_state_changed";
+  state: import("@anthropic-ai/claude-agent-sdk").SDKSessionStateChangedMessage["state"];
+  sessionId: string;
+  activeStartedAt?: string;
+}
+
+export interface CodexPlanServerMessage {
+  type: "codex_plan";
+  turnId: string;
+  explanation: string;
+  plan: import("./generated/codex/types/v2/TurnPlanStep").TurnPlanStep[];
+  sessionId: string;
+}
+
+export interface CodexContextUsage {
+  totalTokens: number;
+  maxTokens: number;
+  remainingTokens: number;
+  percentUsed: number;
+  categories: { name: string; tokens: number; color: string }[];
+}
+
+/** Raw provider events retain provider fields for the debug view. */
+export interface SdkEventServerMessage {
+  [key: string]: unknown;
+  type: "sdk_event";
+  sdkType: string;
+  sessionId?: string;
+  ts?: string;
+}
+
+export type ContextUsage =
+  | import("@anthropic-ai/claude-agent-sdk").SDKControlGetContextUsageResponse
+  | CodexContextUsage;
+
+export type ContextUsageServerMessage = ContextUsage & {
+  type: "context_usage";
+  sessionId: string;
+};
 
 /** Announces that a user prompt is now part of the session transcript.
  *
@@ -2803,10 +2875,17 @@ export interface CommandReceiptServerMessage {
 }
 
 export type ServerMessage =
+  | SdkEventServerMessage
   | CommandReceiptServerMessage
   | TextServerMessage
   | ToolCallServerMessage
   | ToolResultServerMessage
+  | ToolResultChunkServerMessage
+  | SubagentResultServerMessage
+  | PermissionModeChangedServerMessage
+  | SessionStateChangedServerMessage
+  | CodexPlanServerMessage
+  | ContextUsageServerMessage
   | UserMessageUuidServerMessage
   | QuestionServerMessage
   | QuestionAnsweredServerMessage

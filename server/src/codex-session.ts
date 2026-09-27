@@ -28,6 +28,10 @@ import {
   CodexGoal,
   CodexGoalStatus,
   QuestionItem,
+  QuestionServerMessage,
+  SupportedModelsServerMessage,
+  ActiveSubagentsServerMessage,
+  SdkEventServerMessage,
 } from "./protocol";
 import { SessionContext, SocketAgentPlugin } from "./plugin-api";
 import {
@@ -90,6 +94,29 @@ const TRANSIENT_CODEX_RAW_EVENT_METHODS = new Set([
   "thread/tokenUsage/updated",
   "account/rateLimits/updated",
 ]);
+
+function codexRecordArray(value: unknown): Record<string, unknown>[] {
+  const entries: unknown[] = Array.isArray(value) ? value : [];
+  return entries.filter(isCodexRecord);
+}
+
+// Older catalogs advertised effort strings; current catalogs include descriptions.
+function codexReasoningOptions(value: unknown) {
+  const entries: unknown[] = Array.isArray(value) ? value : [];
+  return entries.flatMap((entry) => {
+    const rawEffort = isCodexRecord(entry) ? entry.reasoningEffort || entry.effort : entry;
+    if (typeof rawEffort !== "string" || !rawEffort.trim()) return [];
+    return [{
+      reasoningEffort: rawEffort.trim(),
+      ...(isCodexRecord(entry) && typeof entry.description === "string" ? { description: entry.description } : {}),
+    }];
+  });
+}
+
+function isSocketAgentEffort(value: unknown) {
+  return value === "minimal" || value === "low" || value === "medium" || value === "high" ||
+    value === "max" || value === "xhigh" || value === "ultra";
+}
 
 function playReviewModeEnabled(): boolean {
   return process.env.SOCKETAGENT_PLAY_REVIEW_MODE === "1";
@@ -158,8 +185,8 @@ function normalizeCodexGoal(value: unknown): CodexGoal | null {
 }
 
 function unwrapExecResultEnvelope(value: unknown): string | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
+  if (!isCodexRecord(value)) return null;
+  const record = value;
   const isExecEnvelope = "output" in record && [
     "chunk_id",
     "session_id",
@@ -175,18 +202,19 @@ function unwrapExecResultEnvelope(value: unknown): string | null {
 function dynamicToolContentText(value: unknown, depth = 0): string[] {
   if (value == null || depth > 4) return [];
   if (Array.isArray(value)) {
-    return value.flatMap((item) => dynamicToolContentText(item, depth + 1));
+    const items: unknown[] = value;
+    return items.flatMap((item) => dynamicToolContentText(item, depth + 1));
   }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if ((trimmed.startsWith("{") && trimmed.endsWith("}"))
       || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
       try {
-        const parsed = JSON.parse(trimmed);
+        const parsed: unknown = JSON.parse(trimmed);
         const execOutput = unwrapExecResultEnvelope(parsed);
         if (execOutput !== null) return execOutput ? [execOutput] : [];
         if (Array.isArray(parsed)
-          || (parsed && typeof parsed === "object"
+          || (isCodexRecord(parsed)
             && ["input_text", "output_text", "text"].includes(String(parsed.type || "")))) {
           return dynamicToolContentText(parsed, depth + 1);
         }
@@ -196,9 +224,8 @@ function dynamicToolContentText(value: unknown, depth = 0): string[] {
     }
     return value ? [value] : [];
   }
-  if (typeof value !== "object") return [String(value)];
-
-  const record = value as Record<string, unknown>;
+  if (!isCodexRecord(value)) return [String(value)];
+  const record = value;
   const execOutput = unwrapExecResultEnvelope(record);
   if (execOutput !== null) return execOutput ? [execOutput] : [];
   if (typeof record.text === "string") {
@@ -214,7 +241,8 @@ function dynamicToolContentText(value: unknown, depth = 0): string[] {
   return [JSON.stringify(record, null, 2)];
 }
 
-function formatDynamicToolOutput(item: any): string {
+function formatDynamicToolOutput(value: unknown): string {
+  const item = isCodexRecord(value) ? value : undefined;
   const blocks = dynamicToolContentText(item?.contentItems)
     .map((block) => block.trimEnd())
     .filter((block) => block.trim().length > 0);
@@ -226,7 +254,8 @@ function formatDynamicToolOutput(item: any): string {
   return "Tool completed";
 }
 
-function dynamicToolDisplayName(item: any): string {
+function dynamicToolDisplayName(value: unknown): string {
+  const item = isCodexRecord(value) ? value : undefined;
   const tool = String(item?.tool || "tool");
   const namespace = String(item?.namespace || "");
   if (tool.toLowerCase() === "exec" && (!namespace || namespace === "functions")) {
@@ -246,11 +275,10 @@ export function summarizeCodexCommandActions(
   actions: unknown,
   command: unknown,
 ): string {
-  const summaries = (Array.isArray(actions) ? actions : [])
+  const actionList: unknown[] = Array.isArray(actions) ? actions : [];
+  const summaries = actionList
     .map((raw): string => {
-      const action = raw && typeof raw === "object"
-        ? raw as Record<string, unknown>
-        : {};
+      const action = isCodexRecord(raw) ? raw : {};
       const type = String(action.type || "");
       if (type === "read") {
         const name = String(action.name || "").trim()
@@ -317,13 +345,13 @@ type PendingAppServerSteer = QueuedPrompt & {
 };
 
 function authoritativeTurnIdFromSteerError(error: unknown): string | null {
-  const candidate = error as any;
-  const structured = candidate?.data?.activeTurnId
-    || candidate?.data?.currentTurnId
-    || candidate?.error?.data?.activeTurnId
-    || candidate?.error?.data?.currentTurnId;
+  const candidate = isCodexRecord(error) ? error : {};
+  const data = isCodexRecord(candidate.data) ? candidate.data : {};
+  const nestedError = isCodexRecord(candidate.error) ? candidate.error : {};
+  const nestedData = isCodexRecord(nestedError.data) ? nestedError.data : {};
+  const structured = data.activeTurnId || data.currentTurnId || nestedData.activeTurnId || nestedData.currentTurnId;
   if (typeof structured === "string" && structured.trim()) return structured.trim();
-  const message = String(candidate?.message || candidate || "");
+  const message = String(candidate.message || error || "");
   const match = message.match(/expected active turn id [`'"]?[^`'"\s]+[`'"]? but found [`'"]?([^`'"\s}]+)[`'"]?/i);
   return match?.[1]?.trim() || null;
 }
@@ -468,9 +496,7 @@ export function codexAuthScopeFromAccountRead(
   raw: unknown,
   hintedMcp: boolean,
 ): CodexAuthScope {
-  const result = raw && typeof raw === "object"
-    ? raw as Record<string, unknown>
-    : {};
+  const result = isCodexRecord(raw) ? raw : {};
   if (result.requiresOpenaiAuth === true && result.account == null) {
     return "openai";
   }
@@ -478,12 +504,13 @@ export function codexAuthScopeFromAccountRead(
   return hintedMcp ? "mcp" : "unknown";
 }
 
-function codexAppServerErrorMessage(params: any, fallback: string): string {
-  return params?.error?.message
-    || params?.status?.error?.message
-    || params?.status?.message
-    || params?.message
-    || fallback;
+function codexAppServerErrorMessage(value: unknown, fallback: string): string {
+  const params = isCodexRecord(value) ? value : {};
+  const error = isCodexRecord(params.error) ? params.error : {};
+  const status = isCodexRecord(params.status) ? params.status : {};
+  const statusError = isCodexRecord(status.error) ? status.error : {};
+  return [error.message, statusError.message, status.message, params.message]
+    .find((message): message is string => typeof message === "string" && message.length > 0) || fallback;
 }
 
 /**
@@ -492,12 +519,13 @@ function codexAppServerErrorMessage(params: any, fallback: string): string {
  * events, not terminal failures; rejecting the turn here races Codex's own
  * successful retry and leaves late activity attached to a falsely closed run.
  */
-export function isRecoverableCodexAppServerError(params: any): boolean {
-  const error = params?.error || params;
-  const message = String(error?.message || params?.message || "");
-  const errorInfo = error?.codexErrorInfo || params?.codexErrorInfo;
+export function isRecoverableCodexAppServerError(value: unknown): boolean {
+  const params = isCodexRecord(value) ? value : {};
+  const error = isCodexRecord(params.error) ? params.error : params;
+  const message = String(error.message || params.message || "");
+  const errorInfo = error.codexErrorInfo || params.codexErrorInfo;
   return /^reconnecting(?:\.{3}|…)?\s*(?:\d+\s*\/\s*\d+)?$/i.test(message.trim())
-    && errorInfo?.responseStreamDisconnected != null;
+    && isCodexRecord(errorInfo) && errorInfo.responseStreamDisconnected != null;
 }
 
 /** Errors that leave the app-server process unsafe to reuse for another turn. */
@@ -543,6 +571,7 @@ const CODEX_TURN_COMPLETION_GRACE_MS = 500;
 // ─── CodexSession ─────────────────────────────────────────────────────────
 
 export class CodexSession {
+  public _delegationSupervisorSessionId?: string;
   private sessionId: string | null = null; // SocketAgent session id (= codex thread_id)
   private threadId: string | null = null;  // codex thread_id (for resume)
   private appServer: CodexAppServerClient | null = null;
@@ -617,15 +646,15 @@ export class CodexSession {
     cacheCreateTokens: number;
     contextWindow: number;
   } | null = null;
-  private _lastSupportedModels: ServerMessage | null = null;
+  private _lastSupportedModels: SupportedModelsServerMessage | null = null;
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
   private pendingQuestions = new Map<string, PendingQuestion>();
   private appServerQuestionByRequestId = new Map<string, string>();
   private connectedAppApprovals = new Set<string>();
   private clientSockets = new Set<WebSocket>();
-  private sessionEventDelivery = new SessionEventDelivery((message) => {
-    this.dispatchToClients(message as ServerMessage);
+  private sessionEventDelivery = new SessionEventDelivery<ServerMessage>((message) => {
+    this.dispatchToClients(message);
   });
   private streamSnapshots = new LatestSnapshotDispatcher<ServerMessage>((message) => {
     this.sendImmediately(message);
@@ -734,7 +763,7 @@ export class CodexSession {
         output,
         sessionId: sid,
         ...(call.parentToolUseId ? { parentToolUseId: call.parentToolUseId } : {}),
-      } as any);
+      });
       historyEntries.push({
         role: "tool_result",
         content: output,
@@ -770,7 +799,7 @@ export class CodexSession {
           usage,
           resultSubtype: status === "interrupted" ? "interrupted" : "success",
           stopReason: status === "interrupted" ? "interrupted" : undefined,
-        } as ServerMessage);
+        });
         updateSessionActivity(sid, this._lastAssistantText, usage);
       }
       this._isRunning = false;
@@ -796,7 +825,7 @@ export class CodexSession {
     return null;
   }
   get driver(): CodexDriver { return "app-server"; }
-  get permissionMode(): string | null {
+  get permissionMode(): string {
     return this._permissionMode;
   }
   get sessionModel(): string | null { return this._model; }
@@ -840,7 +869,7 @@ export class CodexSession {
   async setPermissionMode(mode: string, options: { recordHistory?: boolean } = {}): Promise<void> {
     const previousMode = this._permissionMode;
     if (mode !== previousMode && (this._isRunning || this._isCompacting)) {
-      this.send({ type: "permission_mode_changed", permissionMode: previousMode, sessionId: this.sessionId || "" } as any);
+      this.send({ type: "permission_mode_changed", permissionMode: previousMode, sessionId: this.sessionId || "" });
       throw new Error("Stop the current Codex run before changing its permissions. The current permission mode has not changed.");
     }
     this._permissionMode = mode;
@@ -897,16 +926,17 @@ export class CodexSession {
 
   private resolvePendingSuperYoloGitHubConfirmations(): void {
     for (const [questionId, pending] of [...this.pendingQuestions]) {
-      const questions = (pending.questionData as any)?.questions;
-      if (!Array.isArray(questions) || questions.length === 0) continue;
-      const confirmations = questions.map((question: any) =>
+      if (pending.questionData?.type !== "question") continue;
+      const questions = pending.questionData.questions;
+      if (questions.length === 0) continue;
+      const confirmations = questions.map((question) =>
         connectedAppConfirmation(String(question?.question || ""), question?.options || []),
       );
       if (confirmations.some((confirmation: ConnectedAppConfirmation | null) => confirmation?.appKey !== "github")) {
         continue;
       }
       const answers: Record<string, string> = {};
-      questions.forEach((question: any, index: number) => {
+      questions.forEach((question, index) => {
         answers[String(question.question)] = confirmations[index]!.approveLabel;
       });
       this.pendingQuestions.delete(questionId);
@@ -914,7 +944,7 @@ export class CodexSession {
       pending.resolve(answers);
       const sid = this.sessionId || this._resumeSessionId || "";
       if (sid) markQuestionAnswered(sid, questionId, answers);
-      this.send({ type: "question_answered", questionId, sessionId: sid, answers } as any);
+      this.send({ type: "question_answered", questionId, sessionId: sid, answers });
     }
   }
 
@@ -941,7 +971,7 @@ export class CodexSession {
     if (this._lastSupportedModels) this.sendTo(ws, this._lastSupportedModels);
     if (!deferLiveReplay) {
       this.sessionEventDelivery.replayTo((message) => {
-        this.sendTo(ws, message as ServerMessage);
+        this.sendTo(ws, message);
       });
     }
   }
@@ -958,7 +988,7 @@ export class CodexSession {
     }
 
     this.sessionEventDelivery.replayTo((message) => {
-      this.sendTo(ws, message as ServerMessage);
+      this.sendTo(ws, message);
     });
 
     for (const [toolUseId, call] of this.appServerActiveToolCalls.entries()) {
@@ -971,7 +1001,7 @@ export class CodexSession {
         sessionId: sid,
         replay: true,
         ...(call.parentToolUseId ? { parentToolUseId: call.parentToolUseId } : {}),
-      } as any);
+      });
     }
 
     for (const [itemId, content] of this.appServerReasoningText.entries()) {
@@ -984,7 +1014,7 @@ export class CodexSession {
           streamId: itemId,
           replay: true,
           ...(parentToolUseId ? { parentToolUseId } : {}),
-        } as any);
+        });
       }
     }
 
@@ -998,7 +1028,7 @@ export class CodexSession {
           streamId,
           replay: true,
           ...(parentToolUseId ? { parentToolUseId } : {}),
-        } as any);
+        });
       }
     }
     for (const pendingSecureInput of pendingSecureInputMessagesForSession(sid)) {
@@ -1041,13 +1071,13 @@ export class CodexSession {
     const fingerprint = JSON.stringify(tasks);
     if (!ws && fingerprint === this.lastSubagentSnapshotFingerprint) return;
     if (!ws) this.lastSubagentSnapshotFingerprint = fingerprint;
-    const message = {
+    const message: ActiveSubagentsServerMessage = {
       type: "active_subagents",
       sessionId,
       backend: "codex",
       replace: true,
       tasks,
-    } as any;
+    };
     if (ws) this.sendTo(ws, message);
     else this.send(message);
   }
@@ -1146,7 +1176,7 @@ export class CodexSession {
       toolUseId: state.toolUseId,
       sessionId,
       ...(state.parentToolUseId ? { parentToolUseId: state.parentToolUseId } : {}),
-    } as any);
+    });
     appendHistory(sessionId, {
       role: "tool_call",
       content: state.description,
@@ -1200,14 +1230,14 @@ export class CodexSession {
         output,
         subagentStatus: status,
         sessionId: this.sessionId,
-      } as any);
+      });
       this.send({
         type: "subagent_result",
         parentToolUseId: agent.toolUseId,
         content: output,
         subagentStatus: status,
         sessionId: this.sessionId,
-      } as any);
+      });
       appendHistory(this.sessionId, {
         role: "tool_result",
         content: output,
@@ -1234,21 +1264,26 @@ export class CodexSession {
         if (!codexSubagentIsActive(agent.status)) continue;
         const revision = agent.revision;
         try {
-          let response = await client.readThread({ threadId: agent.agentId, includeTurns: false }) as any;
+          const response = await client.readThread({ threadId: agent.agentId, includeTurns: false });
           if (this.appServer !== client || agent.revision !== revision) continue;
-          const runtimeStatus = response?.thread?.status?.type;
+          const thread = isCodexRecord(response) && isCodexRecord(response.thread) ? response.thread : undefined;
+          const runtimeStatus = isCodexRecord(thread?.status) ? thread.status.type : undefined;
           if (runtimeStatus === "idle") {
             // Fetch terminal details only when the runtime says work has ended.
-            response = await client.readThread({ threadId: agent.agentId, includeTurns: true }) as any;
+            const terminalResponse = await client.readThread({ threadId: agent.agentId, includeTurns: true });
             if (this.appServer !== client || agent.revision !== revision) continue;
-            if (response?.thread?.status?.type !== "idle") continue;
-            const lastTurn = response?.thread?.turns?.at(-1);
+            if (!isCodexRecord(terminalResponse) || !isCodexRecord(terminalResponse.thread)) continue;
+            const terminalThread = terminalResponse.thread;
+            if (!isCodexRecord(terminalThread.status) || terminalThread.status.type !== "idle") continue;
+            const lastTurn = codexRecordArray(terminalThread.turns).at(-1);
             const terminalStatus = normalizeCodexSubagentStatus(lastTurn?.status);
             if (!terminalStatus || codexSubagentIsActive(terminalStatus)) continue;
             agent.activeTurnId = undefined;
-            if (lastTurn?.id) agent.completedTurnIds.add(lastTurn.id);
-            this.updateCodexSubagentStatus(agent.agentId, lastTurn?.status || "completed", lastTurn?.error?.message);
-          } else if (runtimeStatus) {
+            if (typeof lastTurn?.id === "string" && lastTurn.id) agent.completedTurnIds.add(lastTurn.id);
+            const errorMessage = isCodexRecord(lastTurn?.error) && typeof lastTurn.error.message === "string"
+              ? lastTurn.error.message : undefined;
+            this.updateCodexSubagentStatus(agent.agentId, terminalStatus, errorMessage);
+          } else if (typeof runtimeStatus === "string" && runtimeStatus) {
             this.updateCodexSubagentStatus(agent.agentId, runtimeStatus);
           }
         } catch {
@@ -1275,7 +1310,7 @@ export class CodexSession {
   // Some are meaningful for Codex, others remain no-ops where Codex has no
   // matching runtime control.
   setEffort(e: string): void {
-    if (e === "minimal" || e === "low" || e === "medium" || e === "high" || e === "max" || e === "xhigh" || e === "ultra") {
+    if (isSocketAgentEffort(e)) {
       this._effort = e;
       this.persistAgentSettings({ effort: e });
     }
@@ -1379,7 +1414,7 @@ export class CodexSession {
     pending.resolve({});
     const sid = this.sessionId || this._resumeSessionId || "";
     if (sid) markQuestionAnswered(sid, questionId, {});
-    this.send({ type: "question_answered", questionId, sessionId: sid, answers: {} } as any);
+    this.send({ type: "question_answered", questionId, sessionId: sid, answers: {} });
   }
   submitAuthCode(_code: string): void {}
   interrupt(): void { this.abort(); }
@@ -1422,7 +1457,7 @@ export class CodexSession {
     this._compactStartedAt = new Date().toISOString();
     this._compactBoundaryEmitted = false;
     this._compactBoundaryTrigger = "manual";
-    this.send({ type: "compacting", active: true, sessionId: threadId } as any);
+    this.send({ type: "compacting", active: true, sessionId: threadId });
     try {
       await this.appServer!.resumeThread({ ...this.buildAppServerThreadParams(), threadId });
       await this.appServer!.compactThreadAndWait(threadId);
@@ -1433,7 +1468,7 @@ export class CodexSession {
       this._manualCompactionPending = false;
       this._isCompacting = false;
       this._compactStartedAt = null;
-      this.send({ type: "compacting", active: false, sessionId: threadId } as any);
+      this.send({ type: "compacting", active: false, sessionId: threadId });
       await this.releaseAppServerThreadWriter();
       this.scheduleAppServerIdleStop();
     }
@@ -1530,7 +1565,7 @@ export class CodexSession {
         await this.ensureAppServer();
         if (!commandArgs) {
           const result = await this.appServer!.getGoal(threadId);
-          const goal = (result as any)?.goal;
+          const goal = result.goal;
           this.emitSlashCommandResult(
             command,
             goal
@@ -1572,8 +1607,8 @@ export class CodexSession {
         await this.ensureAppServer();
         this.appServerConfig();
         const result = await this.appServer!.listMcpServerStatus(undefined);
-        const servers = Array.isArray((result as any)?.data) ? (result as any).data : [];
-        const displayServers = servers.map((server: any) => ({
+        const servers = codexRecordArray(isCodexRecord(result) ? result.data : undefined);
+        const displayServers = servers.map((server) => ({
           name: String(server.name || server.serverName || "unnamed"),
           authStatus: this.formatMcpAuthStatus(server.authStatus || server.status || server.startupStatus || server.state || "unknown"),
           toolCount: server.tools && typeof server.tools === "object" ? Object.keys(server.tools).length : 0,
@@ -1581,7 +1616,7 @@ export class CodexSession {
           templateCount: Array.isArray(server.resourceTemplates) ? server.resourceTemplates.length : 0,
           tools: server.tools && typeof server.tools === "object" ? Object.keys(server.tools) : [],
         }));
-        if (!displayServers.some((server: any) => server.name === "socketagent_app")) {
+        if (!displayServers.some((server) => server.name === "socketagent_app")) {
           displayServers.unshift({
             name: "socketagent_app",
             authStatus: this.appServerMcpRegistration ? "registered" : "configured",
@@ -1593,7 +1628,7 @@ export class CodexSession {
         }
         const summary = displayServers.length === 0
           ? "No Codex MCP servers reported."
-          : displayServers.map((server: any) => `${server.name}: ${server.authStatus} (${server.toolCount} tools, ${server.resourceCount} resources, ${server.templateCount} templates)`).join("\n");
+          : displayServers.map((server) => `${server.name}: ${server.authStatus} (${server.toolCount} tools, ${server.resourceCount} resources, ${server.templateCount} templates)`).join("\n");
         this.emitSlashCommandResult(command, summary, "completed", {
           servers: displayServers,
         });
@@ -1608,29 +1643,29 @@ export class CodexSession {
         }
         await this.ensureAppServer();
         const result = await this.appServer!.listModels();
-        const models = Array.isArray((result as any)?.data) ? (result as any).data : [];
+        const models = codexRecordArray(isCodexRecord(result) ? result.data : undefined);
         const names = models
-          .filter((model: any) => model && model.hidden !== true)
+          .filter((model) => model && model.hidden !== true)
           .slice(0, 12)
-          .map((model: any) => {
+          .map((model) => {
             const id = String(model.id || model.model || "unknown");
             const display = model.displayName ? ` (${model.displayName})` : "";
             const current = id === this._model || (!this._model && model.isDefault) ? " current" : "";
             const tier = Array.isArray(model.serviceTiers) && model.serviceTiers.length > 0
-              ? `; tiers: ${model.serviceTiers.map((tier: any) => tier.name || tier.id).filter(Boolean).join(", ")}`
+              ? `; tiers: ${codexRecordArray(model.serviceTiers).map((tier) => tier.name || tier.id).filter(Boolean).join(", ")}`
               : "";
             return `${id}${display}${current}${tier}`;
           });
         this.emitSlashCommandResult(command, names.length > 0 ? names.join("\n") : `Current model: ${this._model || "default"}`, "completed", {
           models: models
-            .filter((model: any) => model && model.hidden !== true)
+            .filter((model) => model && model.hidden !== true)
             .slice(0, 12)
-            .map((model: any) => ({
+            .map((model) => ({
               id: String(model.id || model.model || "unknown"),
               displayName: String(model.displayName || model.id || model.model || "unknown"),
               description: String(model.description || ""),
               current: String(model.id || model.model || "") === this._model || (!this._model && model.isDefault === true),
-              tiers: Array.isArray(model.serviceTiers) ? model.serviceTiers.map((tier: any) => tier.name || tier.id).filter(Boolean) : [],
+              tiers: Array.isArray(model.serviceTiers) ? codexRecordArray(model.serviceTiers).map((tier) => tier.name || tier.id).filter(Boolean) : [],
             })),
         });
         return;
@@ -1699,10 +1734,10 @@ export class CodexSession {
 
   async buildStatusResult(threadId: string): Promise<{ summary: string; payload: Record<string, unknown> }> {
     const lines: string[] = [];
-    let config: any = null;
-    let thread: any = null;
-    let rateLimits: any = null;
-    let usage: any = null;
+    let config: Record<string, unknown> | undefined;
+    let thread: Record<string, unknown> | undefined;
+    let rateLimits: unknown;
+    let usage: unknown;
 
     await this.ensureAppServer();
     const [configResult, threadResult, limitsResult, usageResult] = await Promise.allSettled([
@@ -1711,12 +1746,16 @@ export class CodexSession {
       this.appServer!.readAccountRateLimits(),
       this.appServer!.readAccountUsage(),
     ]);
-    if (configResult.status === "fulfilled") config = (configResult.value as any)?.config || null;
-    if (threadResult.status === "fulfilled") thread = (threadResult.value as any)?.thread || null;
+    if (configResult.status === "fulfilled" && isCodexRecord(configResult.value) && isCodexRecord(configResult.value.config)) {
+      config = configResult.value.config;
+    }
+    if (threadResult.status === "fulfilled" && isCodexRecord(threadResult.value) && isCodexRecord(threadResult.value.thread)) {
+      thread = threadResult.value.thread;
+    }
     if (limitsResult.status === "fulfilled") rateLimits = limitsResult.value;
     if (usageResult.status === "fulfilled") usage = usageResult.value;
 
-    const threadStatus = thread?.status?.type
+    const threadStatus = (isCodexRecord(thread?.status) ? thread.status.type : undefined)
       || (this._isCompacting ? "compacting" : this._isRunning ? "running" : "idle");
     const model = this._model || config?.model || "default";
     const effort = config?.model_reasoning_effort || this._effort;
@@ -1773,22 +1812,22 @@ export class CodexSession {
         },
         limits: limitPayload,
         usage: usagePayload,
-        resetCredits: rateLimits?.rateLimitResetCredits ?? null,
+        resetCredits: isCodexRecord(rateLimits) ? rateLimits.rateLimitResetCredits ?? null : null,
       },
     };
   }
 
-  private buildRateLimitPayload(value: any): Array<Record<string, unknown>> {
-    if (!value) return [];
-    const byId = value.rateLimitsByLimitId && typeof value.rateLimitsByLimitId === "object"
+  private buildRateLimitPayload(value: unknown): Array<Record<string, unknown>> {
+    if (!isCodexRecord(value)) return [];
+    const byId = isCodexRecord(value.rateLimitsByLimitId)
       ? Object.values(value.rateLimitsByLimitId)
       : [];
-    const limits = (byId.length > 0 ? byId : [value.rateLimits]).filter(Boolean) as any[];
+    const limits = (byId.length > 0 ? byId : [value.rateLimits]).filter(isCodexRecord);
     return limits.map((limit) => ({
       id: String(limit.limitId || limit.limitName || "codex"),
       label: String(limit.limitName || (limit.limitId === "codex" ? "Codex" : limit.limitId) || "Codex"),
       plan: limit.planType ? String(limit.planType) : "",
-      credits: limit.credits
+      credits: isCodexRecord(limit.credits)
         ? (limit.credits.unlimited ? "unlimited" : String(limit.credits.balance ?? "0"))
         : "",
       reached: limit.rateLimitReachedType ? this.formatScalar(limit.rateLimitReachedType) : "",
@@ -1797,8 +1836,8 @@ export class CodexSession {
     }));
   }
 
-  private buildRateLimitWindowPayload(window: any): Record<string, unknown> | null {
-    if (!window) return null;
+  private buildRateLimitWindowPayload(window: unknown): Record<string, unknown> | null {
+    if (!isCodexRecord(window)) return null;
     const usedPercent = Number(window.usedPercent);
     return {
       usedPercent: Number.isFinite(usedPercent) ? usedPercent : null,
@@ -1809,19 +1848,21 @@ export class CodexSession {
     };
   }
 
-  private buildUsagePayload(value: any): Record<string, unknown> {
-    const summary = value?.summary;
-    if (!summary) return {};
+  private buildUsagePayload(value: unknown): Record<string, unknown> {
+    if (!isCodexRecord(value) || !isCodexRecord(value.summary)) return {};
+    const summary = value.summary;
     const today = this.localDateKey();
     const metric = (value: unknown) => value == null || !Number.isFinite(Number(value)) ? null : Number(value);
-    const buckets = Array.isArray(value.dailyUsageBuckets)
-      ? value.dailyUsageBuckets.filter((bucket: any) =>
-          typeof bucket?.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(bucket.startDate) &&
-          bucket.startDate <= today && metric(bucket.tokens) !== null)
-      : [];
-    const todayBucket = buckets.find((bucket: any) => bucket.startDate === today);
-    const latestBucket = buckets.reduce((latest: any, bucket: any) =>
-      !latest || bucket.startDate > latest.startDate ? bucket : latest, null);
+    const rawBuckets: unknown[] = Array.isArray(value.dailyUsageBuckets) ? value.dailyUsageBuckets : [];
+    const buckets = rawBuckets.flatMap((bucket) => {
+      if (!isCodexRecord(bucket) || typeof bucket.startDate !== "string" ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(bucket.startDate) || bucket.startDate > today) return [];
+      const tokens = metric(bucket.tokens);
+      return tokens === null ? [] : [{ startDate: bucket.startDate, tokens }];
+    });
+    const todayBucket = buckets.find((bucket) => bucket.startDate === today);
+    const latestBucket = buckets.reduce<(typeof buckets)[number] | undefined>((latest, bucket) =>
+      !latest || bucket.startDate > latest.startDate ? bucket : latest, undefined);
     return {
       lifetimeTokens: metric(summary.lifetimeTokens),
       todayTokens: todayBucket ? metric(todayBucket.tokens) : null,
@@ -1833,18 +1874,18 @@ export class CodexSession {
     };
   }
 
-  private formatRateLimitSummary(value: any): string[] {
-    if (!value) return [];
-    const byId = value.rateLimitsByLimitId && typeof value.rateLimitsByLimitId === "object"
+  private formatRateLimitSummary(value: unknown): string[] {
+    if (!isCodexRecord(value)) return [];
+    const byId = isCodexRecord(value.rateLimitsByLimitId)
       ? Object.values(value.rateLimitsByLimitId)
       : [];
-    const limits = (byId.length > 0 ? byId : [value.rateLimits]).filter(Boolean) as any[];
+    const limits = (byId.length > 0 ? byId : [value.rateLimits]).filter(isCodexRecord);
     return limits.slice(0, 4).map((limit) => {
       const label = limit.limitName || limit.limitId || "Codex";
       const plan = limit.planType ? `; plan ${limit.planType}` : "";
       const primary = this.formatRateLimitWindow("primary", limit.primary);
       const secondary = this.formatRateLimitWindow("secondary", limit.secondary);
-      const credits = limit.credits
+      const credits = isCodexRecord(limit.credits)
         ? `; credits ${limit.credits.unlimited ? "unlimited" : String(limit.credits.balance ?? "0")}`
         : "";
       const reached = limit.rateLimitReachedType ? `; reached ${this.formatScalar(limit.rateLimitReachedType)}` : "";
@@ -1852,17 +1893,17 @@ export class CodexSession {
     });
   }
 
-  private formatRateLimitWindow(label: string, window: any): string {
-    if (!window) return "";
+  private formatRateLimitWindow(label: string, window: unknown): string {
+    if (!isCodexRecord(window)) return "";
     const used = Number.isFinite(Number(window.usedPercent)) ? `${Math.round(Number(window.usedPercent))}%` : "unknown";
     const duration = this.formatWindowDuration(window.windowDurationMins);
     const reset = this.formatResetTime(window.resetsAt);
     return `${label} ${used}${duration ? `/${duration}` : ""}${reset ? `, resets ${reset}` : ""}`;
   }
 
-  private formatUsageSummary(value: any): string[] {
-    const summary = value?.summary;
-    if (!summary) return [];
+  private formatUsageSummary(value: unknown): string[] {
+    if (!isCodexRecord(value) || !isCodexRecord(value.summary)) return [];
+    const summary = value.summary;
     const lines = [
       `- Lifetime tokens: ${this.formatNumber(summary.lifetimeTokens)}`,
       `- Peak daily tokens: ${this.formatNumber(summary.peakDailyTokens)}`,
@@ -1870,9 +1911,8 @@ export class CodexSession {
       `- Longest streak: ${this.formatNumber(summary.longestStreakDays)} days`,
     ];
     const today = this.localDateKey();
-    const todayBucket = Array.isArray(value.dailyUsageBuckets)
-      ? value.dailyUsageBuckets.find((bucket: any) => bucket?.startDate === today)
-      : null;
+    const buckets: unknown[] = Array.isArray(value.dailyUsageBuckets) ? value.dailyUsageBuckets : [];
+    const todayBucket = buckets.filter(isCodexRecord).find((bucket) => bucket.startDate === today);
     if (todayBucket) {
       lines.splice(1, 0, `- Today: ${this.formatNumber(todayBucket.tokens)} tokens`);
     }
@@ -1970,7 +2010,7 @@ export class CodexSession {
       payload,
       sessionId: sid,
       parentToolUseId: `codex_slash_${command}`,
-    } as any);
+    });
   }
 
   async listCodexCollaborationModes(): Promise<Array<Record<string, unknown>>> {
@@ -1978,16 +2018,11 @@ export class CodexSession {
     await this.ensureAppServer();
     const result = await this.appServer!.listCollaborationModes();
     void this.refreshSupportedModels();
-    const rawModes = Array.isArray((result as any)?.modes)
-      ? (result as any).modes
-      : Array.isArray((result as any)?.data)
-        ? (result as any).data
-      : Array.isArray(result)
-        ? result
-        : [];
+    const response = isCodexRecord(result) ? result : {};
+    const rawModes = codexRecordArray(Array.isArray(response.modes) ? response.modes :
+      Array.isArray(response.data) ? response.data : result);
     const modes: Array<Record<string, unknown>> = rawModes
-      .filter((mode: any) => mode && typeof mode === "object")
-      .map((mode: any) => ({
+      .map((mode) => ({
         id: String(mode.id || mode.mode || mode.name || "default"),
         name: String(mode.name || mode.title || mode.id || "Default"),
         ...(mode.description ? { description: String(mode.description) } : {}),
@@ -2020,48 +2055,32 @@ export class CodexSession {
     try {
       await this.ensureAppServer();
       const result = await this.appServer!.listModels();
-      const rawModels = Array.isArray((result as any)?.data)
-        ? (result as any).data
-        : Array.isArray((result as any)?.models)
-          ? (result as any).models
-          : Array.isArray(result)
-            ? result
-            : [];
+      const response = isCodexRecord(result) ? result : {};
+      const rawModels = codexRecordArray(Array.isArray(response.data) ? response.data :
+        Array.isArray(response.models) ? response.models : result);
       const visible = rawModels
-        .filter((model: any) => model && model.hidden !== true)
+        .filter((model) => model && model.hidden !== true)
         .slice(0, 50);
       const configuredModel = this.configuredCodexModel();
       const defaultModel = visible
-        .map((model: any) => ({ model, id: this.codexModelId(model) }))
-        .find((entry: { model: any; id: string }) => entry.id && entry.model.isDefault === true)?.id;
+        .map((model) => ({ model, id: this.codexModelId(model) }))
+        .find((entry) => entry.id && entry.model.isDefault === true)?.id;
       const currentModel = this._model || configuredModel || defaultModel || this.codexModel();
       if (!this._model && currentModel) {
         this._model = currentModel;
         this.persistAgentSettings({ model: currentModel });
       }
       const models = visible
-        .map((model: any) => {
+        .map((model) => {
           const id = this.codexModelId(model);
           if (!id) return null;
-          const tiers = Array.isArray(model.serviceTiers)
-            ? model.serviceTiers.map((tier: any) => tier?.name || tier?.id).filter(Boolean)
-            : [];
+          const tiers = codexRecordArray(model.serviceTiers)
+            .map((tier) => String(tier.name || tier.id || "")).filter(Boolean);
           const descriptionParts = [
             model.description ? String(model.description) : "",
             tiers.length > 0 ? `Tiers: ${tiers.join(", ")}` : "",
           ].filter(Boolean);
-          const supportedReasoningEfforts = Array.isArray(model.supportedReasoningEfforts)
-            ? model.supportedReasoningEfforts
-                .map((entry: any) => {
-                  const reasoningEffort = String(entry?.reasoningEffort || entry?.effort || entry || "").trim();
-                  if (!reasoningEffort) return null;
-                  return {
-                    reasoningEffort,
-                    ...(entry?.description ? { description: String(entry.description) } : {}),
-                  };
-                })
-                .filter(Boolean)
-            : [];
+          const supportedReasoningEfforts = codexReasoningOptions(model.supportedReasoningEfforts);
           return {
             id,
             value: id,
@@ -2081,12 +2100,12 @@ export class CodexSession {
             ...(model.upgradeInfo ? { upgradeInfo: model.upgradeInfo } : {}),
           };
         })
-        .filter(Boolean) as Array<Record<string, unknown>>;
+        .filter((model) => model !== null);
       this.normalizeEffortForModel(currentModel);
       const saved = saveCachedModelCatalog("codex", models);
       this.publishSupportedModels(saved.models, { updatedAt: saved.updatedAt });
-    } catch (e: any) {
-      console.warn(`[CodexModels] Failed to list models: ${e?.message || e}`);
+    } catch (e) {
+      console.warn(`[CodexModels] Failed to list models: ${codexAppServerErrorMessage(e, String(e))}`);
     }
   }
 
@@ -2112,41 +2131,40 @@ export class CodexSession {
       const id = String(model.value || model.id || "");
       return { ...model, current: id === currentModel };
     });
-    const message = {
+    const message: SupportedModelsServerMessage = {
       type: "supported_models",
       models: selectedModels,
       ...(currentModel ? { currentModel } : {}),
       sessionId: this.sessionId || this._resumeSessionId || "",
       backend: "codex",
       ...options,
-    } as ServerMessage;
+    };
     this._lastSupportedModels = message;
     this.send(message);
   }
 
-  private codexModelId(model: any): string {
+  private codexModelId(model: Record<string, unknown>): string {
     return String(model?.id || model?.model || model?.value || "").trim();
   }
 
   private normalizeEffortForModel(modelId?: string | null): void {
-    const cached = this._lastSupportedModels as any;
+    const cached = this._lastSupportedModels;
     if (!modelId || !cached || !Array.isArray(cached.models)) return;
-    const model = cached.models.find((entry: any) => String(entry?.value || entry?.id || "") === modelId);
+    const model = cached.models.find((entry) => String(entry.value || entry.id || "") === modelId);
     if (!model || !Array.isArray(model.supportedReasoningEfforts)) return;
-    const supported = model.supportedReasoningEfforts
-      .map((entry: any) => String(entry?.reasoningEffort || entry?.effort || entry || "").trim())
-      .filter(Boolean);
+    const supported = codexReasoningOptions(model.supportedReasoningEfforts)
+      .map((entry) => entry.reasoningEffort).filter(isSocketAgentEffort);
     if (supported.length === 0 || supported.includes(this._effort)) return;
     const defaultEffort = String(model.defaultReasoningEffort || "").trim();
-    this._effort = (supported.includes(defaultEffort) ? defaultEffort : supported[0]) as typeof this._effort;
+    this._effort = isSocketAgentEffort(defaultEffort) && supported.includes(defaultEffort) ? defaultEffort : supported[0];
   }
 
   private updateCachedSupportedModelSelection(): void {
-    const cached = this._lastSupportedModels as any;
+    const cached = this._lastSupportedModels;
     if (!cached || !Array.isArray(cached.models)) return;
     const currentModel = this._model || this.configuredCodexModel() || cached.currentModel || this.codexModel() || "";
     cached.currentModel = currentModel;
-    cached.models = cached.models.map((model: any) => {
+    cached.models = cached.models.map((model) => {
       const id = String(model?.value || model?.id || "");
       return { ...model, current: id === currentModel };
     });
@@ -2181,8 +2199,8 @@ export class CodexSession {
         this._pendingAppServerSteers.push(pending);
         this.flushPendingAppServerSteers();
       });
-    } catch (err: any) {
-      console.warn(`[codex app-server] turn/steer failed; queueing follow-up: ${err?.message || String(err)}`);
+    } catch (err) {
+      console.warn(`[codex app-server] turn/steer failed; queueing follow-up: ${codexAppServerErrorMessage(err, String(err))}`);
     }
 
     console.warn(`[codex app-server] no active turn for injection; queueing follow-up (thread=${this.threadId || ""}, turn=${this.activeAppServerTurnId || ""}, priority=${priority}, messageId=${messageId || ""})`);
@@ -2204,8 +2222,8 @@ export class CodexSession {
     return {
       sessionId: this.sessionId ?? "",
       cwd: this.cwd,
-      send: (msg: ServerMessage | Record<string, any>) => {
-        this.send(this.withCodexProtectedPrompt(msg) as ServerMessage);
+      send: (msg) => {
+        this.send(this.withCodexProtectedPrompt(msg));
       },
       appendHistory: (entry: HistoryEntry) => {
         if (this.sessionId) appendHistory(this.sessionId, this.withCodexProtectedHistory(entry));
@@ -2215,13 +2233,13 @@ export class CodexSession {
     };
   }
 
-  private withCodexProtectedPrompt(msg: ServerMessage | Record<string, any>): ServerMessage | Record<string, any> {
-    if ((msg as any).type !== "question" || !Array.isArray((msg as any).questions)) {
+  private withCodexProtectedPrompt(msg: ServerMessage): ServerMessage {
+    if (msg.type !== "question") {
       return msg;
     }
     return {
-      ...(msg as Record<string, any>),
-      questions: (msg as any).questions.map((question: any) => ({
+      ...msg,
+      questions: msg.questions.map((question) => ({
         ...question,
         question: this.codexProtectedPromptText(question?.question),
       })),
@@ -2229,20 +2247,19 @@ export class CodexSession {
   }
 
   private withCodexProtectedHistory(entry: HistoryEntry): HistoryEntry {
-    if (entry.role !== "question" || !Array.isArray((entry as any).questions)) {
+    if (entry.role !== "question" || !entry.questions) {
       return entry;
     }
     return {
       ...entry,
-      questions: (entry as any).questions.map((question: any) => ({
+      questions: entry.questions.map((question) => ({
         ...question,
         question: this.codexProtectedPromptText(question?.question),
       })),
     };
   }
 
-  private codexProtectedPromptText(text: unknown): unknown {
-    if (typeof text !== "string") return text;
+  private codexProtectedPromptText(text: string): string {
     return text.replace(/^Claude wants to /, "Codex wants to ");
   }
 
@@ -2259,47 +2276,46 @@ export class CodexSession {
   }
 
   public send(msg: ServerMessage): void {
-    positionSessionMessage(String((msg as any).sessionId || this.sessionId || ""), msg as any);
-    maybeSendAgentAttentionPush(msg as any, path.basename(this.cwd) || "SocketAgent");
+    positionSessionMessage(String(("sessionId" in msg ? msg.sessionId : undefined) || this.sessionId || ""), msg);
+    maybeSendAgentAttentionPush(msg, path.basename(this.cwd) || "SocketAgent");
     const streamKey = this.coalescedStreamKey(msg);
-    if (streamKey && (msg as any).snapshot === true && (msg as any).finalSnapshot !== true) {
+    if (streamKey && (msg.type === "text" || msg.type === "thinking") && msg.snapshot === true && msg.finalSnapshot !== true) {
       this.streamSnapshots.push(streamKey, msg);
       return;
     }
-    if (streamKey && (msg as any).finalSnapshot === true) {
+    if (streamKey && (msg.type === "text" || msg.type === "thinking") && msg.finalSnapshot === true) {
       this.streamSnapshots.discard(streamKey);
-    } else if ((msg as any).type === "tool_call") {
+    } else if (msg.type === "tool_call") {
       this.streamSnapshots.flushAll();
     }
     this.sendImmediately(msg);
   }
 
   private coalescedStreamKey(msg: ServerMessage): string | null {
-    const type = String((msg as any).type || "");
-    if (type !== "text" && type !== "thinking") return null;
-    const identity = String((msg as any).entryId || (msg as any).streamId || "");
-    return identity ? `${type}:${identity}` : null;
+    if (msg.type !== "text" && msg.type !== "thinking") return null;
+    const identity = msg.entryId || msg.streamId;
+    return identity ? `${msg.type}:${identity}` : null;
   }
 
   private sendImmediately(msg: ServerMessage): void {
     const deliveryAware = [...this.clientSockets].some(
-      (socket) => (socket as any).supportsSessionEventAck === true,
+      (socket) => "supportsSessionEventAck" in socket && socket.supportsSessionEventAck === true,
     );
     const monitorDeliveryAware = this.clientSockets.size > 0 && [...this.clientSockets].every(
-      (socket) => (socket as any).supportsMonitorOutputAck === true,
+      (socket) => "supportsMonitorOutputAck" in socket && socket.supportsMonitorOutputAck === true,
     );
     const shouldPrepare = deliveryAware
-      && ((msg as any).type !== "monitor_output" || monitorDeliveryAware);
+      && (msg.type !== "monitor_output" || monitorDeliveryAware);
     const outgoing = shouldPrepare
-      ? this.sessionEventDelivery.prepare(msg as any)
+      ? this.sessionEventDelivery.prepare(msg)
       : msg;
-    this.dispatchToClients(outgoing as ServerMessage);
+    this.dispatchToClients(outgoing);
   }
 
   private sendSdkEvent(msg: ServerMessage): void {
     const recipients: WebSocket[] = [];
     for (const socket of [...this.clientSockets]) {
-      if (socket.readyState === WebSocket.OPEN && (socket as any).supportsRawSdkEvents === true) {
+      if (socket.readyState === WebSocket.OPEN && "supportsRawSdkEvents" in socket && socket.supportsRawSdkEvents === true) {
         recipients.push(socket);
       } else if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
         this.clientSockets.delete(socket);
@@ -2392,12 +2408,12 @@ export class CodexSession {
           title,
           backend: "codex",
           permissionMode: this.permissionMode,
-        } as ServerMessage);
+        });
         this.send({
           type: "session_settings",
           sessionId,
           settings: this.getAgentSettings(),
-        } as any);
+        });
       }
 
       const sessionId = this.sessionId!;
@@ -2422,7 +2438,7 @@ export class CodexSession {
           input,
           toolUseId,
           sessionId,
-        } as any);
+        });
         appendHistory(sessionId, {
           role: "tool_call",
           content: "Inspecting the isolated review workspace",
@@ -2436,7 +2452,7 @@ export class CodexSession {
           toolUseId,
           output,
           sessionId,
-        } as any);
+        });
         appendHistory(sessionId, {
           role: "tool_result",
           content: output,
@@ -2462,7 +2478,7 @@ export class CodexSession {
         streamId,
         snapshot: true,
         finalSnapshot: true,
-      } as any);
+      });
       appendHistory(sessionId, {
         role: "assistant",
         content: response,
@@ -2481,7 +2497,7 @@ export class CodexSession {
         content: response,
         sessionId,
         usage,
-      } as ServerMessage);
+      });
       updateSessionActivity(sessionId, response, usage);
     } finally {
       this._isRunning = false;
@@ -2557,7 +2573,7 @@ export class CodexSession {
             ...threadConfig,
             threadId: this.threadId,
           });
-        } catch (err: any) {
+        } catch (err) {
           if (this.isMissingRolloutAppServerError(err)) {
             const orphanedThreadId = this.threadId;
             console.warn(`[codex app-server] Replacing rollout-less thread ${orphanedThreadId}`);
@@ -2642,12 +2658,12 @@ export class CodexSession {
             messageId: nextPrompt.messageId,
           });
           nextPrompt.resolve();
-        } catch (err: any) {
+        } catch (err) {
           nextPrompt.reject(err instanceof Error ? err : new Error(String(err)));
           throw err;
         }
       }
-    } catch (err: any) {
+    } catch (err) {
       if (this._preparedRolloverSessionId && !this.sessionId) {
         const previousSessionId = this._preparedRolloverSessionId;
         this.sessionId = previousSessionId;
@@ -2658,7 +2674,7 @@ export class CodexSession {
         this._preparedRolloverSessionId = null;
       }
       this._pendingUserPrompt = null;
-      this.clearPendingAppServerSteers(`codex app-server error: ${err?.message || String(err)}`);
+      this.clearPendingAppServerSteers(`codex app-server error: ${codexAppServerErrorMessage(err, String(err))}`);
       const activeWriterConflict = isCodexActiveWriterError(err);
       if (isTimedOutCodexThreadResume(err) || activeWriterConflict) {
         const reason = isTimedOutCodexThreadResume(err)
@@ -2667,9 +2683,9 @@ export class CodexSession {
         console.warn(`[codex app-server] Discarding ${reason}`);
         try {
           await this.stopAppServerClient(true);
-        } catch (stopError: any) {
+        } catch (stopError) {
           console.error(
-            `[codex app-server] Failed to terminate rejected resume: ${stopError?.message || stopError}`
+            `[codex app-server] Failed to terminate rejected resume: ${codexAppServerErrorMessage(stopError, String(stopError))}`
           );
         }
       }
@@ -2682,7 +2698,7 @@ export class CodexSession {
         // The caller emits the canonical prompt_failed event with the stable
         // user-message ID. Mark this handled so it does not also emit a
         // second generic error card for the same failure.
-        if (surfacedError && typeof surfacedError === "object") {
+        if (isCodexRecord(surfacedError)) {
           surfacedError.socketAgentSurfaced = true;
         }
       }
@@ -2758,15 +2774,15 @@ export class CodexSession {
       // Codex "error" notifications (e.g. usageLimitExceeded / systemError)
       // arrive here on a non-reserved channel so they cannot crash the process.
       // Surface the real message to the client instead of failing silently.
-      this.appServer.on("errorNotification", (params: any) => {
+      this.appServer.on("errorNotification", (params: unknown) => {
         this.handleAppServerErrorNotification(params);
       });
       // Guard genuine client errors (e.g. spawn failure) so an emitted
       // "error" event never becomes an uncaught ERR_UNHANDLED_ERROR.
       this.appServer.on("error", (err: Error) => {
-        this._stderrBuffer.push(`[codex app-server error] ${err?.message || String(err)}\n`);
+        this._stderrBuffer.push(`[codex app-server error] ${codexAppServerErrorMessage(err, String(err))}\n`);
         if (this._isRunning && !this._abortRequested && !this.appServerStopExpected) {
-          this.handleAppServerProcessFailure(err?.message || String(err));
+          this.handleAppServerProcessFailure(codexAppServerErrorMessage(err, String(err)));
         }
       });
     }
@@ -2797,7 +2813,7 @@ export class CodexSession {
     }
   }
 
-  private handleAppServerErrorNotification(params: any): void {
+  private handleAppServerErrorNotification(params: unknown): void {
     if (this._rewindPending) {
       // Rewind RPCs report their own failures. Runtime shutdown/resume can
       // emit transient errors that must not become agent transcript messages.
@@ -2812,7 +2828,7 @@ export class CodexSession {
           state: "running",
           sessionId: sid,
           ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
-        } as any);
+        });
       }
       return;
     }
@@ -2841,21 +2857,21 @@ export class CodexSession {
     this.appServerTerminalFailureHandled = true;
     const sid = this.sessionId;
     if (sid) {
-      this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
+      this.send({ type: "session_state_changed", state: "idle", sessionId: sid });
       const recovery = recycling
         ? " SocketAgent is restarting Codex; retry your message. If this keeps happening on Windows, rerun the SocketAgent installer once so the server starts in your interactive logon session."
         : "";
-      this.send({ type: "error", message: `Codex: ${message}${recovery}`, sessionId: sid } as any);
+      this.send({ type: "error", message: `Codex: ${message}${recovery}`, sessionId: sid });
     }
     const error = new Error(message);
-    (error as any).socketAgentSurfaced = true;
+    Object.assign(error, { socketAgentSurfaced: true });
     this.appServerTurnSettler?.reject(error);
   }
 
-  private scheduleSystemErrorRecovery(params: any): void {
+  private scheduleSystemErrorRecovery(params: unknown): void {
     const sid = this.sessionId;
     if (sid) {
-      this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
+      this.send({ type: "session_state_changed", state: "idle", sessionId: sid });
     }
     if (this.appServerSystemErrorTimer) return;
     this.appServerSystemErrorTimer = setTimeout(() => {
@@ -2872,8 +2888,8 @@ export class CodexSession {
   private async recycleFailedAppServer(): Promise<void> {
     try {
       await this.stopAppServerClient(true);
-    } catch (error: any) {
-      console.warn(`[codex app-server] failed to recycle after terminal error: ${error?.message || error}`);
+    } catch (error) {
+      console.warn(`[codex app-server] failed to recycle after terminal error: ${codexAppServerErrorMessage(error, String(error))}`);
     }
   }
 
@@ -2918,7 +2934,7 @@ export class CodexSession {
       sessionId: this.sessionId || undefined,
       message: "Your OpenAI sign-in has expired. Re-authenticate to continue using Codex.",
       detail,
-    } as any);
+    });
   }
 
   private emitMcpAuthRequired(detail: string, name = "Connected app"): void {
@@ -2933,7 +2949,7 @@ export class CodexSession {
       sessionId: this.sessionId || undefined,
       message: `${name} needs to be reconnected.`,
       detail,
-    } as any);
+    });
   }
 
   private async handleAppServerAuthFailure(
@@ -2950,10 +2966,10 @@ export class CodexSession {
     if (!options.terminal) return;
     const error = new Error(detail);
     if (scope === "openai") {
-      (error as any).codexPrimaryAuthSurfaced = true;
+      Object.assign(error, { codexPrimaryAuthSurfaced: true });
     } else if (scope === "mcp") {
-      (error as any).codexMcpAuth = true;
-      (error as any).socketAgentSurfaced = true;
+      Object.assign(error, { codexMcpAuth: true });
+      Object.assign(error, { socketAgentSurfaced: true });
     }
     this.appServerTurnSettler?.reject(error);
   }
@@ -2979,11 +2995,11 @@ export class CodexSession {
     if (!client || !threadId || !this.appServerInitialized) return;
     try {
       await client.unsubscribeThread(threadId);
-    } catch (error: any) {
+    } catch (error) {
       // thread/unsubscribe is unavailable in older Codex builds. Stopping our
       // app-server still releases the writer and keeps desktop handoff safe.
       console.warn(
-        `[codex app-server] thread unsubscribe failed; stopping warm process: ${error?.message || error}`
+        `[codex app-server] thread unsubscribe failed; stopping warm process: ${codexAppServerErrorMessage(error, String(error))}`
       );
       await this.stopAppServerClient(true);
     }
@@ -3021,14 +3037,14 @@ export class CodexSession {
           requireConfirmedExit,
         );
         stopped = true;
-      } catch (err: any) {
+      } catch (err) {
         if (requireConfirmedExit) {
           // Keep the process handle reachable so a retransmitted hard stop can
           // attempt termination again instead of falsely treating it as absent.
           this.appServer = client;
           throw err;
         }
-        console.warn(`[codex app-server] cleanup failed: ${err?.message || err}`);
+        console.warn(`[codex app-server] cleanup failed: ${codexAppServerErrorMessage(err, String(err))}`);
       } finally {
         this.appServerStopExpected = false;
         if (stopped || !requireConfirmedExit) {
@@ -3170,23 +3186,21 @@ export class CodexSession {
   }
 
   private extractThreadId(value: unknown): string | null {
-    const v = value as any;
-    return v?.thread?.id || v?.threadId || null;
+    if (!isCodexRecord(value)) return null;
+    const id = isCodexRecord(value.thread) ? value.thread.id || value.threadId : value.threadId;
+    return typeof id === "string" ? id : null;
   }
 
   private extractTurnId(value: unknown): string | null {
-    const v = value as any;
-    return v?.turn?.id || v?.turnId || null;
+    if (!isCodexRecord(value)) return null;
+    const id = isCodexRecord(value.turn) ? value.turn.id || value.turnId : value.turnId;
+    return typeof id === "string" ? id : null;
   }
 
   private adoptAppServerThread(threadId: string | null, source?: unknown): void {
     if (!threadId) return;
-    const sourceRecord = source && typeof source === "object"
-      ? source as Record<string, unknown>
-      : undefined;
-    const threadRecord = sourceRecord?.thread && typeof sourceRecord.thread === "object"
-      ? sourceRecord.thread as Record<string, unknown>
-      : sourceRecord;
+    const sourceRecord = isCodexRecord(source) ? source : undefined;
+    const threadRecord = isCodexRecord(sourceRecord?.thread) ? sourceRecord.thread : sourceRecord;
     const nativeModel = typeof threadRecord?.model === "string"
       ? threadRecord.model.trim()
       : "";
@@ -3270,16 +3284,16 @@ export class CodexSession {
           title: visibleTitle,
           backend: "codex",
           permissionMode: this.permissionMode,
-        } as ServerMessage);
+        });
         this.send({
           type: "permission_mode_changed",
           permissionMode: this.permissionMode,
-        } as any);
+        });
         this.send({
           type: "session_settings",
           sessionId: this.sessionId,
           settings: this.getAgentSettings(),
-        } as any);
+        });
       }
     }
 
@@ -3302,7 +3316,7 @@ export class CodexSession {
       getSessionId: () => this.sessionId || "",
       getDelegationSupervisorSessionId: () =>
         String(
-          (this as any)._delegationSupervisorSessionId ||
+          this._delegationSupervisorSessionId ||
             getSession(this.sessionId || "")?.delegationSupervisorSessionId ||
             this.sessionId ||
             "",
@@ -3369,7 +3383,7 @@ export class CodexSession {
         type: "result",
         content: "(interrupted)",
         sessionId: this.sessionId,
-      } as ServerMessage);
+      });
     }
     const sid = this.sessionId || this._resumeSessionId || "";
     await Promise.all([
@@ -3462,7 +3476,7 @@ export class CodexSession {
         console.log(`[codex app-server] turn/steer accepted (turn=${turnId}, messageId=${pending.messageId || ""})`);
         this.acknowledgeAcceptedAppServerSteer(pending);
       })
-      .catch((err: any) => {
+      .catch((err: unknown) => {
         const authoritativeTurnId = authoritativeTurnIdFromSteerError(err);
         if (
           authoritativeTurnId
@@ -3476,7 +3490,7 @@ export class CodexSession {
           this.sendPendingAppServerSteer(pending);
           return;
         }
-        this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${err?.message || String(err)}`);
+        this.requeuePendingAppServerSteer(pending, `turn/steer failed: ${codexAppServerErrorMessage(err, String(err))}`);
       });
   }
 
@@ -3573,12 +3587,12 @@ export class CodexSession {
             },
           });
       }
-    } catch (err: any) {
-      console.error(`[codex app-server] approval request failed: ${err?.message || String(err)}`);
+    } catch (err) {
+      console.error(`[codex app-server] approval request failed: ${codexAppServerErrorMessage(err, String(err))}`);
       respond({
         error: {
           code: -32603,
-          message: err?.message || String(err),
+          message: codexAppServerErrorMessage(err, String(err)),
         },
       });
     }
@@ -3637,7 +3651,7 @@ export class CodexSession {
         url: prepared.url,
         elicitationId: prepared.elicitationId,
         sessionId,
-      } as ServerMessage;
+      };
       this.send(message);
       if (sessionId) {
         appendHistory(sessionId, {
@@ -3671,7 +3685,7 @@ export class CodexSession {
       questions: prepared.questions,
       sessionId,
       mcpServerName: serverName,
-    } as ServerMessage;
+    };
     this.send(questionMessage);
     if (sessionId) {
       appendHistory(sessionId, {
@@ -3772,7 +3786,7 @@ export class CodexSession {
       questionId,
       questions,
       sessionId,
-    } as ServerMessage;
+    };
     this.send(questionMessage);
     if (sessionId) {
       appendHistory(sessionId, {
@@ -3801,7 +3815,7 @@ export class CodexSession {
           if (!this.pendingQuestions.delete(questionId)) return;
           this.clearAppServerQuestionMapping(questionId);
           if (sessionId) markQuestionAnswered(sessionId, questionId, {});
-          this.send({ type: "question_answered", questionId, sessionId, answers: {} } as any);
+          this.send({ type: "question_answered", questionId, sessionId, answers: {} });
           resolve({});
         }, autoResolutionMs);
         timer.unref?.();
@@ -3831,7 +3845,7 @@ export class CodexSession {
     respond({ result: { answers: responseAnswers } });
   }
 
-  private async checkAppServerToolPolicy(toolName: string, input: Record<string, any>): Promise<boolean> {
+  private async checkAppServerToolPolicy(toolName: string, input: Record<string, unknown>): Promise<boolean> {
     for (const plugin of this._plugins) {
       const result = await plugin.canUseToolInterceptor?.(toolName, input, this.getSessionContext());
       if (result?.behavior === "deny") return false;
@@ -3845,14 +3859,14 @@ export class CodexSession {
     const questionId = createInteractiveRequestId("codex_approval");
     const sessionId = this.sessionId || this._resumeSessionId || "";
     const question = description;
-    const message: any = { type: "question", questionId, sessionId,
+    const message: QuestionServerMessage = { type: "question", questionId, sessionId,
       questions: [{ question, header: "Tool approval", options: [{ label: "Approve" }, { label: "Decline" }], multiSelect: false }] };
     if (requestId !== undefined) this.appServerQuestionByRequestId.set(String(requestId), questionId);
     if (sessionId) appendHistory(sessionId, { role: "question", content: "", questionId, questions: message.questions, timestamp: now() });
     const waiting = waitForInteractiveAnswer(this.pendingQuestions, questionId, message, undefined, () => {
       this.clearAppServerQuestionMapping(questionId);
       if (sessionId) markQuestionAnswered(sessionId, questionId, {});
-      this.send({ type: "question_answered", questionId, sessionId, answers: {} } as any);
+      this.send({ type: "question_answered", questionId, sessionId, answers: {} });
     });
     this.send(message);
     const answers = await waiting;
@@ -3909,7 +3923,7 @@ export class CodexSession {
         pending.resolve({});
         const sessionId = this.sessionId || this._resumeSessionId || "";
         if (sessionId) markQuestionAnswered(sessionId, questionId, {});
-        this.send({ type: "question_answered", questionId, sessionId, answers: {} } as any);
+        this.send({ type: "question_answered", questionId, sessionId, answers: {} });
       }
       this.clearAppServerQuestionMapping(questionId);
     }
@@ -3995,7 +4009,7 @@ export class CodexSession {
             state: "running",
             sessionId: this.sessionId,
             ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
-          } as any);
+          });
         }
         this.onActivity?.();
         return;
@@ -4022,9 +4036,9 @@ export class CodexSession {
             state: "running",
             sessionId: sid,
             ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
-          } as any);
+          });
         } else if (statusType === "idle" && !this._isRunning && !this.pendingAppServerTurnCompletion) {
-          this.send({ type: "session_state_changed", state: "idle", sessionId: sid } as any);
+          this.send({ type: "session_state_changed", state: "idle", sessionId: sid });
         } else if (statusType === "systemError") {
           const message = codexAppServerErrorMessage(p, "Codex app-server entered systemError state");
           if (isCodexAuthError(p) || isCodexAuthError(message)) {
@@ -4053,7 +4067,7 @@ export class CodexSession {
           sessionId,
           goal,
           ok: true,
-        } as any);
+        });
         return;
       }
 
@@ -4066,16 +4080,16 @@ export class CodexSession {
           sessionId,
           goal: null,
           ok: true,
-        } as any);
+        });
         return;
       }
 
       case "thread/compacted": {
-        const sid = this.sessionId || p?.threadId;
+        const sid = this.sessionId || (isCodexRecord(params) && typeof params.threadId === "string" ? params.threadId : undefined);
         if (!sid) return;
         this._isCompacting = false;
         this._compactStartedAt = null;
-        this.send({ type: "compacting", active: false, sessionId: sid } as any);
+        this.send({ type: "compacting", active: false, sessionId: sid });
         this.emitCompactBoundary(sid, this._compactBoundaryTrigger);
         this.scheduleAppServerIdleStop();
         return;
@@ -4115,7 +4129,7 @@ export class CodexSession {
           type: "session_settings",
           sessionId: sid,
           settings: this.getAgentSettings(),
-        } as any);
+        });
         return;
       }
 
@@ -4142,7 +4156,7 @@ export class CodexSession {
             snapshot: true,
             ...(messagePhase ? { messagePhase } : {}),
             ...(parentToolUseId ? { parentToolUseId } : {}),
-          } as ServerMessage);
+          });
         }
         return;
       }
@@ -4166,7 +4180,7 @@ export class CodexSession {
           streamId: String(itemId),
           snapshot: true,
           ...(parentToolUseId ? { parentToolUseId } : {}),
-        } as ServerMessage);
+        });
         return;
       }
 
@@ -4194,7 +4208,7 @@ export class CodexSession {
           explanation: accumulated,
           plan: [],
           sessionId: sid,
-        } as any);
+        });
         return;
       }
 
@@ -4208,7 +4222,7 @@ export class CodexSession {
           hookName: this.formatAppServerHookName(run),
           hookEvent: String(run.eventName || ""),
           sessionId: sid,
-        } as any);
+        });
         return;
       }
 
@@ -4228,7 +4242,7 @@ export class CodexSession {
           stderr,
           outcome: String(run.status || "completed"),
           sessionId: sid,
-        } as any);
+        });
         return;
       }
 
@@ -4251,7 +4265,7 @@ export class CodexSession {
           done: false,
           chunkIndex: 1,
           ...(parentToolUseId ? { parentToolUseId } : {}),
-        } as any);
+        });
         return;
       }
 
@@ -4272,7 +4286,7 @@ export class CodexSession {
           done: false,
           chunkIndex: 1,
           ...(parentToolUseId ? { parentToolUseId } : {}),
-        } as any);
+        });
         return;
       }
 
@@ -4285,14 +4299,14 @@ export class CodexSession {
           type: "usage_update",
           sessionId: this.sessionId,
           ...usage,
-        } as any);
+        });
         const contextUsage = this.contextUsageFromAppServerUsage(usage);
         if (contextUsage) {
           this.send({
             type: "context_usage",
             sessionId: this.sessionId,
             ...contextUsage,
-          } as any);
+          });
           updateSessionContextUsage(this.sessionId, contextUsage);
           recordSessionMemoryContextUsage(
             this.sessionId,
@@ -4317,14 +4331,14 @@ export class CodexSession {
           explanation,
           plan,
           sessionId: sid,
-        } as any);
+        });
         appendHistory(sid, {
           role: "codex_plan",
           content: explanation,
           toolUseId: turnId,
           toolInput: { explanation, steps: plan },
           timestamp: now(),
-        } as HistoryEntry);
+        });
         return;
       }
 
@@ -4357,7 +4371,7 @@ export class CodexSession {
           input,
           toolUseId,
           sessionId: sid,
-        } as any);
+        });
         const output = reason
           ? `Codex switched from ${fromModel} to ${toModel}: ${reason}`
           : `Codex switched from ${fromModel} to ${toModel}`;
@@ -4366,7 +4380,7 @@ export class CodexSession {
           toolUseId,
           output,
           sessionId: sid,
-        } as any);
+        });
         appendHistory(sid, {
           role: "tool_call",
           content: "Codex model changed",
@@ -4405,7 +4419,7 @@ export class CodexSession {
             toolUseId,
             sessionId: sid,
             ...(parentToolUseId ? { parentToolUseId } : {}),
-          } as any);
+          });
           appendHistory(sid, {
             role: "tool_call",
             content: "Response safety check",
@@ -4422,7 +4436,7 @@ export class CodexSession {
             output: "Safety check completed",
             sessionId: sid,
             ...(parentToolUseId ? { parentToolUseId } : {}),
-          } as any);
+          });
           appendHistory(sid, {
             role: "tool_result",
             content: "Safety check completed",
@@ -4449,7 +4463,7 @@ export class CodexSession {
           input,
           toolUseId,
           sessionId: sid,
-        } as any);
+        });
         const output = input.verifications.length > 0
           ? JSON.stringify(input.verifications, null, 2)
           : "Additional account verification is required";
@@ -4458,7 +4472,7 @@ export class CodexSession {
           toolUseId,
           output,
           sessionId: sid,
-        } as any);
+        });
         appendHistory(sid, {
           role: "tool_call",
           content: "Account verification required",
@@ -4493,7 +4507,7 @@ export class CodexSession {
           input,
           toolUseId,
           sessionId: sid,
-        } as any);
+        });
         appendHistory(sid, {
           role: "tool_call",
           content: "Reviewing tool approval",
@@ -4518,7 +4532,7 @@ export class CodexSession {
           toolUseId,
           output,
           sessionId: sid,
-        } as any);
+        });
         appendHistory(sid, {
           role: "tool_result",
           content: output,
@@ -4532,7 +4546,7 @@ export class CodexSession {
       case "guardianWarning":
       case "windows/worldWritableWarning": {
         const message = String(p?.message || p?.warning || method);
-        this.send({ type: "error", message } as ServerMessage);
+        this.send({ type: "error", message });
         return;
       }
 
@@ -4543,7 +4557,7 @@ export class CodexSession {
           type: "error",
           message: details ? `${summary}\n${details}` : summary,
           sessionId: this.sessionId || undefined,
-        } as any);
+        });
         return;
       }
 
@@ -4559,7 +4573,7 @@ export class CodexSession {
             mcpServerName: name,
           });
         } else if (error) {
-          this.send({ type: "error", message: `${name}: ${error}` } as ServerMessage);
+          this.send({ type: "error", message: `${name}: ${error}` });
         }
         return;
       }
@@ -4599,7 +4613,7 @@ export class CodexSession {
           done: false,
           chunkIndex: 1,
           ...(parentToolUseId ? { parentToolUseId } : {}),
-        } as any);
+        });
         return;
       }
 
@@ -4704,7 +4718,7 @@ export class CodexSession {
               type: "error",
               message,
               sessionId: this.sessionId || undefined,
-            } as any);
+            });
           }
         }
         return;
@@ -4717,7 +4731,7 @@ export class CodexSession {
           type: "error",
           message: `${summary}${details ? `\n${details}` : ""}${path ? `\nConfig: ${path}` : ""}`,
           sessionId: this.sessionId || undefined,
-        } as any);
+        });
         return;
       }
     }
@@ -4781,7 +4795,7 @@ export class CodexSession {
             finalSnapshot: true,
             ...(messagePhase ? { messagePhase } : {}),
             ...(parentToolUseId ? { parentToolUseId } : {}),
-          } as any);
+          });
           if (!parentToolUseId) this._lastAssistantText = text;
           appendItem({
             role: "assistant",
@@ -4876,14 +4890,14 @@ export class CodexSession {
           explanation,
           plan: [],
           sessionId: sid,
-        } as any);
+        });
         appendHistory(sid, {
           role: "codex_plan",
           content: explanation,
           toolUseId: turnId,
           toolInput: { explanation, steps: [] },
           timestamp: now(),
-        } as HistoryEntry);
+        });
         this.appServerPlanText.delete(String(item.id));
       }
       return;
@@ -4898,11 +4912,11 @@ export class CodexSession {
         if (this._compactBoundaryTrigger !== "manual") {
           this._compactBoundaryTrigger = "auto";
         }
-        this.send({ type: "compacting", active: true, sessionId: sid } as any);
+        this.send({ type: "compacting", active: true, sessionId: sid });
       } else {
         this._isCompacting = false;
         this._compactStartedAt = null;
-        this.send({ type: "compacting", active: false, sessionId: sid } as any);
+        this.send({ type: "compacting", active: false, sessionId: sid });
         this.emitCompactBoundary(sid, this._compactBoundaryTrigger);
         this.scheduleAppServerIdleStop();
       }
@@ -5458,7 +5472,8 @@ export class CodexSession {
     }
   }
 
-  private formatAppServerHookName(run: any): string {
+  private formatAppServerHookName(value: unknown): string {
+    const run = isCodexRecord(value) ? value : {};
     const event = String(run?.eventName || "Hook");
     const sourcePath = String(run?.sourcePath || "");
     const sourceName = sourcePath ? path.basename(sourcePath) : "";
@@ -5503,8 +5518,8 @@ export class CodexSession {
     }
     try {
       filePath = cacheToolImage(sessionId, toolUseId, bytes, mimeType, filePath);
-    } catch (err: any) {
-      console.warn(`[codex app-server] failed to cache tool image: ${err?.message || String(err)}`);
+    } catch (err) {
+      console.warn(`[codex app-server] failed to cache tool image: ${codexAppServerErrorMessage(err, String(err))}`);
     }
     this.send({
       type: "tool_image",
@@ -5514,7 +5529,7 @@ export class CodexSession {
       filePath,
       sessionId,
       ...(parentToolUseId ? { parentToolUseId } : {}),
-    } as any);
+    });
     appendHistory(sessionId, {
       role: "tool_image",
       content: "",
@@ -5550,8 +5565,8 @@ export class CodexSession {
       let persistedPath = resolved;
       try {
         persistedPath = cacheToolImage(sessionId, toolUseId, bytes, mimeType, resolved);
-      } catch (err: any) {
-        console.warn(`[codex app-server] failed to cache tool image ${resolved}: ${err?.message || String(err)}`);
+      } catch (err) {
+        console.warn(`[codex app-server] failed to cache tool image ${resolved}: ${codexAppServerErrorMessage(err, String(err))}`);
       }
       this.send({
         type: "tool_image",
@@ -5561,7 +5576,7 @@ export class CodexSession {
         filePath: persistedPath,
         sessionId,
         ...(parentToolUseId ? { parentToolUseId } : {}),
-      } as any);
+      });
       appendHistory(sessionId, {
         role: "tool_image",
         content: "",
@@ -5572,8 +5587,8 @@ export class CodexSession {
         ...(parentToolUseId ? { parentToolUseId } : {}),
       });
       return true;
-    } catch (err: any) {
-      console.warn(`[codex app-server] failed to send tool image ${resolved}: ${err?.message || String(err)}`);
+    } catch (err) {
+      console.warn(`[codex app-server] failed to send tool image ${resolved}: ${codexAppServerErrorMessage(err, String(err))}`);
       return false;
     }
   }
@@ -5591,8 +5606,8 @@ export class CodexSession {
     }
   }
 
-  private summarizeAppServerFileChanges(changes: any[]): string {
-    return changes
+  private summarizeAppServerFileChanges(changes: unknown): string {
+    return codexRecordArray(changes)
       .map((change) => {
         const path = change?.path || change?.filePath || "";
         const kind = this.appServerFileChangeKind(change?.kind || change?.type);
@@ -5602,10 +5617,9 @@ export class CodexSession {
       .join("\n");
   }
 
-  private formatAppServerFileChanges(changes: any): string {
-    if (!Array.isArray(changes)) return "";
+  private formatAppServerFileChanges(changes: unknown): string {
     const parts: string[] = [];
-    for (const change of changes) {
+    for (const change of codexRecordArray(changes)) {
       const path = change?.path || change?.filePath || "";
       const diff = typeof change?.diff === "string" ? change.diff.trimEnd() : "";
       if (!diff) continue;
@@ -5618,17 +5632,18 @@ export class CodexSession {
     return parts.join("\n");
   }
 
-  private appServerFileChangeKind(kind: any): string {
+  private appServerFileChangeKind(kind: unknown): string {
     if (typeof kind === "string") return kind;
-    if (kind && typeof kind === "object") {
+    if (isCodexRecord(kind)) {
       return String(kind.type || kind.kind || "change");
     }
     return "change";
   }
 
-  private usageFromAppServerTokenUsage(tokenUsage: any): NonNullable<CodexSession["_lastUsage"]> | null {
-    const last = tokenUsage?.last || tokenUsage?.total;
-    if (!last) return null;
+  private usageFromAppServerTokenUsage(tokenUsage: unknown): NonNullable<CodexSession["_lastUsage"]> | null {
+    if (!isCodexRecord(tokenUsage)) return null;
+    const last = tokenUsage.last || tokenUsage.total;
+    if (!isCodexRecord(last)) return null;
     const cached = Number(last.cachedInputTokens ?? 0);
     return {
       inputTokens: Math.max(0, Number(last.inputTokens ?? 0) - cached),
@@ -5639,17 +5654,17 @@ export class CodexSession {
     };
   }
 
-  private isArchivedAppServerError(err: any): boolean {
-    const message = String(err?.message || err || "");
+  private isArchivedAppServerError(err: unknown): boolean {
+    const message = String(codexAppServerErrorMessage(err, String(err)) || "");
     return message.includes(" is archived") || message.includes("unarchive it first");
   }
 
-  private isMissingRolloutAppServerError(err: any): boolean {
-    const message = String(err?.message || err || "");
+  private isMissingRolloutAppServerError(err: unknown): boolean {
+    const message = String(codexAppServerErrorMessage(err, String(err)) || "");
     return message.includes("no rollout found for thread id");
   }
 
-  private contextUsageFromAppServerUsage(usage: NonNullable<CodexSession["_lastUsage"]>): Record<string, unknown> | null {
+  private contextUsageFromAppServerUsage(usage: NonNullable<CodexSession["_lastUsage"]>) {
     if (!usage.contextWindow) return null;
     const totalTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens;
     return {
@@ -5683,7 +5698,7 @@ export class CodexSession {
       trigger: boundaryTrigger,
       preTokens,
       sessionId: sid,
-    } as any);
+    });
     appendHistory(sid, {
       role: "assistant",
       content: `[compact_boundary:${preTokens}:${boundaryTrigger}]`,
@@ -5692,9 +5707,10 @@ export class CodexSession {
     recordSessionMemoryCompaction(sid, preTokens);
   }
 
-  private emitAppServerRawEvent(method: string, params: any): void {
-    const sid = String(this.sessionId || params?.threadId || params?.thread?.id || "");
-    const event = {
+  private emitAppServerRawEvent(method: string, params: unknown): void {
+    const record = isCodexRecord(params) ? params : {};
+    const sid = String(this.sessionId || record.threadId || (isCodexRecord(record.thread) ? record.thread.id : "") || "");
+    const event: SdkEventServerMessage = {
       type: "sdk_event",
       sdkType: "codex_app_server",
       method,
@@ -5709,7 +5725,7 @@ export class CodexSession {
     if (sid && !TRANSIENT_CODEX_RAW_EVENT_METHODS.has(method)) {
       appendSdkEvent(sid, event);
     }
-    this.sendSdkEvent(event as any);
+    this.sendSdkEvent(event);
   }
 
   private buildCodexMcpUrl(token: string): string {
@@ -5997,7 +6013,7 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
     });
 
     if (result.error) {
-      const code = (result.error as NodeJS.ErrnoException).code;
+      const code = "code" in result.error ? result.error.code : undefined;
       return cache({
         available: false,
         reason: code === "ENOENT"
@@ -6044,10 +6060,10 @@ export function getCodexAvailability(): { available: boolean; reason?: string } 
     }
 
     return cache({ available: true });
-  } catch (e: any) {
+  } catch (e) {
     return cache({
       available: false,
-      reason: `Codex availability check failed: ${e?.message || String(e)}`,
+      reason: `Codex availability check failed: ${codexAppServerErrorMessage(e, String(e))}`,
     });
   }
 }

@@ -1,3 +1,5 @@
+import { isRecord, unknownArray } from "./value-guards";
+
 export type HarnessRateLimitType =
   | "five_hour"
   | "seven_day"
@@ -112,14 +114,14 @@ interface UsageWindow {
  * discarded every per-model window. The named fields remain the fallback for
  * accounts and SDK versions that still populate them.
  */
-function usageWindows(limits: Record<string, any>): UsageWindow[] {
-  const rows = Array.isArray(limits.limits) ? limits.limits : [];
+function usageWindows(limits: Record<string, unknown>): UsageWindow[] {
+  const rows = unknownArray(limits.limits);
   if (rows.length > 0) {
     return rows
-      .filter((row: any) => row && typeof row === "object")
-      .map((row: any) => {
+      .filter(isRecord)
+      .map((row) => {
         const kind = String(row.kind || "");
-        const model = row.scope?.model?.display_name;
+        const model = isRecord(row.scope) && isRecord(row.scope.model) ? row.scope.model.display_name : undefined;
         return {
           // Classified on `kind`, never the display name.
           type: kind === "session" ? "five_hour" : kind === "weekly_all" ? "seven_day" : kind,
@@ -136,14 +138,13 @@ function usageWindows(limits: Record<string, any>): UsageWindow[] {
     ["seven_day_opus", limits.seven_day_opus],
     ["seven_day_sonnet", limits.seven_day_sonnet],
   ]
-    .filter((entry) => entry[1])
-    .map(([type, value]) => ({
+    .flatMap(([type, value]) => isRecord(value) ? [{
       type: String(type),
       // The structured Claude SDK /usage contract reports percentage points.
       // Unlike legacy rate_limit_event payloads, 1 means 1%, not 100%.
-      percent: normalizeExplicitPercent((value as Record<string, unknown>).utilization),
-      resetsAt: (value as Record<string, unknown>).resets_at,
-    }));
+      percent: normalizeExplicitPercent(value.utilization),
+      resetsAt: value.resets_at,
+    }] : []);
 }
 
 /**
@@ -153,13 +154,13 @@ function usageWindows(limits: Record<string, any>): UsageWindow[] {
  * window; the busiest one is the one worth warning about.
  */
 export function buildClaudeUsageRateLimitEvents(
-  usage: Record<string, any> | null | undefined,
+  usage: unknown,
   sessionId: string,
 ): RateLimitEventPayload[] {
-  if (!usage?.rate_limits_available || !usage.rate_limits || !sessionId) {
+  if (!isRecord(usage) || !usage.rate_limits_available || !isRecord(usage.rate_limits) || !sessionId) {
     return [];
   }
-  const windows = usageWindows(usage.rate_limits as Record<string, any>);
+  const windows = usageWindows(usage.rate_limits);
   const fiveHour = windows.filter((window) => window.type === "five_hour");
   const weekly = windows
     .filter((window) => rateLimitWindowForType(window.type) === "weekly")
@@ -189,19 +190,19 @@ function codexWindowType(
 }
 
 export function buildCodexRateLimitEvents(
-  rateLimits: Record<string, any> | null | undefined,
+  rateLimits: unknown,
   sessionId: string,
 ): RateLimitEventPayload[] {
-  if (!rateLimits || !sessionId) return [];
+  if (!isRecord(rateLimits) || !sessionId) return [];
   const windows: Array<{
-    value: Record<string, unknown> | null | undefined;
+    value: unknown;
     fallback: "five_hour" | "seven_day";
   }> = [
     { value: rateLimits.primary, fallback: "five_hour" },
     { value: rateLimits.secondary, fallback: "seven_day" },
   ];
   return windows.flatMap(({ value, fallback }) => {
-    if (!value) return [];
+    if (!isRecord(value)) return [];
     // Codex names this field usedPercent and reports percentage points. In
     // particular, 1 means 1%, not a fractional ratio meaning 100%.
     const utilizationPercent = normalizeExplicitPercent(value.usedPercent);

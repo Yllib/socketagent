@@ -905,7 +905,9 @@ export interface SetSystemPromptMessage {
   clearOverride?: boolean;
 }
 
-export type AgentEffort = "minimal" | "low" | "medium" | "high" | "max" | "xhigh" | "ultra";
+// Codex advertises effort names in its model catalog; newer names must survive
+// storage and forwarding even when our manual selector has not added them yet.
+export type AgentEffort = import("./generated/codex/types/ReasoningEffort").ReasoningEffort;
 
 export type AgentThinkingSetting =
   | { type: "adaptive" }
@@ -1346,6 +1348,12 @@ export interface CodexPlanServerMessage {
   turnId: string;
   explanation: string;
   plan: import("./generated/codex/types/v2/TurnPlanStep").TurnPlanStep[];
+  sessionId: string;
+}
+
+export interface TodosServerMessage {
+  type: "todos";
+  todos: Record<string, unknown>[];
   sessionId: string;
 }
 
@@ -2885,6 +2893,7 @@ export type ServerMessage =
   | PermissionModeChangedServerMessage
   | SessionStateChangedServerMessage
   | CodexPlanServerMessage
+  | TodosServerMessage
   | ContextUsageServerMessage
   | UserMessageUuidServerMessage
   | QuestionServerMessage

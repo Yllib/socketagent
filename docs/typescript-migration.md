@@ -65,7 +65,7 @@ Use the report command for current rule and file counts.
 | Enforcement | Implemented | Checks in tests and pre-push; shrinking source-specific baseline; test rejection of new debt and bypasses. |
 | Codex transport, rewind, sign-in | Complete | Raw RPC responses stay unknown; validate consumed rewind, compaction, migration, and login fields. No baseline entries in these modules. |
 | Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
-| Provider adapters | In progress | Codex account/model/error helpers and outbound messages migrated; generic delivery retains message types. Remaining work: native notifications, requests, item translation, Claude adapter. Test streaming, completion, approvals, cancellation, and subagents. |
+| Provider adapters | In progress | `codex-session.ts` has zero diagnostics, including native notifications, approvals, questions, and item translation. Remaining work: Codex history/elicitation helpers and Claude adapter. Test streaming, completion, approvals, cancellation, and subagents. |
 | Persisted history | Pending | Validate JSON and database rows, including supported legacy records, in `session-store.ts` and `transcript-database.ts`. Test recovery, pagination, rewind, and archive reads. |
 | WebSocket routing | Pending | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
 | Remaining code and tests | Pending | MCP tools, plugins API, relay client, helpers, JS fixtures and scripts. Audit additional repositories and ignored private plugins separately. |
@@ -103,10 +103,16 @@ not a new auto-update policy.
   mode settings validate their supported values, and raw results remain unknown
   unless a runtime decoder validates them. Tests that inspect collaboration
   settings now select a model, as the real send path does.
-- Codex adapter foundations: typed existing wire events, validated account and
+- Server `f6d2a62`: Codex adapter foundations. Typed existing wire events, validated account and
   model records, subagent reconciliation, error handling, and file-change helpers.
   Session delivery preserves its caller's message type across acknowledgement,
   retry, and replay. Plugin session sends now use the declared server protocol.
+- Codex native event translation: no remaining unsafe types or assertions in
+  `codex-session.ts`. Provider data is checked before use, including supported
+  legacy event shapes. Rate-limit normalization is clean too. App tool callbacks
+  now preserve `ServerMessage` and `HistoryEntry`; secure-input messages have a
+  concrete protocol type. Effort names advertised by Codex remain extensible,
+  following the generated provider type instead of asserting a fixed enum.
 
 ## Validation log
 
@@ -125,3 +131,7 @@ not a new auto-update policy.
 - Adapter foundations: build and type-safety checks passed; full suite 539 passed,
   one skipped. Baseline reduced to 8,354 diagnostics, 904 fewer than the previous
   checkpoint. Output: `/tmp/sa-adapter-foundation-full-tests.log`.
+- Codex native translation: full suite 539 passed, one skipped; focused native,
+  approval, subagent, delivery, rate-limit, and task tests 91 passed, one skipped.
+  Output: `/tmp/sa-codex-native-full-tests.log` and `/tmp/sa-codex-native-tests.log`.
+  Final model/instruction checks: nine passed, one skipped. Baseline: 7,668.

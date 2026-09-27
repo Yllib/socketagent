@@ -407,7 +407,7 @@ export function deleteSecureInput(secretId: string, sessionId?: string, cwd?: st
 }
 
 export function requestSecureInput(
-  send: (msg: ServerMessage | Record<string, unknown>) => void,
+  send: (msg: ServerMessage) => void,
   args: SecureInputRequestArgs,
   sessionId?: string,
   cwd?: string,
@@ -415,7 +415,7 @@ export function requestSecureInput(
 ): Promise<SavedSecureInput> {
   const requestId = `secure_${crypto.randomBytes(8).toString("hex")}`;
   const timeoutMs = Math.max(30, Math.min(args.timeoutSeconds ?? 600, 3600)) * 1000;
-  const requestMessage: Record<string, unknown> = {
+  const requestMessage = {
     type: "secure_input_request",
     requestId,
     sessionId: sessionId || "",
@@ -424,7 +424,7 @@ export function requestSecureInput(
     envHint: normalizeEnvHint(args.label || "Secret", args.envHint),
     scope: normalizeScope(args.scope),
     multiline: args.multiline === true,
-  };
+  } satisfies Extract<ServerMessage, { type: "secure_input_request" }>;
   const promise = new Promise<SavedSecureInput>((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingRequests.delete(requestId);
@@ -524,9 +524,9 @@ export function isSecureInputPending(requestId: string | undefined): boolean {
   return !!requestId && pendingRequests.has(requestId);
 }
 
-export function pendingSecureInputMessagesForSession(sessionId: string): Array<ServerMessage | Record<string, unknown>> {
+export function pendingSecureInputMessagesForSession(sessionId: string): ServerMessage[] {
   if (!sessionId) return [];
-  const messages: Array<ServerMessage | Record<string, unknown>> = [];
+  const messages: ServerMessage[] = [];
   for (const pending of pendingRequests.values()) {
     if (pending.sessionId !== sessionId) continue;
     messages.push({

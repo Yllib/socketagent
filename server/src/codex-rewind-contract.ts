@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { isRecord as isCodexRecord } from "./value-guards";
+export { isRecord as isCodexRecord } from "./value-guards";
 
 // Validate the fields rewind relies on. Additional provider fields remain compatible.
 const turnSchema = z.object({
@@ -20,10 +22,6 @@ const userMessageSchema = z.object({
   clientId: z.string().nullish(),
   content: z.array(z.unknown()).nullish(),
 });
-
-export function isCodexRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 export function parseRewindThread(value: unknown) {
   const result = threadSchema.safeParse(value);

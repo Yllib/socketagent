@@ -1,4 +1,5 @@
 import * as crypto from "crypto";
+import { isRecord, unknownArray } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import type { Backend, CodexDriver, HistoryEntry, ServerMessage } from "./protocol";
@@ -73,8 +74,8 @@ export interface AppToolContext {
   getCwd?(): string;
   getBackend?(): Backend;
   getCodexDriver?(): CodexDriver;
-  send(msg: ServerMessage | Record<string, any>): void;
-  appendHistory?(entry: Record<string, any>): Record<string, any> | void;
+  send(msg: ServerMessage): void;
+  appendHistory?(entry: HistoryEntry): HistoryEntry | void;
   getTtsEngine(): "system" | "kokoro_server" | "kokoro_device";
   getKokoroVoice(): string;
   getKokoroSpeed(): number;
@@ -160,7 +161,7 @@ export function publishBrowserSessionCard(
     toolName: "BrowserSession",
     toolInput,
     timestamp: new Date().toISOString(),
-  }) as Record<string, any> | undefined;
+  }) ?? undefined;
   ctx.send({
     type: "browser_session_open",
     ...toolInput,
@@ -627,7 +628,7 @@ export async function handleTaskBatchTool(
     };
   }
   try {
-    const current = getTodos(sessionId);
+    const current = unknownArray(getTodos(sessionId)).filter(isRecord);
     const otherTasks = current.filter(
       (task) => task?.source !== SOCKETAGENT_TASK_SOURCE,
     );
@@ -908,10 +909,10 @@ export async function handleHtmlPlanTool(
       role: "html_plan",
       content: saved.title,
       toolName: "HtmlPlan",
-      toolInput: saved,
+      toolInput: { ...saved },
       toolUseId: `html_plan_${saved.planId}`,
       timestamp: saved.updatedAt,
-    }) as Record<string, any> | undefined;
+    }) ?? undefined;
     ctx.send({
       type: "html_plan",
       ...saved,
@@ -993,7 +994,7 @@ export function publishWorkReviewCard(
     workReview: cardReview,
     entryId: String(review.cardId || `work-review:${reviewId}`),
     timestamp: String(review.updatedAt || new Date().toISOString()),
-  }) as Record<string, any> | undefined;
+  }) ?? undefined;
   if (!positioned?.entryId || !positioned?.sessionSeq || !positioned?.revision) {
     return positioned;
   }

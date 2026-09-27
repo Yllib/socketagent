@@ -62,8 +62,10 @@ import { inlineImageStore } from "./inline-image-store";
 import { isSendFileDeliveryPath } from "./send-file-store";
 import { SocketAgentPlugin, PluginContext } from "./plugin-api";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
-import { RelayClient, RelayStatus } from "./relay-client";
-import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
+import { RelayClient, RelayStatus, relayPeerForMessage } from "./relay-client";
+import { parseClientMessage } from "./client-message";
+import { errorMessage, isRecord } from "./value-guards";
+import { KeyPair, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { isAuthFailureMessage } from "./backend-auth";
@@ -610,8 +612,11 @@ class DirectClientTransport implements ClientTransport {
     if (!this.peerPublicKey) {
       throw new Error("Encrypted direct message before key exchange");
     }
-    const plaintext = decrypt(parsed as EncryptedEnvelope, this.peerPublicKey, this.keyPair.secretKey);
-    return JSON.parse(plaintext) as ClientMessage;
+    if (!isRecord(parsed) || typeof parsed.n !== "string" || typeof parsed.c !== "string") {
+      throw new Error("Invalid encrypted envelope");
+    }
+    const plaintext = decrypt({ n: parsed.n, c: parsed.c }, this.peerPublicKey, this.keyPair.secretKey);
+    return parseClientMessage(JSON.parse(plaintext));
   }
 
   decryptBinaryFrame(buf: Buffer): ClientMessage {
@@ -626,7 +631,7 @@ class DirectClientTransport implements ClientTransport {
 
     if (marker === BIN_MARKER_JSON) {
       const json = new TextDecoder().decode(plaintext.subarray(1));
-      return JSON.parse(json) as ClientMessage;
+      return parseClientMessage(JSON.parse(json));
     }
 
     if (marker === BIN_MARKER_UPLOAD_CHUNK) {
@@ -642,7 +647,7 @@ class DirectClientTransport implements ClientTransport {
         (plaintext[off + 2] << 8) |
         plaintext[off + 3];
       const data = Buffer.from(plaintext.subarray(headerEnd));
-      return { type: "upload_chunk_bin", uploadId, chunkIndex, data } as any;
+      return { type: "upload_chunk_bin", uploadId, chunkIndex, data };
     }
 
     throw new Error(`Unknown direct binary marker: 0x${marker.toString(16)}`);
@@ -3743,7 +3748,7 @@ function createConnectionHandler(
     const commandId = requestedId || (msg.type === "prompt" ? msg.messageId : undefined);
     const receipted = !!commandId && ["prompt", "answer", "abort", "rewind", "rewind_conversation", "compact_context"].includes(msg.type);
     const reply = (value: Record<string, unknown>) => sendJson(value,
-      (msg as ClientMessage & { __relayPeerId?: string }).__relayPeerId);
+      relayPeerForMessage(msg));
     const clientConversationId = msg.type === "prompt" && !msg.sessionId ? msg.clientConversationId : undefined;
     const conversation = clientConversationId ? commandReceipts.conversation(clientConversationId) : undefined;
     if (conversation && !conversation.sessionId && conversation.firstCommandId !== commandId) {
@@ -3824,7 +3829,7 @@ function createConnectionHandler(
 
   const sendConnectionJson = sendJson;
   async function handleMessageImpl(msg: ClientMessage): Promise<void> {
-    const peerId = (msg as ClientMessage & { __relayPeerId?: string }).__relayPeerId;
+    const peerId = relayPeerForMessage(msg);
     // Request responses belong to the requesting device. Live broadcasts use
     // the connection sender and still reach all attached devices.
     const sendJson = (value: Record<string, unknown>): void => {
@@ -10318,16 +10323,16 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
   const controlMessageScheduler = new ControlMessageScheduler();
   let bulkMessageQueue = Promise.resolve();
 
-  ws.on("message", (data: Buffer, isBinary: boolean) => {
+  ws.on("message", (data, isBinary) => {
     let msg: ClientMessage;
 
-    console.log(`[WS Recv] isBinary=${isBinary} bytes=${data.length}`);
-    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+    const buf = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+    console.log(`[WS Recv] isBinary=${isBinary} bytes=${buf.length}`);
     if (isBinary && transport.hasPeerKey) {
       try {
         msg = transport.decryptBinaryFrame(buf);
-      } catch (err: any) {
-        console.warn(`[Direct E2E] Binary frame rejected: ${err?.message || err}`);
+      } catch (err) {
+        console.warn(`[Direct E2E] Binary frame rejected: ${errorMessage(err)}`);
         transport.send(JSON.stringify({ type: "error", message: "Invalid encrypted binary frame" }));
         return;
       }
@@ -10348,23 +10353,23 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       const off = 2 + idLen;
       const chunkIndex = buf.readUInt32BE(off);
       const chunkBytes = buf.subarray(headerEnd);
-      msg = { type: "upload_chunk_bin", uploadId, chunkIndex, data: chunkBytes } as any;
+      msg = { type: "upload_chunk_bin", uploadId, chunkIndex, data: chunkBytes };
     } else {
       try {
-        const parsed = JSON.parse(buf.toString());
-        if (parsed?.type === "key_exchange") {
+        const parsed: unknown = JSON.parse(buf.toString());
+        if (isRecord(parsed) && parsed.type === "key_exchange") {
           try {
             transport.handleKeyExchange(parsed.pubkey);
-          } catch (err: any) {
-            console.warn(`[Direct E2E] Key exchange rejected: ${err?.message || err}`);
+          } catch (err) {
+            console.warn(`[Direct E2E] Key exchange rejected: ${errorMessage(err)}`);
             ws.close(1008, "Invalid key exchange");
           }
           return;
         }
-        if (parsed?.n && parsed?.c) {
+        if (isRecord(parsed) && parsed.n && parsed.c) {
           msg = transport.decryptTextEnvelope(parsed);
         } else {
-          msg = parsed as ClientMessage;
+          msg = parseClientMessage(parsed);
         }
       } catch {
         transport.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
@@ -10372,15 +10377,15 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       }
     }
 
-    if ((msg as any)?.type === "direct_auth") {
-      const token = typeof (msg as any).token === "string" ? (msg as any).token : "";
+    if (msg.type === "direct_auth") {
+      const token = msg.token;
       if (token !== AUTH_TOKEN) {
         console.log("Rejected direct E2E auth: invalid token");
         transport.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
         ws.close(1008, "Unauthorized");
         return;
       }
-      transport.authenticate((msg as any).binaryEnvelope === true);
+      transport.authenticate(msg.binaryEnvelope === true);
       transport.setClientCapabilities(msg);
       transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);

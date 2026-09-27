@@ -1,0 +1,4239 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$ref": "#/definitions/JsonClientMessage",
+  "definitions": {
+    "JsonClientMessage": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "clientConversationId": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "prompt"
+            },
+            "text": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "priority": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "backend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "codexFastMode": {
+              "type": "boolean"
+            },
+            "initialSettings": {
+              "$ref": "#/definitions/InitialSessionSettings"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "retract_queued_prompt"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "messageId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "answer"
+            },
+            "questionId": {
+              "type": "string"
+            },
+            "answers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "answers",
+            "questionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "private_integration_auth_request"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "integration": {
+              "type": "string",
+              "enum": [
+                "outlook-auth",
+                "ibs-auth"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "integration",
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "browser_frame_request"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "browser_watch"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "watching": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "type",
+            "watching"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "browser_viewport"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "width": {
+              "type": "number"
+            },
+            "height": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "height",
+            "profile",
+            "type",
+            "width"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "browser_session_input"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "tap",
+                "text",
+                "key",
+                "scroll",
+                "navigate",
+                "reload",
+                "back",
+                "forward",
+                "clipboard_read",
+                "clipboard_write"
+              ]
+            },
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "text": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "deltaX": {
+              "type": "number"
+            },
+            "deltaY": {
+              "type": "number"
+            },
+            "url": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "profile",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "browser_runtime_install"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "type",
+            "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "secure_input_response"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "secretId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "cancelled": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "secure_input_store"
+            },
+            "label": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "envHint": {
+              "type": "string"
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "session",
+                "project",
+                "global"
+              ]
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "clientRequestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "secret_inventory_request"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "secret_replace"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "secretId": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "envHint": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "secretId",
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "secret_delete"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "secretId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "secretId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "html_plan_list"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "html_plan_rename"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "planId": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "planId",
+            "requestId",
+            "sessionId",
+            "title",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "html_plan_delete"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "planId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "planId",
+            "requestId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "html_plan_revision_list"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "planId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "planId",
+            "requestId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "html_plan_revision_get"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "planId": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "number"
+            },
+            "baseRevision": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "planId",
+            "requestId",
+            "revision",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "html_plan_rollback"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "planId": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "planId",
+            "requestId",
+            "revision",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "work_review_list"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "includeArchived": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "work_review_get"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "reviewId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "reviewId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "work_review_draft_update"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "reviewId": {
+              "type": "string"
+            },
+            "roundId": {
+              "type": "string"
+            },
+            "mutationId": {
+              "type": "string"
+            },
+            "baseRevision": {
+              "type": "number"
+            },
+            "draft": {
+              "$ref": "#/definitions/WorkReviewDraft"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "draft",
+            "mutationId",
+            "requestId",
+            "reviewId",
+            "roundId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "work_review_finish"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "reviewId": {
+              "type": "string"
+            },
+            "roundId": {
+              "type": "string"
+            },
+            "mutationId": {
+              "type": "string"
+            },
+            "baseRevision": {
+              "type": "number"
+            },
+            "draft": {
+              "$ref": "#/definitions/WorkReviewDraft"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "draft",
+            "mutationId",
+            "requestId",
+            "reviewId",
+            "roundId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "work_review_cancel"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "reviewId": {
+              "type": "string"
+            },
+            "roundId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "reviewId",
+            "roundId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "work_review_archive"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "reviewId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "reviewId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "work_review_restore"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "reviewId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "reviewId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "new_session"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "backend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "knownHistoryDigest": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "resume_session"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "historyRequestId": {
+              "type": "string"
+            },
+            "knownSessionSeq": {
+              "type": "number"
+            },
+            "knownHistoryOffset": {
+              "type": "number"
+            },
+            "knownHistoryEntryCount": {
+              "type": "number"
+            },
+            "openTraceId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session_event_ack"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "deliveryId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "deliveryId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "client_event_error"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "eventType": {
+              "type": "string"
+            },
+            "deliveryId": {
+              "type": "string"
+            },
+            "toolUseId": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "list_sessions"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_server_settings"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_codex_driver"
+            },
+            "driver": {
+              "$ref": "#/definitions/CodexDriver"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "driver",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_server_settings"
+            },
+            "defaultCwd": {
+              "type": "string"
+            },
+            "systemPrompt": {
+              "type": "string"
+            },
+            "claudeAutoCompactWindow": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "systemPromptIfUnset": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "backend_auth_callback"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "callbackUrl": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "callbackUrl",
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "backend_install"
+            },
+            "backend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "reinstall": {
+              "type": "boolean"
+            },
+            "authenticate": {
+              "type": "boolean"
+            },
+            "forceAuthenticate": {
+              "type": "boolean"
+            },
+            "authMethod": {
+              "type": "string",
+              "enum": [
+                "device",
+                "browser"
+              ]
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "repair",
+                "auth"
+              ]
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "backend",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "backend_install_cancel"
+            },
+            "backend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "backend",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_collaboration_modes"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_codex_collaboration_mode"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "delete_session"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "rename_session"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "title",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "clear_context"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "compact_context"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_session_memory"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "upsert_session_memory"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "entryId": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "active_work",
+                "decision",
+                "constraint",
+                "preference",
+                "project_fact",
+                "open_question"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "pinned": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "active",
+                "superseded"
+              ]
+            },
+            "sourceSessionSeq": {
+              "type": "number"
+            },
+            "sourceEntryId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "sessionId",
+            "text",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "delete_session_memory"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "entryId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "entryId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_session_memory_settings"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "autoRollover": {
+              "type": "boolean"
+            },
+            "maxCompactions": {
+              "type": "number"
+            },
+            "maxPostCompactionTokens": {
+              "type": "number"
+            },
+            "recentRuns": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "rollover_session_memory"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_rollback_thread"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "numTurns": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "numTurns",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "archive_session"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session_transfer_job"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "status",
+                "list"
+              ]
+            },
+            "jobId": {
+              "type": "string"
+            },
+            "config": {
+              "$ref": "#/definitions/TransferJobConfig"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session_transfer_export"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session_transfer_import"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "bundlePath": {
+              "type": "string"
+            },
+            "expectedSha256": {
+              "type": "string"
+            },
+            "targetCwd": {
+              "type": "string"
+            },
+            "targetBackend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "move",
+                "clone"
+              ]
+            },
+            "nativeMode": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "handoff"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "bundlePath",
+            "expectedSha256",
+            "mode",
+            "nativeMode",
+            "requestId",
+            "targetBackend",
+            "targetCwd",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session_transfer_discard"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "bundlePath": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "bundlePath",
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "abort"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "interrupt"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_tts"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "enabled",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_tts_engine"
+            },
+            "engine": {
+              "type": "string",
+              "enum": [
+                "system",
+                "kokoro_server",
+                "kokoro_device"
+              ]
+            },
+            "voice": {
+              "type": "string"
+            },
+            "speed": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "engine",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "request_tts_audio"
+            },
+            "text": {
+              "type": "string"
+            },
+            "voice": {
+              "type": "string"
+            },
+            "speed": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_effort"
+            },
+            "effort": {
+              "type": "string",
+              "enum": [
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "max",
+                "xhigh",
+                "ultra"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "effort",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_codex_fast_mode"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "enabled",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_claude_auto_compact"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "enabled",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_claude_auto_compact_window"
+            },
+            "window": {
+              "type": "number"
+            },
+            "clearOverride": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_thinking"
+            },
+            "thinking": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "adaptive"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "enabled"
+                    },
+                    "budgetTokens": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "budgetTokens"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "disabled"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "thinking",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_disallowed_tools"
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tools",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_system_prompt"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "inherited": {
+              "type": "boolean"
+            },
+            "clearOverride": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "prompt",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "stop_task"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "stop_monitor"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fork_session"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_model"
+            },
+            "model": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_permission_mode"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "mcp_status"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_context_usage"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_sdk_event_history"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "mcp_reconnect"
+            },
+            "serverName": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "serverName",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "mcp_toggle"
+            },
+            "serverName": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "enabled",
+            "serverName",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "rewind"
+            },
+            "userMessageUuid": {
+              "type": "string"
+            },
+            "dryRun": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "userMessageUuid"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "rewind_conversation"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "userMessageUuid": {
+              "type": "string"
+            },
+            "dryRun": {
+              "type": "boolean"
+            },
+            "rewindFiles": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "userMessageUuid"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "branch_from_message"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "userMessageUuid": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type",
+            "userMessageUuid"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "sync_desktop"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "list_sdk_sessions"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "recursive": {
+              "type": "boolean"
+            },
+            "query": {
+              "type": "string"
+            },
+            "all": {
+              "type": "boolean"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "request_file"
+            },
+            "filePath": {
+              "type": "string"
+            },
+            "fileId": {
+              "type": "string"
+            },
+            "offsetBytes": {
+              "type": "number"
+            },
+            "transferToken": {
+              "type": "string"
+            },
+            "expectedFileVersion": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "filePath",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "load_more_history"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "number"
+            },
+            "limit": {
+              "type": "number"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "limit",
+            "offset",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "check_cwd"
+            },
+            "path": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "create_cwd"
+            },
+            "path": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_list"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "includeHidden": {
+              "type": "boolean"
+            },
+            "offset": {
+              "type": "number"
+            },
+            "limit": {
+              "type": "number"
+            },
+            "anchorPath": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "list_directory"
+            },
+            "path": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_stat"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "macos_permission_status"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "macos_permission_action"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "open_settings",
+                "reveal_helper",
+                "restart"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_set_protected"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "protected": {
+              "type": "boolean"
+            },
+            "label": {
+              "type": "string"
+            },
+            "pattern": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "directory"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "protected",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_download"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "fileId": {
+              "type": "string"
+            },
+            "offsetBytes": {
+              "type": "number"
+            },
+            "transferToken": {
+              "type": "string"
+            },
+            "expectedFileVersion": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_read_text"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "maxBytes": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_write_text"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content",
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_mkdir"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_rename"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "fromPath": {
+              "type": "string"
+            },
+            "toName": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fromPath",
+            "toName",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_delete"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "recursive": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "file_manager_upload_start"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "uploadId": {
+              "type": "string"
+            },
+            "targetDir": {
+              "type": "string"
+            },
+            "fileName": {
+              "type": "string"
+            },
+            "fileSize": {
+              "type": "number"
+            },
+            "totalChunks": {
+              "type": "number"
+            },
+            "chunkSize": {
+              "type": "number"
+            },
+            "conflictPolicy": {
+              "type": "string",
+              "enum": [
+                "fail",
+                "rename",
+                "overwrite"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "chunkSize",
+            "fileName",
+            "fileSize",
+            "targetDir",
+            "totalChunks",
+            "type",
+            "uploadId"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "upload_start"
+            },
+            "uploadId": {
+              "type": "string"
+            },
+            "fileName": {
+              "type": "string"
+            },
+            "fileSize": {
+              "type": "number"
+            },
+            "totalChunks": {
+              "type": "number"
+            },
+            "chunkSize": {
+              "type": "number"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fileName",
+            "fileSize",
+            "totalChunks",
+            "type",
+            "uploadId"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "upload_chunk"
+            },
+            "uploadId": {
+              "type": "string"
+            },
+            "chunkIndex": {
+              "type": "number"
+            },
+            "data": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "chunkIndex",
+            "data",
+            "type",
+            "uploadId"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ready": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "file_download_ack"
+            },
+            "fileId": {
+              "type": "string"
+            },
+            "transferToken": {
+              "type": "string"
+            },
+            "receivedBytes": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fileId",
+            "receivedBytes",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "client_capabilities"
+            },
+            "lane": {
+              "$ref": "#/definitions/TransportLane"
+            },
+            "transportLaneVersion": {
+              "type": "number"
+            },
+            "uploadAckVersion": {
+              "type": "number"
+            },
+            "binaryEnvelope": {
+              "type": "boolean"
+            },
+            "binaryFileDownloadVersion": {
+              "type": "number"
+            },
+            "sessionEventAckVersion": {
+              "type": "number"
+            },
+            "sessionEventAck": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_raw_mode"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "enabled",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "direct_auth"
+            },
+            "token": {
+              "type": "string"
+            },
+            "lane": {
+              "$ref": "#/definitions/TransportLane"
+            },
+            "transportLaneVersion": {
+              "type": "number"
+            },
+            "uploadAckVersion": {
+              "type": "number"
+            },
+            "binaryEnvelope": {
+              "type": "boolean"
+            },
+            "binaryFileDownloadVersion": {
+              "type": "number"
+            },
+            "sessionEventAckVersion": {
+              "type": "number"
+            },
+            "sessionEventAck": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "terminal_attach"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "cols": {
+              "type": "number"
+            },
+            "rows": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "terminal_input"
+            },
+            "data": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "data",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "terminal_resize"
+            },
+            "cols": {
+              "type": "number"
+            },
+            "rows": {
+              "type": "number"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cols",
+            "rows",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "terminal_detach"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "terminal_kill"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "register_push_token"
+            },
+            "fcmToken": {
+              "type": "string"
+            },
+            "platform": {
+              "type": "string"
+            },
+            "appServerId": {
+              "type": "string"
+            },
+            "deliveryRoute": {
+              "type": "string",
+              "enum": [
+                "relay",
+                "direct"
+              ]
+            },
+            "firebaseProjectId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fcmToken",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "unregister_push_token"
+            },
+            "fcmToken": {
+              "type": "string"
+            },
+            "appServerId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fcmToken",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_push_registration"
+            },
+            "fcmToken": {
+              "type": "string"
+            },
+            "appServerId": {
+              "type": "string"
+            },
+            "deliveryRoute": {
+              "type": "string",
+              "enum": [
+                "relay",
+                "direct"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fcmToken",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "schedule_task"
+            },
+            "name": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "backend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "codexDriver": {
+              "$ref": "#/definitions/CodexDriver"
+            },
+            "model": {
+              "type": "string"
+            },
+            "effort": {
+              "$ref": "#/definitions/AgentEffort"
+            },
+            "permissionMode": {
+              "type": "string"
+            },
+            "scheduledTime": {
+              "type": "string"
+            },
+            "recurrence": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "once",
+                    "daily",
+                    "weekly",
+                    "monthly",
+                    "custom"
+                  ]
+                },
+                "intervalMs": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "reuseSession": {
+              "type": "boolean"
+            },
+            "notificationMode": {
+              "type": "string",
+              "enum": [
+                "completion",
+                "quiet"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cwd",
+            "prompt",
+            "scheduledTime",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "list_scheduled_tasks"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cancel_scheduled_task"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "execute_scheduled_task"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "update_scheduled_task"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "backend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "codexDriver": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodexDriver"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "effort": {
+              "$ref": "#/definitions/AgentEffort"
+            },
+            "permissionMode": {
+              "type": "string"
+            },
+            "scheduledTime": {
+              "type": "string"
+            },
+            "recurrence": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "once",
+                        "daily",
+                        "weekly",
+                        "monthly",
+                        "custom"
+                      ]
+                    },
+                    "intervalMs": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reuseSession": {
+              "type": "boolean"
+            },
+            "notificationMode": {
+              "type": "string",
+              "enum": [
+                "completion",
+                "quiet"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "delete_scheduled_task"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "mark_scheduled_task_read"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "read": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "read",
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "archive_scheduled_task"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "restore_scheduled_task"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "list_archives"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_archive_history"
+            },
+            "sid": {
+              "type": "string"
+            },
+            "ts": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sid",
+            "ts",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "restore_archive"
+            },
+            "sid": {
+              "type": "string"
+            },
+            "ts": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sid",
+            "ts",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "delete_archive"
+            },
+            "sid": {
+              "type": "string"
+            },
+            "ts": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sid",
+            "ts",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "auth_code"
+            },
+            "code": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "authRequestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "version_check"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "force_update"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_status_sync"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_codex_status"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_claude_usage"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "consume_codex_reset"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "idempotencyKey": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "confirmed",
+            "idempotencyKey",
+            "requestId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "get_recent_cwds"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "add_recent_cwd"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cwd",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "remove_recent_cwd"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cwd",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "skills_list"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_slash_command"
+            },
+            "name": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_goal_get"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_goal_set"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "objective": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/CodexGoalStatus"
+            },
+            "tokenBudget": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_goal_clear"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "skills_save"
+            },
+            "name": {
+              "type": "string"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "format": {
+              "type": "string"
+            },
+            "agent": {
+              "type": "string",
+              "enum": [
+                "claude",
+                "codex"
+              ]
+            },
+            "frontmatter": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "body": {
+              "type": "string"
+            },
+            "filePath": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "format",
+            "frontmatter",
+            "name",
+            "scope",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "skills_delete"
+            },
+            "filePath": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "filePath",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "protected_files_list"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "protected_files_add"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "protected_files_delete"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "plugins_list"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "plugins_install"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pluginId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "plugins_uninstall"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pluginId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "plugins_enable"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pluginId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "plugins_disable"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pluginId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "marketplaces_list"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "marketplaces_add"
+            },
+            "url": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "marketplaces_update"
+            },
+            "name": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "marketplaces_remove"
+            },
+            "name": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "type"
+          ]
+        }
+      ]
+    },
+    "Backend": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "InitialSessionSettings": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "$ref": "#/definitions/AgentEffort"
+        },
+        "thinking": {
+          "$ref": "#/definitions/AgentThinkingSetting"
+        },
+        "codexFastMode": {
+          "type": "boolean"
+        },
+        "codexCollaborationMode": {
+          "type": "string"
+        },
+        "claudeAutoCompact": {
+          "type": "boolean"
+        },
+        "claudeAutoCompactWindow": {
+          "type": "number"
+        },
+        "disallowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "systemPrompt": {
+          "type": "string"
+        },
+        "connectedAppApprovals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "permissionMode": {
+          "type": "string"
+        }
+      }
+    },
+    "AgentEffort": {
+      "$ref": "#/definitions/ReasoningEffort"
+    },
+    "ReasoningEffort": {
+      "type": "string"
+    },
+    "AgentThinkingSetting": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "adaptive"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "enabled"
+            },
+            "budgetTokens": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "budgetTokens"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "disabled"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "WorkReviewDraft": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "overallNote": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkReviewDraftItem"
+          }
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "WorkReviewDraftItem": {
+      "type": "object",
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "pending"
+            },
+            {
+              "$ref": "#/definitions/WorkReviewDisposition"
+            }
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId",
+        "status"
+      ]
+    },
+    "WorkReviewDisposition": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "changes_requested",
+        "rejected",
+        "skipped"
+      ]
+    },
+    "CodexDriver": {
+      "type": "string",
+      "const": "app-server"
+    },
+    "TransferJobConfig": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "source",
+            "destination",
+            "local"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "targetCwd": {
+          "type": "string"
+        },
+        "targetBackend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "move",
+            "clone"
+          ]
+        },
+        "nativeMode": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "handoff"
+          ]
+        },
+        "relayUrl": {
+          "type": "string"
+        },
+        "ticket": {
+          "type": "string"
+        },
+        "peerPublicKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jobId",
+        "role",
+        "sessionId",
+        "targetCwd",
+        "targetBackend",
+        "mode",
+        "nativeMode"
+      ]
+    },
+    "TransportLane": {
+      "type": "string",
+      "enum": [
+        "control",
+        "bulk"
+      ]
+    },
+    "CodexGoalStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "paused",
+        "blocked",
+        "usageLimited",
+        "budgetLimited",
+        "complete"
+      ]
+    }
+  }
+}

@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from "./generated/codex/types/ReasoningEffort";
 import { isRecord } from "./value-guards";
 
 // ── Backend selection ──
@@ -490,6 +491,12 @@ export interface CreateCwdMessage {
   requestId?: string;
 }
 
+export interface ListDirectoryMessage {
+  type: "list_directory";
+  path?: string;
+  requestId?: string;
+}
+
 export interface FileManagerListMessage {
   type: "file_manager_list";
   requestId?: string;
@@ -909,7 +916,7 @@ export interface SetSystemPromptMessage {
 
 // Codex advertises effort names in its model catalog; newer names must survive
 // storage and forwarding even when our manual selector has not added them yet.
-export type AgentEffort = import("./generated/codex/types/ReasoningEffort").ReasoningEffort;
+export type AgentEffort = ReasoningEffort;
 
 export type AgentThinkingSetting =
   | { type: "adaptive" }
@@ -1097,6 +1104,9 @@ export interface RestoreScheduledTaskMessage {
   taskId: string;
 }
 
+/** JSON messages exclude the upload frames decoded directly from binary buffers. */
+export type JsonClientMessage = Exclude<ClientMessage, UploadChunkBinMessage>;
+
 export type ClientMessage = { commandId?: string } & (
   | PromptMessage
   | RetractQueuedPromptMessage
@@ -1185,6 +1195,7 @@ export type ClientMessage = { commandId?: string } & (
   | CheckCwdMessage
   | CreateCwdMessage
   | FileManagerListMessage
+  | ListDirectoryMessage
   | FileManagerStatMessage
   | MacosPermissionStatusMessage
   | MacosPermissionActionMessage

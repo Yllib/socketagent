@@ -34,6 +34,11 @@ hook also builds and checks type safety when dependencies are installed. Hooks
 must be enabled with `git config core.hooksPath .githooks` in each pushing checkout.
 Run the build first in fresh checkouts: existing JS tests import `dist` modules.
 
+Client-message runtime schemas derive from `protocol.ts` with
+`npm run protocol:generate`. Type-safety checks regenerate in memory and reject
+stale checked-in schemas. Known fields are validated; unknown future fields are
+retained. Packed binary uploads are decoded separately from JSON messages.
+
 ESLint checks explicit `any`, unsafe assignments, arguments, calls, member access,
 returns, narrowing assertions, and TypeScript suppression comments. Inline ESLint
 configuration cannot disable these checks. TypeScript strict compilation remains
@@ -188,3 +193,15 @@ not a new auto-update policy.
 - Routing foundation validation: 32 focused delivery/lifecycle tests passed;
   full suite 546 passed, one skipped. Baseline: 4,644. Output:
   `/tmp/sa-routing-foundation-full-tests.log`.
+
+- Server `ef061cd`: typed transports/runtime metadata/abort group checkpoint.
+- Client protocol checkpoint: generated JSON schemas validate direct and relay
+  commands at ingress. Discriminant lookup validates one command at a time.
+  Legacy directory listing now has a declared contract. Relay peer identity is
+  transport-owned WeakMap metadata, not a field supplied by the client. Relay
+  control messages, public keys, socket data, and outgoing JSON are narrowed;
+  TCP keepalive uses the WebSocket upgrade event. Relay client has zero diagnostics.
+- Client protocol validation: nine focused tests passed, including encrypted
+  malformed-then-valid traffic, peer routing, and binary upload delivery. Full
+  suite: 548 passed, one skipped. Baseline: 4,545. Output:
+  `/tmp/sa-client-protocol-full-tests.log`.

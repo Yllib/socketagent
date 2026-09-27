@@ -1,5 +1,7 @@
 import WebSocket from "ws";
-import { KeyPair, EncryptedEnvelope, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
+import { KeyPair, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
+import { parseClientMessage } from "./client-message";
+import { errorMessage, isRecord, parseJsonObject } from "./value-guards";
 import {
   ClientMessage,
   TransportLane,
@@ -12,6 +14,12 @@ import { BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, support
 const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
 const BIN_MARKER_UPLOAD_CHUNK = 0x42;  // 'B' — upload chunk: [1 idLen][idBytes][4 chunkIdx BE][bytes]
 const LEGACY_PEER_ID = "legacy";
+const messagePeers = new WeakMap<ClientMessage, string>();
+
+/** Routing metadata belongs to the authenticated transport, never the wire payload. */
+export function relayPeerForMessage(message: ClientMessage): string | undefined {
+  return messagePeers.get(message);
+}
 
 interface RelayPeer {
   publicKey: Uint8Array | null;
@@ -175,23 +183,21 @@ export class RelayClient {
 
     try {
       this.ws = new WebSocket(url);
-    } catch (err: any) {
-      console.error(`[Relay] Connection error: ${err.message}`);
+    } catch (err) {
+      console.error(`[Relay] Connection error: ${errorMessage(err)}`);
       this.scheduleReconnect();
       return;
     }
+
+    this.ws.on("upgrade", response => {
+      response.socket.setKeepAlive(true, 60_000);
+    });
 
     this.ws.on("open", () => {
       console.log(`[Relay] Connected, waiting for phone...`);
       this.reconnectDelay = 1000; // reset backoff
       this.setStatus("waiting_for_peer");
       this.virtualWs._setOpen(true);
-
-      // Enable TCP keepalive on the underlying socket to detect dead connections
-      const socket = (this.ws as any)?._socket;
-      if (socket?.setKeepAlive) {
-        socket.setKeepAlive(true, 60_000);
-      }
 
       // Start WebSocket-level ping/pong keepalive
       this.startPingPong();
@@ -204,14 +210,14 @@ export class RelayClient {
     this.ws.on("message", (data, isBinary) => {
       try {
         if (isBinary) {
-          this.handleBinaryFrame(Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer));
+          this.handleBinaryFrame(Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data));
           return;
         }
-        const raw = data.toString();
-        const parsed = JSON.parse(raw);
+        const raw = (Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data)).toString();
+        const parsed: unknown = JSON.parse(raw);
         this.handleRelayMessage(parsed);
-      } catch (err: any) {
-        console.error(`[Relay] Failed to parse message: ${err.message}`);
+      } catch (err) {
+        console.error(`[Relay] Failed to parse message: ${errorMessage(err)}`);
       }
     });
 
@@ -313,7 +319,7 @@ export class RelayClient {
         type: "relay_to_peer",
         peerId,
         binary,
-        data: binary ? Buffer.from(data as Buffer).toString("base64") : data.toString(),
+        data: binary ? Buffer.from(data).toString("base64") : data.toString(),
       }));
       return;
     }
@@ -368,7 +374,8 @@ export class RelayClient {
     return true;
   }
 
-  private handleRelayMessage(parsed: any): void {
+  private handleRelayMessage(parsed: unknown): void {
+    if (!isRecord(parsed)) throw new Error("Invalid relay control message");
     if (parsed.type === "relay_capabilities") {
       this.relaySupportsMultiDevice = !!parsed.multiDevice;
       if (this.relaySupportsMultiDevice) {
@@ -419,8 +426,8 @@ export class RelayClient {
       }
       try {
         this.handlePeerMessage(JSON.parse(String(parsed.data || "")), peerId);
-      } catch (err: any) {
-        console.error(`[Relay] Failed to parse peer message: ${err.message}`);
+      } catch (err) {
+        console.error(`[Relay] Failed to parse peer message: ${errorMessage(err)}`);
       }
       return;
     }
@@ -428,13 +435,16 @@ export class RelayClient {
     this.handlePeerMessage(parsed, LEGACY_PEER_ID);
   }
 
-  private handlePeerMessage(parsed: any, peerId: string): void {
+  private handlePeerMessage(parsed: unknown, peerId: string): void {
+    if (!isRecord(parsed)) throw new Error("Invalid relay peer message");
     const peer = this.getPeer(peerId);
 
     // Key exchange (plaintext from phone)
     if (parsed.type === "key_exchange") {
       console.log(`[Relay] Received phone public key${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
+      if (typeof parsed.pubkey !== "string") throw new Error("Missing relay public key");
       const nextPhonePublicKey = fromBase64(parsed.pubkey);
+      if (nextPhonePublicKey.length !== 32) throw new Error("Invalid relay public key");
       if (peer.publicKey && toBase64(peer.publicKey) !== toBase64(nextPhonePublicKey)) {
         console.warn(`[Relay] Phone ${peerId} changed public key; replacing peer crypto state`);
       }
@@ -451,21 +461,21 @@ export class RelayClient {
     }
 
     // Encrypted message from phone
-    if (parsed.n && parsed.c) {
+    if (typeof parsed.n === "string" && typeof parsed.c === "string") {
       if (!peer.publicKey) {
         console.error(`[Relay] Received encrypted message before key exchange${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
         return;
       }
       try {
         const plaintext = decrypt(
-          parsed as EncryptedEnvelope,
+          { n: parsed.n, c: parsed.c },
           peer.publicKey,
           this.opts.keyPair.secretKey
         );
-        const msg = JSON.parse(plaintext) as ClientMessage;
+        const msg = parseClientMessage(JSON.parse(plaintext));
         this.dispatchClientMessage(msg, peerId);
-      } catch (err: any) {
-        console.error(`[Relay] Decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${err.message}`);
+      } catch (err) {
+        console.error(`[Relay] Decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${errorMessage(err)}`);
       }
       return;
     }
@@ -487,8 +497,8 @@ export class RelayClient {
     let plaintext: Uint8Array;
     try {
       plaintext = decryptBinary(buf, peer.publicKey, this.opts.keyPair.secretKey);
-    } catch (err: any) {
-      console.error(`[Relay] Binary decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${err.message}`);
+    } catch (err) {
+      console.error(`[Relay] Binary decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${errorMessage(err)}`);
       return;
     }
     if (plaintext.length === 0) return;
@@ -497,10 +507,10 @@ export class RelayClient {
     if (marker === BIN_MARKER_JSON) {
       try {
         const json = new TextDecoder().decode(plaintext.subarray(1));
-        const msg = JSON.parse(json) as ClientMessage;
+        const msg = parseClientMessage(JSON.parse(json));
         this.dispatchClientMessage(msg, peerId);
-      } catch (err: any) {
-        console.error(`[Relay] Binary JSON parse failed: ${err.message}`);
+      } catch (err) {
+        console.error(`[Relay] Binary JSON parse failed: ${errorMessage(err)}`);
       }
       return;
     }
@@ -524,7 +534,7 @@ export class RelayClient {
         uploadId,
         chunkIndex,
         data,
-      } as any, peerId);
+      }, peerId);
       return;
     }
 
@@ -537,8 +547,8 @@ export class RelayClient {
    * through to the handler.
    */
   private dispatchClientMessage(msg: ClientMessage, peerId = LEGACY_PEER_ID): void {
-    if ((msg as any).type === "client_capabilities") {
-      const wantsBinary = !!(msg as any).binaryEnvelope;
+    if (msg.type === "client_capabilities") {
+      const wantsBinary = msg.binaryEnvelope === true;
       const peer = this.getPeer(peerId);
       peer.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       peer.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
@@ -566,11 +576,7 @@ export class RelayClient {
       );
       return;
     }
-    Object.defineProperty(msg, "__relayPeerId", {
-      value: peerId,
-      enumerable: false,
-      configurable: true,
-    });
+    messagePeers.set(msg, peerId);
     this.opts.onMessage(msg);
   }
 
@@ -674,7 +680,7 @@ export class VirtualRelaySocket {
 
   send(data: string): void {
     try {
-      const msg = JSON.parse(data);
+      const msg = parseJsonObject(data);
       this.relay.send(msg);
     } catch {
       // If it's not JSON, send raw
@@ -683,7 +689,7 @@ export class VirtualRelaySocket {
   }
 
   sendReply(peerId: string, data: string): void {
-    this.relay.sendReply(peerId, JSON.parse(data) as Record<string, unknown>);
+    this.relay.sendReply(peerId, parseJsonObject(data));
   }
 
   /** Called by RelayClient when pairing status changes */
@@ -711,8 +717,8 @@ export class VirtualRelaySocket {
   }
 
   // Minimal EventEmitter-like interface for compatibility
-  on(event: string, cb: (...args: any[]) => void): void {
-    if (event === "message") this._onMessageCallbacks.push(cb);
-    if (event === "close") this._onCloseCallbacks.push(cb);
+  on(...args: [event: "message", cb: (data: Buffer) => void] | [event: "close", cb: () => void]): void {
+    if (args[0] === "message") this._onMessageCallbacks.push(args[1]);
+    else this._onCloseCallbacks.push(args[1]);
   }
 }

@@ -8060,11 +8060,11 @@ function createConnectionHandler(
           } else {
             const messagesRemoved = all.length - (idx + 1);
             // Also do a file rewind dry run if requested and query is active
-            let fileInfo: any = {};
+            let fileInfo: { filesReverted?: string[]; insertions?: number; deletions?: number } = {};
             if (shouldRewindFiles && activeSession?.isRunning) {
               try {
                 const fileResult = await activeSession.rewindFiles(uuid, true);
-                if (fileResult) {
+                if (fileResult && "filesChanged" in fileResult) {
                   fileInfo = { filesReverted: fileResult.filesChanged, insertions: fileResult.insertions, deletions: fileResult.deletions };
                 }
               } catch {}

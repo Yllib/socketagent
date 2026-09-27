@@ -1316,6 +1316,78 @@ export interface ToolResultChunkServerMessage {
   parentToolUseId?: string | null;
 }
 
+export interface ToolStderrServerMessage {
+  type: "tool_stderr";
+  content: string;
+  sessionId: string;
+  toolUseId?: string;
+}
+
+export interface SessionInitServerMessage {
+  type: "session_init";
+  sessionId: string;
+  agents?: import("@anthropic-ai/claude-agent-sdk").SDKSystemMessage["agents"];
+  tools?: import("@anthropic-ai/claude-agent-sdk").SDKSystemMessage["tools"];
+  mcpServers?: import("@anthropic-ai/claude-agent-sdk").SDKSystemMessage["mcp_servers"];
+  model?: string;
+  claudeCodeVersion?: string;
+  permissionMode?: string;
+}
+
+export interface SupportedCommandsServerMessage {
+  type: "supported_commands";
+  commands: Record<string, unknown>[];
+  sessionId: string;
+}
+
+export interface SupportedAgentsServerMessage {
+  type: "supported_agents";
+  agents: import("@anthropic-ai/claude-agent-sdk").AgentInfo[];
+  sessionId: string;
+}
+
+export interface FilesPersistedServerMessage {
+  type: "files_persisted";
+  files: import("@anthropic-ai/claude-agent-sdk").SDKFilesPersistedEvent["files"];
+  failed: import("@anthropic-ai/claude-agent-sdk").SDKFilesPersistedEvent["failed"];
+  sessionId: string;
+}
+
+export interface AuthStatusServerMessage {
+  type: "auth_status";
+  isAuthenticating: boolean;
+  output: string[];
+  error?: string;
+  sessionId: string;
+}
+
+export interface CwdChangedServerMessage {
+  type: "cwd_changed";
+  oldCwd: string;
+  newCwd: string;
+  sessionId: string;
+}
+
+export interface ClaudeAuthServerMessage {
+  type: "claude_auth";
+  url: string;
+  sessionId: string;
+}
+
+export interface ClaudeAuthResultServerMessage {
+  type: "claude_auth_result";
+  success: boolean;
+  sessionId: string;
+}
+
+export interface BashBackgroundedServerMessage {
+  type: "bash_backgrounded";
+  toolUseId: string;
+  taskId: string;
+  outputFile: string;
+  sessionId: string;
+}
+
 export interface SubagentResultServerMessage {
   type: "subagent_result";
   parentToolUseId: string;
@@ -1434,6 +1506,8 @@ export interface QuestionServerMessage {
   mcpServerName?: string;
   /** The answer is a new user turn, not a response to a blocking tool call. */
   asyncQuestion?: boolean;
+  agentId?: string;
+  decisionReason?: string;
 }
 
 export interface BackendAuthRecoveryServerMessage {
@@ -1754,6 +1828,7 @@ export interface SessionInfo {
 }
 
 export interface ErrorServerMessage {
+  errorType?: string;
   sessionId?: string;
   type: "error";
   message: string;
@@ -2363,7 +2438,7 @@ export interface CompactBoundaryServerMessage {
 export interface TaskNotificationServerMessage {
   type: "task_notification";
   taskId: string;
-  status: "started" | "completed" | "failed" | "stopped";
+  status: "started" | "completed" | "failed" | "stopped" | "cancelled";
   outputFile?: string;
   summary: string;
   sessionId: string;
@@ -2618,6 +2693,7 @@ export interface WorkflowStatePayload {
 export interface WorkflowStateServerMessage extends WorkflowStatePayload {
   type: "workflow_state";
   sessionId: string;
+  replay?: boolean;
 }
 
 export interface ApiRetryServerMessage {
@@ -2889,6 +2965,16 @@ export type ServerMessage =
   | ToolCallServerMessage
   | ToolResultServerMessage
   | ToolResultChunkServerMessage
+  | ToolStderrServerMessage
+  | SessionInitServerMessage
+  | SupportedCommandsServerMessage
+  | SupportedAgentsServerMessage
+  | FilesPersistedServerMessage
+  | AuthStatusServerMessage
+  | CwdChangedServerMessage
+  | ClaudeAuthServerMessage
+  | ClaudeAuthResultServerMessage
+  | BashBackgroundedServerMessage
   | SubagentResultServerMessage
   | PermissionModeChangedServerMessage
   | SessionStateChangedServerMessage

@@ -1,3 +1,4 @@
+import { isRecord, unknownArray } from "./value-guards";
 import { requestTranscriptAccess } from "./transcript-access-approval";
 import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type Settings } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -17,6 +18,8 @@ import { WebSocket } from "ws";
 import {
   ServerMessage,
   ActiveSubagentsServerMessage,
+  SupportedModelsServerMessage,
+  QuestionServerMessage,
   HistoryEntry,
   QuestionItem,
   SessionInfo,
@@ -146,8 +149,7 @@ export function shouldEmitClaudeResultFallback(
 
 /** Claude Code 2.1.198+ treats omitted run_in_background as true. */
 export function claudeAgentRunsInBackground(input: unknown): boolean {
-  return !(input && typeof input === "object"
-    && (input as Record<string, unknown>).run_in_background === false);
+  return !(isRecord(input) && input.run_in_background === false);
 }
 
 /**
@@ -170,29 +172,28 @@ export const CLAUDE_TASK_TOOLS = [
 
 /** Background completion follow-ups are SDK-owned turns, not phone prompts. */
 export function isClaudeTaskNotificationResult(message: unknown): boolean {
-  if (!message || typeof message !== "object") return false;
-  const origin = (message as Record<string, any>).origin;
-  return origin?.kind === "task-notification";
+  if (!isRecord(message) || !isRecord(message.origin)) return false;
+  return message.origin.kind === "task-notification";
 }
 
 /** Structured Agent launch acknowledgements are non-terminal tool results. */
 export function isClaudeAgentLaunchOutput(output: unknown): boolean {
-  if (!output || typeof output !== "object") return false;
-  const status = (output as Record<string, unknown>).status;
+  if (!isRecord(output)) return false;
+  const status = output.status;
   return status === "async_launched" || status === "remote_launched";
 }
 
 /** Structured Workflow launch acknowledgements are non-terminal tool results. */
 export function isClaudeWorkflowLaunchOutput(output: unknown): boolean {
-  if (!output || typeof output !== "object") return false;
-  const value = output as Record<string, unknown>;
+  if (!isRecord(output)) return false;
+  const value = output;
   return (value.status === "async_launched" || value.status === "remote_launched")
     && value.taskType === "local_workflow";
 }
 
 export function workflowStatePathForLaunch(output: unknown): string | undefined {
-  if (!output || typeof output !== "object") return undefined;
-  const value = output as Record<string, unknown>;
+  if (!isRecord(output)) return undefined;
+  const value = output;
   const runId = String(value.runId || "");
   const scriptPath = String(value.scriptPath || "");
   if (!runId || !scriptPath || path.basename(runId) !== runId) return undefined;
@@ -239,19 +240,14 @@ export function sanitizeClaudeWorkflowState(
     statePath?: string;
   },
 ): WorkflowStatePayload {
-  const value = raw && typeof raw === "object"
-    ? raw as Record<string, any>
-    : {};
-  const phases = Array.isArray(value.phases)
-    ? value.phases.slice(0, 100).map((phase: any) => ({
+  const value = isRecord(raw) ? raw : {};
+  const phases = unknownArray(value.phases).slice(0, 100).filter(isRecord).map((phase) => ({
       title: boundedWorkflowString(phase?.title, 500) || "Phase",
       ...(boundedWorkflowString(phase?.detail, 2_000)
         ? { detail: boundedWorkflowString(phase?.detail, 2_000) }
         : {}),
-    }))
-    : [];
-  const progress = Array.isArray(value.workflowProgress)
-    ? value.workflowProgress.slice(0, 1_000).map((entry: any) => ({
+    }));
+  const progress = unknownArray(value.workflowProgress).slice(0, 1_000).filter(isRecord).map((entry) => ({
       type: boundedWorkflowString(entry?.type, 100) || "workflow_agent",
       ...(boundedWorkflowNumber(entry?.index) !== undefined ? { index: boundedWorkflowNumber(entry.index) } : {}),
       ...(boundedWorkflowString(entry?.title, 500) ? { title: boundedWorkflowString(entry.title, 500) } : {}),
@@ -271,13 +267,10 @@ export function sanitizeClaudeWorkflowState(
       ...(boundedWorkflowString(entry?.promptPreview, 4_000) ? { promptPreview: boundedWorkflowString(entry.promptPreview, 4_000) } : {}),
       ...(boundedWorkflowString(entry?.resultPreview, 8_000) ? { resultPreview: boundedWorkflowString(entry.resultPreview, 8_000) } : {}),
       ...(boundedWorkflowString(entry?.error, 4_000) ? { error: boundedWorkflowString(entry.error, 4_000) } : {}),
-    }))
-    : [];
-  const logs = Array.isArray(value.logs)
-    ? value.logs.slice(-200)
-      .map((entry: unknown) => boundedWorkflowString(entry, 2_000))
-      .filter((entry: string | undefined): entry is string => Boolean(entry))
-    : [];
+    }));
+  const logs = unknownArray(value.logs).slice(-200)
+      .map((entry) => boundedWorkflowString(entry, 2_000))
+      .filter((entry): entry is string => Boolean(entry));
   return {
     taskId: fallback.taskId,
     ...(fallback.toolUseId ? { toolUseId: fallback.toolUseId } : {}),
@@ -313,18 +306,22 @@ export interface ClaudeTaskStateUpdate {
   status?: "pending" | "in_progress" | "completed" | "deleted";
 }
 
+function claudeTaskStatus(value: unknown): ClaudeTaskStateUpdate["status"] {
+  return value === "pending" || value === "in_progress" || value === "completed" || value === "deleted" ? value : undefined;
+}
+
 /**
  * Claude's TaskCreate/TaskUpdate list is not a subagent list. Keep it in the
  * same durable session task store used by TodoWrite while preserving any
  * legacy TodoWrite entries that may coexist during an upgrade.
  */
 export function reduceClaudeTaskTodos(
-  current: any[],
+  current: unknown[],
   update: ClaudeTaskStateUpdate,
-): any[] {
+): Record<string, unknown>[] {
   const taskId = String(update.taskId || "");
-  if (!taskId) return current.map((item) => ({ ...item }));
-  const result = current.map((item) => ({ ...item }));
+  if (!taskId) return current.filter(isRecord).map((item) => ({ ...item }));
+  const result = current.filter(isRecord).map((item) => ({ ...item }));
   const index = result.findIndex(
     (item) => item?.source === "claude_tasks"
       && String(item?.id ?? item?.taskId ?? "") === taskId,
@@ -360,12 +357,12 @@ export function reduceClaudeTaskTodos(
   return result;
 }
 
-export function replaceClaudeTaskTodos(current: any[], tasks: any[]): any[] {
-  let result = current
+export function replaceClaudeTaskTodos(current: unknown[], tasks: unknown[]): Record<string, unknown>[] {
+  let result = current.filter(isRecord)
     .filter((item) => item?.source !== "claude_tasks")
     .map((item) => ({ ...item }));
-  const previousTasks = current.filter((item) => item?.source === "claude_tasks");
-  for (const task of tasks) {
+  const previousTasks = current.filter(isRecord).filter((item) => item?.source === "claude_tasks");
+  for (const task of tasks.filter(isRecord)) {
     const taskId = String(task?.id || task?.taskId || "");
     if (!taskId) continue;
     const previous = previousTasks.find(
@@ -374,9 +371,9 @@ export function replaceClaudeTaskTodos(current: any[], tasks: any[]): any[] {
     result = reduceClaudeTaskTodos(result, {
       taskId,
       subject: String(task?.subject || previous?.content || `Task #${taskId}`),
-      description: task?.description ?? previous?.description,
-      teammateName: task?.owner ?? task?.teammateName ?? previous?.teammateName,
-      status: task?.status || previous?.status || "pending",
+      description: typeof task.description === "string" ? task.description : typeof previous?.description === "string" ? previous.description : undefined,
+      teammateName: typeof task.owner === "string" ? task.owner : typeof task.teammateName === "string" ? task.teammateName : typeof previous?.teammateName === "string" ? previous.teammateName : undefined,
+      status: claudeTaskStatus(task.status || previous?.status) || "pending",
     });
   }
   return result;
@@ -387,14 +384,14 @@ export function replaceClaudeTaskTodos(current: any[], tasks: any[]): any[] {
  * erase modern TaskCreate/TaskUpdate rows or SocketAgent TaskBatch rows that
  * share the visible task pane and durable store.
  */
-export function replaceClaudeTodoWriteTodos(current: any[], todos: any[]): any[] {
-  const retained = current
+export function replaceClaudeTodoWriteTodos(current: unknown[], todos: unknown[]): Record<string, unknown>[] {
+  const retained = current.filter(isRecord)
     .filter((item) => {
       const source = String(item?.source || "");
       return source !== "" && source !== "claude_todos";
     })
     .map((item) => ({ ...item }));
-  const replacement = todos.map((todo) => ({
+  const replacement = todos.filter(isRecord).map((todo) => ({
     ...todo,
     source: "claude_todos",
   }));
@@ -443,7 +440,9 @@ function resolveSdkClaudeBinary(): string | undefined {
   // binary and fail with ENOENT for /lib/ld-musl-*.so.1.
   if (process.platform !== "linux") return undefined;
   const arch = process.arch;
-  const glibcRuntime = (process.report?.getReport() as any)?.header?.glibcVersionRuntime;
+  const report = process.report?.getReport();
+  const header = isRecord(report) && isRecord(report.header) ? report.header : {};
+  const glibcRuntime = header.glibcVersionRuntime;
   const isGlibc = typeof glibcRuntime === "string" && glibcRuntime.length > 0;
   const glibcPkg = `@anthropic-ai/claude-agent-sdk-linux-${arch}/claude`;
   const muslPkg = `@anthropic-ai/claude-agent-sdk-linux-${arch}-musl/claude`;
@@ -546,9 +545,7 @@ export function getClaudeExecutableInfo(): ClaudeExecutableInfo {
 }
 
 function errorRecord(error: unknown): Record<string, unknown> | undefined {
-  return typeof error === "object" && error !== null
-    ? error as Record<string, unknown>
-    : undefined;
+  return isRecord(error) ? error : undefined;
 }
 
 function errorString(record: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -654,8 +651,8 @@ interface ClaudeTurnCorrelation {
 }
 
 export function claudeTurnCorrelation(message: unknown): ClaudeTurnCorrelation {
-  if (!message || typeof message !== "object") return {};
-  const record = message as Record<string, unknown>;
+  if (!isRecord(message)) return {};
+  const record = message;
   const primary = typeof record.user_message_uuid === "string"
     ? record.user_message_uuid.trim()
     : "";
@@ -951,21 +948,21 @@ export function createClaudeContinuationMessages(
 }
 
 export function isLiveClaudeUserEcho(message: unknown): boolean {
-  const candidate = message as any;
-  return candidate?.type === "user"
+  const candidate = isRecord(message) ? message : {};
+  return candidate.type === "user"
     && candidate.isReplay !== true
     && candidate.isSynthetic !== true
     && candidate.tool_use_result == null;
 }
 
 export function claudeApiRetryDelayMs(message: unknown): number {
-  const delay = Number((message as any)?.retry_delay_ms);
+  const delay = Number(isRecord(message) ? message.retry_delay_ms : undefined);
   return Number.isFinite(delay) && delay >= 0 ? delay : 0;
 }
 
 class ClaudeInputQueue implements AsyncIterable<ClaudeQueuedUserMessage> {
   private messages: ClaudeQueuedUserMessage[] = [];
-  private waiters: Array<(result: IteratorResult<ClaudeQueuedUserMessage>) => void> = [];
+  private waiters: Array<(result: IteratorResult<ClaudeQueuedUserMessage, undefined>) => void> = [];
   private closed = false;
 
   push(message: ClaudeQueuedUserMessage): void {
@@ -983,17 +980,17 @@ class ClaudeInputQueue implements AsyncIterable<ClaudeQueuedUserMessage> {
     this.closed = true;
     while (this.waiters.length > 0) {
       const waiter = this.waiters.shift();
-      waiter?.({ value: undefined as any, done: true });
+      waiter?.({ value: undefined, done: true });
     }
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<ClaudeQueuedUserMessage> {
+  [Symbol.asyncIterator](): AsyncIterator<ClaudeQueuedUserMessage, undefined> {
     return {
       next: () => {
         const message = this.messages.shift();
         if (message) return Promise.resolve({ value: message, done: false });
-        if (this.closed) return Promise.resolve({ value: undefined as any, done: true });
-        return new Promise<IteratorResult<ClaudeQueuedUserMessage>>((resolve) => {
+        if (this.closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise<IteratorResult<ClaudeQueuedUserMessage, undefined>>((resolve) => {
           this.waiters.push(resolve);
         });
       },
@@ -1088,8 +1085,8 @@ export class ClaudeSession {
   private _lastSupportedCommands: ServerMessage | null = null;
   private _lastSupportedAgents: ServerMessage | null = null;
   private clientSockets = new Set<WebSocket>();
-  private sessionEventDelivery = new SessionEventDelivery((message) => {
-    this.dispatchToClients(message as ServerMessage);
+  private sessionEventDelivery = new SessionEventDelivery<ServerMessage>((message) => {
+    this.dispatchToClients(message);
   });
   private streamSnapshots = new LatestSnapshotDispatcher<ServerMessage>((message) => {
     this.sendImmediately(message);
@@ -1292,8 +1289,7 @@ export class ClaudeSession {
   private _startBashWatcher(filePath: string): void {
     this._stopBashWatcher();  // clean up any previous watcher
     console.log(`[BashWatcher] Starting on ${filePath}`);
-    const state = { interval: null as any, filePath, lastSize: 0 };
-    state.interval = setInterval(() => {
+    const state: NonNullable<ClaudeSession["_activeBashStream"]> = { filePath, lastSize: 0, interval: setInterval(() => {
       try {
         if (!fs.existsSync(filePath)) return;
         const stat = fs.statSync(filePath);
@@ -1308,10 +1304,10 @@ export class ClaudeSession {
             type: "tool_stderr",
             content,
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
       } catch {}
-    }, 500);
+    }, 500) };
     this._activeBashStream = state;
   }
 
@@ -1326,8 +1322,7 @@ export class ClaudeSession {
   private _startBgBashWatcher(taskId: string, toolUseId: string, filePath: string): void {
     this._stopBgBashWatcher(taskId);
     console.log(`[BgBashWatcher] Starting for ${taskId} (toolUseId=${toolUseId}) on ${filePath}`);
-    const state = { interval: null as any, filePath, lastSize: 0 };
-    state.interval = setInterval(() => {
+    const state: NonNullable<ClaudeSession["_activeBashStream"]> = { filePath, lastSize: 0, interval: setInterval(() => {
       try {
         if (!fs.existsSync(filePath)) return;
         const stat = fs.statSync(filePath);
@@ -1343,11 +1338,10 @@ export class ClaudeSession {
             toolUseId,
             content,
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
       } catch {}
-    }, 1000);
-    state.interval = state.interval;
+    }, 1000) };
     this._bgBashWatchers.set(taskId, state);
   }
 
@@ -1407,7 +1401,7 @@ export class ClaudeSession {
                 sessionSeq: positioned.sessionSeq,
                 revision: positioned.revision,
               } : {}),
-            } as any);
+            });
             // Accumulate for Claude injection (5s debounce)
             state.outputBuffer.push(...lines);
             if (state.debounceTimer) clearTimeout(state.debounceTimer);
@@ -1492,7 +1486,7 @@ export class ClaudeSession {
       description: state.description,
       monitoring: false,
       sessionId: this.sessionId || "",
-    } as any);
+    });
   }
 
   private _cleanupAllMonitors(): void {
@@ -1559,7 +1553,7 @@ export class ClaudeSession {
         description: state.description,
         monitoring: false,
         sessionId: this.sessionId || "",
-      } as any);
+      });
     }
   }
 
@@ -1663,15 +1657,15 @@ export class ClaudeSession {
    * `rate_limits_available` is false for API-key, Bedrock and Vertex sessions,
    * where plan limits do not apply.
    */
-  async getPlanUsage(): Promise<Record<string, any> | null> {
-    const activeQuery = this.activeQuery as any;
+  async getPlanUsage() {
+    const activeQuery = this.activeQuery;
     const getUsage = activeQuery?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (typeof getUsage !== "function") return null;
     return await getUsage.call(activeQuery, { skipBehaviors: true });
   }
 
   private _refreshPlanRateLimits(): void {
-    const activeQuery = this.activeQuery as any;
+    const activeQuery = this.activeQuery;
     const getUsage =
       activeQuery?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (typeof getUsage !== "function") return;
@@ -1679,13 +1673,13 @@ export class ClaudeSession {
     // seven days, which this runs per turn and needs none of: the meter reads
     // two percentages. That scan is 4,000 files and ~100 MB on a busy machine.
     Promise.resolve(getUsage.call(activeQuery, { skipBehaviors: true }))
-      .then((usage: any) => {
+      .then((usage) => {
         for (const event of buildClaudeUsageRateLimitEvents(
           usage,
           this.sessionId || "",
         )) {
           recordRateLimitEvent(event);
-          this.send(event as any);
+          this.send(event);
         }
       })
       .catch(() => {
@@ -1826,7 +1820,8 @@ export class ClaudeSession {
     }
   }
 
-  private _handleClaudeConversationReset(message: any): void {
+  private _handleClaudeConversationReset(message: unknown): void {
+    if (!isRecord(message)) return;
     const previousSessionId = this.sessionId || String(message?.session_id || "");
     const nextSessionId = String(message?.new_conversation_id || "").trim();
     if (!previousSessionId || !nextSessionId || previousSessionId === nextSessionId) return;
@@ -1898,8 +1893,8 @@ export class ClaudeSession {
     }));
   }
 
-  private _taskUsage(raw: any): ClaudeSubagentState["usage"] | undefined {
-    if (!raw || typeof raw !== "object") return undefined;
+  private _taskUsage(raw: unknown): ClaudeSubagentState["usage"] | undefined {
+    if (!isRecord(raw)) return undefined;
     const totalTokens = Number(raw.total_tokens ?? raw.totalTokens);
     const toolUses = Number(raw.tool_uses ?? raw.toolUses);
     const durationMs = Number(raw.duration_ms ?? raw.durationMs);
@@ -1995,7 +1990,7 @@ export class ClaudeSession {
     return snapshot;
   }
 
-  private _trackWorkflowLaunch(output: Record<string, any>, toolUseId: string): void {
+  private _trackWorkflowLaunch(output: Record<string, unknown>, toolUseId: string): void {
     const taskId = String(output.taskId || "");
     if (!taskId || !toolUseId) return;
     const previous = this._workflowRuns.get(taskId);
@@ -2247,7 +2242,7 @@ export class ClaudeSession {
       taskId,
       toolUseId,
       patch: {
-        ...(rawStatus ? { status: rawStatus } : {}),
+        ...(rawStatus === "pending" || rawStatus === "running" || rawStatus === "completed" || rawStatus === "failed" || rawStatus === "paused" || rawStatus === "killed" ? { status: rawStatus } : {}),
         ...(rawPatch.description ? { description: String(rawPatch.description) } : {}),
         ...(Number.isFinite(Number(rawPatch.end_time)) ? { endTime: Number(rawPatch.end_time) } : {}),
         ...(Number.isFinite(Number(rawPatch.total_paused_ms)) ? { totalPausedMs: Number(rawPatch.total_paused_ms) } : {}),
@@ -2255,15 +2250,14 @@ export class ClaudeSession {
         ...(typeof rawPatch.is_backgrounded === "boolean" ? { isBackgrounded: rawPatch.is_backgrounded } : {}),
       },
       sessionId: this.sessionId || "",
-    } as any);
+    });
     this._emitActiveSubagentsSnapshot();
     this.onActivity?.();
   }
 
-  private _handleSdkBackgroundTasksChanged(message: any): void {
-    const tasks = Array.isArray(message.tasks)
-      ? message.tasks.filter((task: any) => task?.ambient !== true)
-      : [];
+  private _handleSdkBackgroundTasksChanged(message: unknown): void {
+    if (!isRecord(message)) return;
+    const tasks = unknownArray(message.tasks).filter(isRecord).filter((task) => task.ambient !== true);
     const replacement = new Map<string, ClaudeSdkBackgroundTask>();
     for (const task of tasks) {
       const taskId = String(task?.task_id || "");
@@ -2483,12 +2477,12 @@ export class ClaudeSession {
         type: "todos",
         todos: next,
         sessionId: this.sessionId,
-      } as any);
+      });
     }
     this.onActivity?.();
   }
 
-  private _publishClaudeTaskSnapshot(tasks: any[]): void {
+  private _publishClaudeTaskSnapshot(tasks: unknown[]): void {
     if (!this.sessionId) return;
     const current = getTodos(this.sessionId);
     const next = replaceClaudeTaskTodos(current, tasks);
@@ -2520,8 +2514,8 @@ export class ClaudeSession {
         status: String(task.status || "pending"),
         content: String(task.content || `Task #${taskId}`),
         taskSubject: String(task.content || "") || undefined,
-        taskDescription: task.description,
-        teammateName: task.teammateName,
+        taskDescription: typeof task.description === "string" ? task.description : undefined,
+        teammateName: typeof task.teammateName === "string" ? task.teammateName : undefined,
         isBackgrounded: false,
       });
     }
@@ -2531,7 +2525,7 @@ export class ClaudeSession {
         type: "todos",
         todos: next,
         sessionId: this.sessionId,
-      } as any);
+      });
     }
     this.onActivity?.();
   }
@@ -2600,7 +2594,7 @@ export class ClaudeSession {
       this.send({
         type: thinking ? "thinking" : "text", content, sessionId: this.sessionId || "",
         snapshot: true, finalSnapshot: true, ...common,
-      } as any);
+      });
       if (this.sessionId && !this._authErrorSent) {
         appendHistory(this.sessionId, { role: "assistant", content, ...(thinking ? { thinking: true } : {}), ...common });
       }
@@ -2614,9 +2608,9 @@ export class ClaudeSession {
 
   private _waitForQuestion(questionId: string, message: ServerMessage, signal?: AbortSignal) {
     return waitForInteractiveAnswer(this.pendingQuestions, questionId, message, signal, () => {
-      const sessionId = String((message as any).sessionId || this.sessionId || "");
+      const sessionId = String(("sessionId" in message ? message.sessionId : undefined) || this.sessionId || "");
       if (sessionId) markQuestionAnswered(sessionId, questionId, {});
-      this.send({ type: "question_answered", questionId, sessionId, answers: {} } as any);
+      this.send({ type: "question_answered", questionId, sessionId, answers: {} });
     });
   }
 
@@ -2627,7 +2621,7 @@ export class ClaudeSession {
         this.pendingQuestions.delete(pending.questionId);
         pending.resolve({});
         if (this.sessionId) markQuestionAnswered(this.sessionId, pending.questionId, {});
-        this.send({ type: "question_answered", questionId: pending.questionId, sessionId: this.sessionId || "", answers: {} } as any);
+        this.send({ type: "question_answered", questionId: pending.questionId, sessionId: this.sessionId || "", answers: {} });
       }
     }
   }
@@ -2638,7 +2632,7 @@ export class ClaudeSession {
     // ask rules in bypass mode. Never silently override those requests.
     const questionId = createInteractiveRequestId("approval");
     const question = `Allow ${toolName}?\n${reason || ""}\n${JSON.stringify(redactSecretsDeep(input), null, 2)}`;
-    const message: any = {
+    const message: QuestionServerMessage = {
       type: "question", questionId, sessionId: this.sessionId || "",
       questions: [{ question, header: "Tool approval", options: [{ label: "Approve" }, { label: "Decline" }], multiSelect: false }],
     };
@@ -2725,7 +2719,7 @@ export class ClaudeSession {
     if (!deferLiveReplay) {
       this.replayPendingInteractions(ws);
       this.sessionEventDelivery.replayTo((message) => {
-        this.sendTo(ws, message as ServerMessage);
+        this.sendTo(ws, message);
       });
     }
   }
@@ -2736,7 +2730,7 @@ export class ClaudeSession {
 
   replayLiveState(ws: WebSocket = this.ws): void {
     this.sessionEventDelivery.replayTo((message) => {
-      this.sendTo(ws, message as ServerMessage);
+      this.sendTo(ws, message);
     });
     const activeTool = this.getActiveToolCall();
     if (activeTool && !this.sessionEventDelivery.hasPending("tool_call", activeTool.toolUseId)) {
@@ -2747,7 +2741,7 @@ export class ClaudeSession {
         toolUseId: activeTool.toolUseId,
         sessionId: this.sessionId || "",
         replay: true,
-      } as any);
+      });
     }
     for (const [streamId, stream] of this._streamingThinking) {
       if (!stream.content.trim()) continue;  // signature-only thinking, nothing to show
@@ -2785,7 +2779,7 @@ export class ClaudeSession {
       }
     }
     for (const pendingSecureInput of pendingSecureInputMessagesForSession(this.sessionId || "")) {
-      this.sendTo(ws, pendingSecureInput as ServerMessage);
+      this.sendTo(ws, pendingSecureInput);
     }
     // Workflow snapshots are cumulative state, not append-only stream frames.
     // Re-send the latest snapshot after history restoration so a reconnect
@@ -2797,7 +2791,7 @@ export class ClaudeSession {
         ...run.lastSnapshot,
         sessionId: this.sessionId || "",
         replay: true,
-      } as ServerMessage);
+      });
     }
     // Send active subagent tasks so the app can render SubAgentCards
     const activeSubagents = this.getActiveSubagents();
@@ -2810,7 +2804,7 @@ export class ClaudeSession {
       sessionId: this.sessionId || "",
       backend: "claude",
       replace: true,
-    } as ActiveSubagentsServerMessage);
+    });
   }
 
   /** Detach the WebSocket so this session stops sending to the client.
@@ -2833,47 +2827,46 @@ export class ClaudeSession {
   }
 
   public send(msg: ServerMessage): void {
-    positionSessionMessage(String((msg as any).sessionId || this.sessionId || ""), msg as any);
-    maybeSendAgentAttentionPush(msg as any, path.basename(this.cwd) || "SocketAgent");
+    positionSessionMessage(String(("sessionId" in msg ? msg.sessionId : undefined) || this.sessionId || ""), msg);
+    maybeSendAgentAttentionPush(msg, path.basename(this.cwd) || "SocketAgent");
     const streamKey = this.coalescedStreamKey(msg);
-    if (streamKey && (msg as any).snapshot === true && (msg as any).finalSnapshot !== true) {
+    if (streamKey && (msg.type === "text" || msg.type === "thinking") && msg.snapshot === true && msg.finalSnapshot !== true) {
       this.streamSnapshots.push(streamKey, msg);
       return;
     }
-    if (streamKey && (msg as any).finalSnapshot === true) {
+    if (streamKey && (msg.type === "text" || msg.type === "thinking") && msg.finalSnapshot === true) {
       this.streamSnapshots.discard(streamKey);
-    } else if ((msg as any).type === "tool_call") {
+    } else if (msg.type === "tool_call") {
       this.streamSnapshots.flushAll();
     }
     this.sendImmediately(msg);
   }
 
   private coalescedStreamKey(msg: ServerMessage): string | null {
-    const type = String((msg as any).type || "");
-    if (type !== "text" && type !== "thinking") return null;
-    const identity = String((msg as any).entryId || (msg as any).streamId || "");
-    return identity ? `${type}:${identity}` : null;
+    if (msg.type !== "text" && msg.type !== "thinking") return null;
+    const identity = msg.entryId || msg.streamId;
+    return identity ? `${msg.type}:${identity}` : null;
   }
 
   private sendImmediately(msg: ServerMessage): void {
     const deliveryAware = [...this.clientSockets].some(
-      (socket) => (socket as any).supportsSessionEventAck === true,
+      (socket) => "supportsSessionEventAck" in socket && socket.supportsSessionEventAck === true,
     );
     const monitorDeliveryAware = this.clientSockets.size > 0 && [...this.clientSockets].every(
-      (socket) => (socket as any).supportsMonitorOutputAck === true,
+      (socket) => "supportsMonitorOutputAck" in socket && socket.supportsMonitorOutputAck === true,
     );
     const shouldPrepare = deliveryAware
-      && ((msg as any).type !== "monitor_output" || monitorDeliveryAware);
+      && (msg.type !== "monitor_output" || monitorDeliveryAware);
     const outgoing = shouldPrepare
-      ? this.sessionEventDelivery.prepare(msg as any)
+      ? this.sessionEventDelivery.prepare(msg)
       : msg;
-    this.dispatchToClients(outgoing as ServerMessage);
+    this.dispatchToClients(outgoing);
   }
 
   private sendSdkEvent(msg: ServerMessage): void {
     const recipients: WebSocket[] = [];
     for (const socket of [...this.clientSockets]) {
-      if (socket.readyState === WebSocket.OPEN && (socket as any).supportsRawSdkEvents === true) {
+      if (socket.readyState === WebSocket.OPEN && "supportsRawSdkEvents" in socket && socket.supportsRawSdkEvents === true) {
         recipients.push(socket);
       } else if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
         this.clientSockets.delete(socket);
@@ -3019,7 +3012,7 @@ export class ClaudeSession {
       originToolUseId: toolUseId,
       parentToolUseId: parentToolUseId || null,
       sessionId: this.sessionId || "",
-    } as any);
+    });
     if (this.sessionId) {
       appendHistory(this.sessionId, {
         role: "notification",
@@ -3049,14 +3042,14 @@ export class ClaudeSession {
   ): void {
     if (models.length === 0) return;
     const currentModel = this._requestedModel || this._sessionModel || undefined;
-    const message = {
+    const message: SupportedModelsServerMessage = {
       type: "supported_models",
       models,
       ...(currentModel ? { currentModel } : {}),
       sessionId: this.sessionId || this._resumeSessionId || "",
       backend: "claude",
       ...options,
-    } as ServerMessage;
+    };
     this._lastSupportedModels = message;
     this.send(message);
   }
@@ -3125,7 +3118,7 @@ export class ClaudeSession {
   }
 
   /** Get MCP server health status */
-  async mcpServerStatus(): Promise<any> {
+  async mcpServerStatus() {
     if (this.activeQuery) {
       return this.activeQuery.mcpServerStatus();
     }
@@ -3133,23 +3126,23 @@ export class ClaudeSession {
   }
 
   /** Reconnect a failed MCP server */
-  async reconnectMcpServer(name: string): Promise<any> {
+  async reconnectMcpServer(name: string) {
     if (this.activeQuery) {
-      return (this.activeQuery as any).reconnectMcpServer(name);
+      return this.activeQuery.reconnectMcpServer(name);
     }
     return null;
   }
 
   /** Toggle an MCP server on/off */
-  async toggleMcpServer(name: string, enabled: boolean): Promise<any> {
+  async toggleMcpServer(name: string, enabled: boolean) {
     if (this.activeQuery) {
-      return (this.activeQuery as any).toggleMcpServer(name, enabled);
+      return this.activeQuery.toggleMcpServer(name, enabled);
     }
     return null;
   }
 
   /** Rewind files to a specific message UUID (requires file checkpointing) */
-  async rewindFiles(uuid: string, dryRun = false): Promise<any> {
+  async rewindFiles(uuid: string, dryRun = false) {
     if (this.activeQuery) {
       return this.activeQuery.rewindFiles(uuid, { dryRun });
     }
@@ -3258,7 +3251,7 @@ export class ClaudeSession {
       const content = "Settings saved for the next prompt. The current Claude run keeps its existing settings. Background tasks must finish or be stopped before the new settings can apply.";
       const uuid = crypto.randomUUID();
       const streamId = `settings:${uuid}`;
-      this.send({ type: "text", content, streamId, snapshot: true, finalSnapshot: true, sessionId: this.sessionId } as any);
+      this.send({ type: "text", content, streamId, snapshot: true, finalSnapshot: true, sessionId: this.sessionId });
       appendHistory(this.sessionId, { role: "assistant", content, streamId, uuid, timestamp: new Date().toISOString() });
     }
   }
@@ -3558,7 +3551,7 @@ export class ClaudeSession {
               this.send({
                 type: "scheduled_task_update",
                 task,
-              } as any);
+              });
 
               const when = scheduledDate.toLocaleString();
               const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
@@ -3699,7 +3692,7 @@ export class ClaudeSession {
                           this._cleanupMonitor(foundTaskId!, true);
                         }, args.timeoutSeconds * 1000);
                       }
-                      this.send({ type: "monitor_started", taskId: foundTaskId, description: desc, monitoring: true, sessionId: this.sessionId || "" } as any);
+                      this.send({ type: "monitor_started", taskId: foundTaskId, description: desc, monitoring: true, sessionId: this.sessionId || "" });
                       return { content: [{ type: "text" as const, text: `Monitoring enabled for task ${foundTaskId}.${args.timeoutSeconds ? ` Timeout: ${args.timeoutSeconds}s.` : ""}` }] };
                     }
                     return { content: [{ type: "text" as const, text: `No output file found for task ${taskId}. The task may not be a backgrounded bash command, or it may have already completed.` }], isError: true };
@@ -3725,7 +3718,7 @@ export class ClaudeSession {
                       this._cleanupMonitor(taskId, true);
                     }, args.timeoutSeconds * 1000);
                   }
-                  this.send({ type: "monitor_started", taskId, description: desc, monitoring: true, sessionId: this.sessionId || "" } as any);
+                  this.send({ type: "monitor_started", taskId, description: desc, monitoring: true, sessionId: this.sessionId || "" });
                   return { content: [{ type: "text" as const, text: `Monitoring enabled for task ${taskId}.${args.timeoutSeconds ? ` Timeout: ${args.timeoutSeconds}s.` : ""}` }] };
                 }
 
@@ -3779,8 +3772,8 @@ export class ClaudeSession {
                 }
 
                 // Notify app about the new task + monitoring state
-                this.send({ type: "task_started", taskId, toolUseId: syntheticToolUseId, description, taskType: "monitor", sessionId: this.sessionId || "" } as any);
-                this.send({ type: "monitor_started", taskId, description, monitoring: true, command, sessionId: this.sessionId || "" } as any);
+                this.send({ type: "task_started", taskId, toolUseId: syntheticToolUseId, description, taskType: "monitor", sessionId: this.sessionId || "" });
+                this.send({ type: "monitor_started", taskId, description, monitoring: true, command, sessionId: this.sessionId || "" });
 
                 // Listen for process exit
                 child.on("exit", (code, signal) => {
@@ -3831,7 +3824,7 @@ export class ClaudeSession {
                     status: code === 0 ? "completed" : "failed",
                     summary: `Process exited with code ${code ?? "unknown"}`,
                     sessionId: this.sessionId || "",
-                  } as any);
+                  });
                 });
 
                 return { content: [{ type: "text" as const, text: `Process started and monitoring enabled. Task ID: ${taskId}. PID: ${child.pid || "unknown"}.${args.timeoutSeconds ? ` Monitoring timeout: ${args.timeoutSeconds}s.` : ""}` }] };
@@ -3951,7 +3944,7 @@ export class ClaudeSession {
           effort: this._effort as any,
           thinking: this._thinking as any,
           ...(this._requestedModel ? { model: this._requestedModel } : {}),
-          systemPrompt: { type: "preset", preset: "claude_code", append: this._appendSystemPrompt ? toolContext + '\n\n' + this._appendSystemPrompt : toolContext } as any,
+          systemPrompt: { type: "preset", preset: "claude_code", append: this._appendSystemPrompt ? toolContext + '\n\n' + this._appendSystemPrompt : toolContext },
           tools: { type: "preset", preset: "claude_code" },
           disallowedTools: claudeDisallowedTools(this._disallowedTools),
           settings: this.claudeFlagSettings(),
@@ -4156,7 +4149,7 @@ export class ClaudeSession {
                     model: model || undefined,
                     agentType: agentType || undefined,
                     sessionId: this.sessionId || "",
-                  } as any);
+                  });
                   // Persist in history for restore on session resume
                   if (this.sessionId) {
                     appendHistory(this.sessionId, {
@@ -4179,7 +4172,7 @@ export class ClaudeSession {
                     event: "end",
                     reason,
                     sessionId: this.sessionId || "",
-                  } as any);
+                  });
                   // Persist in history for restore on session resume
                   if (this.sessionId) {
                     appendHistory(this.sessionId, {
@@ -4248,10 +4241,10 @@ export class ClaudeSession {
                 type: "tool_stderr",
                 content: trimmed,
                 sessionId: this.sessionId || "",
-              } as any);
+              });
             }
           },
-          canUseTool: async (toolName, input, { signal, suggestions, blockedPath, decisionReason, toolUseID, agentID } = {} as any) => {
+          canUseTool: async (toolName, input, { signal, suggestions, blockedPath, decisionReason, toolUseID, agentID }) => {
             console.log(`canUseTool called: ${toolName}${agentID ? ` (agent: ${agentID})` : ''}${decisionReason ? ` reason: ${decisionReason}` : ''}`);
 
             // NOTE: Plugin interceptors run in PreToolUse hook (not here).
@@ -4287,7 +4280,7 @@ export class ClaudeSession {
                 sessionId: this.sessionId || "",
                 agentId: agentID || undefined,
                 decisionReason: decisionReason || undefined,
-              } as any;
+              };
               this.send(questionMsg);
 
               // Persist to history so questions survive reconnects
@@ -4626,7 +4619,7 @@ export class ClaudeSession {
             type: "session_settings",
             sessionId: message.session_id,
             settings: this.getAgentSettings(),
-          } as any);
+          });
 
           // Forward init data to app (available agents, tools, MCP servers, model, etc.)
           const initMsg = message as any;
@@ -4663,7 +4656,7 @@ export class ClaudeSession {
             claudeCodeVersion: initMsg.claude_code_version || undefined,
             permissionMode: initPermissionMode || undefined,
             sessionId: this.sessionId || "",
-          } as any;
+          };
           this.send(this._lastSessionInit!);
 
           // Query available models and forward to app for model picker
@@ -4693,7 +4686,7 @@ export class ClaudeSession {
                     type: "supported_commands",
                     commands: phoneCommands,
                     sessionId: this.sessionId || "",
-                  } as any;
+                  };
                   this.send(this._lastSupportedCommands!);
                 }
               }).catch((e: any) => {
@@ -4705,14 +4698,14 @@ export class ClaudeSession {
 
             try {
               console.log(`[Init] Querying supportedAgents...`);
-              this.activeQuery.supportedAgents().then((agents: any) => {
+              this.activeQuery.supportedAgents().then((agents) => {
                 console.log(`[Init] supportedAgents returned: ${Array.isArray(agents) ? agents.length + ' agents' : typeof agents}`);
                 if (agents && Array.isArray(agents) && agents.length > 0) {
                   this._lastSupportedAgents = {
                     type: "supported_agents",
                     agents,
                     sessionId: this.sessionId || "",
-                  } as any;
+                  };
                   this.send(this._lastSupportedAgents!);
                 }
               }).catch((e: any) => {
@@ -4723,13 +4716,13 @@ export class ClaudeSession {
             }
 
             // Fetch initial context usage
-            this.activeQuery.getContextUsage({ detail: "summary" }).then((ctx: any) => {
+            this.activeQuery.getContextUsage({ detail: "summary" }).then((ctx) => {
               if (ctx) {
                 this.send({
                   type: "context_usage",
                   sessionId: this.sessionId || "",
                   ...ctx,
-                } as any);
+                });
                 if (this.sessionId) updateSessionContextUsage(this.sessionId, ctx);
               }
             }).catch(() => {});
@@ -4786,7 +4779,7 @@ export class ClaudeSession {
             files: fp.files || [],
             failed: fp.failed || [],
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
 
         if (message.type === "system" && (message as any).subtype === "commands_changed") {
@@ -4801,7 +4794,7 @@ export class ClaudeSession {
             type: "supported_commands",
             commands: phoneCommands,
             sessionId: this.sessionId || "",
-          } as any;
+          };
           if (this._lastSupportedCommands) this.send(this._lastSupportedCommands);
         }
 
@@ -4833,7 +4826,7 @@ export class ClaudeSession {
               sessionId: this.sessionId || "",
               uuid: tt.uuid || undefined,
               ...this._turnCorrelation,
-            } as any);
+            });
           }
         }
 
@@ -4847,7 +4840,7 @@ export class ClaudeSession {
             output: auth.output || [],
             error: auth.error || undefined,
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
 
         // Detect context compaction status changes
@@ -4865,7 +4858,7 @@ export class ClaudeSession {
             type: "compacting",
             active: this._isCompacting,
             sessionId: this.sessionId || "",
-          } as any);
+          });
           // Forward permission mode changes (e.g., entering/exiting plan mode)
           if (permMode) {
             const previousMode = this._permissionMode;
@@ -4877,7 +4870,7 @@ export class ClaudeSession {
               type: "permission_mode_changed",
               permissionMode: permMode,
               sessionId: this.sessionId || "",
-            } as any);
+            });
           }
         }
 
@@ -4890,7 +4883,7 @@ export class ClaudeSession {
             trigger: meta.trigger || "auto",
             preTokens: meta.pre_tokens || 0,
             sessionId: this.sessionId || "",
-          } as any);
+          });
           if (this.sessionId) {
             appendHistory(this.sessionId, {
               role: "assistant",
@@ -5041,7 +5034,7 @@ export class ClaudeSession {
             usage: taskUsage,
             skipTranscript: tn.skip_transcript === true || undefined,
             sessionId: this.sessionId || "",
-          } as any);
+          });
           if (this.sessionId) {
             appendHistory(this.sessionId, {
               role: "notification",
@@ -5081,7 +5074,7 @@ export class ClaudeSession {
             parentToolUseId: summary.parent_tool_use_id || null,
             sessionId: this.sessionId || "",
             uuid: summary.uuid || undefined,
-          } as any);
+          });
           if (this.sessionId) {
             appendHistory(this.sessionId, {
               role: "assistant",
@@ -5101,7 +5094,7 @@ export class ClaudeSession {
           console.log(`[SDK] Rate limit raw: ${JSON.stringify((message as any).rate_limit_info)}`);
           const event = buildClaudeRateLimitEvent(info, this.sessionId || "");
           recordRateLimitEvent(event);
-          this.send(event as any);
+          this.send(event);
         }
 
         // Forward background task lifecycle events (#8, #9)
@@ -5141,7 +5134,7 @@ export class ClaudeSession {
             delayMs,
             errorStatus: ar.error_status || undefined,
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
 
         // Forward hook lifecycle messages
@@ -5154,7 +5147,7 @@ export class ClaudeSession {
             hookName: hs.hook_name || "",
             hookEvent: hs.hook_event || "",
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
 
         if (message.type === "system" && (message as any).subtype === "hook_progress") {
@@ -5167,7 +5160,7 @@ export class ClaudeSession {
             stdout: hp.stdout || "",
             stderr: hp.stderr || "",
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
 
         if (message.type === "system" && (message as any).subtype === "hook_response") {
@@ -5183,7 +5176,7 @@ export class ClaudeSession {
             exitCode: hr.exit_code,
             outcome: hr.outcome || "success",
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
 
         // Forward session state changes (idle/running/requires_action)
@@ -5224,7 +5217,7 @@ export class ClaudeSession {
             state,
             sessionId: this.sessionId || "",
             ...(this.activeStartedAt ? { activeStartedAt: this.activeStartedAt } : {}),
-          } as any);
+          });
         }
 
         // Forward CWD changes to app
@@ -5240,7 +5233,7 @@ export class ClaudeSession {
               oldCwd,
               newCwd,
               sessionId: this.sessionId || "",
-            } as any);
+            });
             // Persist to history for restore on resume
             if (this.sessionId) {
               appendHistory(this.sessionId, {
@@ -5266,7 +5259,7 @@ export class ClaudeSession {
             type: "local_command_output",
             content: lco.content || "",
             sessionId: this.sessionId || "",
-          } as any);
+          });
         }
 
         // Forward prompt suggestions (#12)
@@ -5278,7 +5271,7 @@ export class ClaudeSession {
             type: "prompt_suggestion",
             suggestion,
             sessionId: this.sessionId || "",
-          } as any);
+          });
           // Persist in session history so it can be restored on resume
           if (this.sessionId && suggestion) {
             appendHistory(this.sessionId, {
@@ -5367,7 +5360,7 @@ export class ClaudeSession {
               cacheCreateTokens: lastTurnCacheCreateTokens,
               contextWindow: this._lastContextWindow,
               sessionId: this.sessionId || "",
-            } as any);
+            });
           }
 
           // Track output tokens from message_delta (end of turn)
@@ -5387,7 +5380,7 @@ export class ClaudeSession {
               cacheCreateTokens: lastTurnCacheCreateTokens,
               contextWindow: this._lastContextWindow,
               sessionId: this.sessionId || "",
-            } as any);
+            });
           }
 
           if (event?.type === "message_stop") {
@@ -5408,7 +5401,7 @@ export class ClaudeSession {
                     type: "claude_auth",
                     url,
                     sessionId: this.sessionId || "",
-                  } as any);
+                  });
                   if (this.sessionId) {
                     appendHistory(this.sessionId, {
                       role: "assistant",
@@ -5422,7 +5415,7 @@ export class ClaudeSession {
                     message: `Authentication failed. Run \`claude auth login\` on the server to re-authenticate.`,
                     errorType: assistantError,
                     sessionId: this.sessionId || "",
-                  } as any);
+                  });
                 }
               }).catch(() => {
                 this.send({
@@ -5430,7 +5423,7 @@ export class ClaudeSession {
                   message: `Authentication failed. Run \`claude auth login\` on the server to re-authenticate.`,
                   errorType: assistantError,
                   sessionId: this.sessionId || "",
-                } as any);
+                });
               });
             } else {
               this.send({
@@ -5438,7 +5431,7 @@ export class ClaudeSession {
                 message: `Assistant error: ${assistantError}`,
                 errorType: assistantError,
                 sessionId: this.sessionId || "",
-              } as any);
+              });
             }
           }
 
@@ -5485,7 +5478,7 @@ export class ClaudeSession {
                         type: "todos",
                         todos: next,
                         sessionId: this.sessionId || "",
-                      } as any);
+                      });
                     }
                   }
                   continue;
@@ -5762,7 +5755,7 @@ export class ClaudeSession {
                     taskId: bgTaskId,
                     outputFile,
                     sessionId: this.sessionId || "",
-                  } as any);
+                  });
 
                   // task_id ↔ tool_use_id mapping handled by task_started SDK message
 
@@ -5814,7 +5807,7 @@ export class ClaudeSession {
                       done: i + CHUNK_SIZE >= shownOutput.length,
                       sessionId: this.sessionId || "",
                       parentToolUseId: parentId,
-                    } as any);
+                    });
                   }
                 } else {
                   console.log(`[SDK] <<< tool_result: toolUseId=${toolUseId} len=${shownOutput.length}`);
@@ -5873,7 +5866,7 @@ export class ClaudeSession {
               subtype: result.subtype || undefined,
               terminalReason: result.terminal_reason || undefined,
               sessionId: this.sessionId || "",
-            } as any);
+            });
             continue;
           }
           if (isClaudeTaskNotificationResult(result)) {
@@ -6017,13 +6010,13 @@ export class ClaudeSession {
 
           // Fetch detailed context usage breakdown from SDK (async, non-blocking)
           if (this.activeQuery) {
-            this.activeQuery.getContextUsage({ detail: "summary" }).then((ctx: any) => {
+            this.activeQuery.getContextUsage({ detail: "summary" }).then((ctx) => {
               if (ctx) {
                 this.send({
                   type: "context_usage",
                   sessionId: this.sessionId || "",
                   ...ctx,
-                } as any);
+                });
                 if (this.sessionId) updateSessionContextUsage(this.sessionId, ctx);
               }
             }).catch(() => {});
@@ -6179,7 +6172,7 @@ export class ClaudeSession {
       type: "claude_auth_result",
       success,
       sessionId: this.sessionId || "",
-    } as any);
+    });
     if (this.sessionId) {
       appendHistory(this.sessionId, {
         role: "assistant",

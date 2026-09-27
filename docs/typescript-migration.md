@@ -113,6 +113,11 @@ not a new auto-update policy.
   now preserve `ServerMessage` and `HistoryEntry`; secure-input messages have a
   concrete protocol type. Effort names advertised by Codex remain extensible,
   following the generated provider type instead of asserting a fixed enum.
+- Server `1fefd9d`: Codex history and elicitation helper validation.
+- Claude foundations: declared outgoing SDK-derived protocol messages, typed
+  delivery/replay, workflow/task reducers, async input queue completion, and
+  usage/MCP/rewind results. File rewind callers now distinguish provider result
+  shapes. Main Claude stream handling remains in progress.
 
 ## Validation log
 
@@ -138,3 +143,5 @@ not a new auto-update policy.
 - Codex history/elicitation helpers: build and lint passed; 19 focused tests
   passed for elicitation, history, and native subagent lifecycle. Both helpers
   have zero diagnostics. Baseline: 7,416.
+- Claude foundations: build/lint passed; full suite 539 passed, one skipped.
+  Baseline: 6,953. Output: `/tmp/sa-claude-foundation-full-tests.log`.

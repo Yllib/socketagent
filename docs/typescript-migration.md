@@ -8,7 +8,7 @@ Remove explicit and inferred `any` from our code, validate external data as
 `unknown`, and replace narrowing casts with checked types. Do not change product
 behavior just to satisfy a type checker. Preserve older supported provider formats.
 
-The enforced initial scope is `server/src/**/*.ts`, JavaScript/MJS under
+The enforced scope is `server/src/**/*.{ts,mts}`, JavaScript/MJS under
 `server/test` and `server/scripts`, and the ESLint configuration. Dependencies,
 build output, ignored private plugins, the separate relay repository, and scripts
 outside `server` are not covered yet. Flutter is Dart and needs a separate audit.
@@ -72,8 +72,8 @@ Use the report command for current rule and file counts.
 | Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
 | Provider adapters | Complete | Codex and Claude sessions, stream identity, native history, elicitation, and interactive answer helpers have zero diagnostics. Test streaming, completion, approvals, cancellation, and subagents. |
 | Persisted history | Complete | SQLite rows, history JSON, session metadata, task lists, native history readers, and transfer bundles are validated. `session-store.ts`, `transcript-database.ts`, and `session-transfer.ts` have zero diagnostics. Test recovery, pagination, rewind, and archive reads. |
-| WebSocket routing | In progress | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
-| Remaining code and tests | Pending | MCP tools, plugins API, relay client, helpers, JS fixtures and scripts. Audit additional repositories and ignored private plugins separately. |
+| WebSocket routing | Complete | Generated incoming-message validation, typed routing and provider dispatch; `index.ts` and relay client have zero diagnostics. |
+| Remaining code and tests | In progress | MCP tools, helpers, JS fixtures and scripts. Plugin loading and hook results are validated, including private SDK copies. Audit private plugin implementation debt separately. |
 | Final enforcement | Pending | Zero baseline; remove baseline handling; review lingering assertions and inferred unsafe types, not just the explicit-any count. |
 
 Work shared definitions before consumers to avoid repeated edits. Keep each batch
@@ -217,3 +217,18 @@ not a new auto-update policy.
   2,487, including 311 remaining diagnostics in index.ts (provider settings,
   durable tool delivery, HTTP endpoints, and update helpers). Output:
   `/tmp/sa-router-full-tests.log`.
+
+- Server `b69fbec`: validated routing and error boundaries checkpoint.
+- Provider settings/tool delivery checkpoint: index.ts has zero diagnostics.
+  Work Review delivery uses service records; monitor events and plugin contexts
+  retain their message types. Claude exposes context usage without private-field
+  access; provider-specific settings are narrowed before dispatch. Legacy Claude
+  `superYolo` maps to `bypassPermissions`, and old rollback `system` notes load as
+  notifications. Reset consumption validates the generated Codex response.
+- Dynamic plugin exports and hook results are validated. MCP configs accept real
+  CJS/ESM instances and SDK copies found in a plugin's loaded dependency graph;
+  the ESM interop source is included in enforcement. Both existing private plugins
+  passed read-only configuration validation without auth/tool execution.
+- Validation: 43 focused tests and 11 compatibility tests passed; full suite 553
+  passed, one skipped. Baseline: 2,043. Output:
+  `/tmp/sa-tools-full-tests.log`. No deployment or live server restart.

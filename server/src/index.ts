@@ -1,4 +1,7 @@
-import { errorMessage, isRecord } from "./value-guards";
+import qrcode from "qrcode-terminal";
+import { z } from "zod";
+import type { WorkReviewAgentView, WorkReviewClientSnapshot, WorkReviewPublishedResult } from "./work-review-types";
+import { errorMessage, isRecord, parseJsonObject } from "./value-guards";
 import type { ClientTransport } from "./client-transport";
 import { CommandReceipts } from "./command-receipts";
 import { SessionTransferJobs } from "./session-transfer-jobs";
@@ -33,7 +36,7 @@ import * as path from "path";
 import { RestartRecoveryStore, RestartRecoveryWorker, boundedRecoverySetup, RESTART_CONTINUATION_PROMPT } from "./restart-recovery";
 import { finishRecoveredScheduledTask } from "./scheduled-task-store";
 import { flushSessionStore, flushSdkEventQueue } from "./session-store";
-import { execFile, execFileSync, spawn } from "child_process";
+import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
@@ -61,7 +64,8 @@ import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBi
 import { onInlineImagesSaved } from "./session-store";
 import { inlineImageStore } from "./inline-image-store";
 import { isSendFileDeliveryPath } from "./send-file-store";
-import { SocketAgentPlugin, PluginContext } from "./plugin-api";
+import { SocketAgentPlugin, PluginContext, SessionContext } from "./plugin-api";
+import { parseSocketAgentPlugin } from "./plugin-contract";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
 import { RelayClient, RelayStatus, relayPeerForMessage } from "./relay-client";
 import { parseClientMessage } from "./client-message";
@@ -98,7 +102,7 @@ import { invalidateCachedModelCatalog } from "./model-catalog-store";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
 import { activeAppMonitorRecords, AppToolContext, publishWorkReviewCard, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
-import { applyInitialSessionSettings } from "./initial-session-settings";
+import { applyInitialSessionSettings, isClaudeEffort } from "./initial-session-settings";
 import { TurnAbortTracker } from "./turn-abort-tracker";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { routeMonitorOutputToSession } from "./monitor-output-route";
@@ -163,7 +167,7 @@ import {
   SESSION_RUN_BACKFILL_VERSION,
   setSessionRunSupervisorSettled,
 } from "./session-run-store";
-import type { SessionRunOutcome, HistoryEntry } from "./protocol";
+import type { SessionRunOutcome, HistoryEntry, ServerMessage } from "./protocol";
 import {
   archiveWorkReview,
   cancelWorkReview,
@@ -268,8 +272,8 @@ function readLocalAppVersionInfo(): AppVersionInfo | null {
 
 function parseServerReleaseVersion(raw: string): string | null {
   try {
-    const parsed = JSON.parse(raw);
-    const version = parsed?.version;
+    const parsed = parseJsonObject(raw);
+    const version = parsed.version;
     return typeof version === "string" && version.trim()
       ? version.trim()
       : null;
@@ -472,8 +476,8 @@ if (fs.existsSync(pluginsDir)) {
     .filter(f => !f.endsWith(".d.js"));
   for (const file of files) {
     try {
-      const mod = require(path.join(pluginsDir, file));
-      const plugin: SocketAgentPlugin = mod.default || mod;
+      const mod: unknown = require(path.join(pluginsDir, file));
+      const plugin = parseSocketAgentPlugin(mod, path.join(pluginsDir, file));
       if (plugin.name) {
         plugins.push(plugin);
         console.log(`Loaded plugin: ${plugin.name}`);
@@ -1475,20 +1479,17 @@ function shouldSendPushNotification(): boolean {
   return true;
 }
 
-function maybeSendPushNotification(msg: {
-  type: "scheduled_task_notification";
-  title: string;
-  body: string;
-  sessionId: string;
-  status?: "completed" | "failed" | "manual";
-  sessionCompletion?: boolean;
-  kind?: string;
-  eventId?: string;
-  finishedAt?: string;
-  startedAt?: string;
-  navigationTarget?: "scheduled_tasks";
-  scheduledTaskId?: string;
-}): void {
+const forwardedNotificationSchema = z.object({
+  type: z.literal("scheduled_task_notification"),
+  title: z.string(), body: z.string(), sessionId: z.string(),
+  status: z.enum(["completed", "failed", "manual"]).optional(),
+  sessionCompletion: z.boolean().optional(), kind: z.string().optional(),
+  eventId: z.string().optional(), finishedAt: z.string().optional(),
+  startedAt: z.string().optional(), navigationTarget: z.literal("scheduled_tasks").optional(),
+  scheduledTaskId: z.string().optional(),
+});
+
+function maybeSendPushNotification(msg: z.infer<typeof forwardedNotificationSchema>): void {
   if (!shouldSendPushNotification()) return;
   const sessionCompletion = msg.sessionCompletion === true && Boolean(msg.sessionId);
   const finishedAt = sessionCompletion
@@ -1674,7 +1675,7 @@ function broadcastScheduledTaskNotification(
 
 function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: string): void {
   try {
-    const msg = JSON.parse(data);
+    const msg = parseJsonObject(data);
     if (msg?.type !== "scheduled_task_notification" && msg?.type !== "reminder") {
       return;
     }
@@ -1687,7 +1688,7 @@ function forwardHeadlessScheduledAgentMessage(data: string, fallbackSessionId?: 
     }
     if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
     if (shouldSendForwardedPush(msg)) {
-      maybeSendPushNotification(msg);
+      maybeSendPushNotification(forwardedNotificationSchema.parse(msg));
     }
   } catch {
     // Ignore non-JSON or unrelated headless session traffic.
@@ -1818,7 +1819,7 @@ const workReviewResultRetryAttempts = new Map<string, number>();
 const workReviewResultRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const workReviewResultDeliveryStore = new WorkReviewResultDeliveryStore();
 
-function dispatchDurableSessionMessage(message: Record<string, any>): void {
+function dispatchDurableSessionMessage(message: Record<string, unknown>): void {
   const raw = JSON.stringify(redactSecretsDeep(message));
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) client.send(raw);
@@ -1840,9 +1841,9 @@ onInlineImagesSaved((sessionId, entry) => {
 });
 
 function workReviewClientPayload(
-  snapshot: Record<string, any>,
+  snapshot: WorkReviewClientSnapshot,
   requestId?: string,
-): Record<string, any> {
+) {
   const { currentDraft, ...review } = snapshot;
   const cardEntry = getWorkReviewHistoryEntry(
     String(snapshot.originSessionId || ""),
@@ -1870,7 +1871,7 @@ function workReviewClientPayload(
   };
 }
 
-function broadcastWorkReviewCard(review: Record<string, any>): void {
+function broadcastWorkReviewCard(review: WorkReviewAgentView): void {
   const sessionId = String(review.originSessionId || "");
   if (!sessionId) return;
   let delivery = durableSessionEventDeliveries.get(sessionId);
@@ -1879,12 +1880,12 @@ function broadcastWorkReviewCard(review: Record<string, any>): void {
     durableSessionEventDeliveries.set(sessionId, delivery);
   }
   publishWorkReviewCard({
-    appendHistory: (entry) => appendHistory(sessionId, entry as any),
+    appendHistory: (entry) => appendHistory(sessionId, entry),
     send: (message) => {
       const outgoing = [...connectedClients].some(
         (client) => client.supportsSessionEventAck === true,
-      ) ? delivery!.prepare(message as Record<string, any>) : message;
-      dispatchDurableSessionMessage(outgoing as Record<string, any>);
+      ) ? delivery!.prepare({ ...message }) : { ...message };
+      dispatchDurableSessionMessage(outgoing);
     },
   }, review);
 }
@@ -1951,8 +1952,8 @@ async function runWorkReviewResultDelivery(
 }
 
 function queueWorkReviewResultDelivery(
-  review: Record<string, any>,
-  result: Record<string, any>,
+  review: WorkReviewAgentView,
+  result: WorkReviewPublishedResult,
 ): Promise<void> {
   const sessionId = String(review.originSessionId || "");
   const resultId = String(result.resultId || "");
@@ -2018,10 +2019,10 @@ function restorePendingWorkReviewResultDeliveries(): void {
   // Rebuild missing outbox records from the durable review store first. This
   // covers a crash after atomic Finish Review but before outbox enqueue.
   try {
-    const exported = exportWorkReviews({ includeArchived: true } as any) as any;
+    const exported = exportWorkReviews({ includeArchived: true });
     const publishedById = new Map<string, {
-      review: Record<string, any>;
-      result: Record<string, any>;
+      review: WorkReviewAgentView;
+      result: WorkReviewPublishedResult;
     }>();
     for (const review of exported.reviews || []) {
       for (const round of review.rounds || []) {
@@ -2055,7 +2056,7 @@ function restorePendingWorkReviewResultDeliveries(): void {
   }
 }
 
-function broadcastDurableMonitorMessage(message: Record<string, any>): void {
+function broadcastDurableMonitorMessage(message: Record<string, unknown>): void {
   const sessionId = String(message.sessionId || "");
   const deliveryAware = connectedClients.size > 0 && [...connectedClients].every(
     (client) => client.supportsMonitorOutputAck === true,
@@ -2092,7 +2093,7 @@ async function runDurableMonitorPrompt(record: DurableMonitorRecord, text: strin
     readyState: WebSocket.OPEN,
     send: (data: string) => {
       try {
-        const message = JSON.parse(data);
+        const message = parseJsonObject(data);
         if (!message.sessionId) message.sessionId = record.sessionId;
         broadcastDurableMonitorMessage(message);
       } catch {}
@@ -2142,8 +2143,8 @@ function durableMonitorContext(record: DurableMonitorRecord): AppToolContext {
     getCwd: () => record.cwd,
     getBackend: () => record.backend,
     ...(record.backend === "codex" ? { getCodexDriver: () => "app-server" as const } : {}),
-    send: (message) => broadcastDurableMonitorMessage(message as Record<string, any>),
-    appendHistory: (entry) => appendHistory(record.sessionId, entry as any),
+    send: (message) => broadcastDurableMonitorMessage({ ...message }),
+    appendHistory: (entry) => appendHistory(record.sessionId, entry),
     getTtsEngine: () => "system",
     getKokoroVoice: () => "af_heart",
     getKokoroSpeed: () => 1,
@@ -2191,7 +2192,7 @@ browserSessionManager.onFrame(broadcastBrowserFrame);
 
 function broadcastHeadlessSessionMessage(data: string, fallbackSessionId = ""): void {
   try {
-    const parsed = redactSecretsDeep(JSON.parse(data));
+    const parsed = redactSecretsDeep(parseJsonObject(data));
     if (!parsed.sessionId && fallbackSessionId) parsed.sessionId = fallbackSessionId;
     const raw = JSON.stringify(parsed);
     for (const client of connectedClients) {
@@ -2333,7 +2334,7 @@ function publishDelegatedAgentResultCard(
   const deliveryAware = [...connectedClients].some(
     (client) => client.supportsSessionEventAck === true,
   );
-  const dispatch = (message: Record<string, any>) => {
+  const dispatch = (message: Record<string, unknown>) => {
     dispatchDurableSessionMessage(
       deliveryAware ? delivery!.prepare(message) : message,
     );
@@ -2705,7 +2706,7 @@ function boundedDelegationInput(
   value: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (!value) return undefined;
-  const redacted = redactSecretsDeep(value) as Record<string, unknown>;
+  const redacted = redactSecretsDeep(value);
   const serialized = JSON.stringify(redacted);
   if (serialized.length <= 4_000) return redacted;
   return {
@@ -2809,7 +2810,7 @@ function delegatedAgentTail(
   const activeChild = activeSessions.get(sessionId);
   const rawLive = activeChild?.getDelegatedLiveActivity();
   const live = rawLive
-    ? redactSecretsDeep(rawLive) as DelegatedAgentLiveActivity
+    ? redactSecretsDeep(rawLive)
     : undefined;
   return {
     session_id: sessionId,
@@ -3175,13 +3176,13 @@ function normalizeCodexPermissionMode(mode: unknown): string | null {
 }
 
 async function restorePersistedPermissionMode(session: Session, sessionInfo?: SessionInfo): Promise<void> {
-  if (sessionInfo?.backend !== "codex") return;
+  if (sessionInfo?.backend !== "codex" || !(session instanceof CodexSession)) return;
   const historyMode = sessionInfo.id && !sessionInfo.permissionMode
     ? getLastPermissionMode(sessionInfo.id)
     : undefined;
   const mode = normalizeCodexPermissionMode(sessionInfo.permissionMode || historyMode);
   if (mode) {
-    await (session as any).setPermissionMode(mode, { recordHistory: false });
+    await session.setPermissionMode(mode, { recordHistory: false });
   }
 }
 
@@ -3228,27 +3229,30 @@ async function restorePersistedAgentSettings(session: Session, sessionInfo?: Ses
   }
   const settings = persistedAgentSettings(sessionInfo);
   if (settings.model) await session.setModel(settings.model);
-  if (settings.effort) session.setEffort(settings.effort as any);
-  if (settings.thinking) session.setThinking(settings.thinking as any);
+  if (settings.effort) {
+    if (session instanceof CodexSession) session.setEffort(settings.effort);
+    else if (isClaudeEffort(settings.effort)) session.setEffort(settings.effort);
+  }
+  if (settings.thinking) session.setThinking(settings.thinking);
   if (settings.disallowedTools) session.setDisallowedTools(settings.disallowedTools);
   if (settings.systemPrompt !== undefined) {
     session.setAppendSystemPrompt(settings.systemPrompt);
   } else {
     session.setAppendSystemPrompt(getServerSystemPrompt(), { inherited: true });
   }
-  if (settings.codexCollaborationMode !== undefined) {
-    (session as any).setCodexCollaborationMode?.(settings.codexCollaborationMode);
+  if (session instanceof CodexSession && settings.codexCollaborationMode !== undefined) {
+    session.setCodexCollaborationMode(settings.codexCollaborationMode);
   }
-  if (settings.codexFastMode !== undefined) {
-    (session as any).setCodexFastMode?.(settings.codexFastMode);
+  if (session instanceof CodexSession && settings.codexFastMode !== undefined) {
+    session.setCodexFastMode(settings.codexFastMode);
   }
-  if (settings.claudeAutoCompact !== undefined) {
-    (session as any).setClaudeAutoCompact?.(settings.claudeAutoCompact);
+  if (!(session instanceof CodexSession) && settings.claudeAutoCompact !== undefined) {
+    session.setClaudeAutoCompact(settings.claudeAutoCompact);
   }
-  if (settings.claudeAutoCompactWindow !== undefined) {
-    (session as any).setClaudeAutoCompactWindow?.(settings.claudeAutoCompactWindow);
-  } else {
-    (session as any).setClaudeAutoCompactWindow?.(
+  if (!(session instanceof CodexSession) && settings.claudeAutoCompactWindow !== undefined) {
+    session.setClaudeAutoCompactWindow(settings.claudeAutoCompactWindow);
+  } else if (!(session instanceof CodexSession)) {
+    session.setClaudeAutoCompactWindow(
       getClaudeAutoCompactWindow(),
       { inherited: true },
     );
@@ -4107,7 +4111,7 @@ function createConnectionHandler(
             const active = activeBackendInstalls.get(backend);
             if (active?.requestId === requestId) active.acceptAuthCallback = acceptCallback;
           },
-          onProgress: sendProgress as any,
+          onProgress: (progress) => sendProgress({ ...progress }),
         }).then(async () => {
           if (backend === "codex" && operation === "auth") {
             await invalidateCodexAuthenticationForLiveSessions();
@@ -4273,9 +4277,9 @@ function createConnectionHandler(
               if (
                 session
                 && !(session instanceof CodexSession)
-                && (session as any).claudeAutoCompactWindowOverride === undefined
+                && session.claudeAutoCompactWindowOverride === undefined
               ) {
-                (session as any).setClaudeAutoCompactWindow?.(
+                session.setClaudeAutoCompactWindow(
                   window,
                   { inherited: true },
                 );
@@ -4367,10 +4371,9 @@ function createConnectionHandler(
         activeSession.setKokoroVoice(pendingKokoroVoice);
         activeSession.setKokoroSpeed(pendingKokoroSpeed);
         activeSession.setAppendSystemPrompt(getServerSystemPrompt(), { inherited: true });
-        (activeSession as any).setClaudeAutoCompactWindow?.(
-          getClaudeAutoCompactWindow(),
-          { inherited: true },
-        );
+        if (!(activeSession instanceof CodexSession)) {
+          activeSession.setClaudeAutoCompactWindow(getClaudeAutoCompactWindow(), { inherited: true });
+        }
 
         addRecentCwd(cwd);
         sendJson({
@@ -4483,7 +4486,7 @@ function createConnectionHandler(
 
         // Register this client so /continue can find the real WebSocket
         sessionClients.set(msg.sessionId, {
-          ws: transport as WebSocket,
+          ws: transport,
           setActiveSession: (s: Session) => { activeSession = s; },
         });
 
@@ -4629,8 +4632,8 @@ function createConnectionHandler(
         });
 
         // Send detailed context usage on resume (if session has an active query)
-        if (existing) {
-          (existing as any).activeQuery?.getContextUsage().then((ctx: any) => {
+        if (existing && !(existing instanceof CodexSession)) {
+          existing.getContextUsage().then((ctx) => {
             if (ctx) {
               sendJson({ type: "context_usage", sessionId: msg.sessionId, ...ctx });
             }
@@ -4774,7 +4777,7 @@ function createConnectionHandler(
             activeSession = runningForPrompt;
             activeSessionId = msg.sessionId;
             sessionClients.set(msg.sessionId, {
-              ws: transport as WebSocket,
+              ws: transport,
               setActiveSession: (s: Session) => { activeSession = s; },
             });
             console.log(`[Prompt] Reattached to running session ${msg.sessionId} before injection`);
@@ -4935,7 +4938,7 @@ function createConnectionHandler(
           activeSessions.set(resumeId, activeSession);
           activeSessionId = resumeId;
           sessionClients.set(resumeId, {
-            ws: transport as WebSocket,
+            ws: transport,
             setActiveSession: (s: Session) => { activeSession = s; },
           });
         }
@@ -5113,7 +5116,7 @@ function createConnectionHandler(
             maybeSendSessionStartedPush();
             activeSessionId = sid;
             sessionClients.set(sid, {
-              ws: transport as WebSocket,
+              ws: transport,
               setActiveSession: (s: Session) => { activeSession = s; },
             });
           }
@@ -5151,12 +5154,12 @@ function createConnectionHandler(
           || activeSid
           || undefined;
         // Get session context if available, or build a minimal one for plugin-only answers
-        const sessionCtx = answerSession
+        const sessionCtx: SessionContext = answerSession
           ? answerSession.getSessionContext()
           : {
               sessionId: answerSid || "",
               cwd: getDefaultCwd(),
-              send: (m: any) => sendJson(m),
+              send: (m) => sendJson({ ...m }),
               appendHistory: () => {},
               pendingQuestions: new Map(),
               questionCounter: { next: () => "" },
@@ -6040,10 +6043,10 @@ function createConnectionHandler(
             : Promise.reject(new Error("Codex rollback is only supported for Codex threads"));
         runRollback.then(() => {
           appendHistory(targetSid, {
-            role: "system",
+            role: "notification",
             content: `Rolled back ${numTurns} Codex turn${numTurns === 1 ? "" : "s"}`,
             timestamp: new Date().toISOString(),
-          } as any);
+          });
           sendJson({ type: "codex_rollback_result", sessionId: targetSid, success: true, numTurns });
         }).catch((e: unknown) => {
           console.warn(`[CodexRewind] rollback failed session=${targetSid}: ${errorMessage(e) || String(e)}`);
@@ -6534,7 +6537,7 @@ function createConnectionHandler(
             }
             activeSessions.set(targetSessionId, targetSession);
             sessionClients.set(targetSessionId, {
-              ws: transport as WebSocket,
+              ws: transport,
               setActiveSession: (session: Session) => { activeSession = session; },
             });
             const recoveryPrompt = [
@@ -6888,7 +6891,7 @@ function createConnectionHandler(
             roundId,
             ok: true,
             review: payload.review,
-            ...(payload.draft ? { draft: payload.draft } : {}),
+            ...("draft" in payload && payload.draft ? { draft: payload.draft } : {}),
             resultId: finished.result.resultId,
             published: finished.published,
           });
@@ -6978,7 +6981,7 @@ function createConnectionHandler(
             reviewId,
             ok: true,
             review: payload.review,
-            ...(payload.draft ? { draft: payload.draft } : {}),
+            ...("draft" in payload && payload.draft ? { draft: payload.draft } : {}),
           });
         } catch (error: unknown) {
           sendJson({
@@ -7144,7 +7147,7 @@ function createConnectionHandler(
         const speed = msg.speed || pendingKokoroSpeed;
         if (text) {
           try {
-            const { generateKokoroAudio } = require("./kokoro-tts");
+            const { generateKokoroAudio } = await import("./kokoro-tts");
             const wavBuffer = generateKokoroAudio(text, voice, speed);
             if (wavBuffer) {
               sendJson({
@@ -7168,7 +7171,8 @@ function createConnectionHandler(
         const effort = msg.effort;
         if (['minimal', 'low', 'medium', 'high', 'max', 'xhigh', 'ultra'].includes(effort)) {
           if (activeSession) {
-            activeSession.setEffort(effort as any);
+            if (activeSession instanceof CodexSession) activeSession.setEffort(effort);
+            else if (isClaudeEffort(effort)) activeSession.setEffort(effort);
           }
           console.log(`Effort set to ${effort} (session ${activeSession ? 'active' : 'none'})`);
         }
@@ -7200,7 +7204,7 @@ function createConnectionHandler(
         }
         try {
           if (msg.clearOverride === true) {
-            (activeSession as any).setClaudeAutoCompactWindow?.(
+            activeSession.setClaudeAutoCompactWindow(
               getClaudeAutoCompactWindow(),
               { clearOverride: true },
             );
@@ -7209,7 +7213,7 @@ function createConnectionHandler(
             if (window === null) {
               throw new Error("A session override requires a token window");
             }
-            (activeSession as any).setClaudeAutoCompactWindow?.(window);
+            activeSession.setClaudeAutoCompactWindow(window);
           }
           sendJson(sessionSettingsPayload(
             activeSession,
@@ -7490,7 +7494,7 @@ function createConnectionHandler(
               commandName: name || "command",
               commandPayload: { error: message },
               timestamp: new Date().toISOString(),
-            } as any);
+            });
           }
           sendJson({
             type: "codex_command_result",
@@ -7540,18 +7544,18 @@ function createConnectionHandler(
           sendJson({ type: "skills_delete_result", ok: false, error: "Missing filePath" });
           break;
         }
-        const home = require("os").homedir();
-        const normalized = require("path").resolve(data.filePath);
+        const home = os.homedir();
+        const normalized = path.resolve(data.filePath);
         const isUserScope =
-          normalized.startsWith(require("path").join(home, ".claude")) ||
-          normalized.startsWith(require("path").join(home, ".codex"));
+          normalized.startsWith(path.join(home, ".claude")) ||
+          normalized.startsWith(path.join(home, ".codex"));
         let isProjectScope = false;
         let projectCwd: string | undefined;
         if (activeSession) projectCwd = activeSession.getCwd?.();
         if (projectCwd) {
           isProjectScope =
-            normalized.startsWith(require("path").join(projectCwd, ".claude")) ||
-            normalized.startsWith(require("path").join(projectCwd, ".codex"));
+            normalized.startsWith(path.join(projectCwd, ".claude")) ||
+            normalized.startsWith(path.join(projectCwd, ".codex"));
         }
         if (!isUserScope && !isProjectScope) {
           sendJson({ type: "skills_delete_result", ok: false, error: "Cannot delete files outside .claude/.codex directories" });
@@ -7753,7 +7757,7 @@ function createConnectionHandler(
           break;
         }
         if (activeSession && activeSession.isRunning) {
-          (activeSession as any).activeQuery?.getContextUsage().then((ctx: any) => {
+          activeSession.getContextUsage().then((ctx) => {
             if (ctx) {
               sendJson({
                 type: "context_usage",
@@ -7859,7 +7863,7 @@ function createConnectionHandler(
           if (!(session instanceof CodexSession) || session.getSessionId() !== sessionId) {
             throw new Error("The selected Codex session changed. Reopen account usage and try again.");
           }
-          const result = await session.consumeAccountRateLimitReset(idempotencyKey) as any;
+          const result = await session.consumeAccountRateLimitReset(idempotencyKey);
           // The service owns the new quota values. Read them again even when no
           // credit was consumed; never guess the remaining count in the app.
           const refreshed = await session.buildStatusResult(sessionId);
@@ -8258,7 +8262,7 @@ function createConnectionHandler(
             activeSession = forked;
             activeSessionId = newSessionId;
             sessionClients.set(newSessionId, {
-              ws: transport as WebSocket,
+              ws: transport,
               setActiveSession: (s: Session) => { activeSession = s; },
             });
             sendJson({
@@ -9230,7 +9234,7 @@ const httpServer = http.createServer((req, res) => {
           res.end("Request too large");
           return;
         }
-        const parsed = JSON.parse(body || "{}");
+        const parsed = parseJsonObject(body || "{}");
         const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
         const content = typeof parsed.content === "string" ? parsed.content.trim() : "";
         if (!sessionId || parsed.role !== "assistant" || !content || content.length > 4096) {
@@ -9279,7 +9283,7 @@ const httpServer = http.createServer((req, res) => {
     });
     req.on("end", async () => {
       try {
-        const { sessionId, prompt, requestId } = JSON.parse(body);
+        const { sessionId, prompt, requestId } = parseJsonObject(body);
         if (typeof sessionId !== "string" || typeof prompt !== "string" || !sessionId || !prompt
             || typeof requestId !== "string" || !requestId || requestId.length > 128) {
           res.writeHead(400);
@@ -9475,12 +9479,14 @@ const httpServer = http.createServer((req, res) => {
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", () => {
       try {
-        const data = JSON.parse(body);
-        if (!data.name || !data.format || !data.scope) {
+        const raw = parseJsonObject(body);
+        if (!raw.name || !raw.format || !raw.scope) {
           res.writeHead(400);
           res.end("Missing required fields: name, format, scope");
           return;
         }
+        const data = parseClientMessage({ frontmatter: {}, body: "", ...raw, type: "skills_save" });
+        if (data.type !== "skills_save") throw new Error("Invalid skill request");
         let projectCwd: string | undefined;
         for (const [, session] of activeSessions) {
           const cwd = session.getCwd?.();
@@ -9520,18 +9526,18 @@ const httpServer = http.createServer((req, res) => {
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", () => {
       try {
-        const data = JSON.parse(body);
-        if (!data.filePath) {
+        const data = parseJsonObject(body);
+        if (typeof data.filePath !== "string" || !data.filePath) {
           res.writeHead(400);
           res.end("Missing filePath");
           return;
         }
         // Safety: only allow deleting files under ~/.claude, ~/.codex, or project agent dirs
-        const home = require("os").homedir();
-        const normalized = require("path").resolve(data.filePath);
+        const home = os.homedir();
+        const normalized = path.resolve(data.filePath);
         const isUserScope =
-          normalized.startsWith(require("path").join(home, ".claude")) ||
-          normalized.startsWith(require("path").join(home, ".codex"));
+          normalized.startsWith(path.join(home, ".claude")) ||
+          normalized.startsWith(path.join(home, ".codex"));
         let isProjectScope = false;
         let projectCwd: string | undefined;
         for (const [, session] of activeSessions) {
@@ -9540,8 +9546,8 @@ const httpServer = http.createServer((req, res) => {
         }
         if (projectCwd) {
           isProjectScope =
-            normalized.startsWith(require("path").join(projectCwd, ".claude")) ||
-            normalized.startsWith(require("path").join(projectCwd, ".codex"));
+            normalized.startsWith(path.join(projectCwd, ".claude")) ||
+            normalized.startsWith(path.join(projectCwd, ".codex"));
         }
         if (!isUserScope && !isProjectScope) {
           res.writeHead(403);
@@ -9594,7 +9600,7 @@ function isSafetyCriticalControlMessage(msg: ClientMessage): boolean {
 
 function getBearerToken(req: http.IncomingMessage): string | null {
   const header = req.headers.authorization;
-  const value = Array.isArray(header) ? header[0] : header;
+  const value = header;
   if (!value) return null;
   const match = value.match(/^Bearer\s+(.+)$/i);
   return match ? match[1].trim() : null;
@@ -9779,7 +9785,6 @@ const SERVER_STARTED_AT = new Date().toISOString();
 // Cache git version at startup for status_sync
 let SERVER_GIT_HASH = "";
 try {
-  const { execSync } = require("child_process");
   const gitRoot = findGitRoot(path.resolve(__dirname, ".."));
   if (gitRoot) SERVER_GIT_HASH = execSync("git rev-parse --short HEAD", {
     cwd: gitRoot,
@@ -10077,14 +10082,16 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       const permissionMode = backend === "claude" && task.permissionMode === "superYolo"
         ? "bypassPermissions"
         : task.permissionMode;
-      await (session as any).setPermissionMode(permissionMode, { recordHistory: false });
+      if (session instanceof CodexSession) await session.setPermissionMode(permissionMode, { recordHistory: false });
+      else await session.setPermissionMode(permissionMode);
     }
     if (task.model) await session.setModel(task.model);
     if (task.effort) {
       const effort = backend === "claude" && !["low", "medium", "high", "max"].includes(task.effort)
         ? "high"
         : task.effort;
-      session.setEffort(effort as any);
+      if (session instanceof CodexSession) session.setEffort(effort);
+      else if (isClaudeEffort(effort)) session.setEffort(effort);
     }
     attachSessionLifecycleCallbacks(session);
 
@@ -10521,7 +10528,6 @@ function startRelayClient(): void {
 
   if (process.env.SOCKETAGENT_SHOW_PAIRING_QR_ON_STARTUP === "1") {
     try {
-      const qrcode = require("qrcode-terminal");
       console.log(`\n[Relay] Scan this QR code with SocketAgent app to pair:\n`);
       qrcode.generate(qrPayload, { small: true }, (qr: string) => {
         console.log(qr);
@@ -10720,14 +10726,14 @@ function gitRun(args: string[], options: { timeout?: number } = {}): void {
 }
 
 function gitOutputAsync(args: string[], options: { timeout?: number } = {}): Promise<string> {
-  const { execFile } = require("child_process");
+
   return new Promise((resolve, reject) => {
     execFile("git", args, {
       cwd: GIT_ROOT,
       encoding: "utf-8",
       timeout: options.timeout,
       windowsHide: true,
-    }, (err: any, stdout: string, stderr: string) => {
+    }, (err, stdout, stderr) => {
       if (err) {
         err.message = stderr ? `${err.message}\n${stderr}` : err.message;
         reject(err);
@@ -10984,7 +10990,7 @@ function runPackageUpdateSync(cwd: string): void {
 }
 
 function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: string[], cwd: string, timeout = 120000): Promise<string> {
-  const { execFile } = require("child_process");
+
   const spec = updateToolCommand(command, args);
   return new Promise((resolve, reject) => {
     execFile(spec.command, spec.args, {
@@ -10993,7 +10999,7 @@ function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: 
       timeout,
       windowsHide: true,
       windowsVerbatimArguments: spec.windowsVerbatimArguments,
-    }, (err: any, stdout: any, stderr: any) => {
+    }, (err, stdout, stderr) => {
       if (err) {
         err.message = stderr ? `${err.message}\n${stderr}` : err.message;
         reject(err);
@@ -11026,7 +11032,7 @@ function installedManagedBackendVersions(runtime: UpdateRuntimeTools): Record<st
   const versions: Record<string, string | undefined> = {};
   for (const { name, backend } of MANAGED_BACKEND_PACKAGES) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(managedBackendPackageDir(runtime, name), "package.json"), "utf8"));
+      const pkg = parseJsonObject(fs.readFileSync(path.join(managedBackendPackageDir(runtime, name), "package.json"), "utf8"));
       versions[name] = typeof pkg.version === "string" && pkg.version.trim() && isManagedBackendUsable(runtime.env, backend)
         ? pkg.version.trim() : undefined;
     } catch {
@@ -11103,7 +11109,7 @@ function readManagedBackendUpdateCheckedAt(): number {
   try {
     const raw = fs.readFileSync(MANAGED_BACKENDS_UPDATE_STATE_FILE, "utf-8").trim();
     try {
-      const parsed = JSON.parse(raw) as { checkedAt?: unknown };
+      const parsed = parseJsonObject(raw);
       const timestamp = Date.parse(String(parsed.checkedAt || ""));
       if (Number.isFinite(timestamp)) return timestamp;
     } catch {
@@ -11215,7 +11221,6 @@ function replaceSymlink(linkPath: string, targetPath: string): void {
 }
 
 function installSocketAgentCliUnix(gitRoot: string): void {
-  const os = require("os");
   const home = process.env.HOME || os.homedir();
   if (!home) throw new Error("HOME is not set");
 
@@ -11235,8 +11240,7 @@ function installSocketAgentCliUnix(gitRoot: string): void {
 }
 
 function installSocketAgentCliWindows(gitRoot: string): void {
-  const os = require("os");
-  const { execFileSync } = require("child_process");
+
   const userHome = process.env.USERPROFILE || os.homedir();
   const localAppData = process.env.LOCALAPPDATA || path.join(userHome, "AppData", "Local");
   const binDir = path.join(localAppData, "SocketAgent", "bin");

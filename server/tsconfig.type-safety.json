@@ -6,6 +6,6 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "test/**/*.js", "test/**/*.mjs", "scripts/**/*.js", "scripts/**/*.mjs", "eslint.config.mjs"],
+  "include": ["src/**/*.ts", "src/**/*.mts", "test/**/*.js", "test/**/*.mjs", "scripts/**/*.js", "scripts/**/*.mjs", "eslint.config.mjs"],
   "exclude": ["node_modules", "dist", "plugins"]
 }

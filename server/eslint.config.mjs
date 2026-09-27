@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 export default [{
   ignores: ['node_modules/**', 'dist/**', 'plugins/**'],
 }, {
-  files: ['src/**/*.ts', 'test/**/*.{js,mjs}', 'scripts/**/*.{js,mjs}', 'eslint.config.mjs'],
+  files: ['src/**/*.{ts,mts}', 'test/**/*.{js,mjs}', 'scripts/**/*.{js,mjs}', 'eslint.config.mjs'],
   languageOptions: {
     parser: tseslint.parser,
     parserOptions: {

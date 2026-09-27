@@ -1,4 +1,6 @@
-import type { Session } from "./codex-session";
+import type { CodexSession } from "./codex-session";
+import type { ClaudeSession } from "./claude-session";
+import { isRecord } from "./value-guards";
 import type {
   AgentEffort,
   AgentThinkingSetting,
@@ -15,13 +17,9 @@ const ALL_EFFORTS = new Set<AgentEffort>([
   "xhigh",
   "ultra",
 ]);
-const CLAUDE_EFFORTS = new Set<AgentEffort>([
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
+export function isClaudeEffort(value: unknown): value is Parameters<ClaudeSession["setEffort"]>[0] {
+  return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max";
+}
 const CLAUDE_PERMISSION_MODES = new Set([
   "plan",
   "default",
@@ -37,15 +35,14 @@ const CODEX_PERMISSION_MODES = new Set([
   "superYolo",
 ]);
 
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
+type CommonSettingsMethod = "setModel" | "setEffort" | "setThinking" | "setPermissionMode";
+export type InitialSettingsSession =
+  | Pick<ClaudeSession, CommonSettingsMethod | "setClaudeAutoCompact" | "setClaudeAutoCompactWindow">
+  | Pick<CodexSession, CommonSettingsMethod | "setCodexFastMode" | "setCodexCollaborationMode">;
 
 function thinkingSetting(value: unknown): AgentThinkingSetting | undefined {
-  const candidate = record(value);
-  if (!candidate) return undefined;
+  if (!isRecord(value)) return undefined;
+  const candidate = value;
   if (candidate.type === "adaptive" || candidate.type === "disabled") {
     return { type: candidate.type };
   }
@@ -60,12 +57,12 @@ function thinkingSetting(value: unknown): AgentThinkingSetting | undefined {
  * intentional: WebSocket clients are untrusted even though the app is typed.
  */
 export async function applyInitialSessionSettings(
-  session: Session,
+  session: InitialSettingsSession,
   backend: Backend,
   rawSettings: unknown,
 ): Promise<InitialSessionSettings> {
-  const raw = record(rawSettings);
-  if (!raw) return {};
+  if (!isRecord(rawSettings)) return {};
+  const raw = rawSettings;
 
   const applied: InitialSessionSettings = {};
   const model = typeof raw.model === "string" ? raw.model.trim() : "";
@@ -74,10 +71,12 @@ export async function applyInitialSessionSettings(
     applied.model = model;
   }
 
-  const effort = typeof raw.effort === "string" ? raw.effort as AgentEffort : undefined;
-  const allowedEfforts = backend === "claude" ? CLAUDE_EFFORTS : ALL_EFFORTS;
-  if (effort && allowedEfforts.has(effort)) {
-    session.setEffort(effort as any);
+  const effort = typeof raw.effort === "string" ? raw.effort : undefined;
+  if (isClaudeEffort(effort)) {
+    session.setEffort(effort);
+    applied.effort = effort;
+  } else if (backend === "codex" && effort && ALL_EFFORTS.has(effort) && "setCodexFastMode" in session) {
+    session.setEffort(effort);
     applied.effort = effort;
   }
 
@@ -87,8 +86,8 @@ export async function applyInitialSessionSettings(
       session.setThinking(thinking);
       applied.thinking = thinking;
     }
-    if (typeof raw.claudeAutoCompact === "boolean") {
-      (session as any).setClaudeAutoCompact?.(raw.claudeAutoCompact);
+    if (typeof raw.claudeAutoCompact === "boolean" && "setClaudeAutoCompact" in session) {
+      session.setClaudeAutoCompact(raw.claudeAutoCompact);
       applied.claudeAutoCompact = raw.claudeAutoCompact;
     }
     const autoCompactWindow = Number(raw.claudeAutoCompactWindow);
@@ -96,20 +95,21 @@ export async function applyInitialSessionSettings(
       Number.isSafeInteger(autoCompactWindow)
       && autoCompactWindow >= 100_000
       && autoCompactWindow <= 1_000_000
+      && "setClaudeAutoCompactWindow" in session
     ) {
-      (session as any).setClaudeAutoCompactWindow?.(autoCompactWindow);
+      session.setClaudeAutoCompactWindow(autoCompactWindow);
       applied.claudeAutoCompactWindow = autoCompactWindow;
     }
   } else {
-    if (typeof raw.codexFastMode === "boolean") {
-      (session as any).setCodexFastMode?.(raw.codexFastMode);
+    if (typeof raw.codexFastMode === "boolean" && "setCodexFastMode" in session) {
+      session.setCodexFastMode(raw.codexFastMode);
       applied.codexFastMode = raw.codexFastMode;
     }
     const collaborationMode = typeof raw.codexCollaborationMode === "string"
       ? raw.codexCollaborationMode.trim()
       : "";
-    if (collaborationMode && collaborationMode.length <= 100) {
-      (session as any).setCodexCollaborationMode?.(collaborationMode);
+    if (collaborationMode && collaborationMode.length <= 100 && "setCodexCollaborationMode" in session) {
+      session.setCodexCollaborationMode(collaborationMode);
       applied.codexCollaborationMode = collaborationMode;
     }
   }
@@ -121,8 +121,9 @@ export async function applyInitialSessionSettings(
     ? CLAUDE_PERMISSION_MODES
     : CODEX_PERMISSION_MODES;
   if (permissionMode && allowedPermissionModes.has(permissionMode)) {
-    await (session as any).setPermissionMode(permissionMode);
-    applied.permissionMode = permissionMode;
+    const effectiveMode = backend === "claude" && permissionMode === "superYolo" ? "bypassPermissions" : permissionMode;
+    await session.setPermissionMode(effectiveMode);
+    applied.permissionMode = effectiveMode;
   }
 
   return applied;

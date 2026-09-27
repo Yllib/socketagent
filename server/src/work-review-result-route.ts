@@ -1,10 +1,13 @@
+import type { Session } from "./codex-session";
+import type { WorkReviewAgentView, WorkReviewPublishedResult } from "./work-review-types";
+
 /**
  * Deliver one published result using the stable result ID as the backend and
  * transcript message identity. The caller is responsible for exact-session
  * lookup; this helper deliberately accepts the already-selected session.
  */
 export async function deliverWorkReviewToSession(
-  session: any,
+  session: Session,
   backend: "claude" | "codex",
   text: string,
   originSessionId: string,
@@ -16,6 +19,7 @@ export async function deliverWorkReviewToSession(
     return;
   }
   if (backend === "codex") {
+    if (!("runQueryWithOptions" in session)) throw new Error("Work Review backend does not match its session");
     await session.runQueryWithOptions(text, originSessionId, {
       messageId: resultId,
     });
@@ -25,19 +29,15 @@ export async function deliverWorkReviewToSession(
 }
 
 export function buildWorkReviewResultPrompt(
-  review: Record<string, any>,
-  result: Record<string, any>,
+  review: WorkReviewAgentView,
+  result: WorkReviewPublishedResult,
 ): string {
-  const currentRound = Array.isArray(review.rounds)
-    ? review.rounds.find((round: any) => String(round.roundId || "") === String(result.roundId || ""))
-    : undefined;
+  const currentRound = review.rounds.find(round => round.roundId === result.roundId);
   const itemsById = new Map(
-    (Array.isArray(currentRound?.items) ? currentRound.items : [])
-      .map((item: any) => [String(item.itemId || ""), item]),
+    (currentRound?.items ?? []).map(item => [item.itemId, item]),
   );
-  const itemResults = (Array.isArray(result.itemResults) ? result.itemResults : [])
-    .map((itemResult: any) => {
-      const item = itemsById.get(String(itemResult.itemId || "")) as any;
+  const itemResults = result.itemResults.map(itemResult => {
+      const item = itemsById.get(itemResult.itemId);
       return {
         ...itemResult,
         ...(item?.title ? { title: item.title } : {}),

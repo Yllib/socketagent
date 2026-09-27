@@ -3,6 +3,7 @@ import { isRecord, unknownArray } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import type { Backend, CodexDriver, HistoryEntry, ServerMessage } from "./protocol";
+import type { WorkReviewAgentView } from "./work-review-types";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
@@ -952,16 +953,13 @@ function workReviewItems(items: WorkReviewItemArgs[] | undefined): Record<string
  */
 export function publishWorkReviewCard(
   ctx: Pick<AppToolContext, "appendHistory" | "send">,
-  review: Record<string, any>,
-): Record<string, any> | undefined {
+  review: WorkReviewAgentView,
+): HistoryEntry | undefined {
   const reviewId = String(review.reviewId || "");
   const sessionId = String(review.originSessionId || "");
   if (!reviewId || !sessionId) return undefined;
-  const round = Array.isArray(review.rounds)
-    ? review.rounds.find((candidate: any) =>
-        Number(candidate?.revision) === Number(review.currentRevision))
-      || review.rounds[review.rounds.length - 1]
-    : undefined;
+  const round = review.rounds.find(candidate => candidate.revision === review.currentRevision)
+    || review.rounds[review.rounds.length - 1];
   const linkedHtmlPlan = round?.linkedHtmlPlanId
     ? getHtmlPlan(sessionId, round.linkedHtmlPlanId)
     : undefined;

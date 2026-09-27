@@ -11,7 +11,7 @@ if (!['--check', '--prune', '--init', '--report'].includes(mode)) {
   throw new Error('Usage: check-type-safety.mjs [--check|--prune|--report]');
 }
 const eslint = new ESLint({ cwd: root });
-const results = await eslint.lintFiles(['src/**/*.ts', 'test/**/*.{js,mjs}', 'scripts/**/*.{js,mjs}', 'eslint.config.mjs']);
+const results = await eslint.lintFiles(['src/**/*.{ts,mts}', 'test/**/*.{js,mjs}', 'scripts/**/*.{js,mjs}', 'eslint.config.mjs']);
 /** @type {Record<string, number>} */
 const entries = {};
 /** @type {Map<string, string>} */

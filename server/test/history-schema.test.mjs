@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseHistoryEntry, parseHistoryEntries } from '../dist/history-schema.js';
 
+test('legacy rollback system notes remain readable as notifications', () => {
+  assert.deepEqual(parseHistoryEntry({ role: 'system', content: 'Rolled back 1 Codex turn', timestamp: 'old' }),
+    { role: 'notification', content: 'Rolled back 1 Codex turn', timestamp: 'old' });
+});
+
 test('history validation retains future fields and defaults missing legacy display fields', () => {
   const value = { role: 'tool_call', toolName: 'Bash', toolInput: { command: 'pwd' }, futureField: { value: 1 } };
   const parsed = parseHistoryEntry(value);

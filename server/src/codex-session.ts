@@ -1731,7 +1731,7 @@ export class CodexSession {
     }
   }
 
-  async consumeAccountRateLimitReset(idempotencyKey: string): Promise<unknown> {
+  async consumeAccountRateLimitReset(idempotencyKey: string) {
     await this.ensureAppServer();
     return this.appServer!.consumeAccountRateLimitReset(idempotencyKey);
   }

@@ -34,6 +34,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
+    "@types/qrcode-terminal": "0.12.2",
     "@types/ws": "^8.5.14",
     "eslint": "10.11.0",
     "ts-json-schema-generator": "2.9.0",

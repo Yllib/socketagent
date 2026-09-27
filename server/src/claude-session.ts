@@ -1650,6 +1650,10 @@ export class ClaudeSession {
     return this._authRequest !== null;
   }
 
+  async getContextUsage() {
+    return this.activeQuery?.getContextUsage();
+  }
+
   private _hasClaudeBackgroundWork(): boolean {
     return this._sdkBackgroundTasks.size > 0
       || Array.from(this._activeSubagents.values()).some(

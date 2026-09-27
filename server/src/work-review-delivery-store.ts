@@ -35,8 +35,8 @@ export class WorkReviewResultDeliveryStore {
   }
 
   enqueue(
-    review: Record<string, unknown>,
-    result: Record<string, unknown>,
+    review: { originSessionId?: unknown; reviewId?: unknown },
+    result: { resultId?: unknown; reviewId?: unknown; roundId?: unknown },
   ): WorkReviewResultDeliveryRecord {
     const resultId = String(result.resultId || "");
     const originSessionId = String(review.originSessionId || "");

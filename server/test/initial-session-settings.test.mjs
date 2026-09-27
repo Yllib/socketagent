@@ -1,21 +1,28 @@
-const assert = require("node:assert/strict");
-const test = require("node:test");
+import assert from "node:assert/strict";
+import test from "node:test";
 
-const {
-  applyInitialSessionSettings,
-} = require("../dist/initial-session-settings");
+import { applyInitialSessionSettings, isClaudeEffort } from "../dist/initial-session-settings.js";
 
 function fakeSession() {
+  /** @type {[string, unknown][]} */
   const calls = [];
   return {
     calls,
+    /** @param {string | undefined} value */
     async setModel(value) { calls.push(["model", value]); },
+    /** @param {string} value */
     setEffort(value) { calls.push(["effort", value]); },
+    /** @param {import('../dist/protocol.js').AgentThinkingSetting} value */
     setThinking(value) { calls.push(["thinking", value]); },
+    /** @param {boolean} value */
     setClaudeAutoCompact(value) { calls.push(["autoCompact", value]); },
+    /** @param {number | null} value */
     setClaudeAutoCompactWindow(value) { calls.push(["autoCompactWindow", value]); },
+    /** @param {boolean} value */
     setCodexFastMode(value) { calls.push(["fastMode", value]); },
+    /** @param {string} value */
     setCodexCollaborationMode(value) { calls.push(["collaborationMode", value]); },
+    /** @param {string} value */
     async setPermissionMode(value) { calls.push(["permissionMode", value]); },
   };
 }
@@ -83,4 +90,17 @@ test("applies Codex-only settings and rejects invalid client values", async () =
     codexCollaborationMode: "pair_programming",
     permissionMode: "superYolo",
   });
+});
+
+
+test("normalizes legacy Claude permission mode and rejects unsupported effort", async () => {
+  const session = fakeSession();
+  const applied = await applyInitialSessionSettings(session, "claude", {
+    permissionMode: "superYolo", effort: "ultra",
+  });
+  assert.deepEqual(applied, { permissionMode: "bypassPermissions" });
+  assert.deepEqual(session.calls, [["permissionMode", "bypassPermissions"]]);
+  assert.equal(isClaudeEffort("xhigh"), true);
+  assert.equal(isClaudeEffort("ultra"), false);
+  assert.equal(isClaudeEffort({ effort: "high" }), false);
 });

@@ -1,3 +1,4 @@
+import { z } from "zod";
 import * as fs from "fs";
 import type { Backend } from "./protocol";
 import { socketAgentDataPath } from "./socket-agent-paths";
@@ -14,20 +15,18 @@ const MODEL_CATALOG_SCHEMA_VERSION = 2;
 let memoryCache: StoredModelCatalogs | null = null;
 
 function cloneCatalog(catalog: CachedModelCatalog): CachedModelCatalog {
-  return JSON.parse(JSON.stringify(catalog)) as CachedModelCatalog;
+  return structuredClone(catalog);
 }
 
 function readCatalogs(): StoredModelCatalogs {
   if (memoryCache) return memoryCache;
   try {
-    const parsed = JSON.parse(fs.readFileSync(MODEL_CATALOG_FILE, "utf8"));
-    memoryCache = parsed
-      && typeof parsed === "object"
-      && parsed.schemaVersion === MODEL_CATALOG_SCHEMA_VERSION
-      && parsed.catalogs
-      && typeof parsed.catalogs === "object"
-      ? parsed.catalogs
-      : {};
+    const catalog = z.object({ models: z.array(z.record(z.string(), z.unknown())), updatedAt: z.string() });
+    const parsed = z.object({
+      schemaVersion: z.literal(MODEL_CATALOG_SCHEMA_VERSION),
+      catalogs: z.object({ claude: catalog.optional(), codex: catalog.optional() }),
+    }).parse(JSON.parse(fs.readFileSync(MODEL_CATALOG_FILE, "utf8")));
+    memoryCache = parsed.catalogs;
   } catch {
     memoryCache = {};
   }
@@ -54,7 +53,7 @@ export function saveCachedModelCatalog(
   models: Array<Record<string, unknown>>,
   updatedAt = new Date().toISOString(),
 ): CachedModelCatalog {
-  const catalog = { models: JSON.parse(JSON.stringify(models)), updatedAt } as CachedModelCatalog;
+  const catalog: CachedModelCatalog = { models: structuredClone(models), updatedAt };
   const catalogs = readCatalogs();
   catalogs[backend] = catalog;
   writeCatalogs(catalogs);

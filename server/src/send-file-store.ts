@@ -1,3 +1,4 @@
+import { errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import { socketAgentDataPath } from "./socket-agent-paths";
@@ -24,8 +25,8 @@ export async function snapshotSendFile(sourcePath: string, fileId: string): Prom
   try {
     try {
       await fs.promises.copyFile(sourcePath, temporary, fs.constants.COPYFILE_FICLONE);
-    } catch (error: any) {
-      if (error?.code !== "ENOTSUP" && error?.code !== "EINVAL" && error?.code !== "EXDEV") {
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOTSUP" && errorCode(error) !== "EINVAL" && errorCode(error) !== "EXDEV") {
         throw error;
       }
       await fs.promises.copyFile(sourcePath, temporary);

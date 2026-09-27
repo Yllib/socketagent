@@ -1,3 +1,4 @@
+import { errorMessage, errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -13,8 +14,8 @@ export function repairWindowsManagedShims(prefix: string, platform = process.pla
       const content = fs.readFileSync(script, "utf8");
       if (content.includes('$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent')
           && content.includes('node_modules')) fs.unlinkSync(script);
-    } catch (error: any) {
-      if (error.code !== "ENOENT") console.warn(`[Startup] Could not repair ${name} PowerShell shim: ${error.message}`);
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOENT") console.warn(`[Startup] Could not repair ${name} PowerShell shim: ${errorMessage(error)}`);
     }
   }
 }

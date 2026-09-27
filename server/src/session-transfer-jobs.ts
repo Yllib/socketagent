@@ -1,3 +1,5 @@
+import { parseStoredData } from "./stored-data";
+import { parseJsonObject } from "./value-guards";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
@@ -13,7 +15,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 type Phase = "preparing" | "waiting" | "transferring" | "importing" | "finalizing" | "completed" | "failed";
 type Manifest = Pick<SessionTransferExportResult, "fileSize" | "sha256">;
-interface Job {
+export interface Job {
   config: TransferJobConfig;
   phase: Phase;
   bytes: number;
@@ -32,7 +34,7 @@ interface Hooks {
   changed?(): void;
 }
 interface Runtime { ws?: WebSocket; timer?: NodeJS.Timeout; chain: Promise<void>; preparing: boolean; attempt: number }
-interface Header { jobId: string; type: string; offset?: number; fileSize?: number; sha256?: string; result?: SessionTransferImportResult; error?: string }
+export interface Header { jobId: string; type: string; offset?: number; fileSize?: number; sha256?: string; result?: SessionTransferImportResult; error?: string }
 
 function durableJson(file: string, value: unknown): void {
   const temp = `${file}.tmp`;
@@ -57,7 +59,7 @@ export class SessionTransferJobs {
     for (const entry of fs.readdirSync(directory)) {
       if (!UUID.test(entry)) continue;
       try {
-        const job = JSON.parse(fs.readFileSync(path.join(directory, entry, "job.json"), "utf8")) as Job;
+        const job = parseStoredData("transferJob", JSON.parse(fs.readFileSync(path.join(directory, entry, "job.json"), "utf8")));
         this.validate(job.config);
         if (job.config.jobId !== entry) continue;
         this.jobs.set(entry, job);
@@ -189,7 +191,7 @@ export class SessionTransferJobs {
         if (rt.ws !== ws || this.closed || job.phase === "failed") return;
         const data = Buffer.isBuffer(raw) ? raw : Array.isArray(raw) ? Buffer.concat(raw) : Buffer.from(raw);
         if (!binary) {
-          const signal = JSON.parse(data.toString()) as { type?: string };
+          const signal = parseJsonObject(data.toString());
           if (signal.type === "peer_ready") {
             rt.attempt = 0;
             this.hello(job);
@@ -200,7 +202,7 @@ export class SessionTransferJobs {
         if (plain.length < 4) throw new Error("Invalid transfer frame");
         const length = plain.readUInt32BE(0);
         if (length > 8192 || length > plain.length - 4) throw new Error("Invalid transfer header");
-        const header = JSON.parse(plain.subarray(4, 4 + length).toString()) as Header;
+        const header = parseStoredData("transferHeader", JSON.parse(plain.subarray(4, 4 + length).toString()));
         if (header.jobId !== job.config.jobId) throw new Error("Transfer identity mismatch");
         await this.receive(job, header, plain.subarray(4 + length));
       }).catch(error => this.fail(job, error));

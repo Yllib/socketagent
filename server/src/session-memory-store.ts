@@ -1,3 +1,7 @@
+import { z } from "zod";
+import { parseStoredData } from "./stored-data";
+import type { StoredSessionMemory } from "./stored-data-contracts";
+import { errorCode } from "./value-guards";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -130,7 +134,7 @@ function defaultState(sessionId: string): SessionMemoryState {
   };
 }
 
-function normalizeState(sessionId: string, value: Partial<SessionMemoryState>): SessionMemoryState {
+function normalizeState(sessionId: string, value: StoredSessionMemory): SessionMemoryState {
   const base = defaultState(sessionId);
   const entries = Array.isArray(value.entries)
     ? value.entries.filter((entry): entry is SessionMemoryEntry =>
@@ -181,10 +185,10 @@ function readState(sessionId: string): SessionMemoryState {
   fs.mkdirSync(MEMORY_DIR, { recursive: true });
   let state = defaultState(sessionId);
   try {
-    const parsed = JSON.parse(fs.readFileSync(memoryPath(sessionId), "utf8"));
+    const parsed = parseStoredData("sessionMemory", JSON.parse(fs.readFileSync(memoryPath(sessionId), "utf8")));
     state = normalizeState(sessionId, parsed);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (errorCode(error) !== "ENOENT") {
       console.warn(`[SessionMemory] Could not read ${sessionId}: ${String(error)}`);
     }
   }
@@ -229,15 +233,21 @@ export function getSessionMemoryState(sessionId: string): SessionMemoryState {
   return cloneState(readState(sessionId));
 }
 
+const memoryListFields = z.object({
+  compactionsSinceRollover: z.number().optional(),
+  epochs: z.array(z.object({ nativeSessionId: z.string() })).optional(),
+  rolloverPending: z.boolean().optional(), rolloverTrigger: z.string().optional(),
+});
+
 /** Read only the fields needed by the session list without opening history. */
 export function getSessionMemoryListSummary(
   sessionId: string,
 ): SessionMemoryListSummary {
   const cached = cache.get(sessionId);
-  let value: Partial<SessionMemoryState> | undefined = cached;
+  let value: z.infer<typeof memoryListFields> | undefined = cached;
   if (!value) {
     try {
-      value = JSON.parse(fs.readFileSync(memoryPath(sessionId), "utf8"));
+      value = memoryListFields.parse(JSON.parse(fs.readFileSync(memoryPath(sessionId), "utf8")));
     } catch {
       return {
         compactionsSinceRollover: 0,

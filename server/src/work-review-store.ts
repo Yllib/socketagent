@@ -1,3 +1,5 @@
+import { parseStoredData } from "./stored-data";
+import { errorMessage } from "./value-guards";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -16,18 +18,19 @@ interface WorkReviewIndexEntry {
   idempotency: Array<{ keyHash: string; contentHash: string; revision: number }>;
 }
 
-interface WorkReviewIndex {
+export interface WorkReviewIndex {
   schemaVersion: 1;
   rebuiltAt: string;
   entries: WorkReviewIndexEntry[];
 }
 
 function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 function validRecord(value: unknown): value is StoredWorkReviewRecord {
-  const record = value as StoredWorkReviewRecord;
+  let record: StoredWorkReviewRecord;
+  try { record = parseStoredData("workReview", value); } catch { return false; }
   return !!record
     && record.schemaVersion === WORK_REVIEW_SCHEMA_VERSION
     && typeof record.reviewId === "string"
@@ -123,7 +126,7 @@ export class WorkReviewStore {
 
   private readIndex(): WorkReviewIndex | undefined {
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.indexFile, "utf8")) as WorkReviewIndex;
+      const parsed = parseStoredData("workReviewIndex", JSON.parse(fs.readFileSync(this.indexFile, "utf8")));
       if (
         parsed?.schemaVersion !== 1
         || !Array.isArray(parsed.entries)
@@ -149,7 +152,7 @@ export class WorkReviewStore {
       let recovered: StoredWorkReviewRecord | undefined;
       for (const candidate of [file, `${file}.bak`]) {
         try {
-          const parsed = JSON.parse(fs.readFileSync(candidate, "utf8"));
+          const parsed: unknown = JSON.parse(fs.readFileSync(candidate, "utf8"));
           if (!validRecord(parsed)) continue;
           recovered = parsed;
           if (candidate.endsWith(".bak")) atomicWriteJson(file, parsed);
@@ -204,7 +207,7 @@ export class WorkReviewStore {
     const file = this.recordFile(reviewId);
     for (const candidate of [file, `${file}.bak`]) {
       try {
-        const parsed = JSON.parse(fs.readFileSync(candidate, "utf8"));
+        const parsed: unknown = JSON.parse(fs.readFileSync(candidate, "utf8"));
         if (!validRecord(parsed) || parsed.reviewId !== reviewId) continue;
         if (candidate.endsWith(".bak")) {
           // Restore the last valid authoritative snapshot for future reads.
@@ -234,7 +237,7 @@ export class WorkReviewStore {
     }
     const file = this.recordFile(record.reviewId);
     try {
-      const current = JSON.parse(fs.readFileSync(file, "utf8"));
+      const current: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
       if (validRecord(current) && current.reviewId === record.reviewId) {
         atomicWriteJson(`${file}.bak`, current);
       }
@@ -246,11 +249,11 @@ export class WorkReviewStore {
     else this.index.entries.push(entry);
     try {
       this.writeIndex();
-    } catch (error: any) {
+    } catch (error: unknown) {
       // The per-review record is authoritative and already durable. Do not
       // report a failed Finish/Create after it actually committed merely
       // because the rebuildable index could not be refreshed.
-      console.warn(`[WorkReview] Failed to refresh derived index: ${error?.message || String(error)}`);
+      console.warn(`[WorkReview] Failed to refresh derived index: ${errorMessage(error)}`);
     }
     return clone(record);
   }

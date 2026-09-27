@@ -1,3 +1,4 @@
+import { errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import type { IncomingMessage, ServerResponse } from "http";
@@ -10,7 +11,7 @@ export function serveDownloadFile(req: IncomingMessage, res: ServerResponse, fil
     serveOpenedFile(req, res, filePath);
   } catch (error) {
     if (res.headersSent) { res.destroy(); return; }
-    const code = (error as NodeJS.ErrnoException).code;
+    const code = errorCode(error);
     res.writeHead(code === "ENOENT" ? 404 : 500);
     res.end();
   }

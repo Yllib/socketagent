@@ -1,4 +1,5 @@
 import * as path from "path";
+import { isRecord } from "./value-guards";
 import * as fs from "fs";
 import { socketAgentDataPath } from "./socket-agent-paths";
 
@@ -22,13 +23,51 @@ export const KOKORO_VOICES: Record<string, number> = {
   bm_lewis: 10,
 };
 
-let sherpaOnnx: any = null;
-let ttsInstance: any = null;
+interface KokoroAudio { samples: Float32Array; sampleRate: number }
+interface KokoroTts {
+  numSpeakers: number;
+  sampleRate: number;
+  generate(request: { text: string; sid: number; speed: number }): KokoroAudio;
+}
+interface SherpaRuntime {
+  create(config: object): KokoroTts;
+  writeWave(file: string, audio: KokoroAudio): void;
+}
+let sherpaOnnx: SherpaRuntime | null = null;
+let ttsInstance: KokoroTts | null = null;
 
-function loadSherpaOnnx(): any {
+// The optional native package has no TypeScript declarations. Check its exports
+// and generated audio at the boundary while retaining lazy platform loading.
+function loadSherpaOnnx(): SherpaRuntime | null {
   if (!sherpaOnnx) {
     try {
-      sherpaOnnx = require("sherpa-onnx-node");
+      const module: unknown = require("sherpa-onnx-node");
+      if (!isRecord(module) || typeof module.OfflineTts !== "function" || typeof module.writeWave !== "function") {
+        throw new Error("Invalid sherpa-onnx-node exports");
+      }
+      const OfflineTts = module.OfflineTts;
+      const writeWave = module.writeWave;
+      sherpaOnnx = {
+        create(config) {
+          const instance: unknown = Reflect.construct(OfflineTts, [config]);
+          if (!isRecord(instance) || typeof instance.numSpeakers !== "number"
+            || typeof instance.sampleRate !== "number" || typeof instance.generate !== "function") {
+            throw new Error("Invalid sherpa-onnx-node TTS instance");
+          }
+          const generate = instance.generate;
+          return {
+            numSpeakers: instance.numSpeakers, sampleRate: instance.sampleRate,
+            generate(request) {
+              const audio: unknown = generate.call(instance, request);
+              if (!isRecord(audio) || !(audio.samples instanceof Float32Array) || typeof audio.sampleRate !== "number") {
+                throw new Error("Invalid sherpa-onnx-node audio");
+              }
+              return { samples: audio.samples, sampleRate: audio.sampleRate };
+            },
+          };
+        },
+        writeWave(file, audio) { writeWave.call(module, file, audio); },
+      };
     } catch (e) {
       console.error("[KokoroTTS] Failed to load sherpa-onnx-node:", e);
       return null;
@@ -68,7 +107,7 @@ function ensureInitialized(): boolean {
       provider: "cpu",
       maxNumSentences: 2,
     };
-    ttsInstance = new so.OfflineTts(config);
+    ttsInstance = so.create(config);
     console.log(`[KokoroTTS] Model loaded — ${ttsInstance.numSpeakers} speakers, ${ttsInstance.sampleRate}Hz`);
     return true;
   } catch (e) {
@@ -89,6 +128,7 @@ export function generateKokoroAudio(
   if (!ensureInitialized()) return null;
 
   const so = loadSherpaOnnx();
+  if (!so || !ttsInstance) return null;
   const sid = KOKORO_VOICES[voice] ?? 0;
   try {
     const audio = ttsInstance.generate({ text, sid, speed });

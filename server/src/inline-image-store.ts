@@ -40,9 +40,11 @@ export class InlineImageStore {
         while (true) {
           const chunk = await reader.read();
           if (chunk.done) break;
-          length += chunk.value.length;
+          const bytes: unknown = chunk.value;
+          if (!(bytes instanceof Uint8Array)) throw new Error("Invalid image download data");
+          length += bytes.length;
           if (length > MAX_INLINE_IMAGE_BYTES) throw new Error("Image exceeds 20 MB.");
-          chunks.push(Buffer.from(chunk.value));
+          chunks.push(Buffer.from(bytes));
         }
       } finally {
         await reader.cancel().catch(() => {});

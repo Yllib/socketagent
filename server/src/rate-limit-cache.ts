@@ -1,3 +1,4 @@
+import { z } from "zod";
 import * as fs from "fs";
 import type { Backend } from "./protocol";
 import type { RateLimitEventPayload } from "./rate-limit-events";
@@ -16,20 +17,24 @@ const RATE_LIMIT_CACHE_SCHEMA_VERSION = 3;
 let memoryCache: StoredRateLimits | null = null;
 
 function cloneEvent(event: RateLimitEventPayload): RateLimitEventPayload {
-  return JSON.parse(JSON.stringify(event)) as RateLimitEventPayload;
+  return structuredClone(event);
 }
 
 function readCache(): StoredRateLimits {
   if (memoryCache) return memoryCache;
   try {
-    const parsed = JSON.parse(fs.readFileSync(RATE_LIMIT_CACHE_FILE, "utf8"));
-    memoryCache = parsed
-      && typeof parsed === "object"
-      && parsed.schemaVersion === RATE_LIMIT_CACHE_SCHEMA_VERSION
-      && parsed.backends
-      && typeof parsed.backends === "object"
-      ? parsed.backends
-      : {};
+    const event = z.object({
+      type: z.literal("rate_limit_event"), backend: z.enum(["claude", "codex"]),
+      status: z.enum(["allowed", "allowed_warning", "rejected"]), sessionId: z.string(),
+      resetsAt: z.string().optional(), utilization: z.number().optional(),
+      utilizationPercent: z.number().optional(), rateLimitType: z.string().optional(), scopeLabel: z.string().optional(),
+    });
+    const windows = z.object({ five_hour: event.optional(), weekly: event.optional() });
+    const parsed = z.object({
+      schemaVersion: z.literal(RATE_LIMIT_CACHE_SCHEMA_VERSION),
+      backends: z.object({ claude: windows.optional(), codex: windows.optional() }),
+    }).parse(JSON.parse(fs.readFileSync(RATE_LIMIT_CACHE_FILE, "utf8")));
+    memoryCache = parsed.backends;
   } catch {
     memoryCache = {};
   }

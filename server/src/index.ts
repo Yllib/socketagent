@@ -60,7 +60,7 @@ import {
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
-import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferPeerId, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
+import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { onInlineImagesSaved } from "./session-store";
 import { inlineImageStore } from "./inline-image-store";
 import { isSendFileDeliveryPath } from "./send-file-store";
@@ -2810,7 +2810,17 @@ function delegatedAgentTail(
   const activeChild = activeSessions.get(sessionId);
   const rawLive = activeChild?.getDelegatedLiveActivity();
   const live = rawLive
-    ? redactSecretsDeep(rawLive)
+    ? z.object({
+      running: z.boolean(),
+      assistant_text: z.array(z.object({
+        stream_id: z.string(), content: z.string(), parent_tool_use_id: z.string().optional(),
+      })).optional(),
+      active_tools: z.array(z.object({
+        tool_use_id: z.string(), tool: z.string(),
+        input: z.record(z.string(), z.unknown()).optional(), parent_tool_use_id: z.string().optional(),
+      })).optional(),
+      reasoning: z.object({ in_progress: z.boolean(), estimated_tokens: z.number().optional() }).optional(),
+    }).parse(redactSecretsDeep(rawLive))
     : undefined;
   return {
     session_id: sessionId,
@@ -8575,7 +8585,7 @@ function createConnectionHandler(
           typeof msg.expectedFileVersion === "string"
             ? msg.expectedFileVersion
             : undefined;
-        const peerId = fileTransferPeerId(msg);
+        const peerId = relayPeerForMessage(msg);
         try {
           const { resolvedPath } = resolveAllowedDownloadFile(filePath);
           void sendFileChunks(
@@ -8610,7 +8620,7 @@ function createConnectionHandler(
         const transferToken = typeof msg.transferToken === "string"
           ? msg.transferToken
           : undefined;
-        const peerId = fileTransferPeerId(msg);
+        const peerId = relayPeerForMessage(msg);
         const receivedBytes = Number(msg.receivedBytes);
         if (fileId && Number.isSafeInteger(receivedBytes) && receivedBytes >= 0) {
           const state = activeFileDownloadAcks.get(
@@ -8628,7 +8638,7 @@ function createConnectionHandler(
         const requestId = msg.requestId;
         const filePath = String(msg.path || "");
         const fileId = msg.fileId || `fm_${crypto.randomUUID()}`;
-        const peerId = fileTransferPeerId(msg);
+        const peerId = relayPeerForMessage(msg);
         try {
           const { resolvedPath } = resolveAllowedDownloadFile(filePath);
           sendJson({

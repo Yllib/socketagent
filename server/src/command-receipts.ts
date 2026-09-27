@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { isRecord } from "./value-guards";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, chmodSync } from "node:fs";
@@ -6,7 +8,7 @@ import { socketAgentDataPath } from "./socket-agent-paths";
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") return Object.fromEntries(
+  if (isRecord(value)) return Object.fromEntries(
     Object.entries(value).filter(([key]) => !key.startsWith("__") && key !== "commandId")
       .sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]),
   );
@@ -44,7 +46,7 @@ export class CommandReceipts {
     if (inserted.changes) return { status: "new" };
     const row = this.db.prepare("SELECT * FROM command_receipts WHERE id=?").get(id)!;
     if (row.digest !== digest) return { status: "conflict" };
-    if (row.state === "accepted") return { status: "accepted", replies: JSON.parse(String(row.replies)) as Reply[], currentProcess: row.owner === this.owner };
+    if (row.state === "accepted") return { status: "accepted", replies: z.array(z.record(z.string(), z.unknown())).parse(JSON.parse(String(row.replies))), currentProcess: row.owner === this.owner };
     return { status: row.state === "dispatching" && row.owner === this.owner ? "pending" : "uncertain" };
   }
   conversation(clientId: string): { firstCommandId: string; sessionId: string; currentProcess: boolean } | undefined {
@@ -70,7 +72,7 @@ export class CommandReceipts {
   confirmPrompt(id: string, messageId: string, sessionId: string): void {
     const row = this.db.prepare("SELECT replies FROM command_receipts WHERE id=? AND owner=?").get(id, this.owner);
     if (!row) return;
-    const replies = (JSON.parse(String(row.replies)) as Reply[]).filter(reply => reply.type !== "prompt_received");
+    const replies = (z.array(z.record(z.string(), z.unknown())).parse(JSON.parse(String(row.replies)))).filter(reply => reply.type !== "prompt_received");
     replies.push({ type: "prompt_received", messageId, sessionId });
     this.accept(id, replies);
   }

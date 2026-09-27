@@ -1,4 +1,6 @@
 import * as fs from "node:fs";
+import { z } from "zod";
+import { isRecord, unknownArray, errorMessage } from "./value-guards";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ChildProcess, spawn } from "node:child_process";
@@ -179,15 +181,15 @@ export function removeStaleBrowserControlFile(profileDir: string): void {
         process.kill(pid, 0);
         throw new Error(`Browser profile is still owned by process ${pid}.`);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        if ((isRecord(error) ? error.code : undefined) !== "ESRCH") throw error;
       }
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT"
-      && !String((error as Error).message).startsWith("Browser profile is still owned")) {
-      throw new Error(`Could not inspect the browser profile lock: ${(error as Error).message}`);
+    if ((isRecord(error) ? error.code : undefined) !== "ENOENT"
+      && !String(errorMessage(error)).startsWith("Browser profile is still owned")) {
+      throw new Error(`Could not inspect the browser profile lock: ${errorMessage(error)}`);
     }
-    if (String((error as Error).message).startsWith("Browser profile is still owned")) throw error;
+    if (String(errorMessage(error)).startsWith("Browser profile is still owned")) throw error;
   }
 
   for (const name of ["DevToolsActivePort", "SingletonLock", "SingletonSocket", "SingletonCookie"]) {
@@ -195,7 +197,7 @@ export function removeStaleBrowserControlFile(profileDir: string): void {
       fs.rmSync(path.join(profileDir, name), { force: true });
     } catch (error) {
       throw new Error(
-        `Could not remove stale browser control file ${name}: ${(error as Error).message}`,
+        `Could not remove stale browser control file ${name}: ${errorMessage(error)}`,
       );
     }
   }
@@ -343,7 +345,7 @@ async function startVirtualDisplay(width: number, height: number): Promise<Brows
     };
     const onExit = (): void => finish(new Error("Virtual browser display exited before startup."));
     displayProcess.once("exit", onExit);
-    displayPipe.on("data", (chunk) => {
+    displayPipe.on("data", (chunk: Buffer) => {
       output += chunk.toString();
       const line = output.split(/\r?\n/, 1)[0].trim();
       if (/^[0-9]+$/.test(line)) finish(undefined, line);
@@ -424,7 +426,14 @@ class CdpClient {
 
   private onMessage(raw: string): void {
     let message: CdpResponse;
-    try { message = JSON.parse(raw) as CdpResponse; }
+    try {
+      message = z.object({
+        id: z.number().optional(), method: z.string().optional(),
+        params: z.record(z.string(), z.unknown()).optional(),
+        result: z.record(z.string(), z.unknown()).optional(),
+        error: z.object({ message: z.string().optional() }).optional(),
+      }).parse(JSON.parse(raw));
+    }
     catch { return; }
     if (typeof message.id !== "number") {
       // Events carry a method instead of an id.
@@ -453,18 +462,18 @@ class CdpClient {
 
 function readStringResult(result: JsonRecord): string {
   const nested = result.result;
-  if (!nested || typeof nested !== "object") return "";
-  const value = (nested as JsonRecord).value;
+  if (!isRecord(nested)) return "";
+  const value = nested.value;
   return typeof value === "string" ? value : "";
 }
 
 function runtimeExceptionDescription(result: JsonRecord): string {
   const details = result.exceptionDetails;
-  if (!details || typeof details !== "object") return "";
-  const record = details as JsonRecord;
+  if (!isRecord(details)) return "";
+  const record = details;
   const exception = record.exception;
-  if (exception && typeof exception === "object") {
-    const description = (exception as JsonRecord).description;
+  if (isRecord(exception)) {
+    const description = exception.description;
     if (typeof description === "string") return description.split("\n", 1)[0].slice(0, 300);
   }
   return typeof record.text === "string" ? record.text.slice(0, 300) : "";
@@ -919,7 +928,14 @@ export class BrowserSessionManager {
     const result = await session.cdp.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     const serialized = readStringResult(result);
     if (!serialized) throw new Error("Browser page could not be inspected.");
-    const parsed = JSON.parse(serialized) as Omit<BrowserSnapshot, "profile">;
+    const parsed = z.object({
+      url: z.string(), title: z.string(), text: z.string(),
+      elements: z.array(z.object({
+        ref: z.string(), tag: z.string(), role: z.string().optional(), name: z.string(),
+        type: z.string().optional(), value: z.string().optional(),
+        checked: z.boolean().optional(), disabled: z.boolean(),
+      })),
+    }).parse(JSON.parse(serialized));
     session.url = parsed.url || session.url;
     return { profile: session.profile, ...parsed };
   }
@@ -932,7 +948,7 @@ export class BrowserSessionManager {
     const result = await session.cdp.command("Runtime.evaluate", { expression, returnByValue: true });
     const serialized = readStringResult(result);
     if (!serialized) throw new Error("Browser element is no longer available. Refresh the snapshot.");
-    const point = JSON.parse(serialized) as { x: number; y: number };
+    const point = z.object({ x: z.number(), y: z.number() }).parse(JSON.parse(serialized));
     await this.phoneInput(session.profile, { action: "tap", x: point.x, y: point.y });
   }
 
@@ -943,7 +959,7 @@ export class BrowserSessionManager {
     if (text.length > 16_384) throw new Error("Browser text input is too large.");
     const expression = `(() => { const el = document.querySelector('[data-socketagent-ref="${safeRef}"]'); if (!el) return false; const hint = [el.getAttribute('type'), el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase(); if (/(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(hint)) return 'password'; el.focus(); if ('select' in el) el.select(); return true; })()`;
     const result = await session.cdp.command("Runtime.evaluate", { expression, returnByValue: true });
-    const nested = result.result as JsonRecord | undefined;
+    const nested = isRecord(result.result) ? result.result : undefined;
     if (nested?.value === "password") throw new Error("The agent cannot type into password fields. Open the protected phone browser.");
     if (nested?.value !== true) throw new Error("Browser element is no longer available. Refresh the snapshot.");
     await this.pressKey(session, "CTRL+A");
@@ -1094,9 +1110,9 @@ export class BrowserSessionManager {
   private async historyStep(session: RunningBrowserSession, delta: number): Promise<void> {
     const result = await session.cdp.command("Page.getNavigationHistory");
     const currentIndex = Number(result.currentIndex);
-    const entries = Array.isArray(result.entries) ? result.entries as JsonRecord[] : [];
+    const entries = unknownArray(result.entries);
     const target = entries[currentIndex + delta];
-    if (target && typeof target.id === "number") {
+    if (isRecord(target) && typeof target.id === "number") {
       await session.cdp.command("Page.navigateToHistoryEntry", { entryId: target.id });
     }
   }
@@ -1108,7 +1124,9 @@ export class BrowserSessionManager {
       }
       try {
         const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-        const targets = await response.json() as CdpTarget[];
+        const targets = z.array(z.object({
+          type: z.string().optional(), url: z.string().optional(), webSocketDebuggerUrl: z.string().optional(),
+        })).parse(await response.json());
         if (targets.some((target) => target.type === "page" && target.webSocketDebuggerUrl)) return targets;
       } catch {}
       await wait(100);

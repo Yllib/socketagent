@@ -241,3 +241,20 @@ not a new auto-update policy.
   data. OAuth token responses are checked before writing credentials.
 - Validation: full suite 553 passed, one skipped. Baseline: 1,729. Output:
   `/tmp/sa-helper-full-tests.log`. All changes remain local.
+
+- Server `c3e2208`: validated MCP helpers, auth, image comparisons, and restart journals.
+- Remaining production boundaries now have zero ESLint diagnostics. Browser CDP,
+  push tokens/errors, native Kokoro audio, secret metadata, and persisted helper
+  records are validated. Deep redaction returns checked shapes instead of an
+  unsound generic identity type; history is validated after redaction.
+- Generated stored-data contracts cover delegation, monitors, scheduled tasks,
+  session memory, Work Review, and transfer jobs/headers. `storage:check` catches
+  stale schemas. List summaries retain their intentionally partial read contract.
+  Three transfer handlers now use the relay's WeakMap peer identity consistently.
+- Read-only compatibility audit: 76 delegations, six scheduled tasks, one delivery
+  snapshot, 88 memory records, and 22 reviews all validated. Transfer fixtures now
+  contain complete destination session metadata, matching real imports.
+- Validation: 12 focused compatibility tests; full suite 555 passed, one skipped.
+  Baseline: 1,505, all in scripts/tests. Output: `/tmp/sa-source-full-tests.log`.
+  A separate compiler audit found 18 inferred/evolving any bindings to finish;
+  a zero lint count alone is not the final migration criterion.

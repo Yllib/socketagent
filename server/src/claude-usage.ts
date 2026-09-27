@@ -1,8 +1,8 @@
-import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { ModelUsage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
 export function claudeTotalUsage(result: SDKResultMessage) {
   const models = Object.values(result.modelUsage || {});
-  const sum = (key: string) => models.reduce((total, model) => total + Number((model as any)[key] || 0), 0);
+  const sum = (key: keyof ModelUsage) => models.reduce((total, model) => total + Number(model[key] || 0), 0);
   return {
     inputTokens: models.length ? sum("inputTokens") : result.usage.input_tokens || 0,
     outputTokens: models.length ? sum("outputTokens") : result.usage.output_tokens || 0,

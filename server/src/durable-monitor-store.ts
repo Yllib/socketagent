@@ -1,3 +1,5 @@
+import { parseStoredData } from "./stored-data";
+import { errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import { spawn, spawnSync } from "child_process";
@@ -67,8 +69,8 @@ function withRecordLock<T>(taskId: string, operation: () => T): T {
       lockFd = fs.openSync(lockPath, "wx", 0o600);
       fs.writeFileSync(lockFd, String(process.pid), "utf8");
       break;
-    } catch (error: any) {
-      if (error?.code !== "EEXIST") throw error;
+    } catch (error: unknown) {
+      if (errorCode(error) !== "EEXIST") throw error;
       try {
         const age = Date.now() - fs.statSync(lockPath).mtimeMs;
         const ownerPid = Number(fs.readFileSync(lockPath, "utf8"));
@@ -102,9 +104,9 @@ export function saveDurableMonitorRecord(record: DurableMonitorRecord): DurableM
 
 export function getDurableMonitorRecord(taskId: string): DurableMonitorRecord | null {
   try {
-    const parsed = JSON.parse(fs.readFileSync(durableMonitorRecordPath(taskId), "utf8"));
+    const parsed = parseStoredData("monitor", JSON.parse(fs.readFileSync(durableMonitorRecordPath(taskId), "utf8")));
     if (!parsed || parsed.taskId !== taskId || typeof parsed.sessionId !== "string") return null;
-    return parsed as DurableMonitorRecord;
+    return parsed;
   } catch {
     return null;
   }
@@ -127,9 +129,9 @@ export function listDurableMonitorRecords(): DurableMonitorRecord[] {
   for (const file of fs.readdirSync(RECORD_DIR)) {
     if (!file.endsWith(".json")) continue;
     try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(RECORD_DIR, file), "utf8"));
+      const parsed = parseStoredData("monitor", JSON.parse(fs.readFileSync(path.join(RECORD_DIR, file), "utf8")));
       if (parsed && typeof parsed.taskId === "string" && typeof parsed.sessionId === "string") {
-        records.push(parsed as DurableMonitorRecord);
+        records.push(parsed);
       }
     } catch {}
   }

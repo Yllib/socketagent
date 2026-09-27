@@ -1,3 +1,4 @@
+import { isRecord } from "./value-guards";
 import * as crypto from "crypto";
 import {
   CreateWorkReviewInput,
@@ -41,7 +42,7 @@ const itemStatuses = new Set<WorkReviewItemStatus>([
 ]);
 
 function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 function boundedString(
@@ -74,9 +75,9 @@ function cleanId(value: unknown, name: string): string {
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
-  if (value && typeof value === "object") {
+  if (isRecord(value)) {
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
+      Object.entries(value)
         .filter(([, child]) => child !== undefined)
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([key, child]) => [key, canonicalize(child)]),
@@ -581,11 +582,14 @@ export class WorkReviewService {
         revision: round.revision,
         publishedAt: now,
         draftRevision: activeDraft.revision,
-        itemResults: activeDraft.itemDecisions.map((decision) => ({
-          itemId: decision.itemId,
-          status: decision.status as Exclude<WorkReviewItemStatus, "pending">,
-          ...(decision.note ? { note: decision.note } : {}),
-        })),
+        itemResults: activeDraft.itemDecisions.map((decision) => {
+          if (decision.status === "pending") throw new WorkReviewError("invalid_state", "Every work review item needs a decision before finishing");
+          return {
+            itemId: decision.itemId,
+            status: decision.status,
+            ...(decision.note ? { note: decision.note } : {}),
+          };
+        }),
         ...(activeDraft.overallNote ? { overallNote: activeDraft.overallNote } : {}),
       };
       round.status = "completed";

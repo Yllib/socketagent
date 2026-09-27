@@ -1,3 +1,4 @@
+import { parseJsonObject, errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -330,10 +331,8 @@ export function loadServerSettings(): ServerSettings {
   }
 
   try {
-    const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")) as Partial<ServerSettings>;
-    const rawClaudeAutoCompactWindow = (
-      raw as Record<string, unknown>
-    ).claudeAutoCompactWindow;
+    const raw = parseJsonObject(fs.readFileSync(SETTINGS_FILE, "utf-8"));
+    const rawClaudeAutoCompactWindow = raw.claudeAutoCompactWindow;
     cachedSettings = {
       codexDriver: normalizeDriver(raw.codexDriver),
       defaultCwd: normalizeDefaultCwd(raw.defaultCwd),
@@ -351,8 +350,8 @@ export function loadServerSettings(): ServerSettings {
           && rawClaudeAutoCompactWindow !== ""
         ),
     };
-  } catch (err: any) {
-    console.warn(`[settings] Failed to read server settings: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[settings] Failed to read server settings: ${errorMessage(err)}`);
     cachedSettings = {
       codexDriver: DEFAULT_CODEX_DRIVER,
       defaultCwd: BOOT_DEFAULT_CWD,

@@ -1,4 +1,6 @@
 import * as crypto from "crypto";
+import { z } from "zod";
+import { isRecord, unknownArray, errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -34,6 +36,13 @@ export interface SavedSecureInput {
   createdAt: string;
   updatedAt?: string;
 }
+
+const savedSecureInputSchema = z.object({
+  secretId: z.string(), label: z.string(), scope: z.enum(["session", "project", "global"]),
+  filePath: z.string(), metadataPath: z.string(), envHint: z.string(),
+  sessionId: z.string().optional(), cwd: z.string().optional(),
+  createdAt: z.string(), updatedAt: z.string().optional(),
+});
 
 export type AvailableSecureInput = Pick<
   SavedSecureInput,
@@ -82,8 +91,8 @@ function emitSecureInputState(
 ): void {
   try {
     callback?.(message, status);
-  } catch (err: any) {
-    console.warn(`[secure-input] Failed to persist ${status} request state: ${err?.message || err}`);
+  } catch (err: unknown) {
+    console.warn(`[secure-input] Failed to persist ${status} request state: ${errorMessage(err)}`);
   }
 }
 
@@ -147,8 +156,8 @@ function loadExistingSecretsForRedaction(): void {
       }
     };
     walk(STORE_DIR);
-  } catch (err: any) {
-    console.warn(`[secure-input] Failed to load existing secrets for redaction: ${err?.message || err}`);
+  } catch (err: unknown) {
+    console.warn(`[secure-input] Failed to load existing secrets for redaction: ${errorMessage(err)}`);
   }
 }
 
@@ -200,7 +209,7 @@ export function getAccessibleSecureInput(
   const storeRoot = path.resolve(STORE_DIR) + path.sep;
   for (const metadataPath of metadataFiles) {
     try {
-      const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Partial<SavedSecureInput>;
+      const metadata = savedSecureInputSchema.parse(JSON.parse(fs.readFileSync(metadataPath, "utf8")));
       if (metadata.secretId !== secretId
         || typeof metadata.filePath !== "string"
         || !isMetadataInContext(metadata, sessionId, cwd)) {
@@ -214,7 +223,7 @@ export function getAccessibleSecureInput(
         continue;
       }
       return {
-        ...(metadata as SavedSecureInput),
+        ...metadata,
         filePath: resolvedSecretPath,
         metadataPath: resolvedMetadataPath,
       };
@@ -236,8 +245,8 @@ export function listAvailableSecureInputs(sessionId?: string, cwd?: string): Ava
   const metadataFiles: string[] = [];
   try {
     walkMetadataFiles(STORE_DIR, metadataFiles);
-  } catch (err: any) {
-    console.warn(`[secure-input] Failed to enumerate secret metadata: ${err?.message || err}`);
+  } catch (err: unknown) {
+    console.warn(`[secure-input] Failed to enumerate secret metadata: ${errorMessage(err)}`);
     return [];
   }
 
@@ -245,7 +254,7 @@ export function listAvailableSecureInputs(sessionId?: string, cwd?: string): Ava
   const available: AvailableSecureInput[] = [];
   for (const metadataPath of metadataFiles) {
     try {
-      const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Partial<SavedSecureInput>;
+      const metadata = savedSecureInputSchema.parse(JSON.parse(fs.readFileSync(metadataPath, "utf8")));
       if (typeof metadata.secretId !== "string"
         || typeof metadata.label !== "string"
         || typeof metadata.filePath !== "string"
@@ -264,7 +273,7 @@ export function listAvailableSecureInputs(sessionId?: string, cwd?: string): Ava
       available.push({
         secretId: metadata.secretId,
         label: metadata.label,
-        scope: metadata.scope as SecureInputScope,
+        scope: metadata.scope,
         filePath: resolvedSecretPath,
         envHint: metadata.envHint,
         createdAt: metadata.createdAt,
@@ -311,15 +320,18 @@ export function redactSecrets(text: string): string {
   return redacted;
 }
 
-export function redactSecretsDeep<T>(value: T): T {
-  if (typeof value === "string") return redactSecrets(value) as T;
-  if (Array.isArray(value)) return value.map((item) => redactSecretsDeep(item)) as T;
-  if (value && typeof value === "object") {
+// Redaction can replace literal strings, so it cannot promise to preserve T.
+export function redactSecretsDeep(value: string): string;
+export function redactSecretsDeep(value: Record<string, unknown>): Record<string, unknown>;
+export function redactSecretsDeep(value: unknown[]): unknown[];
+export function redactSecretsDeep(value: unknown): unknown;
+export function redactSecretsDeep(value: unknown): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (Array.isArray(value)) return unknownArray(value).map(item => redactSecretsDeep(item));
+  if (isRecord(value)) {
     const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = redactSecretsDeep(item);
-    }
-    return out as T;
+    for (const [key, item] of Object.entries(value)) out[key] = redactSecretsDeep(item);
+    return out;
   }
   return value;
 }

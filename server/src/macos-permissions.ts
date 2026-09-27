@@ -1,3 +1,4 @@
+import { errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -54,7 +55,7 @@ export function macosPrivacyErrorDetails(
 ): Partial<MacosFileAccessStatus> | null {
   if (!isMacosProtectedUserPath(filePath)) return null;
   const message = error instanceof Error ? error.message : String(error);
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  const code = errorCode(error);
   if (code !== "EPERM" && code !== "EACCES" && !/timed out/i.test(message)) return null;
   const helperPath = macosHelperAppPath();
   return {
@@ -88,7 +89,7 @@ function readdirWithTimeout(dirPath: string): Promise<void> {
           return;
         }
         const detail = stderr.trim();
-        if (error.killed || (error as any).code === "ETIMEDOUT") {
+        if (error.killed || errorCode(error) === "ETIMEDOUT") {
           reject(new Error(`Access check timed out after ${ACCESS_CHECK_TIMEOUT_MS / 1000} seconds`));
           return;
         }

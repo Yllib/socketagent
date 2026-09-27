@@ -16,3 +16,8 @@ export function parseJsonObject(text: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error("Expected a JSON object");
   return value;
 }
+
+export function errorCode(value: unknown): string | number | undefined {
+  if (!isRecord(value)) return undefined;
+  return typeof value.code === "string" || typeof value.code === "number" ? value.code : undefined;
+}

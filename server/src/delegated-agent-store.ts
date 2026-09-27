@@ -1,3 +1,6 @@
+import { parseStoredData } from "./stored-data";
+import { unknownArray } from "./value-guards";
+import { errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import type {
@@ -10,22 +13,19 @@ import { socketAgentDataPath } from "./socket-agent-paths";
 const STORE_FILE = socketAgentDataPath("delegated-agent-sessions.json");
 
 function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 function readRecords(): DelegatedAgentRecord[] {
   try {
     if (!fs.existsSync(STORE_FILE)) return [];
-    const parsed = JSON.parse(fs.readFileSync(STORE_FILE, "utf8"));
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((entry): entry is DelegatedAgentRecord =>
-      !!entry
-      && typeof entry.delegationId === "string"
-      && typeof entry.supervisorSessionId === "string"
-      && Array.isArray(entry.runs),
-    );
-  } catch (err: any) {
-    console.warn(`[DelegatedAgent] Failed to read store: ${err?.message || err}`);
+    const parsed: unknown = JSON.parse(fs.readFileSync(STORE_FILE, "utf8"));
+    return unknownArray(parsed).flatMap(entry => {
+      try { return [parseStoredData("delegation", entry)]; }
+      catch { return []; }
+    });
+  } catch (err: unknown) {
+    console.warn(`[DelegatedAgent] Failed to read store: ${errorMessage(err)}`);
     return [];
   }
 }

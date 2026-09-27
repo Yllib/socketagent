@@ -1,4 +1,6 @@
 import * as fs from "fs";
+import { z } from "zod";
+import { isRecord, unknownArray, errorMessage, parseJsonObject } from "./value-guards";
 import * as path from "path";
 import { GoogleAuth } from "google-auth-library";
 import { socketAgentDataPath } from "./socket-agent-paths";
@@ -31,7 +33,7 @@ export interface PushDeliveryCapabilities {
   relayConfigured: boolean;
 }
 
-export function shouldSendForwardedPush(message: Record<string, any>): boolean {
+export function shouldSendForwardedPush(message: Record<string, unknown>): boolean {
   return message.type === "scheduled_task_notification"
     && message.fcmDispatched !== true;
 }
@@ -44,9 +46,10 @@ const sentAttentionEvents = new Map<string, number>();
  * this process-level guard also prevents duplicate sends across session objects.
  */
 export function maybeSendAgentAttentionPush(
-  message: Record<string, any>,
+  message: unknown,
   fallbackTitle = "SocketAgent",
 ): void {
+  if (!isRecord(message)) return;
   const type = String(message.type || "");
   if (type !== "question" && type !== "secure_input_request") return;
   const sessionId = String(message.sessionId || "");
@@ -67,9 +70,8 @@ export function maybeSendAgentAttentionPush(
     }
   }
 
-  const firstQuestion = Array.isArray(message.questions)
-    ? String(message.questions[0]?.question || "").trim()
-    : "";
+  const first = unknownArray(message.questions)[0];
+  const firstQuestion = isRecord(first) ? String(first.question || "").trim() : "";
   const label = String(message.label || "Secret").trim() || "Secret";
   const body = type === "question"
     ? (firstQuestion || "Your agent needs your input")
@@ -87,8 +89,8 @@ export function maybeSendAgentAttentionPush(
     if (result.attempted > 0) {
       console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for ${type} session=${sessionId || "none"}`);
     }
-  }).catch((err) => {
-    console.warn(`[Push] ${type} push error: ${err?.message || err}`);
+  }).catch((err: unknown) => {
+    console.warn(`[Push] ${type} push error: ${errorMessage(err)}`);
   });
 }
 
@@ -103,8 +105,15 @@ let fcmProjectId: string | null = null;
 function readStore(): StoredPushToken[] {
   try {
     if (!fs.existsSync(STORE_PATH)) return [];
-    const parsed = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
-    return Array.isArray(parsed) ? parsed.filter((entry) => entry?.token) : [];
+    const parsed: unknown = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
+    return unknownArray(parsed).flatMap(entry => {
+      const result = z.object({
+        token: z.string().min(1), platform: z.string().default("android"),
+        appServerId: z.string().optional(), deliveryRoute: z.enum(["relay", "direct"]).optional(),
+        firebaseProjectId: z.string().optional(), updatedAt: z.string().default(""),
+      }).safeParse(entry);
+      return result.success ? [result.data] : [];
+    });
   } catch {
     return [];
   }
@@ -176,8 +185,8 @@ export function isPushTokenRegistered(
 }
 
 function hasRequiredServiceAccountFields(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const credentials = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  const credentials = value;
   const hasProject = typeof credentials.project_id === "string"
     && credentials.project_id.trim().length > 0;
   const hasExplicitProject = Boolean(
@@ -222,7 +231,7 @@ function directFcmConfiguration(): Pick<
   const rawJson = String(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim();
   if (rawJson) {
     try {
-      return resultForCredentials(JSON.parse(rawJson));
+      return resultForCredentials(parseJsonObject(rawJson));
     } catch {
       return { directFcmConfigured: false, directFcmIssue: "invalid" };
     }
@@ -237,7 +246,7 @@ function directFcmConfiguration(): Pick<
     return { directFcmConfigured: false, directFcmIssue: "missing" };
   }
   try {
-    const credentials = JSON.parse(fs.readFileSync(credentialsPath, "utf-8"));
+    const credentials = parseJsonObject(fs.readFileSync(credentialsPath, "utf-8"));
     return resultForCredentials(credentials);
   } catch (error: unknown) {
     const hasFileErrorCode = error !== null
@@ -298,7 +307,8 @@ async function sendPushViaRelay(
     }),
     signal: AbortSignal.timeout(10_000),
   });
-  const body = await response.json() as any;
+  const rawBody: unknown = await response.json();
+  const body = isRecord(rawBody) ? rawBody : {};
   if (!response.ok || body?.ok !== true) {
     throw new Error(`relay FCM request failed (${response.status}): ${body?.error || "unknown error"}`);
   }
@@ -314,19 +324,19 @@ function loadServiceAccountCredentials(): Record<string, unknown> | null {
     const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
     const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
     if (rawJson) {
-      const credentials = JSON.parse(rawJson) as Record<string, unknown>;
+      const credentials = parseJsonObject(rawJson);
       cachedCredentials = credentials;
       return credentials;
     }
     if (serviceAccountPath) {
-      const credentials = JSON.parse(fs.readFileSync(serviceAccountPath, "utf-8")) as Record<string, unknown>;
+      const credentials = parseJsonObject(fs.readFileSync(serviceAccountPath, "utf-8"));
       cachedCredentials = credentials;
       return credentials;
     }
     cachedCredentials = null;
     return null;
-  } catch (err: any) {
-    console.error(`[Push] Firebase credentials could not be read: ${err.message || err}`);
+  } catch (err: unknown) {
+    console.error(`[Push] Firebase credentials could not be read: ${errorMessage(err)}`);
     cachedCredentials = null;
     return null;
   }
@@ -363,8 +373,8 @@ async function getFcmProjectId(auth: GoogleAuth): Promise<string | null> {
   try {
     fcmProjectId = await auth.getProjectId();
     return fcmProjectId;
-  } catch (err: any) {
-    console.error(`[Push] Firebase project ID could not be resolved: ${err.message || err}`);
+  } catch (err: unknown) {
+    console.error(`[Push] Firebase project ID could not be resolved: ${errorMessage(err)}`);
     return null;
   }
 }
@@ -374,26 +384,31 @@ function removeTokens(tokensToRemove: Set<string>): void {
   writeStore(readStore().filter((entry) => !tokensToRemove.has(entry.token)));
 }
 
-function fcmDetailErrorCode(err: any): string {
-  const details = err?.response?.data?.error?.details;
-  if (Array.isArray(details)) {
-    for (const detail of details) {
-      const type = typeof detail?.["@type"] === "string" ? detail["@type"] : "";
-      if (type.includes("google.firebase.fcm.v1.FcmError") && typeof detail?.errorCode === "string") {
-        return detail.errorCode;
-      }
+function fcmResponseError(err: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(err) || !isRecord(err.response) || !isRecord(err.response.data)) return undefined;
+  return isRecord(err.response.data.error) ? err.response.data.error : undefined;
+}
+
+function fcmDetailErrorCode(err: unknown): string {
+  for (const detail of unknownArray(fcmResponseError(err)?.details)) {
+    if (!isRecord(detail)) continue;
+    const type = typeof detail["@type"] === "string" ? detail["@type"] : "";
+    if (type.includes("google.firebase.fcm.v1.FcmError") && typeof detail.errorCode === "string") {
+      return detail.errorCode;
     }
   }
   return "";
 }
 
-function fcmErrorCode(err: any): string {
+function fcmErrorCode(err: unknown): string {
   const fcmCode = fcmDetailErrorCode(err);
   if (fcmCode) return fcmCode;
-  return err?.response?.data?.error?.status || err?.code || "";
+  const status = fcmResponseError(err)?.status;
+  if (typeof status === "string" && status) return status;
+  return isRecord(err) && typeof err.code === "string" ? err.code : "";
 }
 
-function isInvalidFcmTokenError(err: any): boolean {
+function isInvalidFcmTokenError(err: unknown): boolean {
   const code = fcmDetailErrorCode(err);
   return code === "UNREGISTERED" || code === "INVALID_ARGUMENT";
 }
@@ -526,12 +541,12 @@ export async function sendPushNotification(
       try {
         await sendFcmHttpV1(auth, projectId, token, data, payload);
         sent++;
-      } catch (err: any) {
+      } catch (err: unknown) {
         const code = fcmErrorCode(err);
         if (isInvalidFcmTokenError(err)) {
           invalid.add(token);
         }
-        console.warn(`[Push] FCM send failed: ${code || err?.message || "unknown error"}`);
+        console.warn(`[Push] FCM send failed: ${code || errorMessage(err)}`);
       }
     }
   }

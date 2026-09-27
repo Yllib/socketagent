@@ -1,3 +1,4 @@
+import { parseStoredData } from "./stored-data";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -12,13 +13,13 @@ export interface WorkReviewResultDeliveryRecord {
   deliveredAt?: string;
 }
 
-interface DeliverySnapshot {
+export interface DeliverySnapshot {
   schemaVersion: 1;
   records: WorkReviewResultDeliveryRecord[];
 }
 
 function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 /**
@@ -91,7 +92,7 @@ export class WorkReviewResultDeliveryStore {
 
   private read(): DeliverySnapshot {
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as DeliverySnapshot;
+      const parsed = parseStoredData("workReviewDeliveries", JSON.parse(fs.readFileSync(this.filePath, "utf8")));
       if (parsed?.schemaVersion === 1 && Array.isArray(parsed.records)) {
         return {
           schemaVersion: 1,

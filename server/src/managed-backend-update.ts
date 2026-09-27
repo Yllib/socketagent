@@ -1,3 +1,4 @@
+import { unknownArray } from "./value-guards";
 import type { Backend } from "./protocol";
 
 export const MANAGED_BACKEND_PACKAGES = [
@@ -9,10 +10,10 @@ export function parseNpmVersionOutput(output: string): string {
   const trimmed = output.trim();
   if (!trimmed) throw new Error("npm returned an empty version");
   try {
-    const parsed = JSON.parse(trimmed);
+    const parsed: unknown = JSON.parse(trimmed);
     if (typeof parsed === "string" && parsed.trim()) return parsed.trim();
     if (Array.isArray(parsed)) {
-      const latest = [...parsed].reverse().find((value) => typeof value === "string" && value.trim());
+      const latest = unknownArray(parsed).filter((value): value is string => typeof value === "string").reverse().find(value => value.trim());
       if (latest) return latest.trim();
     }
   } catch {

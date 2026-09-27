@@ -1,3 +1,4 @@
+import { errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -110,10 +111,10 @@ class TerminalSessionManager {
     this.rows = nextRows;
     try {
       this.process?.resize(nextCols, nextRows);
-    } catch (err: any) {
+    } catch (err: unknown) {
       this.broadcast({
         type: "terminal_error",
-        message: `Failed to resize terminal: ${err?.message || String(err)}`,
+        message: `Failed to resize terminal: ${errorMessage(err)}`,
       });
     }
   }
@@ -122,10 +123,10 @@ class TerminalSessionManager {
     if (!this.process) return;
     try {
       this.process.kill();
-    } catch (err: any) {
+    } catch (err: unknown) {
       this.broadcast({
         type: "terminal_error",
-        message: `Failed to stop terminal: ${err?.message || String(err)}`,
+        message: `Failed to stop terminal: ${errorMessage(err)}`,
       });
     }
   }
@@ -150,11 +151,11 @@ class TerminalSessionManager {
           SOCKETAGENT_TERMINAL: "1",
         },
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       this.process = null;
       this.broadcast({
         type: "terminal_error",
-        message: `Failed to start terminal: ${err?.message || String(err)}`,
+        message: `Failed to start terminal: ${errorMessage(err)}`,
       });
       return;
     }

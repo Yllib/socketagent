@@ -1,3 +1,4 @@
+import { parseJsonObject } from "./value-guards";
 import * as nacl from "tweetnacl";
 import * as fs from "fs";
 import * as path from "path";
@@ -90,7 +91,8 @@ export function fromBase64(b64: string): Uint8Array {
 /** Load key pair from file, or generate and save a new one */
 export function loadOrCreateKeyPair(configPath: string): KeyPair {
   if (fs.existsSync(configPath)) {
-    const data = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    const data = parseJsonObject(fs.readFileSync(configPath, "utf-8"));
+    if (typeof data.publicKey !== "string" || typeof data.secretKey !== "string") throw new Error("Invalid relay key file");
     return {
       publicKey: fromBase64(data.publicKey),
       secretKey: fromBase64(data.secretKey),

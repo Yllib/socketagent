@@ -1,3 +1,4 @@
+import { parseJsonObject, isRecord } from "./value-guards";
 import { installManagedBackendSafely } from "./managed-backend-install";
 import { runCodexBrowserAuth } from "./codex-browser-auth";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
@@ -71,11 +72,11 @@ function resolvePackageBin(prefix: string, packageName: string, binName: string)
   const packageDir = npmGlobalPackageDir(prefix, packageName);
   const packageJsonPath = path.join(packageDir, "package.json");
   try {
-    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { bin?: string | Record<string, string> };
+    const pkg = parseJsonObject(fs.readFileSync(packageJsonPath, "utf8"));
     const binValue = typeof pkg.bin === "string"
       ? pkg.bin
-      : pkg.bin?.[binName] || Object.values(pkg.bin || {})[0];
-    if (!binValue) return undefined;
+      : (isRecord(pkg.bin) ? pkg.bin[binName] || Object.values(pkg.bin)[0] : undefined);
+    if (typeof binValue !== "string" || !binValue) return undefined;
     return existingFile(path.resolve(packageDir, binValue));
   } catch {
     return undefined;
@@ -366,8 +367,8 @@ async function runProcess(options: {
       });
     };
 
-    child.stdout.on("data", (chunk) => handleChunk("stdout", chunk));
-    child.stderr.on("data", (chunk) => handleChunk("stderr", chunk));
+    child.stdout.on("data", (chunk: Buffer) => handleChunk("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => handleChunk("stderr", chunk));
 
     child.on("error", (err) => {
       cleanup();
@@ -490,8 +491,8 @@ async function runCodexDeviceAuth(options: {
       });
     };
 
-    child.stdout.on("data", (chunk) => handleChunk("stdout", chunk));
-    child.stderr.on("data", (chunk) => handleChunk("stderr", chunk));
+    child.stdout.on("data", (chunk: Buffer) => handleChunk("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => handleChunk("stderr", chunk));
 
     child.on("error", (err) => finish(cancelled ? new Error("Operation cancelled") : err));
     child.on("close", (code, signal) => {

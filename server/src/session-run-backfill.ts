@@ -1,3 +1,4 @@
+import { isRecord } from "./value-guards";
 import * as crypto from "crypto";
 import type { DelegatedAgentRecord } from "./delegated-agent-types";
 import type { HistoryEntry, SessionRunRecord } from "./protocol";
@@ -40,7 +41,7 @@ function lifecycleOutcome(value: unknown): SessionRunRecord["outcome"] {
 }
 
 export function extractEngineIntervals(
-  events: Record<string, any>[],
+  events: Record<string, unknown>[],
 ): EngineInterval[] {
   const intervals: EngineInterval[] = [];
   const codexStarts = new Map<string, number>();
@@ -58,8 +59,9 @@ export function extractEngineIntervals(
       continue;
     }
     if (event.method !== "turn/started" && event.method !== "turn/completed") continue;
-    const turn = event.params?.turn;
-    const turnId = String(turn?.id || event.params?.turnId || "");
+    const params = isRecord(event.params) ? event.params : {};
+    const turn = isRecord(params.turn) ? params.turn : undefined;
+    const turnId = String(turn?.id || params.turnId || "");
     if (!turnId || eventTime === undefined) continue;
     if (event.method === "turn/started") {
       codexStarts.set(turnId, eventTime);
@@ -197,7 +199,7 @@ function transcriptEstimates(
 
 export function deriveHistoricalRuns(
   history: HistoryEntry[],
-  events: Record<string, any>[],
+  events: Record<string, unknown>[],
   delegations: DelegatedAgentRecord[] = [],
 ): SessionRunRecord[] {
   const intervals = extractEngineIntervals(events);

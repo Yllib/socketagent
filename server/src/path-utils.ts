@@ -13,10 +13,10 @@ export function getProcessHome(): string {
 
 function expandEnvironmentVariables(input: string): string {
   return input
-    .replace(/%([^%]+)%/g, (match, name) => process.env[name] || match)
-    .replace(/\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (match, braced, bare) => {
+    .replace(/%([^%]+)%/g, (match: string, name: string) => process.env[name] || match)
+    .replace(/\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (match: string, braced: string | undefined, bare: string | undefined) => {
       const name = braced || bare;
-      return process.env[name] || match;
+      return (name ? process.env[name] : undefined) || match;
     });
 }
 

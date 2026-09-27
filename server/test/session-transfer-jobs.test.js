@@ -47,7 +47,14 @@ async function fixture(t) {
   let stopAtChunk = false;
   let stopAfterImport = false;
   let receiptLost = false;
-  const result = { session: { id: jobId, title: 'Test', transferLineage: { transferId: jobId } }, sourceSessionId: 'session-one', exactNativeResume: false };
+  const result = { session: {
+    id: jobId, title: 'Test', cwd: directory, createdAt: new Date().toISOString(),
+    lastActive: new Date().toISOString(), messagePreview: '', backend: 'codex',
+    transferLineage: {
+      transferId: jobId, sourceSessionId: 'session-one', sourceBackend: 'codex',
+      transferredAt: new Date().toISOString(), mode: 'move',
+    },
+  }, sourceSessionId: 'session-one', exactNativeResume: false };
   const hooks = {
     export: async () => {
       exports++;

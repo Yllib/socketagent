@@ -1,7 +1,7 @@
 import * as os from "os";
 import { parseStoredSessions } from "./session-schema";
 import { isRecord, unknownArray, errorMessage, parseJsonObject } from "./value-guards";
-import { parseHistoryEntries } from "./history-schema";
+import { parseHistoryEntry, parseHistoryEntries } from "./history-schema";
 import { hasInlineImages, snapshotInlineImages } from "./inline-image-markdown";
 import * as fs from "fs";
 import * as path from "path";
@@ -1295,9 +1295,9 @@ function safeHistoryEntriesForStorage(
     .map(({ entry }) => entry);
   return dirtyEntries
     ? positioned.map((entry, index) => dirtyEntries.has(entry)
-      ? compactHistoryEntryForStorage(sessionId, redactSecretsDeep(entry), index)
+      ? compactHistoryEntryForStorage(sessionId, parseHistoryEntry(redactSecretsDeep(entry)), index)
       : entry)
-    : redactSecretsDeep(positioned)
+    : parseHistoryEntries(redactSecretsDeep(positioned))
       .map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
 }
 
@@ -1558,7 +1558,7 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
   }
   const safeEntry = compactHistoryEntryForStorage(
     sessionId,
-    redactSecretsDeep(positioned),
+    parseHistoryEntry(redactSecretsDeep(positioned)),
     Math.max(0, Number(positioned.sessionSeq || 1) - 1),
   );
   database.upsert(sessionId, safeEntry, historyPositionKey(safeEntry));
@@ -1694,7 +1694,7 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
     }
     positioned.push(compactHistoryEntryForStorage(
       sessionId,
-      redactSecretsDeep(entry),
+      parseHistoryEntry(redactSecretsDeep(entry)),
       Math.max(0, Number(entry.sessionSeq || 1) - 1),
     ));
   }
@@ -2222,7 +2222,7 @@ async function syncRememberArchiveIndex(): Promise<TranscriptDatabase> {
     if (database.legacyMatches(name, fingerprint)) continue;
     try {
       const entries = repairTranscriptIdentityCollisions(parseHistorySnapshot(file)).entries;
-      database.replace(name, entries.map(entry => ({ entry: redactSecretsDeep(entry), positionKey: null })), fingerprint);
+      database.replace(name, entries.map(entry => ({ entry: parseHistoryEntry(redactSecretsDeep(entry)), positionKey: null })), fingerprint);
     } catch {
       // A corrupt archive must not leave stale indexed content searchable.
       database.deleteSession(name);
@@ -2282,7 +2282,7 @@ export async function rememberReadGlobalHistory(sourceId: string, selector: {
     ? database.context(id, selector.sessionSeq!, selector.before ?? 0, selector.after ?? 0)
     : [selector.entryId ? database.getByEntryId(id, selector.entryId)
       : database.getBySessionSeq(id, selector.sessionSeq!)].filter((entry): entry is HistoryEntry => !!entry);
-  return hydrateHistoryEntries(entries).map(entry => redactSecretsDeep(entry));
+  return hydrateHistoryEntries(entries).map(entry => parseHistoryEntry(redactSecretsDeep(entry)));
 }
 
 /** Retrieve one durable transcript entry by stable sequence or entry ID. */

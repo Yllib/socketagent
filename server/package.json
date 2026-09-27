@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc",
     "test": "npm run build && npm run type-safety && node --test test/*.test.js test/*.test.mjs",
-    "type-safety": "npm run protocol:check && node scripts/check-type-safety.mjs",
+    "type-safety": "npm run protocol:check && npm run storage:check && node scripts/check-type-safety.mjs",
     "type-safety:prune": "node scripts/check-type-safety.mjs --prune",
     "type-safety:report": "node scripts/check-type-safety.mjs --report",
     "codex:generate-contracts": "node scripts/generate-codex-contracts.mjs",
@@ -15,7 +15,9 @@
     "dev": "tsc && node dist/index.js",
     "release:patch": "npm version patch --no-git-tag-version",
     "protocol:generate": "node scripts/generate-client-protocol.mjs",
-    "protocol:check": "node scripts/generate-client-protocol.mjs --check"
+    "protocol:check": "node scripts/generate-client-protocol.mjs --check",
+    "storage:generate": "node scripts/generate-stored-data.mjs",
+    "storage:check": "node scripts/generate-stored-data.mjs --check"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.283",

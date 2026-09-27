@@ -1,0 +1,1669 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$ref": "#/definitions/StoredDataContracts",
+  "definitions": {
+    "StoredDataContracts": {
+      "type": "object",
+      "properties": {
+        "delegation": {
+          "$ref": "#/definitions/DelegatedAgentRecord"
+        },
+        "monitor": {
+          "$ref": "#/definitions/DurableMonitorRecord"
+        },
+        "scheduledTask": {
+          "$ref": "#/definitions/ScheduledTask"
+        },
+        "sessionMemory": {
+          "$ref": "#/definitions/StoredSessionMemory"
+        },
+        "workReview": {
+          "$ref": "#/definitions/StoredWorkReviewRecord"
+        },
+        "workReviewIndex": {
+          "$ref": "#/definitions/WorkReviewIndex"
+        },
+        "workReviewDeliveries": {
+          "$ref": "#/definitions/DeliverySnapshot"
+        },
+        "transferJob": {
+          "$ref": "#/definitions/Job"
+        },
+        "transferHeader": {
+          "$ref": "#/definitions/Header"
+        }
+      },
+      "required": [
+        "delegation",
+        "monitor",
+        "scheduledTask",
+        "sessionMemory",
+        "workReview",
+        "workReviewIndex",
+        "workReviewDeliveries",
+        "transferJob",
+        "transferHeader"
+      ]
+    },
+    "DelegatedAgentRecord": {
+      "type": "object",
+      "properties": {
+        "delegationId": {
+          "type": "string"
+        },
+        "parentSessionId": {
+          "type": "string"
+        },
+        "supervisorSessionId": {
+          "type": "string"
+        },
+        "childSessionId": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/DelegatedAgentStatus"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "agentSettings": {
+          "$ref": "#/definitions/AgentSessionSettings"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DelegatedAgentRun"
+          }
+        }
+      },
+      "required": [
+        "delegationId",
+        "supervisorSessionId",
+        "backend",
+        "cwd",
+        "label",
+        "status",
+        "createdAt",
+        "updatedAt",
+        "runs"
+      ]
+    },
+    "Backend": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "DelegatedAgentStatus": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "completed",
+        "failed",
+        "stopped"
+      ]
+    },
+    "AgentSessionSettings": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "$ref": "#/definitions/AgentEffort"
+        },
+        "thinking": {
+          "$ref": "#/definitions/AgentThinkingSetting"
+        },
+        "codexFastMode": {
+          "type": "boolean"
+        },
+        "codexCollaborationMode": {
+          "type": "string"
+        },
+        "claudeAutoCompact": {
+          "type": "boolean"
+        },
+        "claudeAutoCompactWindow": {
+          "type": "number"
+        },
+        "disallowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "systemPrompt": {
+          "type": "string"
+        },
+        "connectedAppApprovals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "AgentEffort": {
+      "$ref": "#/definitions/ReasoningEffort"
+    },
+    "ReasoningEffort": {
+      "type": "string"
+    },
+    "AgentThinkingSetting": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "adaptive"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "enabled"
+            },
+            "budgetTokens": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "budgetTokens"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "disabled"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "DelegatedAgentRun": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "runNumber": {
+          "type": "number"
+        },
+        "promptPreview": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/DelegatedAgentStatus"
+        },
+        "completedAt": {
+          "type": "string"
+        },
+        "result": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "reportStatus": {
+          "$ref": "#/definitions/DelegatedAgentReportStatus"
+        },
+        "reportAttempts": {
+          "type": "number"
+        },
+        "reportDeliveredAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "runNumber",
+        "promptPreview",
+        "startedAt",
+        "status"
+      ]
+    },
+    "DelegatedAgentReportStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "delivering",
+        "delivered"
+      ]
+    },
+    "DurableMonitorRecord": {
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "outputFile": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "timeoutAt": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/DurableMonitorStatus"
+        },
+        "workerPid": {
+          "type": "number"
+        },
+        "processPid": {
+          "type": "number"
+        },
+        "phoneOffset": {
+          "type": "number"
+        },
+        "agentOffset": {
+          "type": "number"
+        },
+        "completedAt": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "exitSignal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "launcher": {
+          "type": "string",
+          "enum": [
+            "systemd",
+            "launchd",
+            "detached"
+          ]
+        }
+      },
+      "required": [
+        "taskId",
+        "sessionId",
+        "backend",
+        "cwd",
+        "command",
+        "description",
+        "outputFile",
+        "createdAt",
+        "status",
+        "phoneOffset",
+        "agentOffset"
+      ]
+    },
+    "DurableMonitorStatus": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "completed",
+        "failed"
+      ]
+    },
+    "ScheduledTask": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "$ref": "#/definitions/AgentEffort"
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "scheduledTime": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ScheduledTaskStatus"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "resultSummary": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "createdBySessionId": {
+          "type": "string"
+        },
+        "recurrence": {
+          "$ref": "#/definitions/RecurrenceConfig"
+        },
+        "reuseSession": {
+          "type": "boolean"
+        },
+        "notificationMode": {
+          "type": "string",
+          "enum": [
+            "completion",
+            "quiet"
+          ]
+        },
+        "runCount": {
+          "type": "number"
+        },
+        "lastRunAt": {
+          "type": "string"
+        },
+        "lastReadAt": {
+          "type": "string"
+        },
+        "archivedAt": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TaskRun"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "prompt",
+        "cwd",
+        "scheduledTime",
+        "createdAt",
+        "status"
+      ]
+    },
+    "CodexDriver": {
+      "type": "string",
+      "const": "app-server"
+    },
+    "ScheduledTaskStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "RecurrenceConfig": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "once",
+            "daily",
+            "weekly",
+            "monthly",
+            "custom"
+          ]
+        },
+        "intervalMs": {
+          "type": "number"
+        },
+        "daysOfWeek": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "TaskRun": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "completedAt": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "completed",
+            "failed"
+          ]
+        },
+        "trigger": {
+          "type": "string",
+          "enum": [
+            "scheduled",
+            "manual"
+          ]
+        },
+        "resumeTaskStatus": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "resultSummary": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "startedAt",
+        "status"
+      ]
+    },
+    "StoredSessionMemory": {
+      "type": "object",
+      "properties": {
+        "settings": {
+          "type": "object",
+          "properties": {
+            "autoRollover": {
+              "type": "boolean"
+            },
+            "maxCompactions": {
+              "type": "number"
+            },
+            "maxPostCompactionTokens": {
+              "type": "number"
+            },
+            "recentRuns": {
+              "type": "number"
+            }
+          }
+        },
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SessionMemoryEntry"
+          }
+        },
+        "epochs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SessionMemoryEpoch"
+          }
+        },
+        "currentTokens": {
+          "type": "number"
+        },
+        "contextWindow": {
+          "type": "number"
+        },
+        "compactionsSinceRollover": {
+          "type": "number"
+        },
+        "lastCompactionAt": {
+          "type": "string"
+        },
+        "lastCompactionPreTokens": {
+          "type": "number"
+        },
+        "lastPostCompactionTokens": {
+          "type": "number"
+        },
+        "awaitingPostCompactionMeasurement": {
+          "type": "boolean"
+        },
+        "rolloverPending": {
+          "type": "boolean"
+        },
+        "rolloverReason": {
+          "type": "string"
+        },
+        "rolloverTrigger": {
+          "type": "string",
+          "const": "manual"
+        },
+        "historicalCompactionsSeeded": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      }
+    },
+    "SessionMemoryEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/SessionMemoryKind"
+        },
+        "text": {
+          "type": "string"
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "superseded"
+          ]
+        },
+        "sourceSessionSeq": {
+          "type": "number"
+        },
+        "sourceEntryId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "text",
+        "pinned",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SessionMemoryKind": {
+      "type": "string",
+      "enum": [
+        "active_work",
+        "decision",
+        "constraint",
+        "preference",
+        "project_fact",
+        "open_question"
+      ]
+    },
+    "SessionMemoryEpoch": {
+      "type": "object",
+      "properties": {
+        "number": {
+          "type": "number"
+        },
+        "nativeSessionId": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "endedAt": {
+          "type": "string"
+        },
+        "rolloverReason": {
+          "type": "string"
+        },
+        "startingTokens": {
+          "type": "number"
+        },
+        "endingTokens": {
+          "type": "number"
+        },
+        "compactions": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "number",
+        "nativeSessionId",
+        "startedAt",
+        "compactions"
+      ]
+    },
+    "StoredWorkReviewRecord": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "reviewId": {
+          "type": "string"
+        },
+        "cardId": {
+          "type": "string"
+        },
+        "originSessionId": {
+          "type": "string"
+        },
+        "originBackend": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "archivedAt": {
+          "type": "string"
+        },
+        "currentRevision": {
+          "type": "number"
+        },
+        "rounds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/StoredWorkReviewRound"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkReviewEvent"
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "reviewId",
+        "cardId",
+        "originSessionId",
+        "createdAt",
+        "updatedAt",
+        "currentRevision",
+        "rounds",
+        "events"
+      ]
+    },
+    "StoredWorkReviewRound": {
+      "type": "object",
+      "properties": {
+        "roundId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string"
+        },
+        "linkedHtmlPlanId": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "approvalMeaning": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkReviewItem"
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/WorkReviewRoundStatus"
+        },
+        "result": {
+          "$ref": "#/definitions/WorkReviewPublishedResult"
+        },
+        "idempotencyKeyHash": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "draft": {
+          "$ref": "#/definitions/WorkReviewDraft"
+        },
+        "draftMutations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "mutationIdHash": {
+                "type": "string"
+              },
+              "contentHash": {
+                "type": "string"
+              },
+              "resultingRevision": {
+                "type": "number"
+              },
+              "resultDraft": {
+                "$ref": "#/definitions/WorkReviewDraft"
+              }
+            },
+            "required": [
+              "mutationIdHash",
+              "contentHash",
+              "resultingRevision",
+              "resultDraft"
+            ]
+          }
+        }
+      },
+      "required": [
+        "contentHash",
+        "createdAt",
+        "idempotencyKeyHash",
+        "items",
+        "revision",
+        "roundId",
+        "status",
+        "title"
+      ]
+    },
+    "WorkReviewItem": {
+      "type": "object",
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "primaryTarget": {
+          "$ref": "#/definitions/WorkReviewTarget"
+        },
+        "supportingTargets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkReviewTarget"
+          }
+        }
+      },
+      "required": [
+        "itemId",
+        "title",
+        "primaryTarget",
+        "supportingTargets"
+      ]
+    },
+    "WorkReviewTarget": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/WorkReviewTargetKind"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "displayMode": {
+          "$ref": "#/definitions/WorkReviewDisplayMode"
+        },
+        "description": {
+          "type": "string"
+        },
+        "targetId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "displayMode",
+        "kind",
+        "targetId",
+        "uri"
+      ]
+    },
+    "WorkReviewTargetKind": {
+      "type": "string",
+      "enum": [
+        "url",
+        "file",
+        "image",
+        "html",
+        "html_plan",
+        "diff",
+        "session",
+        "custom"
+      ]
+    },
+    "WorkReviewDisplayMode": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "embedded",
+        "external"
+      ]
+    },
+    "WorkReviewRoundStatus": {
+      "type": "string",
+      "enum": [
+        "in_review",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "WorkReviewPublishedResult": {
+      "type": "object",
+      "properties": {
+        "resultId": {
+          "type": "string"
+        },
+        "reviewId": {
+          "type": "string"
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "publishedAt": {
+          "type": "string"
+        },
+        "draftRevision": {
+          "type": "number"
+        },
+        "itemResults": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkReviewPublishedItemResult"
+          }
+        },
+        "overallNote": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resultId",
+        "reviewId",
+        "roundId",
+        "revision",
+        "publishedAt",
+        "draftRevision",
+        "itemResults"
+      ]
+    },
+    "WorkReviewPublishedItemResult": {
+      "type": "object",
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/WorkReviewDecisionStatus"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId",
+        "status"
+      ]
+    },
+    "WorkReviewDecisionStatus": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "changes_requested",
+        "rejected",
+        "skipped"
+      ]
+    },
+    "WorkReviewDraft": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "itemDecisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkReviewItemDecision"
+          }
+        },
+        "overallNote": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "updatedAt",
+        "itemDecisions"
+      ]
+    },
+    "WorkReviewItemDecision": {
+      "type": "object",
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/WorkReviewItemStatus"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId",
+        "status"
+      ]
+    },
+    "WorkReviewItemStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "approved",
+        "changes_requested",
+        "rejected",
+        "skipped"
+      ]
+    },
+    "WorkReviewEvent": {
+      "type": "object",
+      "properties": {
+        "eventId": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/definitions/WorkReviewEventType"
+        },
+        "at": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "draftRevision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "eventId",
+        "type",
+        "at",
+        "revision"
+      ]
+    },
+    "WorkReviewEventType": {
+      "type": "string",
+      "enum": [
+        "created",
+        "draft_saved",
+        "finished",
+        "cancelled",
+        "new_round",
+        "archived",
+        "restored"
+      ]
+    },
+    "WorkReviewIndex": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "rebuiltAt": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reviewId": {
+                "type": "string"
+              },
+              "originSessionId": {
+                "type": "string"
+              },
+              "updatedAt": {
+                "type": "string"
+              },
+              "archivedAt": {
+                "type": "string"
+              },
+              "idempotency": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "keyHash": {
+                      "type": "string"
+                    },
+                    "contentHash": {
+                      "type": "string"
+                    },
+                    "revision": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "keyHash",
+                    "contentHash",
+                    "revision"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "reviewId",
+              "originSessionId",
+              "updatedAt",
+              "idempotency"
+            ]
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "rebuiltAt",
+        "entries"
+      ]
+    },
+    "DeliverySnapshot": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkReviewResultDeliveryRecord"
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "records"
+      ]
+    },
+    "WorkReviewResultDeliveryRecord": {
+      "type": "object",
+      "properties": {
+        "resultId": {
+          "type": "string"
+        },
+        "reviewId": {
+          "type": "string"
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "originSessionId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "deliveredAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resultId"
+      ]
+    },
+    "Job": {
+      "type": "object",
+      "properties": {
+        "config": {
+          "$ref": "#/definitions/TransferJobConfig"
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "preparing",
+            "waiting",
+            "transferring",
+            "importing",
+            "finalizing",
+            "completed",
+            "failed"
+          ]
+        },
+        "bytes": {
+          "type": "number"
+        },
+        "manifest": {
+          "type": "object",
+          "properties": {
+            "fileSize": {
+              "type": "number"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fileSize",
+            "sha256"
+          ]
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/definitions/SessionTransferImportResult"
+        },
+        "error": {
+          "type": "string"
+        },
+        "warning": {
+          "type": "string"
+        },
+        "settled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "config",
+        "phase",
+        "bytes"
+      ]
+    },
+    "TransferJobConfig": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "source",
+            "destination",
+            "local"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "targetCwd": {
+          "type": "string"
+        },
+        "targetBackend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "move",
+            "clone"
+          ]
+        },
+        "nativeMode": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "handoff"
+          ]
+        },
+        "relayUrl": {
+          "type": "string"
+        },
+        "ticket": {
+          "type": "string"
+        },
+        "peerPublicKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jobId",
+        "role",
+        "sessionId",
+        "targetCwd",
+        "targetBackend",
+        "mode",
+        "nativeMode"
+      ]
+    },
+    "SessionTransferImportResult": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/definitions/SessionInfo"
+        },
+        "sourceSessionId": {
+          "type": "string"
+        },
+        "exactNativeResume": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "session",
+        "sourceSessionId",
+        "exactNativeResume"
+      ]
+    },
+    "SessionInfo": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "lastActive": {
+          "type": "string"
+        },
+        "messagePreview": {
+          "type": "string"
+        },
+        "turnCount": {
+          "type": "number"
+        },
+        "historyCount": {
+          "type": "number"
+        },
+        "replacedSessionIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compactionsSinceRollover": {
+          "type": "number"
+        },
+        "freshThreadPending": {
+          "type": "boolean"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "activeStartedAt": {
+          "type": "string"
+        },
+        "runStats": {
+          "$ref": "#/definitions/SessionRunStats"
+        },
+        "lastUsage": {
+          "type": "object",
+          "properties": {
+            "costUsd": {
+              "type": "number"
+            },
+            "numTurns": {
+              "type": "number"
+            },
+            "inputTokens": {
+              "type": "number"
+            },
+            "outputTokens": {
+              "type": "number"
+            },
+            "cacheReadTokens": {
+              "type": "number"
+            },
+            "cacheCreateTokens": {
+              "type": "number"
+            },
+            "contextWindow": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "cacheCreateTokens",
+            "cacheReadTokens",
+            "contextWindow",
+            "inputTokens",
+            "outputTokens"
+          ]
+        },
+        "lastContextUsage": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "scheduledTaskId": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "codexInstructionDelivery": {
+          "type": "object",
+          "properties": {
+            "threadId": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "threadId",
+            "digest"
+          ]
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "agentSettings": {
+          "$ref": "#/definitions/AgentSessionSettings"
+        },
+        "contextClearedAt": {
+          "type": "string"
+        },
+        "pendingHandoffContext": {
+          "type": "string"
+        },
+        "transferLineage": {
+          "type": "object",
+          "properties": {
+            "transferId": {
+              "type": "string"
+            },
+            "sourceSessionId": {
+              "type": "string"
+            },
+            "sourceBackend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "sourceServerLabel": {
+              "type": "string"
+            },
+            "transferredAt": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "move",
+                "clone"
+              ]
+            }
+          },
+          "required": [
+            "sourceSessionId",
+            "sourceBackend",
+            "transferredAt",
+            "mode"
+          ]
+        },
+        "delegatedBySessionId": {
+          "type": "string"
+        },
+        "delegationId": {
+          "type": "string"
+        },
+        "delegationSupervisorSessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "cwd",
+        "createdAt",
+        "lastActive",
+        "messagePreview"
+      ]
+    },
+    "SessionRunStats": {
+      "type": "object",
+      "properties": {
+        "current": {
+          "$ref": "#/definitions/SessionRunCurrent"
+        },
+        "completedCount": {
+          "type": "number"
+        },
+        "totalDurationMs": {
+          "type": "number"
+        },
+        "averageDurationMs": {
+          "type": "number"
+        },
+        "longestDurationMs": {
+          "type": "number"
+        },
+        "shortestDurationMs": {
+          "type": "number"
+        },
+        "lastCompletedAt": {
+          "type": "string"
+        },
+        "recentRuns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SessionRunRecord"
+          }
+        },
+        "backfillVersion": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "completedCount",
+        "totalDurationMs"
+      ]
+    },
+    "SessionRunCurrent": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "supervisorSettled": {
+          "type": "boolean"
+        },
+        "pendingOutcome": {
+          "$ref": "#/definitions/SessionRunOutcome"
+        }
+      },
+      "required": [
+        "runId",
+        "startedAt"
+      ]
+    },
+    "SessionRunOutcome": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "stopped",
+        "failed"
+      ]
+    },
+    "SessionRunRecord": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "runNumber": {
+          "type": "number"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "finishedAt": {
+          "type": "string"
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "outcome": {
+          "$ref": "#/definitions/SessionRunOutcome"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "observed",
+            "sdk_backfill",
+            "transcript_estimate"
+          ]
+        }
+      },
+      "required": [
+        "runId",
+        "runNumber",
+        "startedAt",
+        "finishedAt",
+        "durationMs",
+        "outcome"
+      ]
+    },
+    "Header": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "number"
+        },
+        "fileSize": {
+          "type": "number"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/definitions/SessionTransferImportResult"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jobId",
+        "type"
+      ]
+    }
+  }
+}

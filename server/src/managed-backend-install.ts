@@ -1,3 +1,4 @@
+import { errorMessage, errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -29,12 +30,12 @@ export async function installManagedBackendSafely(options: {
   try {
     fd = fs.openSync(lock, "wx", 0o600);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (errorCode(error) !== "EEXIST") throw error;
     const owner = Number(fs.readFileSync(lock, "utf8"));
     let alive = true;
     if (Number.isInteger(owner) && owner > 0) {
       try { process.kill(owner, 0); } catch (probeError) {
-        alive = (probeError as NodeJS.ErrnoException).code !== "ESRCH";
+        alive = errorCode(probeError) !== "ESRCH";
       }
     }
     if (alive) throw new Error("Another backend install is running. Try again when it finishes.");
@@ -107,7 +108,7 @@ export async function installManagedBackendSafely(options: {
       throw error;
     }
     await fs.promises.rm(backup, { recursive: true, force: true }).catch((error: Error) => {
-      console.warn(`[Backend install] Could not remove previous software: ${error.message}`);
+      console.warn(`[Backend install] Could not remove previous software: ${errorMessage(error)}`);
     });
   } finally {
     try {

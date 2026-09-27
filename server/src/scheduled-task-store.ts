@@ -1,3 +1,5 @@
+import { parseStoredData } from "./stored-data";
+import { unknownArray } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import type { AgentEffort, Backend, CodexDriver } from "./protocol";
@@ -178,7 +180,8 @@ function readTasks(): ScheduledTask[] {
   ensureDir();
   if (!fs.existsSync(TASKS_FILE)) return [];
   try {
-    return JSON.parse(fs.readFileSync(TASKS_FILE, "utf-8")) as ScheduledTask[];
+    const records: unknown = JSON.parse(fs.readFileSync(TASKS_FILE, "utf-8"));
+    return unknownArray(records).map(record => parseStoredData("scheduledTask", record));
   } catch {
     return [];
   }

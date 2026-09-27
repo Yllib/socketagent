@@ -1,3 +1,6 @@
+import { z } from "zod";
+import { unknownArray } from "./value-guards";
+import { errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -20,12 +23,13 @@ export function readProtectedFiles(): ProtectedFileEntry[] {
   try {
     if (!fs.existsSync(PROTECTED_FILES_CONFIG)) return [];
     const raw = fs.readFileSync(PROTECTED_FILES_CONFIG, "utf-8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter((entry) => entry && typeof entry.path === "string")
-      : [];
-  } catch (err: any) {
-    console.error(`[protected-files] Failed to read config: ${err.message || err}`);
+    const parsed: unknown = JSON.parse(raw);
+    return unknownArray(parsed).flatMap(entry => {
+      const result = z.object({ path: z.string(), label: z.string().optional() }).safeParse(entry);
+      return result.success ? [result.data] : [];
+    });
+  } catch (err: unknown) {
+    console.error(`[protected-files] Failed to read config: ${errorMessage(err)}`);
     return [];
   }
 }

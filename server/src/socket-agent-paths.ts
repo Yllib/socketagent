@@ -1,3 +1,4 @@
+import { errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -55,8 +56,8 @@ function ensureLegacyAlias(legacyDir: string, targetDir: string): void {
   try {
     if (fs.existsSync(legacyDir)) return;
     fs.symlinkSync(targetDir, legacyDir, process.platform === "win32" ? "junction" : "dir");
-  } catch (err: any) {
-    console.warn(`[paths] Could not create legacy ${LEGACY_DIR_NAME} alias: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[paths] Could not create legacy ${LEGACY_DIR_NAME} alias: ${errorMessage(err)}`);
   }
 }
 
@@ -83,22 +84,22 @@ export function ensureSocketAgentDataDir(env: NodeJS.ProcessEnv = process.env): 
           fs.renameSync(legacyDir, dataDir);
           ensureLegacyAlias(legacyDir, dataDir);
           console.log(`[paths] Migrated SocketAgent data from ${legacyDir} to ${dataDir}`);
-        } catch (err: any) {
-          console.warn(`[paths] Could not move ${legacyDir} to ${dataDir}: ${err?.message || String(err)}`);
+        } catch (err: unknown) {
+          console.warn(`[paths] Could not move ${legacyDir} to ${dataDir}: ${errorMessage(err)}`);
           try {
             fs.mkdirSync(dataDir, { recursive: true });
             fs.cpSync(legacyDir, dataDir, { recursive: true, force: false, errorOnExist: false });
             console.log(`[paths] Copied legacy SocketAgent data from ${legacyDir} to ${dataDir}`);
-          } catch (copyErr: any) {
-            console.warn(`[paths] Could not copy legacy SocketAgent data: ${copyErr?.message || String(copyErr)}`);
+          } catch (copyErr: unknown) {
+            console.warn(`[paths] Could not copy legacy SocketAgent data: ${errorMessage(copyErr)}`);
           }
         }
       } else {
         try {
           fs.cpSync(legacyDir, dataDir, { recursive: true, force: false, errorOnExist: false });
           console.log(`[paths] Merged legacy SocketAgent data from ${legacyDir} into ${dataDir}`);
-        } catch (copyErr: any) {
-          console.warn(`[paths] Could not merge legacy SocketAgent data: ${copyErr?.message || String(copyErr)}`);
+        } catch (copyErr: unknown) {
+          console.warn(`[paths] Could not merge legacy SocketAgent data: ${errorMessage(copyErr)}`);
         }
       }
     }

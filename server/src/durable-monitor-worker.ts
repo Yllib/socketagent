@@ -1,3 +1,4 @@
+import { errorMessage } from "./value-guards";
 import * as fs from "fs";
 import { spawn } from "child_process";
 import {
@@ -44,7 +45,7 @@ try {
   });
 
   child.once("error", (error) => {
-    appendLine(`[SocketAgent monitor failed to start: ${error.message}]`);
+    appendLine(`[SocketAgent monitor failed to start: ${errorMessage(error)}]`);
     updateDurableMonitorRecord(taskId, {
       status: "failed",
       completedAt: new Date().toISOString(),
@@ -66,8 +67,8 @@ try {
     try { fs.closeSync(outputFd); } catch {}
     process.exit(code === 0 ? 0 : 1);
   });
-} catch (error: any) {
-  appendLine(`[SocketAgent monitor failed to start: ${error?.message || String(error)}]`);
+} catch (error: unknown) {
+  appendLine(`[SocketAgent monitor failed to start: ${errorMessage(error)}]`);
   updateDurableMonitorRecord(taskId, {
     status: "failed",
     completedAt: new Date().toISOString(),

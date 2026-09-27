@@ -1,3 +1,4 @@
+import { isRecord } from "./value-guards";
 export const BINARY_FILE_DOWNLOAD_VERSION = 1;
 export const BIN_MARKER_FILE_DOWNLOAD_CHUNK = 0x46; // 'F'
 
@@ -11,8 +12,8 @@ export interface BinaryFileDownloadChunkMetadata {
 }
 
 export function fileTransferPeerId(message: unknown): string | undefined {
-  if (!message || typeof message !== "object") return undefined;
-  const peerId = (message as Record<string, unknown>).__relayPeerId;
+  if (!isRecord(message)) return undefined;
+  const peerId = message.__relayPeerId;
   return typeof peerId === "string" && peerId.length > 0 ? peerId : undefined;
 }
 
@@ -94,8 +95,8 @@ export function encodeBinaryFileDownloadChunk(
 }
 
 export function supportsBinaryFileDownload(message: unknown): boolean {
-  if (!message || typeof message !== "object") return false;
-  const version = (message as Record<string, unknown>).binaryFileDownloadVersion;
+  if (!isRecord(message)) return false;
+  const version = message.binaryFileDownloadVersion;
   return typeof version === "number"
     && Number.isInteger(version)
     && version >= BINARY_FILE_DOWNLOAD_VERSION;

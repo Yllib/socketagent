@@ -1,3 +1,5 @@
+import { parseJsonObject, unknownArray, isRecord } from "./value-guards";
+import { errorMessage, errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import { socketAgentDataPath } from "./socket-agent-paths";
@@ -61,15 +63,16 @@ export class SessionAutomationLockStore {
 
   private load(): void {
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as SessionAutomationLockFile;
-      for (const record of Array.isArray(parsed?.locks) ? parsed.locks : []) {
-        const sessionId = String(record?.sessionId || "").trim();
-        const stoppedAt = String(record?.stoppedAt || "").trim();
+      const parsed = parseJsonObject(fs.readFileSync(this.filePath, "utf8"));
+      for (const record of unknownArray(parsed.locks)) {
+        if (!isRecord(record)) continue;
+        const sessionId = String(record.sessionId || "").trim();
+        const stoppedAt = String(record.stoppedAt || "").trim();
         if (sessionId && stoppedAt) this.locks.set(sessionId, { sessionId, stoppedAt });
       }
-    } catch (error: any) {
-      if (error?.code !== "ENOENT") {
-        console.warn(`[StopLock] Failed to load ${this.filePath}: ${error?.message || error}`);
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOENT") {
+        console.warn(`[StopLock] Failed to load ${this.filePath}: ${errorMessage(error)}`);
       }
     }
   }

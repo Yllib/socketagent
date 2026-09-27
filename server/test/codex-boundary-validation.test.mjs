@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import './test-data-dir.js';
-import { CodexAppServerClient } from '../dist/codex-app-server-client.js';
-import { codexRewindTarget, rewindCodexConversation, isCodexRewinding } from '../dist/codex-conversation-rewind.js';
-import { parseRewindPage } from '../dist/codex-rewind-contract.js';
-import { appendHistory, getHistory } from '../dist/session-store.js';
+import { CodexAppServerClient } from '#server/codex-app-server-client';
+import { codexRewindTarget, rewindCodexConversation, isCodexRewinding } from '#server/codex-conversation-rewind';
+import { parseRewindPage } from '#server/codex-rewind-contract';
+import { appendHistory, getHistory } from '#server/session-store';
 
 test('rewind rejects malformed native turns and text instead of guessing a target', () => {
   const target = { uuid: 'target', content: 'prompt' };

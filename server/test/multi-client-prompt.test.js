@@ -2,8 +2,8 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 require("./test-data-dir");
 
-const { ClaudeSession } = require("../dist/claude-session");
-const { recordUserPrompt, getHistory } = require("../dist/session-store");
+const { ClaudeSession } = require("#server/claude-session");
+const { recordUserPrompt, getHistory } = require("#server/session-store");
 
 function testSocket(sent) {
   return {

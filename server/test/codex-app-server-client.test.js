@@ -6,8 +6,8 @@ const {
   CodexAppServerClient,
   CodexAppServerRequestTimeoutError,
   CodexAppServerProtocolError,
-} = require("../dist/codex-app-server-client");
-const { isTimedOutCodexThreadResume } = require("../dist/codex-session");
+} = require("#server/codex-app-server-client");
+const { isTimedOutCodexThreadResume } = require("#server/codex-session");
 
 const echoServer = String.raw`
 process.stdin.setEncoding("utf8");

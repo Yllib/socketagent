@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { execFileSync } = require("node:child_process");
 
-const { serverReleaseVersionFor, SERVER_RELEASE_VERSION } = require("../dist/server-build-info");
+const { serverReleaseVersionFor, SERVER_RELEASE_VERSION } = require("#server/server-build-info");
 
 // The patch number is read off a list of many connected machines to see which
 // have updated, so it has to advance on its own. A hand-bumped one is stale

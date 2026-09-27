@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { LatestSnapshotDispatcher } = require("../dist/latest-snapshot-dispatcher");
+const { LatestSnapshotDispatcher } = require("#server/latest-snapshot-dispatcher");
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

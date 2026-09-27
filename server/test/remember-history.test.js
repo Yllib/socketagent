@@ -14,8 +14,8 @@ const {
   getHistoryPage,
   rememberHistoryContext,
   rememberSearchHistory,
-} = require("../dist/session-store");
-const { handleRememberTool } = require("../dist/app-tool-handlers");
+} = require("#server/session-store");
+const { handleRememberTool } = require("#server/app-tool-handlers");
 
 test.after(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });

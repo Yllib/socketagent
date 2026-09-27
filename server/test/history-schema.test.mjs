@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseHistoryEntry, parseHistoryEntries } from '../dist/history-schema.js';
+import { parseHistoryEntry, parseHistoryEntries } from '#server/history-schema';
 
 test('legacy rollback system notes remain readable as notifications', () => {
   assert.deepEqual(parseHistoryEntry({ role: 'system', content: 'Rolled back 1 Codex turn', timestamp: 'old' }),

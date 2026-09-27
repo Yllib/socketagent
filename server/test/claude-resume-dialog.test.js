@@ -1,6 +1,6 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {handleClaudeResumeDialog,resumeQuestion}=require('../dist/claude-resume-dialog');
+const {handleClaudeResumeDialog,resumeQuestion}=require('#server/claude-resume-dialog');
 const request={dialogKind:'resume_return',payload:{}};
 test('resume blocks until an explicit supported choice and returns the native result',async()=>{
   let answer;
@@ -26,8 +26,8 @@ test('custom text does not silently compact; abort never becomes a continue choi
 
 test('resume choice persists even when the native session init has not arrived yet',async()=>{
   require('./test-data-dir');
-  const {ClaudeSession}=require('../dist/claude-session');
-  const {appendHistory,getHistory}=require('../dist/session-store');
+  const {ClaudeSession}=require('#server/claude-session');
+  const {appendHistory,getHistory}=require('#server/session-store');
   const sid='resume-before-native-init';
   const session=new ClaudeSession({readyState:1,send(){}},process.cwd(),[]);
   const message={type:'question',questionId:'resume_context_early',sessionId:sid,questions:[resumeQuestion]};

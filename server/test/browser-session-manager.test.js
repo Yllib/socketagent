@@ -10,7 +10,7 @@ const {
   normalizeBrowserUrl,
   removeStaleBrowserControlFile,
   resolveBrowserBinary,
-} = require("../dist/browser-session-manager");
+} = require("#server/browser-session-manager");
 test("browser navigation permits normal cross-domain and local HTTP URLs", () => {
   assert.equal(
     normalizeBrowserUrl("https://accounts.google.com/signin?continue=https%3A%2F%2Fplay.google.com"),

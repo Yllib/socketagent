@@ -1,3 +1,4 @@
+const { parseServerMessage } = require("#server/server-message");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -15,25 +16,27 @@ const {
   filterClaudePhoneCommands,
   formatClaudeQueryError,
   isLiveClaudeUserEcho,
-} = require("../dist/claude-session");
+} = require("#server/claude-session");
 const {
   CodexSession,
   codexAgentMessagePhase,
   codexThreadGitInfo,
-} = require("../dist/codex-session");
+} = require("#server/codex-session");
 const {
   appendHistory,
   deleteSessionArtifacts,
   getHistory,
   getSession,
   saveSession,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
+/** @param {import("#server/protocol").ServerMessage[]} sent
+ * @returns {import("#server/client-transport").ClientTransport} */
 function testSocket(sent) {
   return {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
 }
@@ -92,6 +95,7 @@ test("keeps Claude task tools required by the SocketAgent task pane explicit", (
 });
 
 test("hides ambient Claude tasks and preserves foreground task metadata", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const sessionId = `claude-task-flags-${crypto.randomUUID()}`;
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
@@ -131,6 +135,7 @@ test("hides ambient Claude tasks and preserves foreground task metadata", () => 
 });
 
 test("surfaces Codex async questions and authentication recovery", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const sessionId = `codex-new-events-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -187,6 +192,7 @@ test("surfaces Codex async questions and authentication recovery", () => {
 });
 
 test("restores Codex thread settings and keeps interactive tools enabled", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const sessionId = `codex-thread-settings-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -250,6 +256,7 @@ test("reports useful Claude spawn details without exposing raw arguments", () =>
 });
 
 test("retracts superseded Claude messages from durable and live history", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const sessionId = `claude-retraction-${crypto.randomUUID()}`;
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
@@ -289,6 +296,7 @@ test("retracts superseded Claude messages from durable and live history", () => 
 });
 
 test("remaps a Claude conversation reset without losing session metadata", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const oldId = `claude-reset-old-${crypto.randomUUID()}`;
   const newId = `claude-reset-new-${crypto.randomUUID()}`;
@@ -332,6 +340,7 @@ test("remaps a Claude conversation reset without losing session metadata", () =>
 });
 
 test("preserves Codex agent message phase and resolves cleared questions", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const sessionId = `codex-phase-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);

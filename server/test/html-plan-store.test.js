@@ -18,13 +18,13 @@ const {
   validateHtmlPlan,
   saveHtmlPlan,
   rollbackHtmlPlan,
-} = require("../dist/html-plan-store");
+} = require("#server/html-plan-store");
 const {
   appendHistory,
   getHistory,
   removeHtmlPlanHistoryEntries,
   updateHtmlPlanHistoryEntry,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 

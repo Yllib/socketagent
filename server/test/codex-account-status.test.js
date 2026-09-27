@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const {CodexSession} = require('../dist/codex-session');
-const {CodexAppServerClient} = require('../dist/codex-app-server-client');
+const {CodexSession} = require('#server/codex-session');
+const {CodexAppServerClient} = require('#server/codex-app-server-client');
 
 test('account payload preserves real quota windows, reset credits, and unknown usage', async () => {
   const session = new CodexSession({readyState:1,send(){}}, '/tmp');

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {DatabaseSync} = require('node:sqlite');
-const {TranscriptDatabase} = require('../dist/transcript-database');
+const {TranscriptDatabase} = require('#server/transcript-database');
 const entry = (seq, content, role = 'user') => ({entryId:`e${seq}`, sessionSeq:seq, revision:2,
  role, uuid:`u${seq}`, content, timestamp:`2026-09-22T10:00:0${seq}Z`});
 for (const disableFts of [false, true]) {

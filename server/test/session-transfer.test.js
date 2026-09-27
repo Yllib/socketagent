@@ -22,17 +22,17 @@ const {
   saveSession,
   saveTodos,
   appendSdkEvent,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 const {
   deleteHtmlPlansForSession,
   listHtmlPlanRevisions,
   listHtmlPlans,
   saveHtmlPlan,
-} = require("../dist/html-plan-store");
+} = require("#server/html-plan-store");
 const {
   exportSessionTransfer,
   importSessionTransfer,
-} = require("../dist/session-transfer");
+} = require("#server/session-transfer");
 
 test.after(() => fs.rmSync(testHome, { recursive: true, force: true }));
 

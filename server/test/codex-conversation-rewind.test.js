@@ -1,9 +1,9 @@
 const assert=require('node:assert/strict');
 const test=require('node:test');
 require('./test-data-dir');
-const {codexRewindTarget,rewindCodexConversation,isCodexRewinding}=require('../dist/codex-conversation-rewind');
-const {appendHistory,getHistory,rememberSearchAllHistory}=require('../dist/session-store');
-const {codexRolloutJsonlToHistory}=require('../dist/codex-native-history');
+const {codexRewindTarget,rewindCodexConversation,isCodexRewinding}=require('#server/codex-conversation-rewind');
+const {appendHistory,getHistory,rememberSearchAllHistory}=require('#server/session-store');
+const {codexRolloutJsonlToHistory}=require('#server/codex-native-history');
 const turn=(id,uuid,text)=>({id,items:[{type:'userMessage',id:'item-'+id,clientId:uuid,content:[{type:'text',text}]}]});
 
 test('rewind maps client ID to native turns, including repeated prompts and automatic turns',()=>{
@@ -94,7 +94,7 @@ test('paginated verification failure retains SocketAgent history', async () => {
 });
 
 test('rewind avoids full transcript hydration and invalidates cached positions', async () => {
- const {TranscriptDatabase}=require('../dist/transcript-database');
+ const {TranscriptDatabase}=require('#server/transcript-database');
  const sid='rewind-indexed';
  const old=appendHistory(sid,{role:'user',uuid:'u1',content:'keep',timestamp:'2026-09-22T10:00:00Z'});
  const removed=appendHistory(sid,{role:'user',uuid:'u2',content:'drop',timestamp:'2026-09-22T10:00:01Z'});
@@ -112,8 +112,8 @@ test('rewind avoids full transcript hydration and invalidates cached positions',
 });
 
 test('rewind errors keep protocol method dumps out of the chat banner', () => {
- const {codexRewindErrorMessage}=require('../dist/codex-conversation-rewind');
- const {CodexAppServerProtocolError}=require('../dist/codex-app-server-client');
+ const {codexRewindErrorMessage}=require('#server/codex-conversation-rewind');
+ const {CodexAppServerProtocolError}=require('#server/codex-app-server-client');
  const detail='Invalid request: unknown variant `thread/rollback`, expected '+('method,'.repeat(1000));
  const error=new CodexAppServerProtocolError('thread/rollback',{code:-32600,message:detail},detail);
  assert.match(codexRewindErrorMessage(error),/does not support/);
@@ -124,7 +124,7 @@ test('rewind errors keep protocol method dumps out of the chat banner', () => {
 });
 
 test('rewind maintenance does not emit agent activity, raw transcript events or transient errors', () => {
- const {CodexSession}=require('../dist/codex-session');
+ const {CodexSession}=require('#server/codex-session');
  const sent=[];
  const session=new CodexSession({readyState:1,send:raw=>sent.push(JSON.parse(raw))},'/tmp');
  session.sessionId=session.threadId='rewind-maintenance';

@@ -6,8 +6,8 @@ import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { importSessionTransfer } from '../dist/session-transfer.js';
-import { getSession } from '../dist/session-store.js';
+import { importSessionTransfer } from '#server/session-transfer';
+import { getSession } from '#server/session-store';
 
 test('a checksummed bundle with malformed nested data is rejected before importing', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'socketagent-invalid-transfer-'));

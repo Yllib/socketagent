@@ -14,7 +14,7 @@ const {
   getCachedRateLimitEvents,
   recordRateLimitEvent,
   resetRateLimitCacheForTests,
-} = require("../dist/rate-limit-cache");
+} = require("#server/rate-limit-cache");
 
 test.after(() => {
   fs.rmSync(testDir, { recursive: true, force: true });

@@ -1,3 +1,4 @@
+const { z } = require("zod");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -10,7 +11,7 @@ process.env.SOCKET_AGENT_DATA_DIR = dataDir;
 const {
   handleWorkReviewTool,
   publishWorkReviewCard,
-} = require("../dist/app-tool-handlers");
+} = require("#server/app-tool-handlers");
 const {
   archiveWorkReview,
   cancelWorkReview,
@@ -18,32 +19,46 @@ const {
   getWorkReviewClientSnapshot,
   restoreWorkReview,
   updateWorkReviewDraft,
-} = require("../dist/work-review-service");
+} = require("#server/work-review-service");
 const {
   appendHistory,
   getHistory,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 const {
   WorkReviewResultDeliveryStore,
-} = require("../dist/work-review-delivery-store");
+} = require("#server/work-review-delivery-store");
 const {
   buildWorkReviewResultPrompt,
   deliverWorkReviewToSession,
-} = require("../dist/work-review-result-route");
-const { saveHtmlPlan } = require("../dist/html-plan-store");
+} = require("#server/work-review-result-route");
+const { saveHtmlPlan } = require("#server/html-plan-store");
 
 test.after(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
+/** @param {Awaited<ReturnType<typeof handleWorkReviewTool>>} result
+ * @returns {unknown} */
 function parseToolResult(result) {
   assert.equal(result.isError, undefined);
   return JSON.parse(result.content[0].text);
 }
 
+/** @param {Awaited<ReturnType<typeof handleWorkReviewTool>>} result */
+function parseCreatedReview(result) {
+  return z.object({
+    review: z.object({ reviewId: z.string(), cardId: z.string(),
+      rounds: z.array(z.object({ linkedHtmlPlanId: z.string().optional() })),
+    }),
+    card: z.object({ entryId: z.string(), sessionSeq: z.number(), revision: z.number() }),
+  }).parse(parseToolResult(result));
+}
+
 test("WorkReview keeps draft feedback private and upserts one stable history card", async () => {
   const sessionId = "review-origin-session";
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/app-tool-handlers").AppToolContext} */
   const ctx = {
     getSessionId: () => sessionId,
     getBackend: () => "codex",
@@ -54,7 +69,7 @@ test("WorkReview keeps draft feedback private and upserts one stable history car
     send: (message) => sent.push(message),
   };
 
-  const created = parseToolResult(await handleWorkReviewTool(ctx, {
+  const created = parseCreatedReview(await handleWorkReviewTool(ctx, {
     action: "create",
     idempotency_key: "integration-create-1",
     title: "Inspect the deployed change",
@@ -144,14 +159,16 @@ test("WorkReview keeps draft feedback private and upserts one stable history car
 
 test("silent lifecycle changes revise one durable phone card without draft content", async () => {
   const sessionId = "review-lifecycle-session";
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/app-tool-handlers").AppToolContext} */
   const ctx = {
     getSessionId: () => sessionId,
     getBackend: () => "claude",
     appendHistory: (entry) => appendHistory(sessionId, entry),
     send: (message) => sent.push(message),
   };
-  const created = parseToolResult(await handleWorkReviewTool(ctx, {
+  const created = parseCreatedReview(await handleWorkReviewTool(ctx, {
     action: "create",
     idempotency_key: "integration-lifecycle-1",
     title: "Lifecycle review",
@@ -195,7 +212,9 @@ test("silent lifecycle changes revise one durable phone card without draft conte
 
 test("WorkReview embeds one same-session HTML plan for anchored item decisions", async () => {
   const sessionId = "linked-plan-review-session";
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/app-tool-handlers").AppToolContext} */
   const ctx = {
     getSessionId: () => sessionId,
     getBackend: () => "codex",
@@ -208,7 +227,7 @@ test("WorkReview embeds one same-session HTML plan for anchored item decisions",
     title: "Feedback queue",
     html: '<section id="ticket-699"><h2>Ticket 699</h2></section>',
   });
-  const created = parseToolResult(await handleWorkReviewTool(ctx, {
+  const created = parseCreatedReview(await handleWorkReviewTool(ctx, {
     action: "create",
     idempotency_key: "linked-plan-review-create",
     linked_html_plan_id: plan.planId,
@@ -223,8 +242,12 @@ test("WorkReview embeds one same-session HTML plan for anchored item decisions",
   const card = getHistory(sessionId).find((entry) => entry.role === "work_review");
   assert.equal(created.review.rounds[0].linkedHtmlPlanId, plan.planId);
   assert.equal(card.workReview.linkedHtmlPlan.planId, plan.planId);
-  assert.match(card.workReview.linkedHtmlPlan.html, /ticket-699/);
-  assert.equal(card.workReview.items[0].primaryTarget.kind, "html_plan");
+  const display = z.object({
+    linkedHtmlPlan: z.object({ html: z.string() }),
+    items: z.array(z.object({ primaryTarget: z.object({ kind: z.string() }) })),
+  }).parse(card.workReview);
+  assert.match(display.linkedHtmlPlan.html, /ticket-699/);
+  assert.equal(display.items[0].primaryTarget.kind, "html_plan");
   assert.equal(JSON.stringify(card).match(/<section/g).length, 1);
 
   const missing = await handleWorkReviewTool(ctx, {
@@ -272,11 +295,13 @@ test("Work Review result outbox persists compact pending records and delivered t
 });
 
 test("Claude and Codex delivery paths propagate resultId as the message identity", async () => {
+  /** @type {unknown[][]} */
   const calls = [];
+  /** @type {Parameters<typeof deliverWorkReviewToSession>[0]} */
   const session = {
-    injectMessage: async (...args) => calls.push(["inject", ...args]),
-    runQuery: async (...args) => calls.push(["claude", ...args]),
-    runQueryWithOptions: async (...args) => calls.push(["codex", ...args]),
+    injectMessage: async (/** @type {Parameters<import("#server/claude-session").ClaudeSession["injectMessage"]>} */ ...args) => { calls.push(["inject", ...args]); },
+    runQuery: async (/** @type {Parameters<import("#server/claude-session").ClaudeSession["runQuery"]>} */ ...args) => { calls.push(["claude", ...args]); },
+    runQueryWithOptions: async (...args) => { calls.push(["codex", ...args]); },
   };
   await deliverWorkReviewToSession(
     session, "claude", "result text", "origin-claude", "result-claude", false,

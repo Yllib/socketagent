@@ -1,3 +1,4 @@
+const { parseServerMessage } = require("#server/server-message");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const test = require("node:test");
@@ -6,14 +7,14 @@ require("./test-data-dir");
 const {
   prepareCodexMcpElicitation,
   resolveCodexMcpElicitation,
-} = require("../dist/codex-elicitation");
-const { CodexSession } = require("../dist/codex-session");
+} = require("#server/codex-elicitation");
+const { CodexSession } = require("#server/codex-session");
 const {
   deleteSession,
   deleteSessionArtifacts,
   getSession,
   saveSession,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test("maps current Codex form elicitations to typed MCP content", () => {
   const prepared = prepareCodexMcpElicitation({
@@ -91,11 +92,13 @@ test("uses an explicit approval question when an openai form has no properties",
 });
 
 test("holds an app-server elicitation until the routed SocketAgent answer arrives", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/client-transport").ClientTransport} */
   const socket = {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);
@@ -130,11 +133,13 @@ test("holds an app-server elicitation until the routed SocketAgent answer arrive
 });
 
 test("routes native Codex request_user_input questions and restores question ids", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/client-transport").ClientTransport} */
   const socket = {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);
@@ -194,11 +199,13 @@ function githubApprovalRequest() {
 
 test("offers and remembers connected-app approval for the SocketAgent session", async () => {
   const sessionId = `test-connected-app-${crypto.randomUUID()}`;
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/client-transport").ClientTransport} */
   const socket = {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);
@@ -253,11 +260,13 @@ test("offers and remembers connected-app approval for the SocketAgent session", 
 });
 
 test("Super Yolo auto-accepts GitHub connected-app confirmations", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/client-transport").ClientTransport} */
   const socket = {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);
@@ -273,11 +282,13 @@ test("Super Yolo auto-accepts GitHub connected-app confirmations", async () => {
 });
 
 test("switching to Super Yolo accepts an already pending GitHub confirmation", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/client-transport").ClientTransport} */
   const socket = {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);
@@ -296,11 +307,13 @@ test("switching to Super Yolo accepts an already pending GitHub confirmation", a
 });
 
 test("Super Yolo also auto-accepts GitHub MCP elicitation confirmations", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/client-transport").ClientTransport} */
   const socket = {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);

@@ -13,7 +13,7 @@ const {
   scheduledTaskCanArchive,
   setScheduledTaskArchiveState,
   setScheduledTaskReadState,
-} = require("../dist/scheduled-task-store");
+} = require("#server/scheduled-task-store");
 
 function scheduledTask(overrides = {}) {
   return {

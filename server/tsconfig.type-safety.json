@@ -4,8 +4,26 @@
     "allowJs": true,
     "checkJs": false,
     "noEmit": true,
-    "rootDir": "."
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "#server/*": [
+        "src/*"
+      ]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.mts", "test/**/*.js", "test/**/*.mjs", "scripts/**/*.js", "scripts/**/*.mjs", "eslint.config.mjs"],
-  "exclude": ["node_modules", "dist", "plugins"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.mts",
+    "test/**/*.js",
+    "test/**/*.mjs",
+    "scripts/**/*.js",
+    "scripts/**/*.mjs",
+    "eslint.config.mjs"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "plugins"
+  ]
 }

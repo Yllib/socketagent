@@ -4,7 +4,7 @@ const test = require("node:test");
 const {
   classifyBubblewrapProbe,
   getCodexLinuxSandboxHealth,
-} = require("../dist/codex-linux-sandbox");
+} = require("#server/codex-linux-sandbox");
 
 test("Codex Bubblewrap health is Linux-only", () => {
   assert.equal(

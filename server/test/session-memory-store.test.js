@@ -17,9 +17,9 @@ const {
   shouldRolloverSessionMemory,
   updateSessionMemorySettings,
   upsertSessionMemoryEntry,
-} = require("../dist/session-memory-store");
-const { handleSessionMemoryTool } = require("../dist/app-tool-handlers");
-const { appendHistory } = require("../dist/session-store");
+} = require("#server/session-memory-store");
+const { handleSessionMemoryTool } = require("#server/app-tool-handlers");
+const { appendHistory } = require("#server/session-store");
 
 test.after(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });

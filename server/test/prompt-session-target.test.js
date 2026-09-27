@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { promptNeedsSessionRebind } = require("../dist/prompt-session-target");
+const { promptNeedsSessionRebind } = require("#server/prompt-session-target");
 
 const OPEN = "064cb7b0-0696-43d9-8726-01f4866a8eea";
 const OTHER = "756baf17-9f8e-46c5-bedb-bf7282485fe8";

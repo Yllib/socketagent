@@ -1476,7 +1476,7 @@ export async function handleScheduleTaskTool(
     cwd: args.cwd,
     backend,
     ...(backend === "codex"
-      ? { codexDriver: "app-server" as CodexDriver }
+      ? { codexDriver: "app-server" as const }
       : {}),
     ...(args.model?.trim() ? { model: args.model.trim() } : {}),
     ...(args.effort ? { effort: args.effort } : {}),
@@ -1726,7 +1726,7 @@ export async function handleSessionMemoryTool(
     };
   }
   try {
-    let state;
+    let state: ReturnType<typeof getSessionMemoryState>;
     switch (args.action) {
       case "list":
         state = getSessionMemoryState(sessionId);

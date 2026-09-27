@@ -4,7 +4,7 @@ const test = require("node:test");
 const {
   createClaudeContinuationMessages,
   formatClaudeBoundaryContext,
-} = require("../dist/claude-session");
+} = require("#server/claude-session");
 
 test("formats injected messages as context rather than a cancellation", () => {
   const context = formatClaudeBoundaryContext([

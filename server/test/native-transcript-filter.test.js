@@ -6,7 +6,7 @@ const {
   isWarmupMessage,
   isUnusableSessionPreview,
   isBareSlashCommand,
-} = require("../dist/native-transcript-filter");
+} = require("#server/native-transcript-filter");
 
 // Verbatim from a /usage transcript in ~/.claude/projects. Both user messages
 // in the file look like real prompts to a scan that only checks for one.
@@ -58,8 +58,8 @@ const {
   isLocalCommandOnlySession,
   isLocalCommandOnlyEntry,
   listedPreview,
-} = require("../dist/native-transcript-filter");
-const { mergeSessionListBase } = require("../dist/session-list-snapshot");
+} = require("#server/native-transcript-filter");
+const { mergeSessionListBase } = require("#server/session-list-snapshot");
 
 const commandBlock = (name) =>
   `<command-name>/${name}</command-name>\n  <command-message>${name}</command-message>`;

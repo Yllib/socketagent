@@ -5,7 +5,7 @@ const {
   isClaudeWorkflowLaunchOutput,
   sanitizeClaudeWorkflowState,
   workflowStatePathForLaunch,
-} = require("../dist/claude-session");
+} = require("#server/claude-session");
 
 test("recognizes a Claude Workflow launch and derives its durable state file", () => {
   const launch = {

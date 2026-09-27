@@ -1,4 +1,4 @@
-import type { Session } from "./codex-session";
+import type { CodexSession, Session } from "./codex-session";
 import type { WorkReviewAgentView, WorkReviewPublishedResult } from "./work-review-types";
 
 /**
@@ -6,8 +6,11 @@ import type { WorkReviewAgentView, WorkReviewPublishedResult } from "./work-revi
  * transcript message identity. The caller is responsible for exact-session
  * lookup; this helper deliberately accepts the already-selected session.
  */
+type WorkReviewDeliverySession = Pick<Session, "injectMessage" | "runQuery">
+  & Partial<Pick<CodexSession, "runQueryWithOptions">>;
+
 export async function deliverWorkReviewToSession(
-  session: Session,
+  session: WorkReviewDeliverySession,
   backend: "claude" | "codex",
   text: string,
   originSessionId: string,
@@ -19,7 +22,7 @@ export async function deliverWorkReviewToSession(
     return;
   }
   if (backend === "codex") {
-    if (!("runQueryWithOptions" in session)) throw new Error("Work Review backend does not match its session");
+    if (typeof session.runQueryWithOptions !== "function") throw new Error("Work Review backend does not match its session");
     await session.runQueryWithOptions(text, originSessionId, {
       messageId: resultId,
     });

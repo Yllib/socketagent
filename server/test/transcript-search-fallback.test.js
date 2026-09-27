@@ -4,7 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { TranscriptDatabase } = require("../dist/transcript-database");
+const { TranscriptDatabase } = require("#server/transcript-database");
 
 test("portable transcript search works when SQLite has no FTS5 module", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-search-fallback-"));

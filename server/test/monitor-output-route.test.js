@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const {
   routeMonitorOutputToSession,
-} = require("../dist/monitor-output-route");
+} = require("#server/monitor-output-route");
 
 function fakeSession(id, running = false) {
   return {

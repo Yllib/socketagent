@@ -1,3 +1,7 @@
+import type { AgentInfo, SDKControlGetContextUsageResponse, SDKFilesPersistedEvent, SDKSessionStateChangedMessage, SDKSystemMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { CodexSubagentStatus } from "./codex-subagent-state";
+import type { TurnPlanStep } from "./generated/codex/types/v2/TurnPlanStep";
+import type { ScheduledTask } from "./scheduled-task-store";
 import type { ReasoningEffort } from "./generated/codex/types/ReasoningEffort";
 import { isRecord } from "./value-guards";
 
@@ -1344,9 +1348,9 @@ export interface ToolStderrServerMessage {
 export interface SessionInitServerMessage {
   type: "session_init";
   sessionId: string;
-  agents?: import("@anthropic-ai/claude-agent-sdk").SDKSystemMessage["agents"];
-  tools?: import("@anthropic-ai/claude-agent-sdk").SDKSystemMessage["tools"];
-  mcpServers?: import("@anthropic-ai/claude-agent-sdk").SDKSystemMessage["mcp_servers"];
+  agents?: SDKSystemMessage["agents"];
+  tools?: SDKSystemMessage["tools"];
+  mcpServers?: SDKSystemMessage["mcp_servers"];
   model?: string;
   claudeCodeVersion?: string;
   permissionMode?: string;
@@ -1360,14 +1364,14 @@ export interface SupportedCommandsServerMessage {
 
 export interface SupportedAgentsServerMessage {
   type: "supported_agents";
-  agents: import("@anthropic-ai/claude-agent-sdk").AgentInfo[];
+  agents: AgentInfo[];
   sessionId: string;
 }
 
 export interface FilesPersistedServerMessage {
   type: "files_persisted";
-  files: import("@anthropic-ai/claude-agent-sdk").SDKFilesPersistedEvent["files"];
-  failed: import("@anthropic-ai/claude-agent-sdk").SDKFilesPersistedEvent["failed"];
+  files: SDKFilesPersistedEvent["files"];
+  failed: SDKFilesPersistedEvent["failed"];
   sessionId: string;
 }
 
@@ -1411,7 +1415,7 @@ export interface SubagentResultServerMessage {
   parentToolUseId: string;
   content: string;
   sessionId: string;
-  subagentStatus?: import("./codex-subagent-state").CodexSubagentStatus;
+  subagentStatus?: CodexSubagentStatus;
   costUsd?: number;
   durationMs?: number;
   numTurns?: number;
@@ -1428,7 +1432,7 @@ export interface PermissionModeChangedServerMessage {
 
 export interface SessionStateChangedServerMessage {
   type: "session_state_changed";
-  state: import("@anthropic-ai/claude-agent-sdk").SDKSessionStateChangedMessage["state"];
+  state: SDKSessionStateChangedMessage["state"];
   sessionId: string;
   activeStartedAt?: string;
 }
@@ -1437,7 +1441,7 @@ export interface CodexPlanServerMessage {
   type: "codex_plan";
   turnId: string;
   explanation: string;
-  plan: import("./generated/codex/types/v2/TurnPlanStep").TurnPlanStep[];
+  plan: TurnPlanStep[];
   sessionId: string;
 }
 
@@ -1465,7 +1469,7 @@ export interface SdkEventServerMessage {
 }
 
 export type ContextUsage =
-  | import("@anthropic-ai/claude-agent-sdk").SDKControlGetContextUsageResponse
+  | SDKControlGetContextUsageResponse
   | CodexContextUsage;
 
 export type ContextUsageServerMessage = ContextUsage & {
@@ -2577,13 +2581,13 @@ export interface ActiveSubagentsServerMessage {
 
 export interface ScheduledTaskListServerMessage {
   type: "scheduled_task_list";
-  tasks: import("./scheduled-task-store").ScheduledTask[];
+  tasks: ScheduledTask[];
   revision?: string;
 }
 
 export interface ScheduledTaskUpdateServerMessage {
   type: "scheduled_task_update";
-  task: import("./scheduled-task-store").ScheduledTask;
+  task: ScheduledTask;
 }
 
 export interface ScheduledTaskNotificationServerMessage {

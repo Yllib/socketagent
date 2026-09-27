@@ -5,7 +5,7 @@ const {
   completionTranscriptTarget,
   SessionPushRunTracker,
   sessionPushEventId,
-} = require("../dist/session-push-state");
+} = require("#server/session-push-state");
 
 test("one session run can claim its completion only once", () => {
   const tracker = new SessionPushRunTracker();

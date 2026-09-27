@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const {CodexSession, getCodexAvailability} = require('../dist/codex-session');
+const {CodexSession, getCodexAvailability} = require('#server/codex-session');
 
 test('review sessions need no provider executable and identify their simulated model', async () => {
   const previous = process.env.SOCKETAGENT_PLAY_REVIEW_MODE;

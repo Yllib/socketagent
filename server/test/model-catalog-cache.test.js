@@ -20,9 +20,9 @@ const {
   invalidateCachedModelCatalog,
   modelCatalogIsFresh,
   saveCachedModelCatalog,
-} = require("../dist/model-catalog-store");
-const { ClaudeSession } = require("../dist/claude-session");
-const { CodexSession } = require("../dist/codex-session");
+} = require("#server/model-catalog-store");
+const { ClaudeSession } = require("#server/claude-session");
+const { CodexSession } = require("#server/codex-session");
 
 function testSocket(sent) {
   return {

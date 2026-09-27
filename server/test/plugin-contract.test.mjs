@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { parseSocketAgentPlugin } from '../dist/plugin-contract.js';
+import { parseSocketAgentPlugin } from '#server/plugin-contract';
 
 test('plugin contracts preserve hook binding and validate dynamic results', async () => {
   const implementation = {
@@ -24,7 +24,7 @@ test('plugin contracts preserve hook binding and validate dynamic results', asyn
 });
 
 test('plugin contracts reject malformed approval results', async () => {
-  /** @type {import('../dist/plugin-api.js').SessionContext} */
+  /** @type {import('#server/plugin-api').SessionContext} */
   const ctx = {
     sessionId: 's1', cwd: '/project', send() {}, appendHistory() {},
     pendingQuestions: new Map(), questionCounter: { next: () => 'q1' },

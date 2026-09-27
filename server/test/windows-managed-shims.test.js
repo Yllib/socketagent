@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { repairWindowsManagedShims } = require('../dist/windows-managed-shims');
+const { repairWindowsManagedShims } = require('#server/windows-managed-shims');
 test('restricted PowerShell repair removes only managed npm shims with cmd alternatives', () => {
   const prefix = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-shims-'));
   try {

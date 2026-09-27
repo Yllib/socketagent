@@ -1,3 +1,4 @@
+import { errorCode as readErrorCode } from "./value-guards";
 import { spawnSync, SpawnSyncReturns } from "child_process";
 
 export interface CodexLinuxSandboxHealth {
@@ -28,7 +29,7 @@ export function classifyBubblewrapProbe(
 ): CodexLinuxSandboxHealth | null {
   if (platform !== "linux") return null;
 
-  const errorCode = (probe.error as NodeJS.ErrnoException | undefined)?.code;
+  const errorCode = readErrorCode(probe.error);
   if (errorCode === "ENOENT") {
     return {
       available: false,

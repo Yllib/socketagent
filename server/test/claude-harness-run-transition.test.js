@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { claudeHarnessRunTransition } = require("../dist/claude-session");
+const { claudeHarnessRunTransition } = require("#server/claude-session");
 
 test("a harness that wakes itself up starts a tracked run", () => {
   // Background task or subagent finished: no prompt, but Claude is working.

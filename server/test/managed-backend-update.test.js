@@ -6,7 +6,7 @@ const {
   managedBackendCheckIsDue,
   managedBackendSpecsNeedingUpdate,
   parseNpmVersionOutput,
-} = require("../dist/managed-backend-update");
+} = require("#server/managed-backend-update");
 
 test("checks managed backends on an elapsed cadence instead of once per git commit", () => {
   const hour = 60 * 60 * 1000;
@@ -58,7 +58,7 @@ test("maps changed managed packages to the model catalogs they invalidate", () =
 });
 
 test('repeated update triggers share one retry deadline instead of multiplying chains', t => {
-  const { ManagedBackendRetry } = require('../dist/managed-backend-update');
+  const { ManagedBackendRetry } = require('#server/managed-backend-update');
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
   const retry = new ManagedBackendRetry();
   let calls = 0;

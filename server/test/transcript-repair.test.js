@@ -1,8 +1,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { createInteractiveRequestId } = require("../dist/interactive-request-id");
-const { repairTranscriptIdentityCollisions } = require("../dist/transcript-repair");
+const { createInteractiveRequestId } = require("#server/interactive-request-id");
+const { repairTranscriptIdentityCollisions } = require("#server/transcript-repair");
 
 test("interactive request ids remain unique across reconstructed callers", () => {
   const ids = new Set(Array.from({ length: 100 }, () => createInteractiveRequestId("codex_elicit")));

@@ -4,7 +4,7 @@ const test = require("node:test");
 const {
   RESTART_CONTINUATION_PROMPT,
   isRestartContinuationPrompt,
-} = require("../dist/restart-recovery");
+} = require("#server/restart-recovery");
 
 // The prompt reached the transcript as a user bubble, bracket tag and all,
 // because runQuery persists whatever prompt it is handed as the user's turn.

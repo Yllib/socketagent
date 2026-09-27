@@ -10,7 +10,7 @@ const {
   isPushConfigured,
   sendPushNotification,
   shouldSendForwardedPush,
-} = require("../dist/push-notifications");
+} = require("#server/push-notifications");
 
 const pushEnvironmentKeys = [
   "FIREBASE_SERVICE_ACCOUNT_JSON",

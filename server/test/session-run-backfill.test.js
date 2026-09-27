@@ -4,7 +4,7 @@ const test = require("node:test");
 const {
   deriveHistoricalRuns,
   extractEngineIntervals,
-} = require("../dist/session-run-backfill");
+} = require("#server/session-run-backfill");
 
 const iso = (seconds) => new Date(Date.UTC(2026, 7, 4, 10, 0, seconds)).toISOString();
 const user = (seconds, content = "Do the work") => ({

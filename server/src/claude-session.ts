@@ -664,7 +664,7 @@ export function claudeTurnCorrelation(message: unknown): ClaudeTurnCorrelation {
     ? record.user_message_uuid.trim()
     : "";
   const all = Array.isArray(record.user_message_uuids)
-    ? record.user_message_uuids
+    ? unknownArray(record.user_message_uuids)
         .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
         .map((value) => value.trim())
     : [];
@@ -677,7 +677,7 @@ export function claudeTurnCorrelation(message: unknown): ClaudeTurnCorrelation {
 
 export function appendClaudeResourceLinks(output: string, value: unknown): string {
   if (!Array.isArray(value)) return output;
-  const links = value
+  const links = unknownArray(value)
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
     .map((item) => {
       const uri = typeof item.uri === "string" ? item.uri.trim() : "";
@@ -1301,7 +1301,7 @@ export class ClaudeSession {
     // Fire and forget — don't await, the SDK will handle it async
     this.activeQuery.stopTask(sdkTaskId).then(() => {
       console.log(`[StopTask] SDK stopped task ${sdkTaskId}`);
-    }).catch(e => {
+    }).catch((e: unknown) => {
       console.error(`[StopTask] SDK error stopping ${sdkTaskId}: ${e}`);
     });
   }
@@ -1397,7 +1397,7 @@ export class ClaudeSession {
             const lineContent = lines.join("\n");
             // Persist one cumulative, revisioned card snapshot so a retry or
             // reconnect can replace state instead of duplicating chunks.
-            let positioned;
+            let positioned: ReturnType<typeof appendHistory> | undefined;
             if (this.sessionId) {
               positioned = appendHistory(this.sessionId, {
                 role: "monitor",
@@ -1460,7 +1460,7 @@ export class ClaudeSession {
 
     // Inject to Claude or start new query (app already gets live output from reader)
     if (this._isRunning && this.activeQuery) {
-      this.injectMessage(text, 'next').catch(e => {
+      this.injectMessage(text, 'next').catch((e: unknown) => {
         console.error(`[Monitor] Inject error: ${e}`);
       });
     } else if (this.onMonitorOutput) {
@@ -1832,7 +1832,7 @@ export class ClaudeSession {
 
   private _retractClaudeMessages(rawUuids: unknown): void {
     if (!Array.isArray(rawUuids)) return;
-    const uuids = [...new Set(rawUuids.map((uuid) => String(uuid || "").trim()).filter(Boolean))];
+    const uuids = [...new Set(unknownArray(rawUuids).map((uuid) => String(uuid || "").trim()).filter(Boolean))];
     if (uuids.length === 0) return;
     const retracted = new Set(uuids);
     for (const [streamId, stream] of this._streamingText) {
@@ -3007,7 +3007,7 @@ export class ClaudeSession {
     this._pendingStaleRecovery = null;
     this._cancelPendingQuestions();
     if (this.activeQuery) {
-      void this.activeQuery.interrupt().catch(error => {
+      void this.activeQuery.interrupt().catch((error: unknown) => {
         this.send({ type: "error", message: `Could not interrupt Claude: ${String(error)}`, sessionId: this.sessionId || "" });
       });
     }
@@ -6144,7 +6144,7 @@ export class ClaudeSession {
       this._pendingStaleRecovery = null;
       if (staleRecovery && !this._stopRequested) {
         const resumeSessionId = this.sessionId || this._resumeSessionId || undefined;
-        void this.runQuery(staleRecovery.prompt, resumeSessionId, staleRecovery.messageId).catch((error) => {
+        void this.runQuery(staleRecovery.prompt, resumeSessionId, staleRecovery.messageId).catch((error: unknown) => {
           console.error(`[Watchdog] Stale-continuation recovery failed: ${error}`);
         });
       }

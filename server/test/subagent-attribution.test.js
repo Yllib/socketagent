@@ -1,3 +1,4 @@
+const { parseServerMessage } = require("#server/server-message");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const crypto = require("node:crypto");
@@ -11,17 +12,17 @@ const {
   isCodexAppServerProcessFailure,
   isRecoverableCodexAppServerError,
   summarizeCodexCommandActions,
-} = require("../dist/codex-session");
+} = require("#server/codex-session");
 const {
   deleteSessionArtifacts,
   deriveClaudeTasksFromHistoryEntries,
   getHistory,
   normalizeMisclassifiedCodexItemEntries,
   normalizeSocketAgentAppToolEntries,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 const {
   handleReportSubagentAssignmentTool,
-} = require("../dist/app-tool-handlers");
+} = require("#server/app-tool-handlers");
 const {
   ClaudeSession,
   claudeAgentRunsInBackground,
@@ -30,18 +31,21 @@ const {
   reduceClaudeTaskTodos,
   replaceClaudeTaskTodos,
   replaceClaudeTodoWriteTodos,
-} = require("../dist/claude-session");
+} = require("#server/claude-session");
 
+/** @param {import('#server/protocol').ServerMessage[]} sent
+ * @returns {import('#server/client-transport').ClientTransport} */
 function testSocket(sent) {
   return {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
 }
 
 test("keeps a Codex turn running through response-stream reconnect notices", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
   session.sessionId = "reconnecting-session";
@@ -77,6 +81,7 @@ test("keeps a Codex turn running through response-stream reconnect notices", () 
 });
 
 test("still rejects a terminal Codex app-server error exactly once", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
   session.sessionId = "terminal-error-session";
@@ -106,6 +111,7 @@ test("still rejects a terminal Codex app-server error exactly once", () => {
 });
 
 test("recycles a systemError app-server and surfaces its detailed error once", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
   session.sessionId = "system-error-session";
@@ -185,6 +191,7 @@ test("stops the warm app-server when thread unsubscribe is unavailable", async (
 });
 
 test("raw Codex SDK events are sent only to subscribed sockets", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const socket = testSocket(sent);
   const session = new CodexSession(socket, process.cwd(), []);
@@ -210,6 +217,7 @@ test("raw Codex SDK events are sent only to subscribed sockets", () => {
 });
 
 test("keeps Codex subagent threads attached to the root session", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-root-${crypto.randomUUID()}`;
   const childId = `test-child-${crypto.randomUUID()}`;
@@ -241,8 +249,7 @@ test("keeps Codex subagent threads attached to the root session", () => {
       delta: "child output",
     });
 
-    const childText = sent.find((message) =>
-      message.type === "text" && message.content === "child output");
+    const childText = sent.filter((message) => message.type === "text").find((message) => message.content === "child output");
     assert.equal(childText.parentToolUseId, childToolUseId);
     assert.equal(childText.streamId, "child-message-1");
 
@@ -257,8 +264,7 @@ test("keeps Codex subagent threads attached to the root session", () => {
       },
     });
 
-    const grandchildCall = sent.find((message) =>
-      message.type === "tool_call" && message.toolUseId === grandchildToolUseId);
+    const grandchildCall = sent.filter((message) => message.type === "tool_call").find((message) => message.toolUseId === grandchildToolUseId);
     assert.equal(grandchildCall.parentToolUseId, childToolUseId);
   } finally {
     fs.rmSync(
@@ -269,6 +275,7 @@ test("keeps Codex subagent threads attached to the root session", () => {
 });
 
 test("attaches Codex v2 subagent assignments to the live card and durable history", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-root-${crypto.randomUUID()}`;
   const childId = `test-child-${crypto.randomUUID()}`;
@@ -291,8 +298,7 @@ test("attaches Codex v2 subagent assignments to the live card and durable histor
       },
     });
 
-    const initialCall = sent.find((message) =>
-      message.type === "tool_call" && message.toolUseId === childToolUseId);
+    const initialCall = sent.filter((message) => message.type === "tool_call").find((message) => message.toolUseId === childToolUseId);
     assert.equal(initialCall.input.prompt, "");
 
     const result = await handleReportSubagentAssignmentTool(
@@ -301,8 +307,7 @@ test("attaches Codex v2 subagent assignments to the live card and durable histor
     );
     assert.equal(result.isError, undefined);
 
-    const calls = sent.filter((message) =>
-      message.type === "tool_call" && message.toolUseId === childToolUseId);
+    const calls = sent.filter((message) => message.type === "tool_call").filter((message) => message.toolUseId === childToolUseId);
     assert.equal(calls.length, 2);
     assert.equal(calls.at(-1).input.prompt, prompt);
 
@@ -351,6 +356,7 @@ test("attaches Codex v2 subagent assignments to the live card and durable histor
 });
 
 test("deduplicates unchanged Codex subagent snapshots but replays one on reconnect", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-root-${crypto.randomUUID()}`;
   const childId = `test-child-${crypto.randomUUID()}`;
@@ -391,7 +397,8 @@ test("deduplicates unchanged Codex subagent snapshots but replays one on reconne
       snapshotsAfterStart,
     );
 
-    const reconnectMessages = [];
+    /** @type {import("#server/protocol").ServerMessage[]} */
+  const reconnectMessages = [];
     session.replayLiveState(testSocket(reconnectMessages));
     const reconnectSnapshots = reconnectMessages.filter(
       (message) => message.type === "active_subagents",
@@ -407,6 +414,7 @@ test("deduplicates unchanged Codex subagent snapshots but replays one on reconne
 });
 
 test("replays concurrent Claude streams with their original parents", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
   session.sessionId = "claude-root";
@@ -429,12 +437,9 @@ test("replays concurrent Claude streams with their original parents", () => {
 
   session.replayLiveState();
 
-  const mainText = sent.find((message) =>
-    message.type === "text" && message.content === "main output");
-  const childText = sent.find((message) =>
-    message.type === "text" && message.content === "child output");
-  const childThinking = sent.find((message) =>
-    message.type === "thinking" && message.content === "child thinking");
+  const mainText = sent.filter((message) => message.type === "text").find((message) => message.content === "main output");
+  const childText = sent.filter((message) => message.type === "text").find((message) => message.content === "child output");
+  const childThinking = sent.filter((message) => message.type === "thinking").find((message) => message.content === "child thinking");
 
   assert.equal(mainText.parentToolUseId, undefined);
   assert.equal(childText.parentToolUseId, "agent-tool-1");
@@ -649,6 +654,7 @@ test("recovers pre-fix Claude task state from durable tool history", () => {
 });
 
 test("reduces Claude task lifecycle events by task and tool identity", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
 
@@ -782,6 +788,7 @@ test("keeps interleaved Claude subagent message streams in separate lanes", () =
 });
 
 test("replays the active Claude tool card for a late-joining client", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
   session.sessionId = "claude-tool-root";
@@ -798,7 +805,9 @@ test("replays the active Claude tool card for a late-joining client", () => {
 });
 
 test("replays an active Codex tool call after reconnect and retires it on completion", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const replayed = [];
   const rootId = `test-tool-replay-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -829,12 +838,13 @@ test("replays an active Codex tool call after reconnect and retires it on comple
       },
     });
 
-    const liveCall = sent.find((message) =>
-      message.type === "tool_call" && message.toolUseId === "command-1");
+    const liveCall = sent.filter((message) => message.type === "tool_call").find((message) => message.toolUseId === "command-1");
     assert.equal(liveCall.input.description, "Search server for test");
     assert.equal(liveCall.input.cwd, "/workspace/socketagent");
     assert.equal(liveCall.input._codexItemType, "commandExecution");
-    assert.equal(liveCall.input.commandActions[0].type, "search");
+    const actions = require("#server/value-guards").unknownArray(liveCall.input.commandActions);
+    assert.ok(require("#server/value-guards").isRecord(actions[0]));
+    assert.equal(actions[0].type, "search");
 
     assert.deepEqual(session.getActiveToolCall(), {
       toolUseId: "command-1",
@@ -875,7 +885,9 @@ test("replays an active Codex tool call after reconnect and retires it on comple
 });
 
 test("idle Codex replay settles orphaned tools instead of moving them to the tail", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const replayed = [];
   const rootId = `test-idle-tool-replay-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -926,6 +938,7 @@ test("summarizes structured Codex command actions with a bounded command fallbac
 });
 
 test("translates every user-visible Codex item family into durable tailored cards", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-codex-items-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -1059,6 +1072,7 @@ test("filters the 1.0.198 known-item diagnostics without hiding future items", (
 });
 
 test("keeps SocketAgent app tools on their native card path", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-codex-native-tool-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -1077,8 +1091,7 @@ test("keeps SocketAgent app tools on their native card path", () => {
       },
     });
 
-    const call = sent.find((message) =>
-      message.type === "tool_call" && message.toolUseId === "send-file-1");
+    const call = sent.filter((message) => message.type === "tool_call").find((message) => message.toolUseId === "send-file-1");
     assert.equal(call.tool, "SendFile");
     assert.deepEqual(call.input, { file_path: "/tmp/app.apk" });
 
@@ -1135,6 +1148,7 @@ test("keeps SocketAgent app tools on their native card path", () => {
 });
 
 test("preserves structured Codex web results for the tailored search card", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-codex-web-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -1167,12 +1181,10 @@ test("preserves structured Codex web results for the tailored search card", () =
       },
     });
 
-    const call = sent.find((message) =>
-      message.type === "tool_call" && message.toolUseId === "web-1");
-    const result = sent.find((message) =>
-      message.type === "tool_result" && message.toolUseId === "web-1");
+    const call = sent.filter((message) => message.type === "tool_call").find((message) => message.toolUseId === "web-1");
+    const result = sent.filter((message) => message.type === "tool_result").find((message) => message.toolUseId === "web-1");
     assert.equal(call.input._codexItemType, "webSearch");
-    assert.deepEqual(JSON.parse(result.output)[0], {
+    assert.deepEqual(require("#server/value-guards").unknownArray(JSON.parse(result.output))[0], {
       title: "Codex App Server",
       url: "https://developers.openai.com/codex/app-server",
       snippet: "Build rich Codex clients.",
@@ -1186,6 +1198,7 @@ test("preserves structured Codex web results for the tailored search card", () =
 });
 
 test("preserves Codex reroutes, reasoning sections, and structured warnings", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-codex-metadata-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -1223,22 +1236,17 @@ test("preserves Codex reroutes, reasoning sections, and structured warnings", ()
       path: "/tmp/config.toml",
     });
 
-    const thinking = sent.filter((message) =>
-      message.type === "thinking" && message.streamId === "reasoning-1").at(-1);
+    const thinking = sent.filter((message) => message.type === "thinking").filter((message) => message.streamId === "reasoning-1").at(-1);
     assert.equal(thinking.content, "First section.\n\nSecond section.");
 
-    const reroute = sent.find((message) =>
-      message.type === "tool_call"
-      && message.toolUseId === "codex-reroute:turn-1");
+    const reroute = sent.filter((message) => message.type === "tool_call").find((message) => message.toolUseId === "codex-reroute:turn-1");
     assert.equal(reroute.input._codexItemType, "modelRerouted");
     assert.equal(reroute.input.reason, "highRiskCyberActivity");
     assert.ok(getHistory(rootId).some((entry) =>
       entry.role === "tool_call"
       && entry.toolUseId === "codex-reroute:turn-1"));
 
-    const warning = sent.find((message) =>
-      message.type === "error"
-      && message.message.includes("Invalid config option"));
+    const warning = sent.filter((message) => message.type === "error").find((message) => message.message.includes("Invalid config option"));
     assert.match(warning.message, /Remove the obsolete setting/);
     assert.match(warning.message, /Config: \/tmp\/config\.toml/);
   } finally {
@@ -1250,6 +1258,7 @@ test("preserves Codex reroutes, reasoning sections, and structured warnings", ()
 });
 
 test("renders dynamic exec results as readable output instead of content-item JSON", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-dynamic-exec-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -1291,10 +1300,8 @@ test("renders dynamic exec results as readable output instead of content-item JS
       },
     });
 
-    const call = sent.find((message) =>
-      message.type === "tool_call" && message.toolUseId === "dynamic-exec-1");
-    const result = sent.find((message) =>
-      message.type === "tool_result" && message.toolUseId === "dynamic-exec-1");
+    const call = sent.filter((message) => message.type === "tool_call").find((message) => message.toolUseId === "dynamic-exec-1");
+    const result = sent.filter((message) => message.type === "tool_result").find((message) => message.toolUseId === "dynamic-exec-1");
     assert.equal(call.tool, "Exec");
     assert.equal(
       result.output,
@@ -1310,7 +1317,9 @@ test("renders dynamic exec results as readable output instead of content-item JS
 });
 
 test("late-joining Codex clients receive the complete cached prefix before new deltas", () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const initial = [];
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const replayed = [];
   const rootId = `test-text-replay-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(initial), process.cwd(), []);
@@ -1330,14 +1339,14 @@ test("late-joining Codex clients receive the complete cached prefix before new d
 
   session.replayLiveState(testSocket(replayed));
 
-  const snapshot = replayed.find((message) =>
-    message.type === "text" && message.streamId === "message-1");
+  const snapshot = replayed.filter((message) => message.type === "text").find((message) => message.streamId === "message-1");
   assert.equal(snapshot.content, "first half, second half");
   assert.equal(snapshot.replay, true);
   assert.equal(snapshot.sessionId, rootId);
 });
 
 test("Codex live text frames are cumulative snapshots with a durable final frame", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-text-snapshot-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -1382,6 +1391,7 @@ test("Codex live text frames are cumulative snapshots with a durable final frame
 });
 
 test("Codex immediate goal continuation preserves one running lifecycle", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-goal-continuation-${crypto.randomUUID()}`;
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
@@ -1437,6 +1447,7 @@ test("Codex immediate goal continuation preserves one running lifecycle", async 
 });
 
 test("Codex injection retries immediately with the authoritative active turn id", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const rootId = `test-steer-recovery-${crypto.randomUUID()}`;
   const staleTurnId = "019fce7c-abc4-7c81-b004-9d0888edb621";

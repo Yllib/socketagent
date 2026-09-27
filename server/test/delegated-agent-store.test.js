@@ -16,12 +16,12 @@ const {
   pendingDelegatedAgentReports,
   saveDelegatedAgent,
   updateDelegatedAgentRun,
-} = require("../dist/delegated-agent-store");
+} = require("#server/delegated-agent-store");
 const {
   handleAgentSessionTool,
   handleScheduleTaskTool,
-} = require("../dist/app-tool-handlers");
-const { getScheduledTask } = require("../dist/scheduled-task-store");
+} = require("#server/app-tool-handlers");
+const { getScheduledTask } = require("#server/scheduled-task-store");
 
 function record(id = "delegation-1") {
   const now = new Date().toISOString();

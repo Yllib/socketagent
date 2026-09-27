@@ -3212,8 +3212,8 @@ function persistedAgentSettings(sessionInfo?: SessionInfo): AgentSessionSettings
   if (sessionInfo.backend === "codex" && (!settings.model || !settings.effort)) {
     const native = readCodexRolloutAgentSettings(sessionInfo.id);
     if (!settings.model && native?.model) settings.model = native.model;
-    if (!settings.effort && native?.effort && AGENT_EFFORTS.has(native.effort as AgentEffort)) {
-      settings.effort = native.effort as AgentEffort;
+    if (!settings.effort && native?.effort && AGENT_EFFORTS.has(native.effort)) {
+      settings.effort = native.effort;
     }
     if (settings.model || settings.effort) {
       sessionInfo.agentSettings = settings;
@@ -4425,7 +4425,7 @@ function createConnectionHandler(
             lastActive: new Date().toISOString(),
             messagePreview: "",
             backend: sdkBackend,
-            ...(sdkBackend === "codex" ? { codexDriver: "app-server" as CodexDriver } : {}),
+            ...(sdkBackend === "codex" ? { codexDriver: "app-server" as const } : {}),
           };
           saveSession(sessionInfo);
           console.log(`[Resume] Created SocketAgent entry for SDK session ${msg.sessionId} in ${resumeCwd} (backend=${sdkBackend ?? "claude"})`);
@@ -5492,7 +5492,7 @@ function createConnectionHandler(
             ...session,
             cwd,
           }));
-          let codexSessions;
+          let codexSessions: ReturnType<typeof listCodexSessions>;
           try {
             codexSessions = (await listCodexNativeSdkSessions(cwd, discoveryLimit)).map((session) => ({
               ...session,
@@ -5578,7 +5578,7 @@ function createConnectionHandler(
 
       case "schedule_task": {
         const recurrence = msg.recurrence;
-        const backend = (msg.backend === "codex" ? "codex" : "claude") as Backend;
+        const backend = msg.backend === "codex" ? "codex" : "claude";
         const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
         const model = typeof msg.model === "string" ? msg.model.trim() : "";
         const effort = msg.effort && AGENT_EFFORTS.has(msg.effort) ? msg.effort : undefined;
@@ -6136,7 +6136,7 @@ function createConnectionHandler(
 
       case "session_transfer_job": {
         try {
-          let job;
+          let job: ReturnType<typeof transferJobs.status>;
           if (msg.action === "start") {
             if (!msg.config) throw new Error("Missing transfer configuration");
             if (msg.config.role !== "local") {
@@ -6484,7 +6484,7 @@ function createConnectionHandler(
           break;
         }
         try {
-          let saved;
+          let saved: ReturnType<typeof getAccessibleSecureInput>;
           let recoveredFromHistory = false;
           if (isSecureInputPending(requestId)) {
             saved = secretId
@@ -7433,10 +7433,10 @@ function createConnectionHandler(
               "budgetLimited",
               "complete",
             ]);
-            if (!allowedStatuses.has(rawStatus as CodexGoalStatus)) {
+            if (!allowedStatuses.has(rawStatus)) {
               throw new Error(`Unsupported goal status: ${String(rawStatus)}`);
             }
-            update.status = rawStatus as CodexGoalStatus;
+            update.status = rawStatus;
           }
           if (hasTokenBudget) {
             if (msg.tokenBudget == null) {
@@ -8386,8 +8386,7 @@ function createConnectionHandler(
           if (isMacosProtectedUserPath(resolvedPath)) {
             const access = await checkMacosFileAccess(resolvedPath);
             if (access.access !== "granted") {
-              const denied = new Error(access.error || `macOS denied access to ${resolvedPath}`) as NodeJS.ErrnoException;
-              denied.code = "EPERM";
+              const denied = Object.assign(new Error(access.error || `macOS denied access to ${resolvedPath}`), { code: "EPERM" });
               throw denied;
             }
           }

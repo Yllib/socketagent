@@ -5,7 +5,7 @@ const {
   DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW,
   normalizeClaudeAutoCompactWindow,
   resolvePersistedClaudeAutoCompactWindow,
-} = require("../dist/server-settings");
+} = require("#server/server-settings");
 
 test("normalizes valid Claude auto-compact server defaults", () => {
   assert.equal(normalizeClaudeAutoCompactWindow(100000), 100000);

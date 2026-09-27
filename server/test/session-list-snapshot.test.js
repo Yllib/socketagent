@@ -4,7 +4,7 @@ const test = require("node:test");
 const {
   mergeSessionListBase,
   createNativeRefreshCoordinator,
-} = require("../dist/session-list-snapshot");
+} = require("#server/session-list-snapshot");
 
 function session(id, overrides = {}) {
   return {
@@ -137,7 +137,7 @@ test("a failed scan does not wedge the coordinator", async () => {
 // The app sorts on lastActive and the two lists alternate every couple of
 // seconds, so a disagreement reshuffles the list under the user's finger.
 
-const { newestIso } = require("../dist/session-list-snapshot");
+const { newestIso } = require("#server/session-list-snapshot");
 
 test("lastActive takes the newest of stored and native, as the native scan does", () => {
   const stored = [session("a", { lastActive: "2026-09-14T16:00:11.000Z" })];
@@ -175,7 +175,7 @@ test("a session's sort key does not change between the two list shapes", () => {
   assert.equal(immediate.lastActive, fromNativeScan);
 });
 
-const { mergeSessionTimestamps } = require("../dist/session-list-snapshot");
+const { mergeSessionTimestamps } = require("#server/session-list-snapshot");
 
 test("every merge site agrees on a session's timestamps", () => {
   // Verbatim from the Codex rows that alternated in the wild: the stored
@@ -206,7 +206,7 @@ test("a session with no stored createdAt falls back to the transcript", () => {
 });
 
 test('list summaries exclude stored context and per-run records without altering storage', () => {
-  const { sessionListSummary } = require('../dist/session-list-snapshot');
+  const { sessionListSummary } = require('#server/session-list-snapshot');
   const original = session('large', {
     cwd: '/project', lastContextUsage: { text: 'x'.repeat(100000) },
     pendingHandoffContext: 'private context',

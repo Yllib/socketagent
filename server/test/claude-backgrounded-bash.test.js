@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { parseClaudeBackgroundedBash } = require("../dist/claude-session");
+const { parseClaudeBackgroundedBash } = require("#server/claude-session");
 
 const PATH = "/tmp/claude-1000/-home-billy/1a5b0279/tasks/b93c9j18e.output";
 
@@ -51,7 +51,7 @@ test("ordinary command output is not mistaken for a backgrounding notice", () =>
 
 // ── Stripping the notice out of what the app shows ──
 
-const { stripClaudeBackgroundedBashNotice } = require("../dist/claude-session");
+const { stripClaudeBackgroundedBashNotice } = require("#server/claude-session");
 
 // Verbatim from a real ebookillustrator run, trailer included.
 const REAL_NOTICE =

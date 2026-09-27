@@ -3,10 +3,10 @@ const test = require("node:test");
 
 const {
   handlePrivateIntegrationAuthTool,
-} = require("../dist/app-tool-handlers");
+} = require("#server/app-tool-handlers");
 const {
   startPrivateIntegrationAuthorization,
-} = require("../dist/private-integration-auth");
+} = require("#server/private-integration-auth");
 
 function context(overrides = {}) {
   return {

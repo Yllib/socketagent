@@ -7,7 +7,7 @@ const {
   appendSdkEvent,
   deleteSessionArtifacts,
   getSdkEvents,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test("batched SDK debug events are flushed before history is read", () => {
   const sessionId = `test-sdk-events-${randomUUID()}`;

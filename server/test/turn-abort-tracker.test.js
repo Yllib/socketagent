@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { TurnAbortTracker } = require("../dist/turn-abort-tracker");
+const { TurnAbortTracker } = require("#server/turn-abort-tracker");
 
 test("an abort only suppresses completion for the active turn", () => {
   const tracker = new TurnAbortTracker();

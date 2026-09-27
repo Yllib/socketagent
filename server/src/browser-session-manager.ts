@@ -351,7 +351,7 @@ async function startVirtualDisplay(width: number, height: number): Promise<Brows
       if (/^[0-9]+$/.test(line)) finish(undefined, line);
     });
     displayPipe.once("error", (error) => finish(error));
-  }).catch((error) => {
+  }).catch((error: unknown) => {
     displayProcess.kill("SIGTERM");
     throw error;
   });

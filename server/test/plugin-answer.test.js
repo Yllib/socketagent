@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const {
   createPluginAnswerAcknowledgement,
-} = require("../dist/plugin-answer");
+} = require("#server/plugin-answer");
 
 test("plugin answers are private by default", () => {
   const acknowledgement = createPluginAnswerAcknowledgement(

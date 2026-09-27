@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import ts from 'typescript';
 import { z } from 'zod';
-import { parseCodexResponse } from '../dist/codex-contracts.js';
+import { parseCodexResponse } from '#server/codex-contracts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 

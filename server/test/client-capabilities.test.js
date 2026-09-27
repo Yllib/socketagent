@@ -6,7 +6,7 @@ const {
   MONITOR_OUTPUT_ACK_VERSION,
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
-} = require("../dist/protocol");
+} = require("#server/protocol");
 
 test("legacy boolean does not enable tracked session-event delivery", () => {
   assert.equal(

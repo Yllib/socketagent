@@ -5,7 +5,7 @@ const {
   DELEGATED_AGENT_RESULT_TOOL,
   delegatedAgentResultHistoryEntries,
   delegatedAgentResultToolUseId,
-} = require("../dist/delegated-agent-result-card");
+} = require("#server/delegated-agent-result-card");
 
 function record() {
   return {

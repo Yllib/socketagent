@@ -5,7 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
 
-const { TranscriptDatabase } = require("../dist/transcript-database");
+const { TranscriptDatabase } = require("#server/transcript-database");
 
 test("FTS updates use the transcript rowid and replace stale search text", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-search-fts-"));

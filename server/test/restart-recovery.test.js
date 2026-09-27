@@ -5,8 +5,9 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
-const { RestartRecoveryStore, RestartRecoveryWorker, boundedRecoverySetup, RESTART_CONTINUATION_PROMPT } = require("../dist/restart-recovery");
+const { RestartRecoveryStore, RestartRecoveryWorker, boundedRecoverySetup, RESTART_CONTINUATION_PROMPT } = require("#server/restart-recovery");
 
+/** @param {import("node:test").TestContext} t */
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-restart-test-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -108,6 +109,7 @@ test("one failed startup does not prevent other sessions from recovering", async
   const { file, store } = fixture(t);
   store.start("bad"); store.start("good");
   const reboot = new RestartRecoveryStore(file);
+  /** @type {string[][]} */
   const notices = [];
   const worker = new RestartRecoveryWorker(reboot, {
     ready: () => true, exists: () => true, stopped: () => false, busy: () => false,
@@ -127,6 +129,7 @@ test("worker bounds simultaneous setup and never launches a claimed run twice", 
   for (let i = 0; i < 5; i++) store.start(String(i));
   const reboot = new RestartRecoveryStore(file);
   const started = [];
+  /** @type {(() => void)[]} */
   const releases = [];
   const worker = new RestartRecoveryWorker(reboot, {
     ready: () => true, exists: () => true, stopped: () => false, busy: () => false,
@@ -144,22 +147,30 @@ test("continuation warns about uncertain external side effects", () => {
   assert.match(RESTART_CONTINUATION_PROMPT, /ask the user/);
 });
 
+/** @param {string} command
+ * @param {string[]} args
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {Promise<{code: number | null, output: string}>} */
 async function runChild(command, args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
-    child.stdout.on("data", c => output += c);
-    child.stderr.on("data", c => output += c);
+    child.stdout.on("data", (/** @type {Buffer} */ c) => output += c);
+    child.stderr.on("data", (/** @type {Buffer} */ c) => output += c);
     child.on("error", reject);
     child.on("close", code => resolve({ code, output }));
   });
 }
 
+/** @param {import("node:test").TestContext} t
+ * @param {import("node:http").RequestListener} handler */
 async function mockServer(t, handler) {
   const server = http.createServer(handler);
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => { server.closeAllConnections(); server.close(); });
-  return { ...process.env, PORT: String(server.address().port), AUTH_TOKEN: "test-only-token" };
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return { ...process.env, PORT: String(address.port), AUTH_TOKEN: "test-only-token" };
 }
 
 test("one-time bootstrap admits only the caller, never overwrites a journal, and can cancel", async t => {
@@ -181,7 +192,7 @@ test("one-time bootstrap admits only the caller, never overwrites a journal, and
   assert.equal(fs.existsSync(journal), false);
   sessions = ["caller"];
   assert.equal((await runChild(process.execPath, [helper, "seed", "caller"], isolatedEnv)).code, 0);
-  assert.equal(JSON.parse(fs.readFileSync(journal)).runs[0].sessionId, "caller");
+  assert.equal(new RestartRecoveryStore(journal).list()[0].sessionId, "caller");
   const before = fs.readFileSync(journal, "utf8");
   assert.equal((await runChild(process.execPath, [helper, "seed", "caller"], isolatedEnv)).code, 1);
   assert.equal(fs.readFileSync(journal, "utf8"), before);
@@ -209,7 +220,8 @@ for (const scenario of ["ready", "prepare-fails", "compile-fails", "restart-fail
     const bin = path.join(dir, "bin");
     fs.mkdirSync(scripts); fs.mkdirSync(bin);
     for (const file of ["restart-server.sh", "restart-control.js"]) fs.copyFileSync(path.join(__dirname, "../scripts", file), path.join(scripts, file));
-    const calls = [];
+    /** @type {(string | undefined)[]} */
+  const calls = [];
     let statusCalls = 0;
     const env = await mockServer(t, (req, res) => {
       calls.push(req.url);
@@ -232,7 +244,7 @@ for (const scenario of ["ready", "prepare-fails", "compile-fails", "restart-fail
     });
     assert.equal(result.code, scenario === "ready" ? 0 : 1, result.output);
     assert.equal(fs.existsSync(path.join(dir, "service-calls")), ["ready", "restart-fails", "never-ready"].includes(scenario));
-    assert.ok(!calls.some(c => c.startsWith("/continue")));
+    assert.ok(!calls.some(c => c?.startsWith("/continue")));
     if (scenario === "compile-fails") assert.deepEqual(calls, []);
     if (["restart-fails", "guard-fails"].includes(scenario)) assert.ok(calls.includes("/internal/restart/cancel"));
     if (scenario === "never-ready") {

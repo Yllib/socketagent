@@ -1,8 +1,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { handleSpeakTool } = require("../dist/app-tool-handlers");
-const { normalizeSpeakHistoryEntries } = require("../dist/session-store");
+const { handleSpeakTool } = require("#server/app-tool-handlers");
+const { normalizeSpeakHistoryEntries } = require("#server/session-store");
 
 test("collapses the handler-generated Speak pair into the canonical pair", () => {
   const normalized = normalizeSpeakHistoryEntries([

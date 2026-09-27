@@ -7,11 +7,11 @@ const test = require("node:test");
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-browser-history-"));
 process.env.SOCKET_AGENT_DATA_DIR = dataDir;
 
-const { publishBrowserSessionCard } = require("../dist/app-tool-handlers");
+const { publishBrowserSessionCard } = require("#server/app-tool-handlers");
 const {
   appendHistory,
   getHistory,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 

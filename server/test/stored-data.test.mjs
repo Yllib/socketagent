@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseStoredData } from '../dist/stored-data.js';
+import { parseStoredData } from '#server/stored-data';
 
 test('stored contracts preserve legacy optional fields and unknown future fields', () => {
   const memory = { settings: { recentRuns: 2 }, futureField: { enabled: true } };

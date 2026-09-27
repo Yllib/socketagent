@@ -18,7 +18,7 @@ const {
   hasPersistedUserMessage,
   markQuestionAnswered,
   positionSessionMessage,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test("uses indexed transcript lookups for prompt deduplication and completion targets", () => {
   const sessionId = `test-transcript-targets-${randomUUID()}`;

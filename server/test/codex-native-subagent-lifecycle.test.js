@@ -1,22 +1,25 @@
+const { parseServerMessage } = require("#server/server-message");
 const assert = require('node:assert/strict'), test = require('node:test'), crypto = require('node:crypto');
 require('./test-data-dir');
-const { CodexSession } = require('../dist/codex-session');
-const { getHistory } = require('../dist/session-store');
-const { codexAppServerThreadToHistory } = require('../dist/codex-native-history');
+const { CodexSession } = require('#server/codex-session');
+const { getHistory } = require('#server/session-store');
+const { codexAppServerThreadToHistory } = require('#server/codex-native-history');
+/** @type {CodexSession[]} */
 const sessions = [];
 test.afterEach(() => { for (const s of sessions.splice(0)) {
     clearTimeout(s.appServerIdleStopTimer);
     clearTimeout(s.pendingAppServerTurnCompletion);
 } });
 function fixture() {
-    const sent = [];
-    const s = new CodexSession({ readyState: 1, send: v => sent.push(JSON.parse(v)) }, '/tmp');
+    /** @type {import("#server/protocol").ServerMessage[]} */
+  const sent = [];
+    const s = new CodexSession({ readyState: 1, send: v => sent.push(parseServerMessage(JSON.parse(v))) }, '/tmp');
     sessions.push(s);
     s.sessionId = s.threadId = `native-${crypto.randomUUID()}`;
-    const emit = (m, p) => s.handleAppServerNotification(m, p);
-    const activity = (kind, id = 'child', method = 'item/completed') => emit(method, { threadId: s.threadId, item: { type: 'subAgentActivity', id: `item-${kind}`, kind, agentThreadId: id, agentPath: `/root/${id}` } });
-    const start = id => emit('turn/started', { threadId: 'child', turn: { id } });
-    const finish = (id, status = 'completed') => emit('turn/completed', { threadId: 'child', turn: { id, status, error: status === 'failed' ? { message: 'child failure' } : undefined } });
+    const emit = (/** @type {string} */ m, /** @type {unknown} */ p) => s.handleAppServerNotification(m, p);
+    const activity = (/** @type {string} */ kind, id = 'child', method = 'item/completed') => emit(method, { threadId: s.threadId, item: { type: 'subAgentActivity', id: `item-${kind}`, kind, agentThreadId: id, agentPath: `/root/${id}` } });
+    const start = (/** @type {string} */ id) => emit('turn/started', { threadId: 'child', turn: { id } });
+    const finish = (/** @type {string} */ id, status = 'completed') => emit('turn/completed', { threadId: 'child', turn: { id, status, error: status === 'failed' ? { message: 'child failure' } : undefined } });
     return { s, sent, emit, activity, start, finish };
 }
 test('native completion settles card once; duplicate spawn cannot resurrect it', () => {
@@ -60,15 +63,17 @@ for (const [status, expected] of [['failed', 'errored'], ['interrupted', 'interr
         f.emit('thread/status/changed', { threadId: 'child', status: { type: 'idle' } });
         assert.equal(f.sent.find(m => m.type === 'subagent_result').subagentStatus, expected);
         assert.equal(getHistory(f.s.sessionId).filter(m => m.role === 'tool_result').at(-1).subagentStatus, expected);
+        /** @type {import("#server/protocol").ServerMessage[]} */
         const replay = [];
-        f.s.replayLiveState({ readyState: 1, send: v => replay.push(JSON.parse(v)) });
+        f.s.replayLiveState({ readyState: 1, send: v => replay.push(parseServerMessage(JSON.parse(v))) });
         assert.equal(replay.find(m => m.type === 'active_subagents').tasks[0].status, expected);
     });
 test('reconnect reads missed terminal outcome without resuming a child', async () => {
     const f = fixture();
     f.start('t1');
+    /** @type {import("#server/codex-app-server-client").CodexAppServerThreadReadParams[]} */
     const reads = [];
-    f.s.appServer = { readThread: async (p) => { reads.push(p); return { thread: { status: { type: 'idle' }, turns: [{ id: 't1', status: 'failed', error: { message: 'offline failure' } }] } }; } };
+    f.s.appServer = { readThread: async (/** @type {import("#server/codex-app-server-client").CodexAppServerThreadReadParams} */ p) => { reads.push(p); return { thread: { status: { type: 'idle' }, turns: [{ id: 't1', status: 'failed', error: { message: 'offline failure' } }] } }; } };
     f.s.replayLiveState();
     await f.s.subagentReconciliation;
     assert.deepEqual(reads.map(p => p.includeTurns), [false, true]);

@@ -1,3 +1,5 @@
+const { parseCodexResponse } = require("#server/codex-contracts");
+const { parseJsonObject, unknownArray, isRecord } = require("#server/value-guards");
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const crypto = require('node:crypto');
@@ -7,11 +9,11 @@ const path = require('node:path');
 const http = require('node:http');
 const { once } = require('node:events');
 require('./test-data-dir');
-const { saveSession, getSession } = require('../dist/session-store');
-const { deliverCodexInstructions, invalidateCodexInstructions } = require('../dist/codex-instruction-delivery');
-const { CodexSession } = require('../dist/codex-session');
-const { CodexAppServerClient } = require('../dist/codex-app-server-client');
-const { buildCodexSpawn } = require('../dist/codex-env');
+const { saveSession, getSession } = require('#server/session-store');
+const { deliverCodexInstructions, invalidateCodexInstructions } = require('#server/codex-instruction-delivery');
+const { CodexSession } = require('#server/codex-session');
+const { CodexAppServerClient } = require('#server/codex-app-server-client');
+const { buildCodexSpawn } = require('#server/codex-env');
 
 function sessionRecord(id = crypto.randomUUID()) {
   saveSession({ id, title: 'Instruction test', cwd: os.tmpdir(),
@@ -42,7 +44,9 @@ test('new threads receive image guidance in developerInstructions, not collabora
 
 test('resumed threads receive changed instructions once, including across session reconstruction', async () => {
   const id = sessionRecord();
+  /** @type {Parameters<CodexAppServerClient["injectDeveloperInstructions"]>[]} */
   const calls = [];
+  /** @type {Pick<CodexAppServerClient, "injectDeveloperInstructions">} */
   const client = { async injectDeveloperInstructions(...args) { calls.push(args); } };
   await deliverCodexInstructions(client, id, 'first instructions', false);
   await deliverCodexInstructions({ ...client }, id, 'first instructions', false);
@@ -76,25 +80,30 @@ test('installed Codex delivers image guidance in new and resumed model requests'
   skip: process.env.SOCKETAGENT_TEST_CODEX_INSTRUCTIONS !== '1', timeout: 45000,
 }, async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'socketagent-instructions-'));
+  /** @type {Record<string, unknown>[]} */
   const requests = [];
   const server = http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/v1/responses') {
       res.writeHead(404); res.end(); return;
     }
     let body = '';
-    req.on('data', chunk => { body += chunk; });
+    req.on('data', (/** @type {Buffer} */ chunk) => { body += chunk; });
     req.on('end', () => {
-      requests.push(JSON.parse(body));
+      requests.push(parseJsonObject(body));
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'Local capture complete', type: 'invalid_request_error' } }));
     });
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  const port = server.address().port;
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
   const args = ['app-server', '--listen', 'stdio://', '-c', 'model_provider="socketagent_test"', '-c',
     `model_providers.socketagent_test={name="Local test",base_url="http://127.0.0.1:${port}/v1",wire_api="responses",requires_openai_auth=false,request_max_retries=0,stream_max_retries=0}`];
+  /** @type {CodexAppServerClient} */
   let client;
+  /** @type {string} */
   let threadId;
   const instructions = guidance();
   const startClient = async () => {
@@ -107,12 +116,12 @@ test('installed Codex delivers image guidance in new and resumed model requests'
     await client.startTurn({ threadId, model: 'gpt-6-astra', input: [{ type: 'text', text: 'Capture this local test request.', text_elements: [] }] });
     await completed;
   };
-  const developerText = request => (request.input || []).filter(item => item.role === 'developer')
+  const developerText = (/** @type {Record<string, unknown>} */ request) => unknownArray(request.input).filter(isRecord).filter(item => item.role === 'developer')
     .map(item => JSON.stringify(item)).join('\n');
   try {
     await startClient();
-    const started = await client.startThread({ cwd, model: 'gpt-6-astra', sandbox: 'read-only',
-      approvalPolicy: 'never', developerInstructions: instructions });
+    const started = parseCodexResponse('thread/start', await client.startThread({ cwd, model: 'gpt-6-astra', sandbox: 'read-only',
+      approvalPolicy: 'never', developerInstructions: instructions }));
     threadId = started.thread.id;
     assert.equal(started.modelProvider, 'socketagent_test', 'refuse any nonlocal model provider');
     sessionRecord(threadId);
@@ -123,7 +132,7 @@ test('installed Codex delivers image guidance in new and resumed model requests'
     await client.stop();
     await startClient();
     const updated = instructions + '\nSOCKETAGENT_UPDATED_GUIDANCE_TEST';
-    const resumed = await client.resumeThread({ threadId, cwd, developerInstructions: updated });
+    const resumed = parseCodexResponse("thread/resume", await client.resumeThread({ threadId, cwd, developerInstructions: updated }));
     assert.equal(resumed.modelProvider, 'socketagent_test');
     await deliverCodexInstructions(client, threadId, updated, false);
     await turn();

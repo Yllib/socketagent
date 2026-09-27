@@ -9,7 +9,7 @@ const {
   readDirectoryEntries,
   statFileManagerPath,
   writeFileManagerText,
-} = require("../dist/file-manager.js");
+} = require("#server/file-manager");
 
 test("directory listing is asynchronous and includes visible entries", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-files-"));

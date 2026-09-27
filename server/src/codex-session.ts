@@ -3452,7 +3452,7 @@ export class CodexSession {
       messageId: nextPrompt.messageId,
     })
       .then(() => nextPrompt.resolve())
-      .catch((err) => nextPrompt.reject(err instanceof Error ? err : new Error(String(err))));
+      .catch((err: unknown) => nextPrompt.reject(err instanceof Error ? err : new Error(String(err))));
   }
 
   private flushPendingAppServerSteers(): void {

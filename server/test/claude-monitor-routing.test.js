@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const {
   claudeDisallowedTools,
-} = require("../dist/claude-session");
+} = require("#server/claude-session");
 
 test("always disables Claude's session-scoped native Monitor", () => {
   assert.deepEqual(claudeDisallowedTools([]), ["Monitor"]);

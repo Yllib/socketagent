@@ -1,4 +1,4 @@
-import { parseJsonObject, errorMessage } from "./value-guards";
+import { parseJsonObject, errorMessage, errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -187,7 +187,7 @@ function codexHealth(): BackendHealthInfo {
   });
 
   if (versionProbe.error) {
-    const code = (versionProbe.error as NodeJS.ErrnoException).code;
+    const code = errorCode(versionProbe.error);
     return {
       ...base,
       reason: code === "ENOENT"

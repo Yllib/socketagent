@@ -12,7 +12,7 @@ const {
   getHistory,
   markQuestionAnswered,
   markSecureInputRequestResolved,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 

@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { SessionEventDelivery } = require("../dist/session-event-delivery");
+const { SessionEventDelivery } = require("#server/session-event-delivery");
 
 test("tool cards retry until acknowledged", async () => {
   const sent = [];

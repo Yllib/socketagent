@@ -3,10 +3,10 @@ const test = require("node:test");
 
 const {
   shouldEmitClaudeResultFallback,
-} = require("../dist/claude-session");
+} = require("#server/claude-session");
 const {
   normalizeClaudeResultFallbackHistoryEntries,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test("emits a result fallback when a local command produced no assistant text", () => {
   assert.equal(shouldEmitClaudeResultFallback("command output", "", false), true);

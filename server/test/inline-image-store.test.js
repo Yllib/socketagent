@@ -7,7 +7,7 @@ const http = require('node:http');
 require('./test-data-dir');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'socketagent-inline-images-'));
 process.env.SOCKET_AGENT_DATA_DIR = path.join(root, 'data');
-const { InlineImageStore, inlineImageStore, MAX_INLINE_IMAGE_BYTES } = require('../dist/inline-image-store');
+const { InlineImageStore, inlineImageStore, MAX_INLINE_IMAGE_BYTES } = require('#server/inline-image-store');
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=', 'base64');
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 

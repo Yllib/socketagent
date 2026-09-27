@@ -3,7 +3,7 @@ const test = require("node:test");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { readClaudeSupportedModels } = require("../dist/claude-model-discovery");
+const { readClaudeSupportedModels } = require("#server/claude-model-discovery");
 
 // Exercise the real SDK transport. The child only answers initialization;
 // a user prompt or persisted session would be visible in its recorded input.

@@ -11,7 +11,7 @@ const {
   saveSession,
   updateSessionActivity,
   updateSessionContextUsage,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test("coalesces hot session metadata while keeping memory immediately current", () => {
   const sessionId = "coalesced-session-metadata";

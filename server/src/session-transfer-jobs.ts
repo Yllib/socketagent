@@ -171,7 +171,7 @@ export class SessionTransferJobs {
         await this.finishSource(job);
         job.settled = true; this.save(job);
       } else this.connect(job);
-    })().catch(error => this.fail(job, error)).finally(() => { rt.preparing = false; });
+    })().catch((error: unknown) => this.fail(job, error)).finally(() => { rt.preparing = false; });
   }
   private connect(job: Job): void {
     const rt = this.getRuntime(job);
@@ -205,7 +205,7 @@ export class SessionTransferJobs {
         const header = parseStoredData("transferHeader", JSON.parse(plain.subarray(4, 4 + length).toString()));
         if (header.jobId !== job.config.jobId) throw new Error("Transfer identity mismatch");
         await this.receive(job, header, plain.subarray(4 + length));
-      }).catch(error => this.fail(job, error));
+      }).catch((error: unknown) => this.fail(job, error));
     });
     ws.on("error", () => {}); // Connection errors retry with the same durable offset.
     ws.on("unexpected-response", (_request, response) => {

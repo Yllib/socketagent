@@ -4,8 +4,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 
-const { getMissedMessages, getJsonlPath } = require("../dist/session-store");
-const { RESTART_CONTINUATION_PROMPT } = require("../dist/restart-recovery");
+const { getMissedMessages, getJsonlPath } = require("#server/session-store");
+const { RESTART_CONTINUATION_PROMPT } = require("#server/restart-recovery");
 
 // SocketAgent hands the continuation prompt to the model, so the SDK records
 // it in its transcript. Reading that transcript back turned it into a user

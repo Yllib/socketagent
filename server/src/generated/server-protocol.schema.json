@@ -1,0 +1,7278 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$ref": "#/definitions/ServerMessage",
+  "definitions": {
+    "ServerMessage": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SdkEventServerMessage"
+        },
+        {
+          "$ref": "#/definitions/CommandReceiptServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TextServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ToolCallServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ToolResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ToolResultChunkServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ToolStderrServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionInitServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SupportedCommandsServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SupportedAgentsServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FilesPersistedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/AuthStatusServerMessage"
+        },
+        {
+          "$ref": "#/definitions/CwdChangedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ClaudeAuthServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ClaudeAuthResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BashBackgroundedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SubagentResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/PermissionModeChangedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionStateChangedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/CodexPlanServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TodosServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ContextUsageServerMessage"
+        },
+        {
+          "$ref": "#/definitions/UserMessageUuidServerMessage"
+        },
+        {
+          "$ref": "#/definitions/QuestionServerMessage"
+        },
+        {
+          "$ref": "#/definitions/QuestionAnsweredServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SecureInputRequestServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SecureInputSavedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BrowserSessionOpenServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BrowserSessionStateServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BrowserRuntimeInstallProgressServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BrowserFrameServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BrowserClipboardServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BrowserSessionErrorServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SecretInventoryServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SecretOperationResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HtmlPlanServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HtmlPlanListServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HtmlPlanOperationResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HtmlPlanRevisionListServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HtmlPlanRevisionServerMessage"
+        },
+        {
+          "$ref": "#/definitions/WorkReviewSnapshotServerMessage"
+        },
+        {
+          "$ref": "#/definitions/WorkReviewListResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/WorkReviewOperationResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/WorkReviewCardServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionListServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SdkSessionListServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ErrorServerMessage"
+        },
+        {
+          "$ref": "#/definitions/PromptReceivedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/PromptFailedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BackendAuthRequiredServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BackendAuthRecoveryServerMessage"
+        },
+        {
+          "$ref": "#/definitions/PushTokenRegisteredServerMessage"
+        },
+        {
+          "$ref": "#/definitions/PushTokenUnregisteredServerMessage"
+        },
+        {
+          "$ref": "#/definitions/PushRegistrationStatusServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ServerCapabilitiesMessage"
+        },
+        {
+          "$ref": "#/definitions/ServerSettingsMessage"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "backend_auth_callback_result"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "success": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "requestId",
+            "success"
+          ]
+        },
+        {
+          "$ref": "#/definitions/BackendInstallProgressServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionCreatedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionArchiveFailedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionHistoryServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionRunCompletedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/StatusServerMessage"
+        },
+        {
+          "$ref": "#/definitions/AbortAckServerMessage"
+        },
+        {
+          "$ref": "#/definitions/CompactingServerMessage"
+        },
+        {
+          "$ref": "#/definitions/UploadChunkAckServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileAvailableServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileStartServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileChunkServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileCompleteServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileErrorServerMessage"
+        },
+        {
+          "$ref": "#/definitions/UploadCompleteServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileManagerListResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileManagerStatResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/MacosPermissionStatusServerMessage"
+        },
+        {
+          "$ref": "#/definitions/MacosPermissionActionServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileManagerProtectedResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileManagerOperationResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/FileManagerTextResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ReminderServerMessage"
+        },
+        {
+          "$ref": "#/definitions/CompactBoundaryServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TaskNotificationServerMessage"
+        },
+        {
+          "$ref": "#/definitions/CodexCommandResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/CodexGoalStateServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ToolSummaryServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionForkedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/RewindConversationResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BranchResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TtsAudioServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SpeakServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ThinkingServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ThinkingTokensServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ToolImageServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ActiveSubagentsServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ScheduledTaskListServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ScheduledTaskUpdateServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ScheduledTaskNotificationServerMessage"
+        },
+        {
+          "$ref": "#/definitions/RateLimitEventServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TaskStartedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BgTaskProgressServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TaskUpdatedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BackgroundTasksChangedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/WorkflowStateServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ApiRetryServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ToolProgressServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HistoryRetractedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/LocalCommandOutputServerMessage"
+        },
+        {
+          "$ref": "#/definitions/PromptSuggestionServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionLifecycleServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionSettingsServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SupportedModelsServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TaskCompletedHookServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ElicitationUrlServerMessage"
+        },
+        {
+          "$ref": "#/definitions/UsageUpdateServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HookStartedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HookProgressServerMessage"
+        },
+        {
+          "$ref": "#/definitions/HookResponseServerMessage"
+        },
+        {
+          "$ref": "#/definitions/MonitorStartedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/MonitorOutputServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TerminalStatusServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TerminalOutputServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TerminalExitedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/TerminalErrorServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionMemoryStateServerMessage"
+        },
+        {
+          "$ref": "#/definitions/SessionMemoryErrorServerMessage"
+        }
+      ]
+    },
+    "SdkEventServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "sdk_event"
+        },
+        "sdkType": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sdkType"
+      ],
+      "additionalProperties": {}
+    },
+    "CommandReceiptServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "command_receipt"
+        },
+        "commandId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "pending",
+            "uncertain",
+            "conflict"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "commandId",
+        "status"
+      ]
+    },
+    "TextServerMessage": {
+      "type": "object",
+      "properties": {
+        "inlineImagesReady": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "text"
+        },
+        "content": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "streamId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "replay": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "type": "boolean"
+        },
+        "finalSnapshot": {
+          "type": "boolean"
+        },
+        "messagePhase": {
+          "type": "string",
+          "enum": [
+            "commentary",
+            "final_answer"
+          ]
+        },
+        "deliveryId": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "content",
+        "sessionId"
+      ]
+    },
+    "ToolCallServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_call"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replay": {
+          "type": "boolean"
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "tool",
+        "input",
+        "toolUseId",
+        "sessionId"
+      ]
+    },
+    "ToolResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_result"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "subagentStatus": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "backgroundPending": {
+          "type": "boolean"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "toolUseId",
+        "output",
+        "sessionId"
+      ]
+    },
+    "ToolResultChunkServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_result_chunk"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "chunkIndex": {
+          "type": "number"
+        },
+        "done": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "toolUseId",
+        "content",
+        "chunkIndex",
+        "done",
+        "sessionId"
+      ]
+    },
+    "ToolStderrServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_stderr"
+        },
+        "content": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "toolUseId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "content",
+        "sessionId"
+      ]
+    },
+    "SessionInitServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_init"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mcpServers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "status"
+            ]
+          }
+        },
+        "model": {
+          "type": "string"
+        },
+        "claudeCodeVersion": {
+          "type": "string"
+        },
+        "permissionMode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId"
+      ]
+    },
+    "SupportedCommandsServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "supported_commands"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "commands",
+        "sessionId"
+      ]
+    },
+    "SupportedAgentsServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "supported_agents"
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AgentInfo"
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "agents",
+        "sessionId"
+      ]
+    },
+    "AgentInfo": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ]
+    },
+    "FilesPersistedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "files_persisted"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "filename": {
+                "type": "string"
+              },
+              "file_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "filename",
+              "file_id"
+            ]
+          }
+        },
+        "failed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "filename": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "filename",
+              "error"
+            ]
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "files",
+        "failed",
+        "sessionId"
+      ]
+    },
+    "AuthStatusServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "auth_status"
+        },
+        "isAuthenticating": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "isAuthenticating",
+        "output",
+        "sessionId"
+      ]
+    },
+    "CwdChangedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "cwd_changed"
+        },
+        "oldCwd": {
+          "type": "string"
+        },
+        "newCwd": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "oldCwd",
+        "newCwd",
+        "sessionId"
+      ]
+    },
+    "ClaudeAuthServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "claude_auth"
+        },
+        "url": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "url",
+        "sessionId"
+      ]
+    },
+    "ClaudeAuthResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "claude_auth_result"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "success",
+        "sessionId"
+      ]
+    },
+    "BashBackgroundedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "bash_backgrounded"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "outputFile": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "toolUseId",
+        "taskId",
+        "outputFile",
+        "sessionId"
+      ]
+    },
+    "SubagentResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "subagent_result"
+        },
+        "parentToolUseId": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "subagentStatus": {
+          "$ref": "#/definitions/CodexSubagentStatus"
+        },
+        "costUsd": {
+          "type": "number"
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "numTurns": {
+          "type": "number"
+        },
+        "stopReason": {
+          "type": "string"
+        },
+        "subtype": {
+          "type": "string"
+        },
+        "terminalReason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "parentToolUseId",
+        "content",
+        "sessionId"
+      ]
+    },
+    "CodexSubagentStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "interrupted",
+        "errored",
+        "shutdown",
+        "unavailable"
+      ]
+    },
+    "PermissionModeChangedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "permission_mode_changed"
+        },
+        "permissionMode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "permissionMode"
+      ]
+    },
+    "SessionStateChangedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_state_changed"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "running",
+            "requires_action"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "activeStartedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "state",
+        "sessionId"
+      ]
+    },
+    "CodexPlanServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "codex_plan"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "plan": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TurnPlanStep"
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "turnId",
+        "explanation",
+        "plan",
+        "sessionId"
+      ]
+    },
+    "TurnPlanStep": {
+      "type": "object",
+      "properties": {
+        "step": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/TurnPlanStepStatus"
+        }
+      },
+      "required": [
+        "step",
+        "status"
+      ]
+    },
+    "TurnPlanStepStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "inProgress",
+        "completed"
+      ]
+    },
+    "TodosServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "todos"
+        },
+        "todos": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "todos",
+        "sessionId"
+      ]
+    },
+    "ContextUsageServerMessage": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "context_usage"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "categories": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  },
+                  "color": {
+                    "type": "string"
+                  },
+                  "isDeferred": {
+                    "type": "boolean"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "used",
+                      "free",
+                      "buffer",
+                      "deferred"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "tokens",
+                  "color",
+                  "kind"
+                ]
+              }
+            },
+            "totalTokens": {
+              "type": "number"
+            },
+            "maxTokens": {
+              "type": "number"
+            },
+            "rawMaxTokens": {
+              "type": "number"
+            },
+            "percentage": {
+              "type": "number"
+            },
+            "gridRows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "color": {
+                      "type": "string"
+                    },
+                    "isFilled": {
+                      "type": "boolean"
+                    },
+                    "categoryName": {
+                      "type": "string"
+                    },
+                    "tokens": {
+                      "type": "number"
+                    },
+                    "percentage": {
+                      "type": "number"
+                    },
+                    "squareFullness": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "color",
+                    "isFilled",
+                    "categoryName",
+                    "tokens",
+                    "percentage",
+                    "squareFullness"
+                  ]
+                }
+              }
+            },
+            "model": {
+              "type": "string"
+            },
+            "memoryFiles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "path",
+                  "type",
+                  "tokens"
+                ]
+              }
+            },
+            "mcpTools": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "serverName": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  },
+                  "isLoaded": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "serverName",
+                  "tokens"
+                ]
+              }
+            },
+            "deferredBuiltinTools": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  },
+                  "isLoaded": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "tokens",
+                  "isLoaded"
+                ]
+              }
+            },
+            "systemTools": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "name",
+                  "tokens"
+                ]
+              }
+            },
+            "systemPromptSections": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "name",
+                  "tokens"
+                ]
+              }
+            },
+            "agents": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "agentType": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "agentType",
+                  "source",
+                  "tokens"
+                ]
+              }
+            },
+            "slashCommands": {
+              "type": "object",
+              "properties": {
+                "totalCommands": {
+                  "type": "number"
+                },
+                "includedCommands": {
+                  "type": "number"
+                },
+                "tokens": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "totalCommands",
+                "includedCommands",
+                "tokens"
+              ]
+            },
+            "skills": {
+              "type": "object",
+              "properties": {
+                "totalSkills": {
+                  "type": "number"
+                },
+                "includedSkills": {
+                  "type": "number"
+                },
+                "tokens": {
+                  "type": "number"
+                },
+                "skillFrontmatter": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "string"
+                      },
+                      "tokens": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "source",
+                      "tokens"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "totalSkills",
+                "includedSkills",
+                "tokens",
+                "skillFrontmatter"
+              ]
+            },
+            "autoCompactThreshold": {
+              "type": "number"
+            },
+            "isAutoCompactEnabled": {
+              "type": "boolean"
+            },
+            "messageBreakdown": {
+              "type": "object",
+              "properties": {
+                "toolCallTokens": {
+                  "type": "number"
+                },
+                "toolResultTokens": {
+                  "type": "number"
+                },
+                "attachmentTokens": {
+                  "type": "number"
+                },
+                "assistantMessageTokens": {
+                  "type": "number"
+                },
+                "userMessageTokens": {
+                  "type": "number"
+                },
+                "redirectedContextTokens": {
+                  "type": "number"
+                },
+                "unattributedTokens": {
+                  "type": "number"
+                },
+                "toolCallsByType": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "callTokens": {
+                        "type": "number"
+                      },
+                      "resultTokens": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "callTokens",
+                      "resultTokens"
+                    ]
+                  }
+                },
+                "attachmentsByType": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "tokens": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "tokens"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "toolCallTokens",
+                "toolResultTokens",
+                "attachmentTokens",
+                "assistantMessageTokens",
+                "userMessageTokens",
+                "redirectedContextTokens",
+                "unattributedTokens",
+                "toolCallsByType",
+                "attachmentsByType"
+              ]
+            },
+            "apiUsage": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "cache_creation_input_tokens": {
+                      "type": "number"
+                    },
+                    "cache_read_input_tokens": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "agents",
+            "apiUsage",
+            "categories",
+            "gridRows",
+            "isAutoCompactEnabled",
+            "maxTokens",
+            "mcpTools",
+            "memoryFiles",
+            "model",
+            "percentage",
+            "rawMaxTokens",
+            "sessionId",
+            "totalTokens",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "context_usage"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "totalTokens": {
+              "type": "number"
+            },
+            "maxTokens": {
+              "type": "number"
+            },
+            "remainingTokens": {
+              "type": "number"
+            },
+            "percentUsed": {
+              "type": "number"
+            },
+            "categories": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  },
+                  "color": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "tokens",
+                  "color"
+                ]
+              }
+            }
+          },
+          "required": [
+            "categories",
+            "maxTokens",
+            "percentUsed",
+            "remainingTokens",
+            "sessionId",
+            "totalTokens",
+            "type"
+          ]
+        }
+      ]
+    },
+    "UserMessageUuidServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "user_message_uuid"
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "clientMessageId": {
+          "type": "string"
+        },
+        "deliveryId": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "uuid",
+        "sessionId"
+      ]
+    },
+    "QuestionServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "question"
+        },
+        "questionId": {
+          "type": "string"
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/QuestionItem"
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "emailPreview": {
+          "$ref": "#/definitions/EmailPreview"
+        },
+        "mcpServerName": {
+          "type": "string"
+        },
+        "asyncQuestion": {
+          "type": "boolean"
+        },
+        "agentId": {
+          "type": "string"
+        },
+        "decisionReason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "questionId",
+        "questions",
+        "sessionId"
+      ]
+    },
+    "QuestionItem": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string"
+        },
+        "header": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "preview": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "label"
+            ]
+          }
+        },
+        "multiSelect": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "question",
+        "options"
+      ]
+    },
+    "EmailPreview": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "cc": {
+          "type": "string"
+        },
+        "attachment": {
+          "type": "string"
+        },
+        "scheduledTime": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "to",
+        "subject",
+        "body"
+      ]
+    },
+    "QuestionAnsweredServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "question_answered"
+        },
+        "questionId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "answers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "questionId"
+      ]
+    },
+    "SecureInputRequestServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "secure_input_request"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "envHint": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "session",
+            "project",
+            "global"
+          ]
+        },
+        "multiline": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "sessionId",
+        "label"
+      ]
+    },
+    "SecureInputSavedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "secure_input_saved"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "secretId": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "session",
+            "project",
+            "global"
+          ]
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "envHint": {
+          "type": "string"
+        },
+        "clientRequestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "secretId",
+        "label",
+        "scope",
+        "filePath",
+        "envHint"
+      ]
+    },
+    "BrowserSessionOpenServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_session_open"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "runtimeRequired": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "label",
+        "url",
+        "width",
+        "height"
+      ]
+    },
+    "BrowserSessionStateServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_session_state"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "runtimeRequired": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "label",
+        "url",
+        "width",
+        "height",
+        "sessionId",
+        "active"
+      ]
+    },
+    "BrowserRuntimeInstallProgressServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_runtime_install_progress"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "ready",
+            "failed"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "status",
+        "message"
+      ]
+    },
+    "BrowserFrameServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_frame"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "imageBase64": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string",
+          "const": "image/jpeg"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "imageBase64",
+        "mimeType",
+        "width",
+        "height",
+        "url",
+        "title"
+      ]
+    },
+    "BrowserClipboardServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_clipboard"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "text"
+      ]
+    },
+    "BrowserSessionErrorServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_session_error"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "message"
+      ]
+    },
+    "SecretInventoryServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "secret_inventory"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SecretInventoryEntry"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "secrets"
+      ]
+    },
+    "SecretInventoryEntry": {
+      "type": "object",
+      "properties": {
+        "secretId": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "session",
+            "project",
+            "global"
+          ]
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "envHint": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "secretId",
+        "label",
+        "scope",
+        "filePath",
+        "envHint",
+        "createdAt"
+      ]
+    },
+    "SecretOperationResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "secret_operation_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "create",
+            "replace",
+            "delete"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "secret": {
+          "$ref": "#/definitions/SecretInventoryEntry"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "operation",
+        "ok"
+      ]
+    },
+    "HtmlPlanServerMessage": {
+      "type": "object",
+      "properties": {
+        "planId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "html": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "currentRevision": {
+          "type": "number"
+        },
+        "revisionCount": {
+          "type": "number"
+        },
+        "type": {
+          "type": "string",
+          "const": "html_plan"
+        },
+        "deliveryId": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "createdAt",
+        "currentRevision",
+        "html",
+        "planId",
+        "revisionCount",
+        "sessionId",
+        "title",
+        "type",
+        "updatedAt"
+      ]
+    },
+    "HtmlPlanListServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "html_plan_list"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "plans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HtmlPlanRecord"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "plans"
+      ]
+    },
+    "HtmlPlanRecord": {
+      "type": "object",
+      "properties": {
+        "planId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "html": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "currentRevision": {
+          "type": "number"
+        },
+        "revisionCount": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "planId",
+        "sessionId",
+        "title",
+        "html",
+        "createdAt",
+        "updatedAt",
+        "currentRevision",
+        "revisionCount"
+      ]
+    },
+    "HtmlPlanOperationResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "html_plan_operation_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "rename",
+            "delete",
+            "rollback"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "plan": {
+          "$ref": "#/definitions/HtmlPlanRecord"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "operation",
+        "ok",
+        "sessionId",
+        "planId"
+      ]
+    },
+    "HtmlPlanRevisionListServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "html_plan_revision_list"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "revisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HtmlPlanRevisionSummaryRecord"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "sessionId",
+        "planId",
+        "ok",
+        "revisions"
+      ]
+    },
+    "HtmlPlanRevisionSummaryRecord": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "byteSize": {
+          "type": "number"
+        },
+        "restoredFromRevision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "revision",
+        "title",
+        "createdAt",
+        "byteSize"
+      ]
+    },
+    "HtmlPlanRevisionServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "html_plan_revision"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/definitions/HtmlPlanRevisionRecord"
+        },
+        "baseRevision": {
+          "type": "number"
+        },
+        "diff": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HtmlPlanDiffSegmentRecord"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "sessionId",
+        "planId",
+        "ok",
+        "diff"
+      ]
+    },
+    "HtmlPlanRevisionRecord": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string"
+        },
+        "html": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "restoredFromRevision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "revision",
+        "title",
+        "html",
+        "createdAt"
+      ]
+    },
+    "HtmlPlanDiffSegmentRecord": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "equal",
+            "added",
+            "removed"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ]
+    },
+    "WorkReviewSnapshotServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "work_review_snapshot"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "reviewId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "draft": {
+          "$ref": "#/definitions/WorkReviewDraft"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "reviewId",
+        "sessionId",
+        "review"
+      ]
+    },
+    "WorkReviewDraft": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "overallNote": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkReviewDraftItem"
+          }
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "WorkReviewDraftItem": {
+      "type": "object",
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "pending"
+            },
+            {
+              "$ref": "#/definitions/WorkReviewDisposition"
+            }
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId",
+        "status"
+      ]
+    },
+    "WorkReviewDisposition": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "changes_requested",
+        "rejected",
+        "skipped"
+      ]
+    },
+    "WorkReviewListResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "work_review_list_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "reviews": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        }
+      },
+      "required": [
+        "type",
+        "reviews"
+      ]
+    },
+    "WorkReviewOperationResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "work_review_operation_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "get",
+            "draft_update",
+            "finish",
+            "cancel",
+            "archive",
+            "restore"
+          ]
+        },
+        "reviewId": {
+          "type": "string"
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "draft": {
+          "$ref": "#/definitions/WorkReviewDraft"
+        },
+        "resultId": {
+          "type": "string"
+        },
+        "published": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "operation",
+        "reviewId",
+        "ok"
+      ]
+    },
+    "WorkReviewCardServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "work_review_card"
+        },
+        "reviewId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "deliveryId": {
+          "type": "string"
+        },
+        "replay": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "reviewId",
+        "sessionId",
+        "review",
+        "entryId",
+        "sessionSeq",
+        "revision"
+      ]
+    },
+    "ResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "result"
+        },
+        "content": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "continuationPending": {
+          "type": "boolean"
+        },
+        "costUsd": {
+          "type": "number"
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "durationApiMs": {
+          "type": "number"
+        },
+        "usage": {
+          "$ref": "#/definitions/UsageInfo"
+        },
+        "totalUsage": {
+          "$ref": "#/definitions/TotalUsageInfo"
+        },
+        "numTurns": {
+          "type": "number"
+        },
+        "stopReason": {
+          "type": "string"
+        },
+        "resultSubtype": {
+          "type": "string"
+        },
+        "terminalReason": {
+          "type": "string"
+        },
+        "fastModeState": {
+          "type": "string"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "permissionDenials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tool_name": {
+                "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
+              },
+              "tool_input": {
+                "type": "object",
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "tool_name",
+              "tool_use_id",
+              "tool_input"
+            ]
+          }
+        },
+        "triggerUserMessageUuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "content",
+        "sessionId"
+      ]
+    },
+    "UsageInfo": {
+      "type": "object",
+      "properties": {
+        "inputTokens": {
+          "type": "number"
+        },
+        "outputTokens": {
+          "type": "number"
+        },
+        "cacheReadTokens": {
+          "type": "number"
+        },
+        "cacheCreateTokens": {
+          "type": "number"
+        },
+        "contextWindow": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheCreateTokens",
+        "contextWindow"
+      ]
+    },
+    "TotalUsageInfo": {
+      "type": "object",
+      "properties": {
+        "inputTokens": {
+          "type": "number"
+        },
+        "outputTokens": {
+          "type": "number"
+        },
+        "cacheReadTokens": {
+          "type": "number"
+        },
+        "cacheCreateTokens": {
+          "type": "number"
+        },
+        "costUsd": {
+          "type": "number"
+        },
+        "thinkingTokens": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheCreateTokens",
+        "costUsd"
+      ]
+    },
+    "SessionListServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_list"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SessionInfo"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "sessions"
+      ]
+    },
+    "SessionInfo": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "lastActive": {
+          "type": "string"
+        },
+        "messagePreview": {
+          "type": "string"
+        },
+        "turnCount": {
+          "type": "number"
+        },
+        "historyCount": {
+          "type": "number"
+        },
+        "replacedSessionIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compactionsSinceRollover": {
+          "type": "number"
+        },
+        "freshThreadPending": {
+          "type": "boolean"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "activeStartedAt": {
+          "type": "string"
+        },
+        "runStats": {
+          "$ref": "#/definitions/SessionRunStats"
+        },
+        "lastUsage": {
+          "type": "object",
+          "properties": {
+            "costUsd": {
+              "type": "number"
+            },
+            "numTurns": {
+              "type": "number"
+            },
+            "inputTokens": {
+              "type": "number"
+            },
+            "outputTokens": {
+              "type": "number"
+            },
+            "cacheReadTokens": {
+              "type": "number"
+            },
+            "cacheCreateTokens": {
+              "type": "number"
+            },
+            "contextWindow": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "cacheCreateTokens",
+            "cacheReadTokens",
+            "contextWindow",
+            "inputTokens",
+            "outputTokens"
+          ]
+        },
+        "lastContextUsage": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "scheduledTaskId": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "codexInstructionDelivery": {
+          "type": "object",
+          "properties": {
+            "threadId": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "threadId",
+            "digest"
+          ]
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "agentSettings": {
+          "$ref": "#/definitions/AgentSessionSettings"
+        },
+        "contextClearedAt": {
+          "type": "string"
+        },
+        "pendingHandoffContext": {
+          "type": "string"
+        },
+        "transferLineage": {
+          "type": "object",
+          "properties": {
+            "transferId": {
+              "type": "string"
+            },
+            "sourceSessionId": {
+              "type": "string"
+            },
+            "sourceBackend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "sourceServerLabel": {
+              "type": "string"
+            },
+            "transferredAt": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "move",
+                "clone"
+              ]
+            }
+          },
+          "required": [
+            "sourceSessionId",
+            "sourceBackend",
+            "transferredAt",
+            "mode"
+          ]
+        },
+        "delegatedBySessionId": {
+          "type": "string"
+        },
+        "delegationId": {
+          "type": "string"
+        },
+        "delegationSupervisorSessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "cwd",
+        "createdAt",
+        "lastActive",
+        "messagePreview"
+      ]
+    },
+    "SessionRunStats": {
+      "type": "object",
+      "properties": {
+        "current": {
+          "$ref": "#/definitions/SessionRunCurrent"
+        },
+        "completedCount": {
+          "type": "number"
+        },
+        "totalDurationMs": {
+          "type": "number"
+        },
+        "averageDurationMs": {
+          "type": "number"
+        },
+        "longestDurationMs": {
+          "type": "number"
+        },
+        "shortestDurationMs": {
+          "type": "number"
+        },
+        "lastCompletedAt": {
+          "type": "string"
+        },
+        "recentRuns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SessionRunRecord"
+          }
+        },
+        "backfillVersion": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "completedCount",
+        "totalDurationMs"
+      ]
+    },
+    "SessionRunCurrent": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "supervisorSettled": {
+          "type": "boolean"
+        },
+        "pendingOutcome": {
+          "$ref": "#/definitions/SessionRunOutcome"
+        }
+      },
+      "required": [
+        "runId",
+        "startedAt"
+      ]
+    },
+    "SessionRunOutcome": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "stopped",
+        "failed"
+      ]
+    },
+    "SessionRunRecord": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "runNumber": {
+          "type": "number"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "finishedAt": {
+          "type": "string"
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "outcome": {
+          "$ref": "#/definitions/SessionRunOutcome"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "observed",
+            "sdk_backfill",
+            "transcript_estimate"
+          ]
+        }
+      },
+      "required": [
+        "runId",
+        "runNumber",
+        "startedAt",
+        "finishedAt",
+        "durationMs",
+        "outcome"
+      ]
+    },
+    "Backend": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "CodexDriver": {
+      "type": "string",
+      "const": "app-server"
+    },
+    "AgentSessionSettings": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "$ref": "#/definitions/AgentEffort"
+        },
+        "thinking": {
+          "$ref": "#/definitions/AgentThinkingSetting"
+        },
+        "codexFastMode": {
+          "type": "boolean"
+        },
+        "codexCollaborationMode": {
+          "type": "string"
+        },
+        "claudeAutoCompact": {
+          "type": "boolean"
+        },
+        "claudeAutoCompactWindow": {
+          "type": "number"
+        },
+        "disallowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "systemPrompt": {
+          "type": "string"
+        },
+        "connectedAppApprovals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "AgentEffort": {
+      "$ref": "#/definitions/ReasoningEffort"
+    },
+    "ReasoningEffort": {
+      "type": "string"
+    },
+    "AgentThinkingSetting": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "adaptive"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "enabled"
+            },
+            "budgetTokens": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "budgetTokens"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "disabled"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "SdkSessionListServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "sdk_session_list"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "recursive": {
+          "type": "boolean"
+        },
+        "query": {
+          "type": "string"
+        },
+        "all": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "total": {
+          "type": "number"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sessionId": {
+                "type": "string"
+              },
+              "firstMessage": {
+                "type": "string"
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "tracked": {
+                "type": "boolean"
+              },
+              "title": {
+                "type": "string"
+              },
+              "lastActive": {
+                "type": "string"
+              },
+              "backend": {
+                "$ref": "#/definitions/Backend"
+              }
+            },
+            "required": [
+              "sessionId",
+              "firstMessage",
+              "lastActive"
+            ]
+          }
+        }
+      },
+      "required": [
+        "type",
+        "cwd",
+        "total",
+        "hasMore",
+        "sessions"
+      ]
+    },
+    "ErrorServerMessage": {
+      "type": "object",
+      "properties": {
+        "errorType": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "error"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ]
+    },
+    "PromptReceivedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "prompt_received"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "duplicate": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "messageId"
+      ]
+    },
+    "PromptFailedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "prompt_failed"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "messageId",
+        "message"
+      ]
+    },
+    "BackendAuthRequiredServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "backend_auth_required"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "authScope": {
+          "type": "string",
+          "enum": [
+            "openai",
+            "mcp"
+          ]
+        },
+        "mcpServerName": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "backend",
+        "message"
+      ]
+    },
+    "BackendAuthRecoveryServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "backend_auth_recovery"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "backend",
+        "active",
+        "message",
+        "sessionId"
+      ]
+    },
+    "PushTokenRegisteredServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "push_token_registered"
+        },
+        "appServerId": {
+          "type": "string"
+        },
+        "deliveryRoute": {
+          "type": "string",
+          "enum": [
+            "relay",
+            "direct"
+          ]
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "PushTokenUnregisteredServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "push_token_unregistered"
+        },
+        "appServerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "PushRegistrationStatusServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "push_registration_status"
+        },
+        "appServerId": {
+          "type": "string"
+        },
+        "registered": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "missing",
+            "invalid",
+            "unreadable",
+            "relay_unavailable",
+            "firebase_project_mismatch"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "registered"
+      ]
+    },
+    "ServerCapabilitiesMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "server_capabilities"
+        },
+        "serverReleaseVersion": {
+          "type": "string"
+        },
+        "serverCommit": {
+          "type": "string"
+        },
+        "binaryEnvelope": {
+          "type": "boolean"
+        },
+        "binaryFileDownloadVersion": {
+          "type": "number"
+        },
+        "transportLane": {
+          "$ref": "#/definitions/TransportLane"
+        },
+        "transportLanes": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            },
+            "bulk": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "version",
+            "bulk"
+          ]
+        },
+        "uploadAckVersion": {
+          "type": "number"
+        },
+        "secretManagement": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        },
+        "htmlPlans": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        },
+        "workReviews": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            },
+            "privateDrafts": {
+              "type": "boolean",
+              "const": true
+            },
+            "atomicFinish": {
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "version",
+            "privateDrafts",
+            "atomicFinish"
+          ]
+        },
+        "sessionTransfer": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        },
+        "codexGoals": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Backend"
+          }
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "codexDriversAvailable": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CodexDriver"
+          }
+        },
+        "backendHealth": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BackendHealthInfo"
+          }
+        },
+        "directE2e": {
+          "type": "object",
+          "properties": {
+            "serverPubkey": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "serverPubkey"
+          ]
+        },
+        "relayPairing": {
+          "type": "object",
+          "properties": {
+            "relayUrl": {
+              "type": "string"
+            },
+            "pairingToken": {
+              "type": "string"
+            },
+            "serverPubkey": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "relayUrl",
+            "pairingToken",
+            "serverPubkey"
+          ]
+        },
+        "pushNotifications": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            },
+            "directFcm": {
+              "type": "boolean"
+            },
+            "configured": {
+              "type": "boolean"
+            },
+            "directFcmConfigured": {
+              "type": "boolean"
+            },
+            "directFcmProjectId": {
+              "type": "string"
+            },
+            "directFcmIssue": {
+              "type": "string",
+              "enum": [
+                "missing",
+                "invalid",
+                "unreadable"
+              ]
+            },
+            "relayConfigured": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "required": [
+        "type",
+        "backends"
+      ]
+    },
+    "TransportLane": {
+      "type": "string",
+      "enum": [
+        "control",
+        "bulk"
+      ]
+    },
+    "BackendHealthInfo": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "warning",
+            "error",
+            "disabled"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "auth",
+            "install",
+            "launch"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "explicit",
+            "sdk",
+            "managed",
+            "legacy",
+            "system",
+            "path",
+            "unresolved"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "installRoot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "enabled",
+        "available",
+        "severity"
+      ]
+    },
+    "ServerSettingsMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "server_settings"
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "defaultCwd": {
+          "type": "string"
+        },
+        "systemPrompt": {
+          "type": "string"
+        },
+        "systemPromptInitialized": {
+          "type": "boolean"
+        },
+        "claudeAutoCompactWindow": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "codexDriversAvailable": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CodexDriver"
+          }
+        },
+        "backendHealth": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BackendHealthInfo"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "codexDriver",
+        "defaultCwd",
+        "systemPrompt",
+        "claudeAutoCompactWindow",
+        "codexDriversAvailable"
+      ]
+    },
+    "BackendInstallProgressServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "backend_install_progress"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "repair",
+            "auth"
+          ]
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "install",
+            "auth",
+            "probe"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "authUrl": {
+          "type": "string"
+        },
+        "authCode": {
+          "type": "string"
+        },
+        "authMethod": {
+          "type": "string",
+          "enum": [
+            "device",
+            "browser"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "backend",
+        "phase",
+        "status",
+        "message"
+      ]
+    },
+    "SessionCreatedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_created"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "replacesSessionId": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "permissionMode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "cwd"
+      ]
+    },
+    "SessionArchiveFailedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_archive_failed"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "error"
+      ]
+    },
+    "SessionHistoryServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_history"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HistoryEntry"
+          }
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "historyKind": {
+          "type": "string",
+          "enum": [
+            "initial",
+            "delta",
+            "older",
+            "append",
+            "rewind"
+          ]
+        },
+        "total": {
+          "type": "number"
+        },
+        "offset": {
+          "type": "number"
+        },
+        "deferredContextAvailable": {
+          "type": "boolean"
+        },
+        "totalUserPrompts": {
+          "type": "number"
+        },
+        "openTraceId": {
+          "type": "string"
+        },
+        "todos": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "taskStates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HistoryEntry"
+          }
+        },
+        "browserSessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HistoryEntry"
+          }
+        },
+        "runStats": {
+          "$ref": "#/definitions/SessionRunStats"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "messages"
+      ]
+    },
+    "HistoryEntry": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "user",
+            "assistant",
+            "tool_call",
+            "tool_result",
+            "tool_image",
+            "question",
+            "secure_input",
+            "browser_session",
+            "html_plan",
+            "work_review",
+            "todos_update",
+            "codex_plan",
+            "user_uuid",
+            "elicitation_url",
+            "prompt_suggestion",
+            "monitor",
+            "notification",
+            "task_state",
+            "permission_mode",
+            "run_boundary"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "inlineImageContent": {
+          "type": "string"
+        },
+        "toolName": {
+          "type": "string"
+        },
+        "toolInput": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "toolOutput": {
+          "type": "string"
+        },
+        "backgroundPending": {
+          "type": "boolean"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "fileSize": {
+          "type": "number"
+        },
+        "fileVersion": {
+          "type": "string"
+        },
+        "fileDeliveryPath": {
+          "type": "string"
+        },
+        "toolOutputRef": {
+          "type": "string"
+        },
+        "toolOutputBytes": {
+          "type": "number"
+        },
+        "toolOutputStoredBytes": {
+          "type": "number"
+        },
+        "toolOutputPreview": {
+          "type": "string"
+        },
+        "toolOutputEncoding": {
+          "type": "string",
+          "const": "gzip"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "questionId": {
+          "type": "string"
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/QuestionItem"
+          }
+        },
+        "asyncQuestion": {
+          "type": "boolean"
+        },
+        "emailPreview": {
+          "$ref": "#/definitions/EmailPreview"
+        },
+        "answered": {
+          "type": "boolean"
+        },
+        "answers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "authRequest": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "startUrl": {
+              "type": "string"
+            },
+            "captureOrigins": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "requestId",
+            "startUrl",
+            "captureOrigins"
+          ]
+        },
+        "subagentStatus": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "messagePhase": {
+          "type": "string",
+          "enum": [
+            "commentary",
+            "final_answer"
+          ]
+        },
+        "toolSummary": {
+          "type": "boolean"
+        },
+        "precedingToolUseIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "thinking": {
+          "type": "boolean"
+        },
+        "thinkingTokens": {
+          "type": "number"
+        },
+        "thinkingDurationMs": {
+          "type": "number"
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "mcpServerName": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "originToolUseId": {
+          "type": "string"
+        },
+        "taskType": {
+          "type": "string"
+        },
+        "taskKind": {
+          "type": "string",
+          "enum": [
+            "claude_task",
+            "subagent",
+            "workflow",
+            "background"
+          ]
+        },
+        "taskSubject": {
+          "type": "string"
+        },
+        "taskDescription": {
+          "type": "string"
+        },
+        "teammateName": {
+          "type": "string"
+        },
+        "progressSummary": {
+          "type": "string"
+        },
+        "lastToolName": {
+          "type": "string"
+        },
+        "isBackgrounded": {
+          "type": "boolean"
+        },
+        "skipTranscript": {
+          "type": "boolean"
+        },
+        "subagentType": {
+          "type": "string"
+        },
+        "taskUsage": {
+          "type": "object",
+          "properties": {
+            "totalTokens": {
+              "type": "number"
+            },
+            "toolUses": {
+              "type": "number"
+            },
+            "durationMs": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "totalTokens",
+            "toolUses",
+            "durationMs"
+          ]
+        },
+        "workflowState": {
+          "$ref": "#/definitions/WorkflowStatePayload"
+        },
+        "commandName": {
+          "type": "string"
+        },
+        "commandPayload": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "runNumber": {
+          "type": "number"
+        },
+        "runStartedAt": {
+          "type": "string"
+        },
+        "runFinishedAt": {
+          "type": "string"
+        },
+        "runDurationMs": {
+          "type": "number"
+        },
+        "runOutcome": {
+          "$ref": "#/definitions/SessionRunOutcome"
+        },
+        "reviewId": {
+          "type": "string"
+        },
+        "workReview": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "streamId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "content",
+        "timestamp"
+      ]
+    },
+    "WorkflowStatePayload": {
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "workflowName": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "scriptPath": {
+          "type": "string"
+        },
+        "transcriptDir": {
+          "type": "string"
+        },
+        "statePath": {
+          "type": "string"
+        },
+        "startTime": {
+          "type": "number"
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "agentCount": {
+          "type": "number"
+        },
+        "totalTokens": {
+          "type": "number"
+        },
+        "totalToolCalls": {
+          "type": "number"
+        },
+        "defaultModel": {
+          "type": "string"
+        },
+        "phases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkflowPhaseState"
+          }
+        },
+        "progress": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkflowProgressState"
+          }
+        },
+        "logs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resultPreview": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "summary",
+        "status",
+        "phases",
+        "progress",
+        "logs"
+      ]
+    },
+    "WorkflowPhaseState": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "WorkflowProgressState": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "index": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "phaseIndex": {
+          "type": "number"
+        },
+        "phaseTitle": {
+          "type": "string"
+        },
+        "agentId": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "number"
+        },
+        "queuedAt": {
+          "type": "number"
+        },
+        "lastProgressAt": {
+          "type": "number"
+        },
+        "tokens": {
+          "type": "number"
+        },
+        "toolCalls": {
+          "type": "number"
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "promptPreview": {
+          "type": "string"
+        },
+        "resultPreview": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "SessionRunCompletedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_run_completed"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "runStats": {
+          "$ref": "#/definitions/SessionRunStats"
+        },
+        "boundary": {
+          "$ref": "#/definitions/HistoryEntry"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "runStats",
+        "boundary"
+      ]
+    },
+    "StatusServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "status"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "compacting": {
+          "type": "boolean"
+        },
+        "activeStartedAt": {
+          "type": "string"
+        },
+        "activeToolUseId": {
+          "type": "string"
+        },
+        "permissionMode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "running"
+      ]
+    },
+    "AbortAckServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "abort_ack"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "alreadyStopped": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "sessionId",
+        "stopped"
+      ]
+    },
+    "CompactingServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "compacting"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "active",
+        "sessionId"
+      ]
+    },
+    "UploadChunkAckServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "upload_chunk_ack"
+        },
+        "uploadId": {
+          "type": "string"
+        },
+        "chunkIndex": {
+          "type": "number"
+        },
+        "receivedChunks": {
+          "type": "number"
+        },
+        "bytesReceived": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "uploadId",
+        "chunkIndex",
+        "receivedChunks",
+        "bytesReceived"
+      ]
+    },
+    "FileAvailableServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "downloadPath": {
+          "type": "string"
+        },
+        "fileSize": {
+          "type": "number"
+        },
+        "fileVersion": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "deliveryId": {
+          "type": "string"
+        },
+        "replay": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "fileId",
+        "fileName",
+        "filePath",
+        "fileSize",
+        "sessionId"
+      ]
+    },
+    "FileStartServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_start"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "fileSize": {
+          "type": "number"
+        },
+        "offsetBytes": {
+          "type": "number"
+        },
+        "transferToken": {
+          "type": "string"
+        },
+        "fileVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "fileId",
+        "fileName",
+        "fileSize",
+        "offsetBytes",
+        "fileVersion"
+      ]
+    },
+    "FileChunkServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_chunk"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "fileSize": {
+          "type": "number"
+        },
+        "offsetBytes": {
+          "type": "number"
+        },
+        "transferToken": {
+          "type": "string"
+        },
+        "fileVersion": {
+          "type": "string"
+        },
+        "chunkIndex": {
+          "type": "number"
+        },
+        "totalChunks": {
+          "type": "number"
+        },
+        "data": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "fileId",
+        "fileName",
+        "fileSize",
+        "chunkIndex",
+        "totalChunks",
+        "data"
+      ]
+    },
+    "FileCompleteServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_complete"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "fileSize": {
+          "type": "number"
+        },
+        "transferToken": {
+          "type": "string"
+        },
+        "fileVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "fileId",
+        "fileName"
+      ]
+    },
+    "FileErrorServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_error"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "transferToken": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "fileId",
+        "message"
+      ]
+    },
+    "UploadCompleteServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "upload_complete"
+        },
+        "uploadId": {
+          "type": "string"
+        },
+        "serverPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "uploadId",
+        "serverPath"
+      ]
+    },
+    "FileManagerListResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_manager_list_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "parentPath": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FileManagerEntry"
+          }
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "path"
+            ]
+          }
+        },
+        "offset": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        },
+        "totalCount": {
+          "type": "number"
+        },
+        "nextOffset": {
+          "type": "number"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "errorCode": {
+          "type": "string"
+        },
+        "permission": {
+          "type": "object",
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "path",
+        "entries",
+        "roots"
+      ]
+    },
+    "FileManagerEntry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "directory",
+            "file",
+            "symlink",
+            "other"
+          ]
+        },
+        "size": {
+          "type": "number"
+        },
+        "modifiedAt": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "extension": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "mediaKind": {
+          "type": "string",
+          "enum": [
+            "image",
+            "video",
+            "audio",
+            "text",
+            "archive",
+            "code",
+            "other"
+          ]
+        },
+        "protected": {
+          "type": "boolean"
+        },
+        "protectedLabel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "kind",
+        "hidden",
+        "protected"
+      ]
+    },
+    "FileManagerStatResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_manager_stat_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "entry": {
+          "$ref": "#/definitions/FileManagerEntry"
+        },
+        "error": {
+          "type": "string"
+        },
+        "errorCode": {
+          "type": "string"
+        },
+        "permission": {
+          "type": "object",
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "path"
+      ]
+    },
+    "MacosPermissionStatusServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "macos_permission_status_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "platform": {
+          "$ref": "#/definitions/global.NodeJS.Platform"
+        },
+        "access": {
+          "type": "string",
+          "enum": [
+            "granted",
+            "denied",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "helperInstalled": {
+          "type": "boolean"
+        },
+        "helperActive": {
+          "type": "boolean"
+        },
+        "helperPath": {
+          "type": "string"
+        },
+        "settingsPane": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "errorCode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "supported",
+        "platform",
+        "access",
+        "path",
+        "helperInstalled",
+        "helperActive",
+        "helperPath",
+        "settingsPane"
+      ]
+    },
+    "global.NodeJS.Platform": {
+      "type": "string",
+      "enum": [
+        "aix",
+        "android",
+        "darwin",
+        "freebsd",
+        "haiku",
+        "linux",
+        "openbsd",
+        "sunos",
+        "win32",
+        "cygwin",
+        "netbsd"
+      ]
+    },
+    "MacosPermissionActionServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "macos_permission_action_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "action": {
+          "type": "string"
+        },
+        "helperPath": {
+          "type": "string"
+        },
+        "restarting": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "action",
+        "helperPath"
+      ]
+    },
+    "FileManagerProtectedResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_manager_protected_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "protected": {
+          "type": "boolean"
+        },
+        "entry": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "removed": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "path",
+        "protected"
+      ]
+    },
+    "FileManagerOperationResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_manager_operation_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "download",
+            "mkdir",
+            "rename",
+            "delete",
+            "upload_start",
+            "write_text"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "newPath": {
+          "type": "string"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "uploadId": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "operation",
+        "ok"
+      ]
+    },
+    "FileManagerTextResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "file_manager_text_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "bytesRead": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "path"
+      ]
+    },
+    "ReminderServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "reminder"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "scheduledTime": {
+          "type": "string"
+        },
+        "notificationId": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "title",
+        "body",
+        "scheduledTime",
+        "notificationId",
+        "sessionId"
+      ]
+    },
+    "CompactBoundaryServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "compact_boundary"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "preTokens": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "trigger",
+        "preTokens",
+        "sessionId"
+      ]
+    },
+    "TaskNotificationServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "task_notification"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "started",
+            "completed",
+            "failed",
+            "stopped",
+            "cancelled"
+          ]
+        },
+        "outputFile": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "originToolUseId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subagentType": {
+          "type": "string"
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "totalTokens": {
+              "type": "number"
+            },
+            "toolUses": {
+              "type": "number"
+            },
+            "durationMs": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "totalTokens",
+            "toolUses",
+            "durationMs"
+          ]
+        },
+        "skipTranscript": {
+          "type": "boolean"
+        },
+        "uuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "status",
+        "summary",
+        "sessionId"
+      ]
+    },
+    "CodexCommandResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "codex_command_result"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "command",
+        "status",
+        "summary",
+        "payload",
+        "sessionId"
+      ]
+    },
+    "CodexGoalStateServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "codex_goal_state"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodexGoal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "goal",
+        "ok"
+      ]
+    },
+    "CodexGoal": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/CodexGoalStatus"
+        },
+        "tokenBudget": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tokensUsed": {
+          "type": "number"
+        },
+        "timeUsedSeconds": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "threadId",
+        "objective",
+        "status",
+        "tokenBudget",
+        "tokensUsed",
+        "timeUsedSeconds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CodexGoalStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "paused",
+        "blocked",
+        "usageLimited",
+        "budgetLimited",
+        "complete"
+      ]
+    },
+    "ToolSummaryServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_summary"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "precedingToolUseIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "summary",
+        "precedingToolUseIds",
+        "sessionId"
+      ]
+    },
+    "SessionForkedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_forked"
+        },
+        "originalSessionId": {
+          "type": "string"
+        },
+        "newSessionId": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "originalSessionId",
+        "newSessionId",
+        "cwd"
+      ]
+    },
+    "RewindConversationResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "rewind_conversation_result"
+        },
+        "rewindIncludesTarget": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "userMessageUuid": {
+          "type": "string"
+        },
+        "dryRun": {
+          "type": "boolean"
+        },
+        "filesReverted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "insertions": {
+          "type": "number"
+        },
+        "deletions": {
+          "type": "number"
+        },
+        "messagesRemoved": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "success",
+        "userMessageUuid"
+      ]
+    },
+    "BranchResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "branch_result"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "originalSessionId": {
+          "type": "string"
+        },
+        "newSessionId": {
+          "type": "string"
+        },
+        "branchPointUuid": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "success",
+        "originalSessionId",
+        "branchPointUuid"
+      ]
+    },
+    "TtsAudioServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tts_audio"
+        },
+        "audioData": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "audioData",
+        "text",
+        "sessionId"
+      ]
+    },
+    "SpeakServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "speak"
+        },
+        "text": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text",
+        "sessionId"
+      ]
+    },
+    "ThinkingServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "thinking"
+        },
+        "content": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "thinkingTokens": {
+          "type": "number"
+        },
+        "thinkingDurationMs": {
+          "type": "number"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "streamId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "replay": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "type": "boolean"
+        },
+        "finalSnapshot": {
+          "type": "boolean"
+        },
+        "deliveryId": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "content",
+        "sessionId"
+      ]
+    },
+    "ThinkingTokensServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "thinking_tokens"
+        },
+        "estimatedTokens": {
+          "type": "number"
+        },
+        "estimatedTokensDelta": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuid": {
+          "type": "string"
+        },
+        "triggerUserMessageUuids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "estimatedTokens",
+        "estimatedTokensDelta",
+        "sessionId"
+      ]
+    },
+    "ToolImageServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_image"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "imageData": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "toolUseId",
+        "imageData",
+        "mimeType",
+        "filePath",
+        "sessionId"
+      ]
+    },
+    "ActiveSubagentsServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "active_subagents"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "replace": {
+          "type": "boolean"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "agentId": {
+                "type": "string"
+              },
+              "toolUseId": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "subagentType": {
+                "type": "string"
+              },
+              "startedAt": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "completed",
+                  "interrupted",
+                  "errored",
+                  "shutdown",
+                  "unavailable"
+                ]
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "reasoningEffort": {
+                "type": "string"
+              },
+              "agentPath": {
+                "type": "string"
+              },
+              "isBackgrounded": {
+                "type": "boolean"
+              },
+              "progressSummary": {
+                "type": "string"
+              },
+              "lastToolName": {
+                "type": "string"
+              },
+              "usage": {
+                "type": "object",
+                "properties": {
+                  "totalTokens": {
+                    "type": "number"
+                  },
+                  "toolUses": {
+                    "type": "number"
+                  },
+                  "durationMs": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "totalTokens",
+                  "toolUses",
+                  "durationMs"
+                ]
+              },
+              "parentToolUseId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "agentId",
+              "toolUseId",
+              "description",
+              "subagentType",
+              "startedAt"
+            ]
+          }
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "tasks"
+      ]
+    },
+    "ScheduledTaskListServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "scheduled_task_list"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ScheduledTask"
+          }
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "tasks"
+      ]
+    },
+    "ScheduledTask": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "$ref": "#/definitions/AgentEffort"
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "scheduledTime": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ScheduledTaskStatus"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "resultSummary": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "createdBySessionId": {
+          "type": "string"
+        },
+        "recurrence": {
+          "$ref": "#/definitions/RecurrenceConfig"
+        },
+        "reuseSession": {
+          "type": "boolean"
+        },
+        "notificationMode": {
+          "type": "string",
+          "enum": [
+            "completion",
+            "quiet"
+          ]
+        },
+        "runCount": {
+          "type": "number"
+        },
+        "lastRunAt": {
+          "type": "string"
+        },
+        "lastReadAt": {
+          "type": "string"
+        },
+        "archivedAt": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TaskRun"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "prompt",
+        "cwd",
+        "scheduledTime",
+        "createdAt",
+        "status"
+      ]
+    },
+    "ScheduledTaskStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "RecurrenceConfig": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "once",
+            "daily",
+            "weekly",
+            "monthly",
+            "custom"
+          ]
+        },
+        "intervalMs": {
+          "type": "number"
+        },
+        "daysOfWeek": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "TaskRun": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "completedAt": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "completed",
+            "failed"
+          ]
+        },
+        "trigger": {
+          "type": "string",
+          "enum": [
+            "scheduled",
+            "manual"
+          ]
+        },
+        "resumeTaskStatus": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "resultSummary": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "startedAt",
+        "status"
+      ]
+    },
+    "ScheduledTaskUpdateServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "scheduled_task_update"
+        },
+        "task": {
+          "$ref": "#/definitions/ScheduledTask"
+        }
+      },
+      "required": [
+        "type",
+        "task"
+      ]
+    },
+    "ScheduledTaskNotificationServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "scheduled_task_notification"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "failed",
+            "manual"
+          ]
+        },
+        "sessionCompletion": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "eventId": {
+          "type": "string"
+        },
+        "navigationTarget": {
+          "type": "string",
+          "const": "scheduled_tasks"
+        },
+        "scheduledTaskId": {
+          "type": "string"
+        },
+        "fcmDispatched": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "title",
+        "body",
+        "sessionId"
+      ]
+    },
+    "RateLimitEventServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "rate_limit_event"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "status": {
+          "type": "string"
+        },
+        "resetsAt": {
+          "type": "string"
+        },
+        "utilization": {
+          "type": "number"
+        },
+        "utilizationPercent": {
+          "type": "number"
+        },
+        "rateLimitType": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "backend",
+        "status",
+        "sessionId"
+      ]
+    },
+    "TaskStartedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "task_started"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "taskType": {
+          "type": "string"
+        },
+        "subagentType": {
+          "type": "string"
+        },
+        "workflowName": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "skipTranscript": {
+          "type": "boolean"
+        },
+        "isBackgrounded": {
+          "type": "boolean"
+        },
+        "spawnDepth": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "description",
+        "sessionId"
+      ]
+    },
+    "BgTaskProgressServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "bg_task_progress"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "subagentType": {
+          "type": "string"
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "lastToolName": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "sessionId"
+      ]
+    },
+    "TaskUpdatedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "task_updated"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "patch": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "failed",
+                "killed",
+                "paused"
+              ]
+            },
+            "description": {
+              "type": "string"
+            },
+            "endTime": {
+              "type": "number"
+            },
+            "totalPausedMs": {
+              "type": "number"
+            },
+            "error": {
+              "type": "string"
+            },
+            "isBackgrounded": {
+              "type": "boolean"
+            }
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "patch",
+        "sessionId"
+      ]
+    },
+    "BackgroundTasksChangedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "background_tasks_changed"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "taskId": {
+                "type": "string"
+              },
+              "taskType": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "toolUseId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "taskId",
+              "taskType",
+              "description"
+            ]
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "tasks",
+        "sessionId"
+      ]
+    },
+    "WorkflowStateServerMessage": {
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "workflowName": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "scriptPath": {
+          "type": "string"
+        },
+        "transcriptDir": {
+          "type": "string"
+        },
+        "statePath": {
+          "type": "string"
+        },
+        "startTime": {
+          "type": "number"
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "agentCount": {
+          "type": "number"
+        },
+        "totalTokens": {
+          "type": "number"
+        },
+        "totalToolCalls": {
+          "type": "number"
+        },
+        "defaultModel": {
+          "type": "string"
+        },
+        "phases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkflowPhaseState"
+          }
+        },
+        "progress": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkflowProgressState"
+          }
+        },
+        "logs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resultPreview": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "workflow_state"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "replay": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "logs",
+        "phases",
+        "progress",
+        "sessionId",
+        "status",
+        "summary",
+        "taskId",
+        "type"
+      ]
+    },
+    "ApiRetryServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "api_retry"
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "maxRetries": {
+          "type": "number"
+        },
+        "delayMs": {
+          "type": "number"
+        },
+        "errorStatus": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "attempt",
+        "maxRetries",
+        "delayMs",
+        "sessionId"
+      ]
+    },
+    "ToolProgressServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_progress"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "toolName": {
+          "type": "string"
+        },
+        "elapsedSeconds": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "parentToolUseId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "heartbeat": {
+          "type": "boolean"
+        },
+        "subagentType": {
+          "type": "string"
+        },
+        "subagentRetry": {
+          "type": "object",
+          "properties": {
+            "agentId": {
+              "type": "string"
+            },
+            "attempt": {
+              "type": "number"
+            },
+            "maxRetries": {
+              "type": "number"
+            },
+            "retryDelayMs": {
+              "type": "number"
+            },
+            "errorStatus": {
+              "type": "number"
+            },
+            "errorCategory": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "agentId",
+            "attempt",
+            "maxRetries",
+            "retryDelayMs",
+            "errorCategory"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "toolUseId",
+        "toolName",
+        "elapsedSeconds",
+        "sessionId"
+      ]
+    },
+    "HistoryRetractedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "history_retracted"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "uuids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "uuids"
+      ]
+    },
+    "LocalCommandOutputServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "local_command_output"
+        },
+        "content": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "content",
+        "sessionId"
+      ]
+    },
+    "PromptSuggestionServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "prompt_suggestion"
+        },
+        "suggestion": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "suggestion",
+        "sessionId"
+      ]
+    },
+    "SessionLifecycleServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_lifecycle"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "start",
+            "end"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "agentType": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "event",
+        "sessionId"
+      ]
+    },
+    "SessionSettingsServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_settings"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/AgentSessionSettings"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "settings"
+      ]
+    },
+    "SupportedModelsServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "supported_models"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "currentModel": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "cached": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "models",
+        "sessionId",
+        "backend"
+      ]
+    },
+    "TaskCompletedHookServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "task_completed_hook"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "teammateName": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "subject",
+        "sessionId"
+      ]
+    },
+    "ElicitationUrlServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "elicitation_url"
+        },
+        "questionId": {
+          "type": "string"
+        },
+        "mcpServerName": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "elicitationId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "questionId",
+        "mcpServerName",
+        "message",
+        "url",
+        "sessionId"
+      ]
+    },
+    "UsageUpdateServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "usage_update"
+        },
+        "inputTokens": {
+          "type": "number"
+        },
+        "outputTokens": {
+          "type": "number"
+        },
+        "cacheReadTokens": {
+          "type": "number"
+        },
+        "cacheCreateTokens": {
+          "type": "number"
+        },
+        "contextWindow": {
+          "type": "number"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheCreateTokens",
+        "contextWindow",
+        "sessionId"
+      ]
+    },
+    "HookStartedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "hook_started"
+        },
+        "hookId": {
+          "type": "string"
+        },
+        "hookName": {
+          "type": "string"
+        },
+        "hookEvent": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "hookId",
+        "hookName",
+        "hookEvent",
+        "sessionId"
+      ]
+    },
+    "HookProgressServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "hook_progress"
+        },
+        "hookId": {
+          "type": "string"
+        },
+        "hookName": {
+          "type": "string"
+        },
+        "hookEvent": {
+          "type": "string"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "hookId",
+        "hookName",
+        "hookEvent",
+        "stdout",
+        "stderr",
+        "sessionId"
+      ]
+    },
+    "HookResponseServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "hook_response"
+        },
+        "hookId": {
+          "type": "string"
+        },
+        "hookName": {
+          "type": "string"
+        },
+        "hookEvent": {
+          "type": "string"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": "number"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "hookId",
+        "hookName",
+        "hookEvent",
+        "stdout",
+        "stderr",
+        "outcome",
+        "sessionId"
+      ]
+    },
+    "MonitorStartedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "monitor_started"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "monitoring": {
+          "type": "boolean"
+        },
+        "command": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "description",
+        "monitoring",
+        "sessionId"
+      ]
+    },
+    "MonitorOutputServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "monitor_output"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "snapshotContent": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "boolean"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "deliveryId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "content",
+        "sessionId"
+      ]
+    },
+    "TerminalStatusServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "terminal_status"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "pid": {
+          "type": "number"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "cols": {
+          "type": "number"
+        },
+        "rows": {
+          "type": "number"
+        },
+        "exitCode": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "running",
+        "cwd",
+        "shell",
+        "cols",
+        "rows"
+      ]
+    },
+    "TerminalOutputServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "terminal_output"
+        },
+        "data": {
+          "type": "string"
+        },
+        "replay": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    "TerminalExitedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "terminal_exited"
+        },
+        "exitCode": {
+          "type": "number"
+        },
+        "signal": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "exitCode"
+      ]
+    },
+    "TerminalErrorServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "terminal_error"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ]
+    },
+    "SessionMemoryStateServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_memory_state"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "state"
+      ]
+    },
+    "SessionMemoryErrorServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_memory_error"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "message"
+      ]
+    }
+  }
+}

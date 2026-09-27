@@ -6,7 +6,7 @@ const test = require("node:test");
 
 const {
   SessionAutomationLockStore,
-} = require("../dist/session-automation-lock");
+} = require("#server/session-automation-lock");
 
 test("stop lock survives restart and only an explicit user prompt removes it", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-stop-lock-"));

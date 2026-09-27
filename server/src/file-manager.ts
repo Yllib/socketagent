@@ -73,7 +73,7 @@ function withFilesystemTimeout<T>(promise: Promise<T>, operation: string): Promi
         clearTimeout(timer);
         resolve(value);
       },
-      (error) => {
+      (error: unknown) => {
         clearTimeout(timer);
         reject(error);
       },
@@ -263,8 +263,7 @@ export async function statFileManagerPath(args: {
   if (isMacosProtectedUserPath(resolvedPath)) {
     const access = await checkMacosFileAccess(resolvedPath);
     if (access.access !== "granted") {
-      const denied = new Error(access.error || `macOS denied access to ${resolvedPath}`) as NodeJS.ErrnoException;
-      denied.code = "EPERM";
+      const denied = Object.assign(new Error(access.error || `macOS denied access to ${resolvedPath}`), { code: "EPERM" });
       throw denied;
     }
   }
@@ -293,8 +292,7 @@ export async function listFileManagerDirectory(args: {
   if (isMacosProtectedUserPath(resolvedPath)) {
     const access = await checkMacosFileAccess(resolvedPath);
     if (access.access !== "granted") {
-      const denied = new Error(access.error || `macOS denied access to ${resolvedPath}`) as NodeJS.ErrnoException;
-      denied.code = "EPERM";
+      const denied = Object.assign(new Error(access.error || `macOS denied access to ${resolvedPath}`), { code: "EPERM" });
       throw denied;
     }
   }

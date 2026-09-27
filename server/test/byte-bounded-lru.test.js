@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { ByteBoundedLru } = require("../dist/byte-bounded-lru");
+const { ByteBoundedLru } = require("#server/byte-bounded-lru");
 
 test("evicts least-recently-used values to stay within its byte budget", () => {
   const cache = new ByteBoundedLru(10, (value) => value.length);

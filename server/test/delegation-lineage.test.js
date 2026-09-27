@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const {
   resolveDelegationSupervisorSessionId,
-} = require("../dist/delegation-lineage");
+} = require("#server/delegation-lineage");
 
 function scheduledTask(overrides = {}) {
   return {

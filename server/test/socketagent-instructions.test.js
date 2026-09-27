@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { normalizeSystemPrompt } = require("../dist/server-settings");
+const { normalizeSystemPrompt } = require("#server/server-settings");
 
 test("migrates the stale server prompt that automatically invoked HtmlPlan", () => {
   const legacy = [

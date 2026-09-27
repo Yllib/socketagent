@@ -5,6 +5,10 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
+/** @template T
+ * @param {() => T | false | null | undefined} predicate
+ * @param {number} timeoutMs
+ * @returns {Promise<T>} */
 function waitFor(predicate, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
@@ -46,8 +50,8 @@ test("Monitor worker survives its server parent and restores exact pending outpu
   const {
     getDurableMonitorRecord,
     readDurableMonitorSlice,
-  } = require("../dist/durable-monitor-store");
-  const { restoreAppMonitors } = require("../dist/app-tool-handlers");
+  } = require("#server/durable-monitor-store");
+  const { restoreAppMonitors } = require("#server/app-tool-handlers");
 
   const firstRecord = getDurableMonitorRecord(taskId);
   assert.ok(firstRecord, "durable record should survive the server parent");
@@ -60,8 +64,11 @@ test("Monitor worker survives its server parent and restores exact pending outpu
     return readDurableMonitorSlice(record, 0).content.includes("after");
   });
 
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/protocol").HistoryEntry[]} */
   const history = [];
+  /** @type {string[]} */
   const injected = [];
   const restored = restoreAppMonitors((record) => ({
     getSessionId: () => record.sessionId,
@@ -123,7 +130,7 @@ test("Linux monitor runs in a user service outside the SocketAgent server cgroup
 
   const completed = await waitFor(() => {
     try {
-      const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+      const record = require("#server/stored-data").parseStoredData("monitor", JSON.parse(fs.readFileSync(recordPath, "utf8")));
       if (record.status !== "completed") return false;
       const output = fs.readFileSync(record.outputFile, "utf8");
       return output.includes("after") ? { record, output } : false;

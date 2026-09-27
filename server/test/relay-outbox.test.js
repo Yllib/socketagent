@@ -6,7 +6,7 @@ const {
   RelayClient,
   RelayMessageOutbox,
   VirtualRelaySocket,
-} = require("../dist/relay-client");
+} = require("#server/relay-client");
 
 test("relay capability handshake uses the authoritative server payload", () => {
   const expected = {
@@ -125,7 +125,7 @@ test("virtual relay socket remains writable across a peer handoff", () => {
 });
 
 test('request replies target one peer; live events still broadcast', () => {
-  const crypto = require('../dist/relay-crypto');
+  const crypto = require('#server/relay-crypto');
   const client = new RelayClient({ relayUrl:'wss://relay.invalid', pairingToken:'test',
     keyPair:crypto.generateKeyPair(), serverCapabilities:()=>({}), onMessage(){}, onStatusChange(){} });
   client.ws = {readyState: WebSocket.OPEN};

@@ -5,7 +5,7 @@ const {
   codexAuthScopeFromAccountRead,
   isCodexActiveWriterError,
   isMcpAuthSignal,
-} = require("../dist/codex-session.js");
+} = require("#server/codex-session");
 
 test("routes a missing required OpenAI account to primary reauthentication", () => {
   assert.equal(

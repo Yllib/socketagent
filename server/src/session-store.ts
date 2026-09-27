@@ -1603,7 +1603,7 @@ function captureMessageImages(sessionId: string, entry: HistoryEntry): void {
     if (!current || current.content !== original || current.inlineImageContent) return;
     const updated = appendHistory(sessionId, { ...current, inlineImageContent: content });
     for (const listener of inlineImageListeners) listener(sessionId, updated);
-  }).catch((error) => {
+  }).catch((error: unknown) => {
     console.warn(`[InlineImages] Could not preserve message images: ${errorMessage(error)}`);
   }).finally(() => { inlineImageCaptures.delete(key); });
   inlineImageCaptures.set(key, work);

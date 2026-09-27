@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const {
   findUntrackedDelegatedRestartContinuation,
-} = require("../dist/delegated-agent-restart-recovery");
+} = require("#server/delegated-agent-restart-recovery");
 
 function record(overrides = {}) {
   return {

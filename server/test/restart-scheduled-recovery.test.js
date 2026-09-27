@@ -7,7 +7,7 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-recovered-task-te
 process.env.SOCKET_AGENT_DATA_DIR = dir;
 process.env.SOCKETAGENT_DATA_DIR = dir;
 process.env.SOCKET_AGENT_HOME = dir;
-const { saveScheduledTask, getScheduledTask, reconcileInterruptedScheduledTasks, finishRecoveredScheduledTask } = require("../dist/scheduled-task-store");
+const { saveScheduledTask, getScheduledTask, reconcileInterruptedScheduledTasks, finishRecoveredScheduledTask } = require("#server/scheduled-task-store");
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 function task(id, extra = {}) {

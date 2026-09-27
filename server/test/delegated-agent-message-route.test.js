@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const {
   routeRunningDelegatedAgentMessage,
-} = require("../dist/delegated-agent-message-route");
+} = require("#server/delegated-agent-message-route");
 
 test("injects a message into a running delegated child at the next safe boundary", async () => {
   const calls = [];

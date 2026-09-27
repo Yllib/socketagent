@@ -5,9 +5,10 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { WebSocketServer, WebSocket } = require('ws');
-const { SessionTransferJobs } = require('../dist/session-transfer-jobs');
-const { generateKeyPair } = require('../dist/relay-crypto');
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const { SessionTransferJobs } = require('#server/session-transfer-jobs');
+const { generateKeyPair } = require('#server/relay-crypto');
+const delay = (/** @type {number} */ ms) => new Promise(resolve => setTimeout(resolve, ms));
+/** @param {() => boolean} predicate */
 async function until(predicate) {
   const deadline = Date.now() + 15000;
   while (!predicate()) {
@@ -17,21 +18,24 @@ async function until(predicate) {
 }
 
 // A ciphertext-only relay. Neither this router nor a phone receives the server keys.
+/** @param {import("node:test").TestContext} t */
 async function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'transfer-job-test-'));
   const relay = new WebSocketServer({ port: 0 });
   await new Promise(resolve => relay.once('listening', resolve));
+  /** @type {Map<string, WebSocket>} */
   const peers = new Map();
   let interrupt = false;
   let observedPlaintext = false;
   relay.on('connection', (socket, req) => {
-    const role = req.headers.authorization.replace('Bearer ', '');
+    const role = (req.headers.authorization || '').replace('Bearer ', '');
     peers.set(role, socket);
     const other = role === 'source' ? 'destination' : 'source';
     if (peers.has(other)) for (const peer of peers.values()) peer.send(JSON.stringify({ type: 'peer_ready' }));
     socket.on('message', (bytes, binary) => {
       assert.equal(binary, true);
-      observedPlaintext ||= bytes.includes(Buffer.from('transferLineage'));
+      const raw = Buffer.isBuffer(bytes) ? bytes : Array.isArray(bytes) ? Buffer.concat(bytes) : Buffer.from(bytes);
+      observedPlaintext ||= raw.includes(Buffer.from('transferLineage'));
       if (interrupt) return;
       const peer = peers.get(other);
       if (peer?.readyState === WebSocket.OPEN) peer.send(bytes, { binary: true });
@@ -43,10 +47,14 @@ async function fixture(t) {
   const checksum = crypto.createHash('sha256').update(payload).digest('hex');
   const jobId = crypto.randomUUID();
   let exports = 0, imports = 0, archives = 0, persistedBytes = 0;
-  let source, destination;
+  /** @type {SessionTransferJobs} */
+  let source;
+  /** @type {SessionTransferJobs} */
+  let destination;
   let stopAtChunk = false;
   let stopAfterImport = false;
   let receiptLost = false;
+  /** @type {import("#server/session-transfer").SessionTransferImportResult} */
   const result = { session: {
     id: jobId, title: 'Test', cwd: directory, createdAt: new Date().toISOString(),
     lastActive: new Date().toISOString(), messagePreview: '', backend: 'codex',
@@ -55,11 +63,12 @@ async function fixture(t) {
       transferredAt: new Date().toISOString(), mode: 'move',
     },
   }, sourceSessionId: 'session-one', exactNativeResume: false };
+  /** @type {ConstructorParameters<typeof SessionTransferJobs>[2]} */
   const hooks = {
     export: async () => {
       exports++;
       const bundlePath = path.join(directory, 'export.gz'); fs.writeFileSync(bundlePath, payload);
-      return { bundlePath, fileSize: payload.length, sha256: checksum };
+      return { bundlePath, fileName: "export.gz", fileSize: payload.length, sha256: checksum, bundleId: jobId, sessionId: "session-one", backend: "codex", cwd: directory, exactNativeAvailable: false };
     },
     import: async (_config, bundlePath, sha256) => {
       assert.deepEqual(fs.readFileSync(bundlePath), payload);
@@ -84,7 +93,11 @@ async function fixture(t) {
     destination = new SessionTransferJobs(path.join(directory, 'destination'), keys[1], hooks);
   };
   create();
-  const common = { jobId, sessionId: 'session-one', targetCwd: directory, targetBackend: 'codex', mode: 'move', nativeMode: 'handoff', relayUrl: `ws://127.0.0.1:${relay.address().port}` };
+  const address = relay.address();
+  assert.ok(address && typeof address !== "string");
+  /** @type {Omit<import("#server/protocol").TransferJobConfig, "role">} */
+  const common = { jobId, sessionId: 'session-one', targetCwd: directory, targetBackend: 'codex', mode: 'move', nativeMode: 'handoff', relayUrl: `ws://127.0.0.1:${address.port}` };
+  /** @type {import("#server/protocol").TransferJobConfig[]} */
   const configs = [0, 1].map(i => ({ ...common, role: i ? 'destination' : 'source', ticket: i ? 'destination' : 'source', peerPublicKey: Buffer.from(keys[1-i].publicKey).toString('base64') }));
   t.after(async () => { source.close(); destination.close(); for (const p of relay.clients) p.terminate(); await new Promise(resolve => relay.close(resolve)); fs.rmSync(directory, { recursive: true, force: true }); });
   return {

@@ -7,8 +7,8 @@ const test = require("node:test");
 const {
   WorkReviewError,
   WorkReviewService,
-} = require("../dist/work-review-service");
-const { WorkReviewStore } = require("../dist/work-review-store");
+} = require("#server/work-review-service");
+const { WorkReviewStore } = require("#server/work-review-store");
 
 const roots = [];
 

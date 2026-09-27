@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const {
   codexRolloutJsonlToHistory,
-} = require("../dist/codex-native-history");
+} = require("#server/codex-native-history");
 
 test("restores Codex reasoning summaries as thinking history", () => {
   const raw = [

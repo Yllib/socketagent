@@ -7,7 +7,7 @@ const path = require("path");
 const {
   codexRolloutJsonlToHistory,
   codexAppServerThreadToHistory,
-} = require("../dist/codex-native-history");
+} = require("#server/codex-native-history");
 
 function line(type, payload, timestamp = "2026-01-01T00:00:00.000Z") {
   return JSON.stringify({ type, timestamp, payload });
@@ -103,7 +103,7 @@ withTempHome((home) => {
   ]));
   const sessionStorePath = require.resolve("../dist/session-store");
   delete require.cache[sessionStorePath];
-  const { appendNativeHistorySuffix } = require("../dist/session-store");
+  const { appendNativeHistorySuffix } = require("#server/session-store");
 
   const toolOnly = appendNativeHistorySuffix(sid, [
     { role: "user", content: "hello", timestamp: "2026-01-01T00:00:00.000Z" },

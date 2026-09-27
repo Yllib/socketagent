@@ -4,7 +4,7 @@ const test = require("node:test");
 const {
   ControlMessageScheduler,
   controlMessageQueueScope,
-} = require("../dist/control-message-scheduler");
+} = require("#server/control-message-scheduler");
 
 function deferred() {
   let resolve;

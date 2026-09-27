@@ -1,4 +1,4 @@
-const { handleMonitorTool } = require("../../dist/app-tool-handlers");
+const { handleMonitorTool } = require("#server/app-tool-handlers");
 
 (async () => {
   const result = await handleMonitorTool(

@@ -5,8 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { once } = require('node:events');
-const { serveDownloadFile } = require('../dist/http-file-download');
-const { modelDownloadArchive } = require('../dist/model-download-archive');
+const { serveDownloadFile } = require('#server/http-file-download');
+const { modelDownloadArchive } = require('#server/model-download-archive');
 
 test('HTTP ranges validate revisions, reject invalid offsets and handle empty files', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'download-http-'));

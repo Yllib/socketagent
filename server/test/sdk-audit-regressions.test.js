@@ -1,26 +1,32 @@
+const { isRecord } = require("#server/value-guards");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const crypto = require("node:crypto");
 require("./test-data-dir");
-const { ClaudeSession } = require("../dist/claude-session");
-const { CodexSession } = require("../dist/codex-session");
-const { CodexAppServerClient } = require("../dist/codex-app-server-client");
-const { claudeTotalUsage } = require("../dist/claude-usage");
-const { getHistory, positionSessionMessage } = require("../dist/session-store");
+const { ClaudeSession } = require("#server/claude-session");
+const { CodexSession } = require("#server/codex-session");
+const { CodexAppServerClient } = require("#server/codex-app-server-client");
+const { claudeTotalUsage } = require("#server/claude-usage");
+const { getHistory, positionSessionMessage } = require("#server/session-store");
 
+/**
+ * @template {ClaudeSession | CodexSession} T
+ * @param {new (...args: ConstructorParameters<typeof ClaudeSession>) => T} Type
+ */
 function session(Type) {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const value = new Type({ readyState: 1, send() {} }, process.cwd(), []);
   value.sessionId = `audit-${crypto.randomUUID()}`;
-  value.threadId = value.sessionId;
-  value.send = message => sent.push(positionSessionMessage(value.sessionId, message));
+  if (value instanceof CodexSession) value.threadId = value.sessionId;
+  value.send = (/** @type {import("#server/protocol").ServerMessage} */ message) => sent.push(positionSessionMessage(value.getSessionId(), message));
   return { value, sent };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test("Claude streamed blocks sharing an API id retain separate durable cards", () => {
   const { value, sent } = session(ClaudeSession);
-  const event = (data) => ({ type: "stream_event", parent_tool_use_id: null, uuid: crypto.randomUUID(), event: data });
+  const event = (/** @type {Record<string, unknown>} */ data) => ({ type: "stream_event", parent_tool_use_id: null, uuid: crypto.randomUUID(), event: data });
   value._streamKey(event({ type: "message_start", message: { id: "api-1" } }));
   for (const [index, text] of ["First paragraph", "Second paragraph"].entries()) {
     value._streamKey(event({ type: "content_block_start", index, content_block: { type: "text" } }));
@@ -119,12 +125,17 @@ test("Claude rejects invalid or missing required form answers and cancels URL wa
 
 test("Codex accepts string request ids and returns integer protocol errors", () => {
   const client = new CodexAppServerClient({ cwd: process.cwd() });
+  /** @type {Parameters<CodexAppServerClient["writeResponse"]>[0][]} */
   const responses = [];
   client.writeResponse = response => responses.push(response);
   client.handleStdout(JSON.stringify({ id: "future-1", method: "future/request", params: {} }) + "\n");
   assert.equal(responses[0].id, "future-1");
+  assert.ok(isRecord(responses[0].error));
   assert.equal(responses[0].error.code, -32601);
-  client.on("serverRequest", (request, respond) => respond({ result: { accepted: request.id } }));
+  client.on("serverRequest", (
+    /** @type {Parameters<CodexSession["handleAppServerRequest"]>[0]} */ request,
+    /** @type {import("#server/codex-app-server-client").CodexAppServerRequestResponder} */ respond,
+  ) => { respond({ result: { accepted: request.id } }); });
   client.handleStdout(JSON.stringify({ id: "input-1", method: "item/tool/requestUserInput", params: {} }) + "\n");
   assert.deepEqual(responses[1], { id: "input-1", result: { accepted: "input-1" } });
 });
@@ -159,9 +170,11 @@ test("Codex structured write paths reach policy checks and unknown paths fail cl
 
 test("Codex failed completion preserves the backend error and does not emit success", async () => {
   const { value, sent } = session(CodexSession);
+  /** @type {unknown} */
   let rejected;
   value.appServerTurnSettler = { resolve() { assert.fail("failed turn resolved"); }, reject(error) { rejected = error; } };
   value.handleAppServerNotification("turn/completed", { threadId: value.threadId, turn: { id: "failed", status: "failed", error: { message: "Backend failure" } } });
+  assert.ok(rejected instanceof Error);
   assert.match(rejected.message, /Backend failure/);
   assert.ok(sent.some(message => message.type === "error" && message.message.includes("Backend failure")));
   assert.equal(sent.some(message => message.type === "result"), false);

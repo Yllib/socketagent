@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { TranscriptDatabase } = require("../dist/transcript-database");
+const { TranscriptDatabase } = require("#server/transcript-database");
 
 for (const disableFts of [false, true]) {
   test(`re-keys transcript rows and artifact paths${disableFts ? " without FTS5" : ""}`, () => {

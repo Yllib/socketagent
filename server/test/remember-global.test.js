@@ -1,16 +1,25 @@
+const { z } = require("zod");
+const { parseServerMessage } = require("#server/server-message");
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const data = require('./test-data-dir');
-const store = require('../dist/session-store');
-const {handleRememberTool} = require('../dist/app-tool-handlers');
-const {requestTranscriptAccess} = require('../dist/transcript-access-approval');
-const {CodexSession} = require('../dist/codex-session');
-const parse = r => JSON.parse(r.content[0].text);
+const store = require('#server/session-store');
+const {handleRememberTool} = require('#server/app-tool-handlers');
+const {requestTranscriptAccess} = require('#server/transcript-access-approval');
+const {CodexSession} = require('#server/codex-session');
+/** @param {Awaited<ReturnType<typeof handleRememberTool>>} r */
+const parse = r => z.object({ results: z.array(z.object({
+  archived: z.boolean(), source_id: z.string(), entry_id: z.string(), session_seq: z.number(),
+})) }).parse(JSON.parse(r.content[0].text));
 
 test('global access waits for a user card; deny, cancel, and missing authorization reveal nothing', async () => {
-  const packets = [], pending = new Map();
+  /** @type {import('#server/protocol').ServerMessage[]} */
+  const packets = [];
+  /** @type {Parameters<typeof requestTranscriptAccess>[0]['pendingQuestions']} */
+  const pending = new Map();
+  /** @type {import('#server/app-tool-handlers').AppToolContext} */
   const ctx = {getSessionId: () => 'requester', send: m => packets.push(m)};
   store.appendHistory('other-session', {role:'user',content:'globalneedle secret project',timestamp:'2026-09-01T00:00:00Z'});
   const denied = await handleRememberTool(ctx, {action:'search_all',query:'globalneedle'});
@@ -22,6 +31,8 @@ test('global access waits for a user card; deny, cancel, and missing authorizati
   await new Promise(r=>setImmediate(r));
   assert.equal(completed,false);
   const card=packets.at(-1);
+  assert.equal(card?.type, "question");
+  assert.ok(card && card.type === "question");
   assert.match(card.questions[0].question,/all sessions/);
   assert.match(card.questions[0].question,/globalneedle/);
   pending.get(card.questionId).resolve({[card.questions[0].question]:'Deny'});
@@ -60,8 +71,9 @@ test('approved search finds other sessions and clear-context archives; every rea
 });
 
 test('Codex automatic approval mode cannot bypass transcript approval, and abort cancels it', async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const packets=[];
-  const session=new CodexSession({readyState:1,send:v=>packets.push(JSON.parse(v))},'/tmp');
+  const session=new CodexSession({readyState:1,send:v=>packets.push(parseServerMessage(JSON.parse(v)))},'/tmp');
   session.sessionId='approval-session'; session._permissionMode='superYolo';
   const result=handleRememberTool(session.createAppToolContext(),{action:'search_all',query:'globalneedle'});
   assert.equal(session.pendingQuestions.size,1);

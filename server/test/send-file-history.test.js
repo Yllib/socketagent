@@ -14,8 +14,8 @@ const {
   deleteSessionArtifacts,
   getHistory,
   normalizeSendFileHistoryEntries,
-} = require("../dist/session-store");
-const { handleSendFileTool } = require("../dist/app-tool-handlers");
+} = require("#server/session-store");
+const { handleSendFileTool } = require("#server/app-tool-handlers");
 
 test.after(() => {
   fs.rmSync(testDataDir, { recursive: true, force: true });
@@ -81,10 +81,12 @@ test("repeated sends of an unchanged path receive independent durable delivery I
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-send-file-"));
   const filePath = path.join(dir, "same-name.txt");
   fs.writeFileSync(filePath, "unchanged content");
+  /** @type {import("#server/protocol").FileAvailableServerMessage[]} */
   const packets = [];
+  /** @type {import("#server/app-tool-handlers").AppToolContext} */
   const ctx = {
     getSessionId: () => sessionId,
-    send: (message) => packets.push(message),
+    send: (message) => { assert.ok(message.type === "file"); packets.push(message); },
     getTtsEngine: () => "system",
     getKokoroVoice: () => "",
     getKokoroSpeed: () => 1,

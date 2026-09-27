@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { SessionInstanceRegistry } = require("../dist/session-instance-registry");
+const { SessionInstanceRegistry } = require("#server/session-instance-registry");
 
 test("retains every live runner for one exact session ID", () => {
   const registry = new SessionInstanceRegistry();

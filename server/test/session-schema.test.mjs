@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseStoredSessions } from '../dist/session-schema.js';
+import { parseStoredSessions } from '#server/session-schema';
 
 const legacySession = {
   id: 'legacy-session', title: 'Saved session', cwd: '/project',

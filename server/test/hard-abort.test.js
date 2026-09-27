@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { HardAbortCoordinator } = require("../dist/hard-abort");
+const { HardAbortCoordinator } = require("#server/hard-abort");
 
 test("concurrent and repeated hard-abort requests terminate a session once", async () => {
   const coordinator = new HardAbortCoordinator(1000);

@@ -9,12 +9,12 @@ const {
   fileTransferVersion,
   resolveFileResumeOffset,
   supportsBinaryFileDownload,
-} = require("../dist/file-transfer-wire");
+} = require("#server/file-transfer-wire");
 const {
   decryptBinary,
   encryptBinary,
   generateKeyPair,
-} = require("../dist/relay-crypto");
+} = require("#server/relay-crypto");
 
 test("encodes raw file bytes in a versioned binary download frame", () => {
   const raw = Buffer.from([0x00, 0x7f, 0x80, 0xff]);

@@ -9,7 +9,7 @@ const path = require("node:path");
 const {
   hasOutstandingDelegatedRuns,
   inferStaleRunCompletion,
-} = require("../dist/session-run-store");
+} = require("#server/session-run-store");
 
 test("stale runs close at their last transcript activity", () => {
   const completion = inferStaleRunCompletion([

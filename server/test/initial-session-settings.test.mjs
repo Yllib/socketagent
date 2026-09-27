@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyInitialSessionSettings, isClaudeEffort } from "../dist/initial-session-settings.js";
+import { applyInitialSessionSettings, isClaudeEffort } from "#server/initial-session-settings";
 
 function fakeSession() {
   /** @type {[string, unknown][]} */
@@ -12,7 +12,7 @@ function fakeSession() {
     async setModel(value) { calls.push(["model", value]); },
     /** @param {string} value */
     setEffort(value) { calls.push(["effort", value]); },
-    /** @param {import('../dist/protocol.js').AgentThinkingSetting} value */
+    /** @param {import('#server/protocol').AgentThinkingSetting} value */
     setThinking(value) { calls.push(["thinking", value]); },
     /** @param {boolean} value */
     setClaudeAutoCompact(value) { calls.push(["autoCompact", value]); },

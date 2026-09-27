@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {CommandReceipts} = require('../dist/command-receipts');
+const {CommandReceipts} = require('#server/command-receipts');
 
 test('receipt survives restart and replays the original result without redispatch', () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sa-receipts-'));

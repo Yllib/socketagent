@@ -93,7 +93,7 @@ function readdirWithTimeout(dirPath: string): Promise<void> {
           reject(new Error(`Access check timed out after ${ACCESS_CHECK_TIMEOUT_MS / 1000} seconds`));
           return;
         }
-        const denied = new Error(detail || error.message) as NodeJS.ErrnoException;
+        const denied: NodeJS.ErrnoException = new Error(detail || error.message);
         if (detail === "EPERM" || detail === "EACCES") denied.code = detail;
         reject(denied);
       },

@@ -3,7 +3,7 @@ const test = require('node:test');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { installManagedBackendSafely } = require('../dist/managed-backend-install');
+const { installManagedBackendSafely } = require('#server/managed-backend-install');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-repair-'));

@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
-import { parseClientMessage } from '../dist/client-message.js';
-import { RelayClient, relayPeerForMessage } from '../dist/relay-client.js';
-import { encrypt, encryptBinary, generateKeyPair, toBase64 } from '../dist/relay-crypto.js';
+import { parseClientMessage } from '#server/client-message';
+import { RelayClient, relayPeerForMessage } from '#server/relay-client';
+import { encrypt, encryptBinary, generateKeyPair, toBase64 } from '#server/relay-crypto';
 
 test('client contracts validate nested data while preserving optional and future fields', () => {
   for (const message of [
@@ -40,7 +40,7 @@ test('relay validates encrypted JSON and keeps valid traffic and peer routing in
   assert.ok(address && typeof address !== 'string');
   const serverKeys = generateKeyPair();
   const phoneKeys = generateKeyPair();
-  /** @type {import('../dist/protocol.js').ClientMessage[]} */
+  /** @type {import('#server/protocol').ClientMessage[]} */
   const received = [];
   let finish = () => {};
   const finished = new Promise(resolve => { finish = () => resolve(undefined); });

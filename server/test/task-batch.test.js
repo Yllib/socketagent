@@ -1,13 +1,18 @@
+const { z } = require("zod");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
 require("./test-data-dir");
 
-const { handleTaskBatchTool } = require("../dist/app-tool-handlers");
-const { getTodos, saveTodos } = require("../dist/session-store");
+const { handleTaskBatchTool } = require("#server/app-tool-handlers");
+const { getTodos, saveTodos } = require("#server/session-store");
 
+/** @param {string} sessionId
+ * @returns {{ sent: import('#server/protocol').ServerMessage[], history: import('#server/protocol').HistoryEntry[], context: import('#server/app-tool-handlers').AppToolContext }} */
 function makeContext(sessionId) {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/protocol").HistoryEntry[]} */
   const history = [];
   return {
     sent,
@@ -17,7 +22,7 @@ function makeContext(sessionId) {
       getCwd: () => process.cwd(),
       getBackend: () => "claude",
       send: (message) => sent.push(message),
-      appendHistory: (entry) => history.push(entry),
+      appendHistory: (entry) => { history.push(entry); },
       getTtsEngine: () => "system",
       getKokoroVoice: () => "",
       getKokoroSpeed: () => 1,
@@ -25,8 +30,9 @@ function makeContext(sessionId) {
   };
 }
 
+/** @param {Awaited<ReturnType<typeof handleTaskBatchTool>>} result */
 function resultBody(result) {
-  return JSON.parse(result.content[0].text);
+  return z.object({ count: z.number(), tasks: z.array(z.object({ task_id: z.string(), status: z.string() })) }).parse(JSON.parse(result.content[0].text));
 }
 
 test("TaskBatch creates and updates several tasks while preserving native tasks", async (t) => {

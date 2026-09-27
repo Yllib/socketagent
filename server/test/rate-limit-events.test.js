@@ -5,7 +5,7 @@ const {
   buildClaudeRateLimitEvent,
   buildClaudeUsageRateLimitEvents,
   buildCodexRateLimitEvents,
-} = require("../dist/rate-limit-events");
+} = require("#server/rate-limit-events");
 
 test("Claude rate-limit events preserve window identity and reset time", () => {
   assert.deepEqual(

@@ -32,9 +32,13 @@ npm test
 `npm test` builds, checks type safety, then runs both JS and MJS tests. The pre-push
 hook also builds and checks type safety when dependencies are installed. Hooks
 must be enabled with `git config core.hooksPath .githooks` in each pushing checkout.
-Run the build first in fresh checkouts: existing JS tests import `dist` modules.
+Run the build first in fresh checkouts. Tests and scripts use `#server/*`:
+Node resolves the built JavaScript in `dist`, while the type-checking project
+resolves the corresponding source. This preserves private implementation types
+that TypeScript intentionally omits from emitted declarations; runtime tests
+still exercise exactly the compiled server. No assertions bridge the two.
 
-Client-message runtime schemas derive from `protocol.ts` with
+Client/server-message runtime schemas derive from `protocol.ts` with
 `npm run protocol:generate`. Type-safety checks regenerate in memory and reject
 stale checked-in schemas. Known fields are validated; unknown future fields are
 retained. Packed binary uploads are decoded separately from JSON messages.
@@ -258,3 +262,17 @@ not a new auto-update policy.
   Baseline: 1,505, all in scripts/tests. Output: `/tmp/sa-source-full-tests.log`.
   A separate compiler audit found 18 inferred/evolving any bindings to finish;
   a zero lint count alone is not the final migration criterion.
+
+- Server `367b14f`: remaining production boundaries and stored-data schemas.
+- Compiler audit: production has zero direct/evolving `any` declarations and
+  arrays. Removed redundant narrowing assertions and annotated untyped library
+  rejection callbacks. Generated schemas now cover both protocol directions;
+  provider fixtures validate emitted packets against the server-message union.
+- Test aliases retain source method types while running built JavaScript. Largest
+  provider, subagent, recovery, transfer, monitor, TaskBatch, Remember, and Work
+  Review fixtures now have typed captures and checked JSON results. The delivery
+  helper accepts only the provider methods it uses instead of a full session.
+- Validation: 53 provider tests and 41 focused integration tests passed; full
+  suite 555 passed, one skipped. Baseline: 460, all scripts/tests. Output:
+  `/tmp/sa-fixture-checkpoint-tests.log`. Compiler audit of JavaScript still has
+  307 inferred/evolving bindings to resolve, including unused callback arguments.

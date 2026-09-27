@@ -17,13 +17,13 @@ const {
   completeSecureInputRequestWithSavedSecret,
   deleteSecureInput,
   replaceSecureInput,
-} = require("../dist/secure-input-store");
+} = require("#server/secure-input-store");
 const {
   appendHistory,
   getHistory,
   getPersistedSecureInputRequest,
   markSecureInputRequestResolved,
-} = require("../dist/session-store");
+} = require("#server/session-store");
 
 test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 

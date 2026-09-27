@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { codexThreadToSessionInfo } = require("../dist/session-store");
+const { codexThreadToSessionInfo } = require("#server/session-store");
 
 const thread = {
   id: "new-native-id",

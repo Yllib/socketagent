@@ -5,7 +5,7 @@ const {
   isAuthFailureMessage,
   claudeAuthStateFromCredentials,
   codexAuthStateFromAuthJson,
-} = require("../dist/backend-auth");
+} = require("#server/backend-auth");
 
 const HOUR = 60 * 60 * 1000;
 const NOW = Date.UTC(2026, 8, 19);

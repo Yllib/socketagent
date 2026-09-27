@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { runCodexBrowserAuth } = require('../dist/codex-browser-auth');
+const { runCodexBrowserAuth } = require('#server/codex-browser-auth');
 
 const mock = String.raw`
 let buffer='';

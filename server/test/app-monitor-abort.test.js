@@ -16,7 +16,7 @@ const {
   rebindAppMonitorsForSession,
   stopAppMonitor,
   stopAppMonitorsForSession,
-} = require("../dist/app-tool-handlers");
+} = require("#server/app-tool-handlers");
 
 test("rejects pgrep -f patterns that match their own watcher shell", async () => {
   assert.equal(
@@ -46,6 +46,10 @@ test("rejects pgrep -f patterns that match their own watcher shell", async () =>
   assert.match(result.content[0].text, /self-matching/);
 });
 
+/** @template T
+ * @param {() => T | false | null | undefined} predicate
+ * @param {number} timeoutMs
+ * @returns {Promise<T>} */
 function waitFor(predicate, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
@@ -64,7 +68,9 @@ function waitFor(predicate, timeoutMs = 3000) {
 test("Monitor streams output, persists it, and emits a terminal lifecycle", async () => {
   if (process.platform === "win32") return;
   const sessionId = `monitor-lifecycle-${Date.now()}`;
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {import("#server/protocol").HistoryEntry[]} */
   const history = [];
   await handleMonitorTool(
     {
@@ -119,6 +125,7 @@ test("Monitor streams output, persists it, and emits a terminal lifecycle", asyn
 test("disabling Monitor clears the phone lifecycle without killing the process", async () => {
   if (process.platform === "win32") return;
   const sessionId = `monitor-disable-${Date.now()}`;
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const result = await handleMonitorTool(
     {
@@ -145,7 +152,9 @@ test("disabling Monitor clears the phone lifecycle without killing the process",
 test("a persistent Monitor rebinds away from a completed Claude turn", async () => {
   if (process.platform === "win32") return;
   const sessionId = `monitor-rebind-${Date.now()}`;
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const original = [];
+  /** @type {(import("#server/protocol").ServerMessage | {type: "agent_output", text: string})[]} */
   const durable = [];
   const result = await handleMonitorTool(
     {
@@ -227,7 +236,9 @@ test("hard stop terminates detached Monitor process trees owned by the session",
 test("terminal output waits behind an in-flight agent delivery without loss or duplication", async () => {
   if (process.platform === "win32") return;
   const sessionId = `monitor-overlap-${Date.now()}`;
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {string[]} */
   const injected = [];
   await handleMonitorTool(
     {

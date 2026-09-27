@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
+const { readFileSync } = require("node:fs");
 const {z} = require("zod");
 const echoSchema = z.object({method:z.string(),params:z.record(z.string(),z.unknown())});
 const test = require("node:test");
@@ -39,6 +41,94 @@ function waitForEvent(emitter, name) {
     )),
   ]);
 }
+
+// Native Codex sandboxes start a new session/process group. Include a grandchild
+// and ignore SIGTERM so both ownership discovery and forced cleanup are exercised.
+const stubbornWorker = `
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+process.stdout.write("ready\\n");
+`;
+const detachedSupervisor = `
+const { spawn } = require("node:child_process");
+process.on("SIGTERM", () => {});
+const worker = spawn(process.execPath, ["-e", ${JSON.stringify(stubbornWorker)}]);
+worker.stdout.once("data", () => process.stdout.write(JSON.stringify({
+  child: process.pid, grandchild: worker.pid,
+}) + "\\n"));
+`;
+const detachedTreeServer = `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(detachedSupervisor)}], {
+  detached: true, stdio: ["ignore", "pipe", "ignore"],
+});
+child.stdout.once("data", data => process.stdout.write(JSON.stringify({
+  method: "test/processes", params: {root: process.pid, ...JSON.parse(data)},
+}) + "\\n"));
+process.on("SIGTERM", () => process.exit(0));
+process.stdin.resume();
+`;
+
+/** @param {number} pid */
+function processIsLive(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return !/^[ZX]/.test(stat.slice(stat.lastIndexOf(")") + 2));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function startDetachedTree() {
+  const client = new CodexAppServerClient({
+    cwd: process.cwd(), command: process.execPath, args: ["-e", detachedTreeServer],
+  });
+  const ready = waitForEvent(client, "test/processes");
+  client.start();
+  const pids = z.object({ root: z.number(), child: z.number(), grandchild: z.number() }).parse(await ready);
+  return { client, pids };
+}
+
+for (const signal of ["SIGKILL", "SIGTERM"]) {
+  test(`stop ${signal} waits for detached sandbox descendants and leaves other processes alone`, {
+    skip: process.platform !== "linux",
+  }, async () => {
+    const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const { client, pids } = await startDetachedTree();
+    try {
+      assert.ok(Object.values(pids).every(processIsLive));
+      await client.stop(signal === "SIGKILL" ? "SIGKILL" : "SIGTERM", 75, true);
+      assert.deepEqual(Object.values(pids).filter(processIsLive), []);
+      assert.ok(unrelated.pid && processIsLive(unrelated.pid));
+    } finally {
+      unrelated.kill("SIGKILL");
+      await client.stop("SIGKILL", 75, true);
+    }
+  });
+}
+
+test("a failed Stop retains descendant ownership after the app-server leader exits", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const { client, pids } = await startDetachedTree();
+  const kill = process.kill.bind(process);
+  const blocked = t.mock.method(process, "kill", /** @param {number} pid @param {NodeJS.Signals | number} signal */ (pid, signal) => {
+    if (pid === pids.grandchild && signal === "SIGKILL") return true;
+    return kill(pid, signal);
+  });
+  try {
+    await assert.rejects(client.stop("SIGKILL", 25, true), /did not exit after SIGKILL/);
+    assert.equal(processIsLive(pids.root), false);
+    assert.equal(processIsLive(pids.grandchild), true);
+    blocked.mock.restore();
+    await client.stop("SIGKILL", 25, true);
+    assert.equal(processIsLive(pids.grandchild), false);
+  } finally {
+    blocked.mock.restore();
+    await client.stop("SIGKILL", 25, true);
+  }
+});
 
 test("completes the app-server initialize handshake before other requests", async () => {
   const client = new CodexAppServerClient({

@@ -3012,6 +3012,7 @@ export class CodexSession {
   private async stopAppServerClient(requireConfirmedExit = false): Promise<void> {
     if (this.appServerStopPromise) {
       await this.appServerStopPromise;
+      if (requireConfirmedExit && this.appServer) await this.stopAppServerClient(true);
       return;
     }
     if (this.appServerIdleStopTimer) {
@@ -3042,16 +3043,16 @@ export class CodexSession {
         );
         stopped = true;
       } catch (err) {
+        // Preserve ownership after failed cleanup, including a failed idle stop.
+        // A subsequent hard Stop must still reach surviving command descendants.
+        this.appServer = client;
         if (requireConfirmedExit) {
-          // Keep the process handle reachable so a retransmitted hard stop can
-          // attempt termination again instead of falsely treating it as absent.
-          this.appServer = client;
           throw err;
         }
         console.warn(`[codex app-server] cleanup failed: ${codexAppServerErrorMessage(err, String(err))}`);
       } finally {
         this.appServerStopExpected = false;
-        if (stopped || !requireConfirmedExit) {
+        if (stopped) {
           client.removeAllListeners();
           this.onClose?.();
         }
@@ -3357,7 +3358,7 @@ export class CodexSession {
     };
   }
 
-  /** Mirrors the abort path. Interrupt the active app-server turn if possible. */
+  /** Hard Stop confirms the app-server and its command descendants have exited. */
   async abort(): Promise<void> {
     this.streamSnapshots.flushAll();
     this._abortRequested = true;
@@ -3365,16 +3366,14 @@ export class CodexSession {
     this.cancelPendingAppServerTurnCompletion();
     this.clearQueuedPrompts("Codex turn interrupted");
     this.clearPendingAppServerSteers("Codex turn interrupted");
+    // Snapshot/terminate descendants before ending the provider turn. An early
+    // interrupt can orphan sandbox processes before their ownership is recorded.
+    const sid = this.sessionId || this._resumeSessionId || "";
+    await Promise.all([
+      this.stopAppServerClient(true),
+      sid ? stopAppMonitorsForSession(sid) : Promise.resolve(0),
+    ]);
     this.settleActiveAppServerToolCalls("(interrupted)");
-    const client = this.appServer;
-    if (client && this.threadId && this.activeAppServerTurnId) {
-      void client.interruptTurn({
-        threadId: this.threadId,
-        turnId: this.activeAppServerTurnId,
-      }).catch((err: unknown) => {
-        console.warn(`[codex app-server] turn interrupt failed: ${codexAppServerErrorMessage(err, String(err))}`);
-      });
-    }
     this.appServerTurnSettler?.resolve();
     this.appServerTurnSettler = null;
     this._isRunning = false;
@@ -3389,11 +3388,6 @@ export class CodexSession {
         sessionId: this.sessionId,
       });
     }
-    const sid = this.sessionId || this._resumeSessionId || "";
-    await Promise.all([
-      this.stopAppServerClient(true),
-      sid ? stopAppMonitorsForSession(sid) : Promise.resolve(0),
-    ]);
   }
 
   private dequeueNextPrompt(): QueuedPrompt | null {

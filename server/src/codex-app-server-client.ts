@@ -2,6 +2,7 @@ import { execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from "chil
 import { EventEmitter } from "events";
 import { promisify } from "util";
 import { z } from "zod";
+import { PosixProcessTree } from "./posix-process-tree";
 import type { CodexMethods } from "./generated/codex/methods";
 import type { SandboxMode } from "./generated/codex/types/v2/SandboxMode";
 import type { AskForApproval } from "./generated/codex/types/v2/AskForApproval";
@@ -133,6 +134,7 @@ export class CodexAppServerClient extends EventEmitter {
   private stderrTail = "";
   private closed = false;
   private initializeParams?: CodexAppServerInitializeParams;
+  private stoppingProcessTree: PosixProcessTree | null = null;
 
   constructor(private readonly options: CodexAppServerOptions) {
     super();
@@ -147,6 +149,7 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   start(): void {
+    if (this.stoppingProcessTree) throw new Error("codex app-server shutdown is still pending");
     if (this.proc) return;
     this.closed = false;
     const command = this.options.command ?? "codex";
@@ -485,6 +488,22 @@ export class CodexAppServerClient extends EventEmitter {
     requireConfirmedExit = false,
   ): Promise<void> {
     const proc = this.proc;
+    if (process.platform !== "win32" && (this.stoppingProcessTree || proc?.pid)) {
+      const tree = this.stoppingProcessTree ?? (proc?.pid ? new PosixProcessTree(proc.pid) : null);
+      if (!tree) return;
+      this.stoppingProcessTree = tree;
+      // Retain descendant identities on failure, even after the leader exits,
+      // so a retry cannot mistake a missing leader for successful cleanup.
+      await tree.stop(signal, forceKillMs);
+      this.stoppingProcessTree = null;
+      this.closed = true;
+      if (this.proc === proc) this.proc = null;
+      proc?.unref();
+      proc?.stdin.destroy();
+      proc?.stdout.destroy();
+      proc?.stderr.destroy();
+      return;
+    }
     if (!proc) return;
     if (this.closed) {
       try { proc.stdin.destroy(); } catch {}
@@ -501,14 +520,6 @@ export class CodexAppServerClient extends EventEmitter {
           windowsHide: true,
         });
         if (result.status === 0) return;
-      }
-      if (process.platform !== "win32" && proc.pid) {
-        try {
-          process.kill(-proc.pid, nextSignal);
-          return;
-        } catch {
-          // Fall back to the direct child below.
-        }
       }
       try {
         proc.kill(nextSignal);

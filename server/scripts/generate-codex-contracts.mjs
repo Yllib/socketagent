@@ -30,6 +30,7 @@ const methods = [
 
 /** @param {string} directory @returns {Promise<string[]>} */
 async function listFiles(directory) {
+  /** @type {string[]} */
   const files = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const name = path.join(directory, entry.name);
@@ -58,7 +59,9 @@ try {
     if (!ts.isTypeAliasDeclaration(statement) || statement.name.text !== 'ClientRequest' || !ts.isUnionTypeNode(statement.type)) continue;
     for (const variant of statement.type.types) {
       if (!ts.isTypeLiteralNode(variant)) throw new Error('Unexpected Codex request union');
+      /** @type {string | undefined} */
       let method;
+      /** @type {string | undefined} */
       let params;
       for (const member of variant.members) {
         if (!ts.isPropertySignature(member) || !member.type) continue;
@@ -88,8 +91,11 @@ try {
       }
     }
   }
+  /** @type {string[]} */
   const importLines = [];
+  /** @type {string[]} */
   const methodLines = [];
+  /** @type {string[]} */
   const responseLines = [];
   const baseSchema = schemaShape.parse(JSON.parse(await readFile(path.join(scratch, 'json/codex_app_server_protocol.schemas.json'), 'utf8')));
   const schema = schemaShape.parse(JSON.parse(await readFile(path.join(scratch, 'json/codex_app_server_protocol.v2.schemas.json'), 'utf8')));
@@ -123,7 +129,8 @@ try {
   if (check) {
     const actual = await listFiles(output);
     const actualNames = new Set(actual.map(file => path.relative(output, file).split(path.sep).join('/')));
-    const changes = [];
+    /** @type {string[]} */
+  const changes = [];
     for (const [name, content] of files) {
       if (!actualNames.has(name) || await readFile(path.join(output, name), 'utf8') !== content) changes.push(name);
       actualNames.delete(name);

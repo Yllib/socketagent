@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -65,10 +69,14 @@ function existingMarker() {
   }
 }
 
+/** @param {string} executable */
 function executableWorks(executable) {
   return Boolean(executable && fs.existsSync(executable));
 }
 
+/** @typedef {{status: number | null, error?: unknown, timedOut?: boolean}} BrowserCheck */
+/** @param {string} executable @param {string[]} args
+ * @param {number} outputFd @param {number} errorFd @returns {Promise<BrowserCheck>} */
 function runBrowserCheck(executable, args, outputFd, errorFd) {
   return new Promise((resolve) => {
     let settled = false;
@@ -77,7 +85,7 @@ function runBrowserCheck(executable, args, outputFd, errorFd) {
       windowsHide: true,
       stdio: ["ignore", outputFd, errorFd],
     });
-    const finish = (status, error) => {
+    const finish = (/** @type {number | null} */ status, /** @type {unknown} */ error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
@@ -102,6 +110,8 @@ function runBrowserCheck(executable, args, outputFd, errorFd) {
 
 // Chrome's Windows GUI executable does not reliably return --dump-dom output
 // when started without a console. Validate the CDP page used by SocketAgent.
+/** @param {string} executable @param {string} profileDir
+ * @param {number} outputFd @param {number} errorFd @returns {Promise<BrowserCheck>} */
 async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) {
   const WebSocket = require("ws");
   const child = spawn(executable, [
@@ -111,11 +121,14 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
     `--user-data-dir=${profileDir}`,
     "data:text/html,<title>SocketAgent</title><p>ok</p>",
   ], { windowsHide: true, stdio: ["ignore", outputFd, errorFd] });
+  /** @type {unknown} */
   let launchError;
   child.once("error", error => { launchError = error; });
+  /** @type {import("ws") | undefined} */
   let socket;
   try {
     const deadline = Date.now() + 30000;
+    /** @type {Record<string, unknown> | undefined} */
     let target;
     while (Date.now() < deadline) {
       if (launchError) throw launchError;
@@ -124,32 +137,39 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
         const port = Number(fs.readFileSync(path.join(profileDir, "DevToolsActivePort"), "utf8").split(/\r?\n/)[0]);
         if (Number.isInteger(port) && port > 0 && port < 65536) {
           const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) });
-          const targets = await response.json();
-          target = targets.find(item => item.type === "page" && item.webSocketDebuggerUrl);
+          /** @type {unknown} */
+          const body = await response.json();
+          /** @type {unknown[]} */
+          const targets = Array.isArray(body) ? body : [];
+          target = targets.filter(isRecord).find(item => item.type === "page" && typeof item.webSocketDebuggerUrl === "string");
           if (target) break;
         }
       } catch {}
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    if (!target) throw new Error("Browser control connection did not become ready within 30 seconds");
-    socket = new WebSocket(target.webSocketDebuggerUrl);
+    if (!target || typeof target.webSocketDebuggerUrl !== "string") throw new Error("Browser control connection did not become ready within 30 seconds");
+    const pageSocket = new WebSocket(target.webSocketDebuggerUrl);
+    socket = pageSocket;
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Browser page validation timed out")), 10000);
-      const finish = error => { clearTimeout(timer); error ? reject(error) : resolve(); };
-      socket.once("error", finish);
-      socket.once("close", () => finish(new Error("Browser closed before page validation")));
-      socket.once("open", () => socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {
+      const finish = (/** @type {unknown} */ error) => { clearTimeout(timer); error ? reject(error) : resolve(); };
+      pageSocket.once("error", finish);
+      pageSocket.once("close", () => finish(new Error("Browser closed before page validation")));
+      pageSocket.once("open", () => pageSocket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {
         expression: "document.documentElement.outerHTML", returnByValue: true,
       } })));
-      socket.on("message", data => {
+      pageSocket.on("message", data => {
+        /** @type {unknown} */
         const message = JSON.parse(data.toString());
+        if (!isRecord(message)) return;
         if (message.id !== 1) return;
-        const html = message.result?.result?.value;
+        const result = isRecord(message.result) && isRecord(message.result.result) ? message.result.result : {};
+        const html = result.value;
         finish(typeof html === "string" && html.includes("<p>ok</p>") ? undefined : new Error("Browser could not render the validation page"));
       });
     });
     // Graceful close releases profile handles before cleanup.
-    socket.send(JSON.stringify({ id: 2, method: "Browser.close" }));
+    pageSocket.send(JSON.stringify({ id: 2, method: "Browser.close" }));
     const closeDeadline = Date.now() + 5000;
     while (child.exitCode === null && Date.now() < closeDeadline) await new Promise(resolve => setTimeout(resolve, 100));
     return { status: 0 };
@@ -163,6 +183,7 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
   }
 }
 
+/** @param {string} executable */
 async function validateBrowserLaunch(executable) {
   const profileRoot = process.platform === "linux"
     && (executable === "/usr/bin/chromium-browser" || executable === "/snap/bin/chromium")
@@ -196,7 +217,7 @@ async function validateBrowserLaunch(executable) {
     const output = fs.readFileSync(outputPath, "utf8");
     const errorOutput = fs.readFileSync(errorPath, "utf8");
     if (result.status !== 0 || (process.platform !== "win32" && !output.includes("<p>ok</p>"))) {
-      const detail = String(result.error?.message || errorOutput || output || (result.timedOut ? "Browser launch timed out." : "Browser launch failed"))
+      const detail = String((result.error instanceof Error ? result.error.message : "") || errorOutput || output || (result.timedOut ? "Browser launch timed out." : "Browser launch failed"))
         .trim()
         .split(/\r?\n/)
         .slice(-4)
@@ -211,10 +232,11 @@ async function validateBrowserLaunch(executable) {
     // Cleanup must not turn a successful launch into an EBUSY install failure
     // or overwrite the original diagnostic when the launch itself failed.
     try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
-    catch (error) { console.warn(`Could not remove browser test profile ${profileDir}: ${error.message}`); }
+    catch (error) { console.warn(`Could not remove browser test profile ${profileDir}: ${error instanceof Error ? error.message : String(error)}`); }
   }
 }
 
+/** @param {string} executable */
 function writeMarker(executable) {
   fs.mkdirSync(runtimeDir(), { recursive: true, mode: 0o700 });
   try { fs.chmodSync(runtimeDir(), 0o700); } catch {}
@@ -232,7 +254,7 @@ async function main() {
       return;
     } catch (error) {
       if (process.platform === "linux") throw error;
-      console.warn(`System browser is not automation-compatible; installing a managed runtime. ${error.message}`);
+      console.warn(`System browser is not automation-compatible; installing a managed runtime. ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -283,7 +305,7 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch((error) => {
+  main().catch((/** @type {unknown} */ error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 // One-time local upgrade from servers without the preparation endpoint.
 // Refuse to interrupt anything except the explicitly identified caller.
 const fs = require("fs");
@@ -15,6 +19,7 @@ function pid() {
   const service = execFileSync(serviceControl, ["name"], { encoding: "utf8" }).trim();
   return execFileSync("systemctl", ["--user", "show", service, "-p", "MainPID", "--value"], { encoding: "utf8" }).trim();
 }
+/** @param {string} route */
 async function request(route) {
   return fetch(`http://127.0.0.1:${process.env.PORT || 8085}${route}`, {
     headers: { Authorization: `Bearer ${process.env.AUTH_TOKEN}` }, signal: AbortSignal.timeout(5000),
@@ -28,16 +33,22 @@ async function request(route) {
   if (!/^[1-9][0-9]*$/.test(currentPid)) throw new Error("No running service process");
   if (action === "cancel") {
     if (currentPid !== expectedPid || !fs.existsSync(file)) return;
+    /** @type {unknown} */
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (data.runs?.length === 1 && data.runs[0].sessionId === sessionId
-        && data.runs[0].id.startsWith(`bootstrap:${currentPid}:`)) fs.unlinkSync(file);
+    if (isRecord(data) && Array.isArray(data.runs) && data.runs.length === 1) {
+      /** @type {unknown} */
+      const run = data.runs[0];
+      if (isRecord(run) && run.sessionId === sessionId && typeof run.id === "string"
+        && run.id.startsWith(`bootstrap:${currentPid}:`)) fs.unlinkSync(file);
+    }
     return;
   }
   if (action !== "seed") throw new Error("Usage: bootstrap-restart.js seed|cancel sessionId [oldPid]");
   const response = await request(`/running-sessions?token=${encodeURIComponent(process.env.AUTH_TOKEN)}`);
   if (!response.ok) throw new Error("Could not verify active sessions");
+  /** @type {unknown} */
   const running = await response.json();
-  if (!Array.isArray(running.sessions) || running.sessions.length !== 1 || running.sessions[0] !== sessionId) {
+  if (!isRecord(running) || !Array.isArray(running.sessions) || running.sessions.length !== 1 || running.sessions[0] !== sessionId) {
     throw new Error("Bootstrap refused: only the explicitly identified caller may be running");
   }
   if (fs.existsSync(file)) throw new Error("Recovery journal already exists; refusing to overwrite it");
@@ -54,4 +65,4 @@ async function request(route) {
   const directory = fs.openSync(path.dirname(file), "r");
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
   console.log(currentPid);
-})().catch(error => { console.error(error.message); process.exitCode = 1; });
+})().catch((/** @type {unknown} */ error) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

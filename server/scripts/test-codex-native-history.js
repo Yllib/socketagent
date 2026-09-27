@@ -9,10 +9,12 @@ const {
   codexAppServerThreadToHistory,
 } = require("#server/codex-native-history");
 
+/** @param {string} type @param {unknown} payload */
 function line(type, payload, timestamp = "2026-01-01T00:00:00.000Z") {
   return JSON.stringify({ type, timestamp, payload });
 }
 
+/** @template T @param {(directory: string) => T} fn @returns {T} */
 function withTempHome(fn) {
   const prev = process.env.HOME;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-history-"));

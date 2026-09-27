@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 const fs = require("fs");
 const os = require("os");
@@ -17,7 +21,9 @@ const defaultKeysFile = fs.existsSync(path.join(dataDir, "relay-keys.json"))
   : path.join(legacyDataDir, "relay-keys.json");
 const keysFile = process.env.SOCKETAGENT_KEYS_FILE || defaultKeysFile;
 
+/** @param {string} file */
 function readEnv(file) {
+  /** @type {Record<string, string>} */
   const result = {};
   if (!fs.existsSync(file)) return result;
   for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
@@ -40,8 +46,9 @@ if (!fs.existsSync(keysFile)) {
   process.exit(1);
 }
 
+/** @type {unknown} */
 const keys = JSON.parse(fs.readFileSync(keysFile, "utf8"));
-if (!keys.publicKey) {
+if (!isRecord(keys) || typeof keys.publicKey !== "string" || !keys.publicKey) {
   console.error(`Relay key file is missing publicKey: ${keysFile}`);
   process.exit(1);
 }

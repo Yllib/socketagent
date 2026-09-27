@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 /**
  * Phase 0 probe for the Codex App Server protocol.
  *
@@ -18,10 +22,12 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+/** @param {NodeJS.ProcessEnv} env */
 function pathKey(env) {
   return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
 }
 
+/** @param {NodeJS.ProcessEnv} env */
 function candidateCodexDirs(env) {
   const home = env.HOME || os.homedir();
   if (process.platform !== "win32") {
@@ -38,9 +44,10 @@ function candidateCodexDirs(env) {
     localAppData && path.join(localAppData, "Programs", "nodejs"),
     env.ProgramFiles && path.join(env.ProgramFiles, "nodejs"),
     env["ProgramFiles(x86)"] && path.join(env["ProgramFiles(x86)"], "nodejs"),
-  ].filter(Boolean);
+  ].filter((value) => typeof value === "string" && value.length > 0);
 }
 
+/** @param {string[]} args */
 function resolveCodexSpawn(args) {
   const env = { ...process.env };
   const key = pathKey(env);
@@ -70,6 +77,7 @@ function resolveCodexSpawn(args) {
   return { command: "codex", args, env, shell: process.platform === "win32" };
 }
 
+/** @param {string} name @param {string} fallback */
 function argValue(name, fallback) {
   const idx = process.argv.indexOf(name);
   if (idx >= 0 && process.argv[idx + 1]) return process.argv[idx + 1];
@@ -91,12 +99,17 @@ const verbose = process.argv.includes("--verbose");
 const experimentalRawEvents = process.argv.includes("--raw-events");
 
 let nextId = 1;
+/** @type {Map<number, {method: string, resolve(value: unknown): void, reject(error: Error): void}>} */
 const pending = new Map();
+/** @type {string | null} */
 let threadId = null;
+/** @type {string | null} */
 let turnId = null;
 let steerSent = false;
 let sawCompleted = false;
+/** @type {NodeJS.Timeout | null} */
 let watchdog = null;
+/** @type {NodeJS.Timeout | null} */
 let shutdownTimer = null;
 
 const codex = resolveCodexSpawn(["app-server", "--listen", "stdio://"]);
@@ -108,7 +121,7 @@ const child = spawn(codex.command, codex.args, {
 });
 
 child.stderr.setEncoding("utf8");
-child.stderr.on("data", (chunk) => {
+child.stderr.on("data", (/** @type {string} */ chunk) => {
   for (const line of chunk.split(/\r?\n/)) {
     if (line.trim()) console.error(`[app-server stderr] ${line}`);
   }
@@ -122,6 +135,7 @@ child.on("exit", (code, signal) => {
   }
 });
 
+/** @param {string} method @param {Record<string, unknown>} params @returns {Promise<unknown>} */
 function send(method, params) {
   const id = nextId++;
   const msg = { id, method, params };
@@ -133,31 +147,36 @@ function send(method, params) {
   });
 }
 
+/** @param {Error} error */
 function rejectAll(error) {
   for (const { reject } of pending.values()) reject(error);
   pending.clear();
 }
 
+/** @param {string} method @param {unknown} params */
 function onNotification(method, params) {
+  const data = isRecord(params) ? params : {};
+  const turn = isRecord(data.turn) ? data.turn : undefined;
+  const thread = isRecord(data.thread) ? data.thread : undefined;
+  const item = isRecord(data.item) ? data.item : undefined;
+  /** @type {Record<string, unknown>} */
   const summary = {};
-  if (params && typeof params === "object") {
-    if (params.threadId) summary.threadId = params.threadId;
-    if (params.turnId) summary.turnId = params.turnId;
-    if (params.item?.type) summary.itemType = params.item.type;
-    if (params.delta) summary.delta = String(params.delta).slice(0, 120);
-    if (params.turn?.id) summary.turnId = params.turn.id;
-    if (params.thread?.id) summary.threadId = params.thread.id;
-  }
+  if (data.threadId) summary.threadId = data.threadId;
+  if (data.turnId) summary.turnId = data.turnId;
+  if (item?.type) summary.itemType = item.type;
+  if (data.delta) summary.delta = String(data.delta).slice(0, 120);
+  if (turn?.id) summary.turnId = turn.id;
+  if (thread?.id) summary.threadId = thread.id;
   console.log(`[notify] ${method} ${JSON.stringify(summary)}`);
   if (verbose) {
     console.log(`[notify:full] ${method} ${JSON.stringify(params)}`);
   }
 
-  if (method === "thread/started" && params?.thread?.id) {
-    threadId = params.thread.id;
+  if (method === "thread/started" && typeof thread?.id === "string") {
+    threadId = thread.id;
   }
-  if (method === "turn/started" && params?.turn?.id) {
-    turnId = params.turn.id;
+  if (method === "turn/started" && typeof turn?.id === "string") {
+    turnId = turn.id;
     if (!steerSent) {
       steerSent = true;
       setTimeout(() => {
@@ -170,8 +189,8 @@ function onNotification(method, params) {
           .then((result) => {
             console.log(`[probe] turn/steer succeeded: ${JSON.stringify(result).slice(0, 500)}`);
           })
-          .catch((err) => {
-            console.error(`[probe] turn/steer failed: ${err.message}`);
+          .catch((/** @type {unknown} */ err) => {
+            console.error(`[probe] turn/steer failed: ${err instanceof Error ? err.message : String(err)}`);
           });
       }, steerDelayMs);
     }
@@ -191,12 +210,13 @@ function onNotification(method, params) {
 
 let stdoutTail = "";
 child.stdout.setEncoding("utf8");
-child.stdout.on("data", (chunk) => {
+child.stdout.on("data", (/** @type {string} */ chunk) => {
   stdoutTail += chunk;
   const lines = stdoutTail.split("\n");
   stdoutTail = lines.pop() || "";
   for (const line of lines) {
     if (!line.trim()) continue;
+    /** @type {unknown} */
     let msg;
     try {
       msg = JSON.parse(line);
@@ -205,13 +225,14 @@ child.stdout.on("data", (chunk) => {
       continue;
     }
 
+    if (!isRecord(msg)) continue;
     if (Object.prototype.hasOwnProperty.call(msg, "id")) {
-      const pendingRequest = pending.get(msg.id);
+      const pendingRequest = typeof msg.id === "number" ? pending.get(msg.id) : undefined;
       if (!pendingRequest) {
         console.log(`[server ->] response#${msg.id} with no pending request`);
         continue;
       }
-      pending.delete(msg.id);
+      if (typeof msg.id === "number") pending.delete(msg.id);
       if (msg.error) {
         pendingRequest.reject(new Error(JSON.stringify(msg.error)));
       } else {
@@ -221,7 +242,7 @@ child.stdout.on("data", (chunk) => {
       continue;
     }
 
-    if (msg.method) {
+    if (typeof msg.method === "string") {
       onNotification(msg.method, msg.params);
     } else {
       console.log(`[server ->] ${line.slice(0, 500)}`);
@@ -234,7 +255,7 @@ async function main() {
     const err = new Error(`probe timed out after ${timeoutMs}ms`);
     rejectAll(err);
     child.kill("SIGTERM");
-    console.error(`[probe] ${err.message}`);
+    console.error(`[probe] ${err instanceof Error ? err.message : String(err)}`);
     process.exitCode = 1;
   }, timeoutMs);
 
@@ -250,7 +271,7 @@ async function main() {
         requestAttestation: false,
       },
     });
-    console.log(`[probe] initialized: ${init.userAgent || "unknown userAgent"}`);
+    console.log(`[probe] initialized: ${isRecord(init) ? init.userAgent || "unknown userAgent" : "unknown userAgent"}`);
 
     const started = await send("thread/start", {
       cwd,
@@ -259,7 +280,8 @@ async function main() {
       experimentalRawEvents,
       persistExtendedHistory: false,
     });
-    threadId = started.thread?.id;
+    if (!isRecord(started) || !isRecord(started.thread) || typeof started.thread.id !== "string") throw new Error("Invalid thread/start response");
+    threadId = started.thread.id;
     console.log(`[probe] threadId=${threadId}`);
 
     const turn = await send("turn/start", {
@@ -267,11 +289,12 @@ async function main() {
       input: [{ type: "text", text: prompt, text_elements: [] }],
       cwd,
     });
-    turnId = turn.turn?.id;
+    if (!isRecord(turn) || !isRecord(turn.turn) || typeof turn.turn.id !== "string") throw new Error("Invalid turn/start response");
+    turnId = turn.turn.id;
     console.log(`[probe] turnId=${turnId}`);
   } catch (err) {
     if (watchdog) clearTimeout(watchdog);
-    console.error(`[probe] failed: ${err.stack || err.message || err}`);
+    console.error(`[probe] failed: ${err instanceof Error ? err.stack || err.message : String(err)}`);
     child.kill("SIGTERM");
     process.exitCode = 1;
   }

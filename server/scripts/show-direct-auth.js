@@ -8,7 +8,9 @@ const serverDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(serverDir, "..");
 const envFile = process.env.SOCKETAGENT_ENV || path.join(serverDir, ".env");
 
+/** @param {string} file */
 function readEnv(file) {
+  /** @type {Record<string, string>} */
   const result = {};
   if (!fs.existsSync(file)) return result;
   for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
@@ -19,6 +21,7 @@ function readEnv(file) {
 }
 
 function localIpv4Addresses() {
+  /** @type {string[]} */
   const results = [];
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const entry of entries || []) {

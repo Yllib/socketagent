@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 // Credentials stay in the environment, not URLs or command arguments.
 const http = require("http");
 const [action, previousPid] = process.argv.slice(2);
@@ -12,19 +16,21 @@ const req = http.request({
   headers: { Authorization: `Bearer ${process.env.AUTH_TOKEN}` },
 }, res => {
   let body = "";
-  res.on("data", chunk => { body += chunk; if (body.length > 1024 * 1024) req.destroy(new Error("Response too large")); });
+  res.on("data", (/** @type {Buffer} */ chunk) => { body += chunk; if (body.length > 1024 * 1024) req.destroy(new Error("Response too large")); });
   res.on("end", () => {
     try {
       if (res.statusCode !== 200) throw new Error(`Restart ${action} failed (${res.statusCode}): ${body.slice(0, 200)}`);
+      /** @type {unknown} */
       const result = JSON.parse(body);
+      if (!isRecord(result)) throw new Error("Invalid restart response");
       if (action === "status" && (!result.ready || String(result.pid) === previousPid)) throw new Error("New server is not ready yet");
       if (action === "prepare") console.log(result.pid);
       if (action === "status") console.log(JSON.stringify(result));
-    } catch (error) { console.error(error.message); process.exitCode = 1; }
+    } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
   });
-  res.on("error", error => { console.error(error.message); process.exitCode = 1; });
+  res.on("error", error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
 });
 const deadline = setTimeout(() => req.destroy(new Error("Restart request timed out")), 5000);
 req.on("close", () => clearTimeout(deadline));
-req.on("error", error => { console.error(error.message); process.exitCode = 1; });
+req.on("error", error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
 req.end();

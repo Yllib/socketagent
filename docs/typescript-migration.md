@@ -276,3 +276,12 @@ not a new auto-update policy.
   suite 555 passed, one skipped. Baseline: 460, all scripts/tests. Output:
   `/tmp/sa-fixture-checkpoint-tests.log`. Compiler audit of JavaScript still has
   307 inferred/evolving bindings to resolve, including unused callback arguments.
+
+- Server `c5661bf`: source any audit, wire validation, and major fixture checkpoint.
+- Standalone setup, pairing, health, restart, browser-install, and Codex probe
+  scripts validate JSON and annotate their process/transport contracts without
+  depending on a compiled server. Invalid existing key files are preserved and
+  rejected instead of being mistaken for valid configuration.
+- Validation: 23 installer/browser/restart tests passed; typed lint has no new
+  violations. Baseline: 264, all in tests. Output:
+  `/tmp/sa-scripts-focused-tests.log`. The live Codex probe was not executed.

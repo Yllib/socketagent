@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 /**
  * SocketAgent setup script — generates server configuration.
@@ -16,6 +20,7 @@ const path = require("path");
 const nacl = require("tweetnacl");
 
 // Parse CLI arguments
+/** @type {Record<string, string>} */
 const args = {};
 for (let i = 2; i < process.argv.length; i += 2) {
   const key = process.argv[i].replace(/^--/, "");
@@ -37,6 +42,7 @@ if (!envFile || !keysFile) {
 }
 
 // --- Read existing .env if present (preserve existing values) ---
+/** @type {Record<string, string>} */
 const existingEnv = {};
 if (fs.existsSync(envFile)) {
   const content = fs.readFileSync(envFile, "utf-8");
@@ -56,12 +62,13 @@ const envBindHost = existingEnv.BIND_HOST || bindHost || "127.0.0.1";
 const envRelay = existingEnv.RELAY_URL || relayUrl;
 const envCwd = existingEnv.DEFAULT_CWD || defaultCwd;
 
+/** @param {string} filePath */
 function secureSecretFileMode(filePath) {
   if (process.platform === "win32") return;
   try {
     if (fs.existsSync(filePath)) fs.chmodSync(filePath, 0o600);
   } catch (e) {
-    console.warn(`Warning: failed to restrict permissions on ${filePath}: ${e.message || e}`);
+    console.warn(`Warning: failed to restrict permissions on ${filePath}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -81,10 +88,17 @@ secureSecretFileMode(envFile);
 console.log(`Wrote ${envFile}`);
 
 // --- Generate or load NaCl key pair ---
-let publicKeyB64, secretKeyB64;
+/** @type {string} */
+let publicKeyB64;
+/** @type {string} */
+let secretKeyB64;
 
 if (fs.existsSync(keysFile)) {
+  /** @type {unknown} */
   const data = JSON.parse(fs.readFileSync(keysFile, "utf-8"));
+  if (!isRecord(data) || typeof data.publicKey !== "string" || typeof data.secretKey !== "string") {
+    throw new Error("Invalid existing relay key file; refusing to replace it");
+  }
   publicKeyB64 = data.publicKey;
   secretKeyB64 = data.secretKey;
   secureSecretFileMode(keysFile);

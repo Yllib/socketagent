@@ -1,3 +1,6 @@
+import * as os from "os";
+import { parseStoredSessions } from "./session-schema";
+import { isRecord, unknownArray, errorMessage, parseJsonObject } from "./value-guards";
 import { parseHistoryEntries } from "./history-schema";
 import { hasInlineImages, snapshotInlineImages } from "./inline-image-markdown";
 import * as fs from "fs";
@@ -8,6 +11,7 @@ import { execFileSync } from "child_process";
 import { listSessions as sdkListSessions, type SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AgentSessionSettings,
+  ContextUsage,
   Backend,
   SessionInfo,
   HistoryEntry,
@@ -162,7 +166,7 @@ function loadSessionStore(): SessionInfo[] {
     return sessionStoreCache;
   }
   const raw = fs.readFileSync(STORE_FILE, "utf-8");
-  sessionStoreCache = JSON.parse(raw) as SessionInfo[];
+  sessionStoreCache = parseStoredSessions(JSON.parse(raw));
   return sessionStoreCache;
 }
 
@@ -302,9 +306,9 @@ function readArchivedSessionIds(): Set<string> {
   ensureStoreDir();
   if (!fs.existsSync(ARCHIVED_SESSION_IDS_FILE)) return new Set();
   try {
-    const raw = JSON.parse(fs.readFileSync(ARCHIVED_SESSION_IDS_FILE, "utf-8"));
+    const raw: unknown = JSON.parse(fs.readFileSync(ARCHIVED_SESSION_IDS_FILE, "utf-8"));
     if (!Array.isArray(raw)) return new Set();
-    return new Set(raw.filter((id) => typeof id === "string" && id.length > 0));
+    return new Set(unknownArray(raw).filter((id): id is string => typeof id === "string" && id.length > 0));
   } catch {
     return new Set();
   }
@@ -347,8 +351,8 @@ function unlinkIfExists(filePath: string | undefined, removed: string[], label =
     if (!fs.existsSync(filePath)) return;
     fs.unlinkSync(filePath);
     removed.push(`${label}:${filePath}`);
-  } catch (err: any) {
-    throw new Error(`Failed to delete ${label} ${filePath}: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    throw new Error(`Failed to delete ${label} ${filePath}: ${errorMessage(err)}`);
   }
 }
 
@@ -358,13 +362,13 @@ function rmDirIfExists(dirPath: string | undefined, removed: string[], label = "
     if (!fs.existsSync(dirPath)) return;
     fs.rmSync(dirPath, { recursive: true, force: true });
     removed.push(`${label}:${dirPath}`);
-  } catch (err: any) {
-    throw new Error(`Failed to delete ${label} ${dirPath}: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    throw new Error(`Failed to delete ${label} ${dirPath}: ${errorMessage(err)}`);
   }
 }
 
 function deleteCodexThreadState(sessionId: string, removed: string[], warnings: string[]): void {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
   if (!fs.existsSync(dbPath)) return;
   const sql = `DELETE FROM threads WHERE id = ${sqlStringLiteral(sessionId)};`;
@@ -376,8 +380,8 @@ function deleteCodexThreadState(sessionId: string, removed: string[], warnings: 
       windowsHide: true,
     });
     removed.push(`codex-thread:${sessionId}`);
-  } catch (err: any) {
-    warnings.push(`Failed to delete Codex thread state for ${sessionId}: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    warnings.push(`Failed to delete Codex thread state for ${sessionId}: ${errorMessage(err)}`);
   }
 }
 
@@ -394,8 +398,8 @@ export function deleteSessionArtifacts(sessionId: string, sessionInfo?: SessionI
     for (const entry of readHistoryEntries(sessionId)) {
       if (entry.fileDeliveryPath) deleteSendFileDelivery(entry.fileDeliveryPath);
     }
-  } catch (error: any) {
-    warnings.push(`Failed to delete sent-file snapshots: ${error?.message || String(error)}`);
+  } catch (error: unknown) {
+    warnings.push(`Failed to delete sent-file snapshots: ${errorMessage(error)}`);
   }
 
   unlinkIfExists(historyFile(sessionId), removed, "history");
@@ -516,7 +520,7 @@ export function remapSession(oldId: string, newId: string): void {
     session.replacedSessionIds = [
       ...new Set([...(session.replacedSessionIds || []), oldId]),
     ];
-    delete (session as any).contextClearedAt;
+    delete session.contextClearedAt;
     session.lastActive = new Date().toISOString();
     writeStore(sessions);
     remapHtmlPlans(oldId, newId);
@@ -533,7 +537,8 @@ function readRecentCwds(): string[] {
   ensureStoreDir();
   if (!fs.existsSync(RECENT_CWDS_FILE)) return [];
   try {
-    return JSON.parse(fs.readFileSync(RECENT_CWDS_FILE, "utf-8")) as string[];
+    const parsed: unknown = JSON.parse(fs.readFileSync(RECENT_CWDS_FILE, "utf-8"));
+    return unknownArray(parsed).filter((value): value is string => typeof value === "string");
   } catch {
     return [];
   }
@@ -565,21 +570,21 @@ export function removeRecentCwd(cwd: string): string[] {
 export function updateSessionActivity(
   id: string,
   messagePreview: string,
-  lastUsage?: any
+  lastUsage?: SessionInfo["lastUsage"]
 ): void {
   mutateSessionStore(id, (session) => {
     session.lastActive = new Date().toISOString();
     session.messagePreview = cleanPreviewText(messagePreview);
     session.turnCount = normalizedTurnCount(session.turnCount) ?? 0;
     if (lastUsage) {
-      (session as any).lastUsage = lastUsage;
+      session.lastUsage = lastUsage;
     }
   }, "coalesced");
 }
 
-export function updateSessionContextUsage(id: string, contextUsage: any): void {
+export function updateSessionContextUsage(id: string, contextUsage: ContextUsage): void {
   mutateSessionStore(id, (session) => {
-    (session as any).lastContextUsage = contextUsage;
+    session.lastContextUsage = { ...contextUsage };
   }, "coalesced");
 }
 
@@ -676,8 +681,8 @@ function readToolOutputBlob(entry: HistoryEntry): string | undefined {
     return entry.toolOutputEncoding === "gzip"
       ? zlib.gunzipSync(raw).toString("utf8")
       : raw.toString("utf8");
-  } catch (err: any) {
-    console.warn(`[HistoryBlob] Failed to read ${entry.toolOutputRef}: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[HistoryBlob] Failed to read ${entry.toolOutputRef}: ${errorMessage(err)}`);
     return undefined;
   }
 }
@@ -799,7 +804,7 @@ function historyPositionKey(entry: HistoryEntry): string | null {
   return null;
 }
 
-function serverMessagePositionKey(message: Record<string, any>): string | null {
+function serverMessagePositionKey(message: PositionableMessage): string | null {
   const type = String(message.type || "");
   if ((type === "text" || type === "thinking") && message.streamId) {
     const role = type === "text" ? "assistant" : "assistant_thinking";
@@ -910,22 +915,37 @@ function reserveTranscriptPosition(
   return position;
 }
 
+interface PositionableMessage {
+  type?: unknown;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: unknown;
+  content?: unknown;
+  streamId?: unknown;
+  toolUseId?: unknown;
+  questionId?: unknown;
+  requestId?: unknown;
+  taskId?: unknown;
+  reviewId?: unknown;
+}
+
 /** Assign a durable transcript identity before the first live frame is sent. */
-export function positionSessionMessage<T extends Record<string, any>>(sessionId: string, message: T): T {
+export function positionSessionMessage<T extends PositionableMessage>(sessionId: string, message: T): T {
   if (!sessionId) return message;
-  const mutable = message as Record<string, any>;
+  const mutable = message;
   const key = serverMessagePositionKey(mutable);
   if (!key && !mutable.entryId) return message;
   const position = reserveTranscriptPosition(sessionId, key, mutable.entryId, mutable.sessionSeq);
   if (!positiveInteger(mutable.revision)) position.revision++;
   mutable.entryId = position.entryId;
   mutable.sessionSeq = position.sessionSeq;
-  mutable.revision = positiveInteger(mutable.revision) || Math.max(1, position.revision);
+  const revision = positiveInteger(mutable.revision) || Math.max(1, position.revision);
+  mutable.revision = revision;
   if (mutable.type === "text" && hasInlineImages(String(mutable.content || ""))) {
     const saved = historyDatabase().getByEntryId(sessionId, position.entryId);
     if (saved?.inlineImageContent && saved.content === mutable.content) {
       mutable.content = saved.inlineImageContent;
-      mutable.revision = Math.max(mutable.revision, saved.revision || 1);
+      mutable.revision = Math.max(revision, saved.revision || 1);
     }
   }
   return message;
@@ -1200,12 +1220,12 @@ function recoverCorruptHistory(
     let backupEntries: HistoryEntry[] | undefined;
     try {
       backupEntries = parseHistorySnapshot(backup);
-    } catch (backupError: any) {
+    } catch (backupError: unknown) {
       const quarantinedBackup = quarantineCorruptHistoryFile(backup);
       console.error(
         `[HistoryRecovery] Invalid backup session=${sessionId}`
         + ` quarantined=${quarantinedBackup || "none"}`
-        + ` error=${backupError?.message || String(backupError)}`,
+        + ` error=${errorMessage(backupError)}`,
       );
     }
     if (backupEntries) {
@@ -1402,7 +1422,7 @@ function updateSessionHistoryMetadata(sessionId: string, entries: HistoryEntry[]
   const preview = latestConversationPreviewFromEntries(entries);
   if (preview) session.messagePreview = preview;
   session.turnCount = conversationTurnCountFromEntries(entries);
-  (session as any).historyCount = entries.length;
+  session.historyCount = entries.length;
 
   const latestTimestamp = latestHistoryTimestamp(entries);
   if (latestTimestamp) {
@@ -1422,7 +1442,7 @@ function updateSessionHistoryMetadataFromDatabase(sessionId: string): void {
   mutateSessionStore(sessionId, (session) => {
     if (summary.messagePreview) session.messagePreview = summary.messagePreview;
     session.turnCount = summary.userPromptCount;
-    (session as any).historyCount = summary.entryCount;
+    session.historyCount = summary.entryCount;
     if (summary.latestTimestamp) {
       const currentMs = Date.parse(session.lastActive);
       const latestMs = Date.parse(summary.latestTimestamp);
@@ -1442,8 +1462,8 @@ function normalizedTurnCount(value: unknown): number | undefined {
 function withCachedTurnCount(session: SessionInfo): SessionInfo {
   return {
     ...session,
-    turnCount: normalizedTurnCount((session as any).turnCount) ?? 0,
-    historyCount: normalizedTurnCount((session as any).historyCount),
+    turnCount: normalizedTurnCount(session.turnCount) ?? 0,
+    historyCount: normalizedTurnCount(session.historyCount),
   };
 }
 
@@ -1584,7 +1604,7 @@ function captureMessageImages(sessionId: string, entry: HistoryEntry): void {
     const updated = appendHistory(sessionId, { ...current, inlineImageContent: content });
     for (const listener of inlineImageListeners) listener(sessionId, updated);
   }).catch((error) => {
-    console.warn(`[InlineImages] Could not preserve message images: ${error?.message || error}`);
+    console.warn(`[InlineImages] Could not preserve message images: ${errorMessage(error)}`);
   }).finally(() => { inlineImageCaptures.delete(key); });
   inlineImageCaptures.set(key, work);
 }
@@ -1842,7 +1862,7 @@ const _backfilledSessions = new Set<string>();
  * Scans ~/.claude/projects/* for `<sessionId>.jsonl` and returns the first match.
  */
 function findJsonlForSession(sessionId: string): string | undefined {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const projectsRoot = path.join(homeDir, ".claude", "projects");
   if (!fs.existsSync(projectsRoot)) return undefined;
   let projects: string[];
@@ -1855,12 +1875,12 @@ function findJsonlForSession(sessionId: string): string | undefined {
 }
 
 /** Extract plain text from a Claude Code JSONL user message's content field. */
-function extractJsonlUserText(content: any): string {
+function extractJsonlUserText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return content
-      .filter((b: any) => b?.type === "text" && typeof b.text === "string")
-      .map((b: any) => b.text)
+    return unknownArray(content).filter(isRecord)
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
       .join("");
   }
   return "";
@@ -1891,9 +1911,10 @@ export function backfillUserUuids(sessionId: string): void {
   try {
     const lines = fs.readFileSync(jsonlPath, "utf-8").split("\n").filter(Boolean);
     for (const line of lines) {
-      let row: any;
+      let row: unknown;
       try { row = JSON.parse(line); } catch { continue; }
-      if (row.type !== "user" || !row.uuid || !row.message) continue;
+      if (!isRecord(row)) continue;
+      if (row.type !== "user" || typeof row.uuid !== "string" || !isRecord(row.message)) continue;
       const text = extractJsonlUserText(row.message.content);
       if (!text) continue;
       jsonlUsers.push({ uuid: row.uuid, text });
@@ -2699,19 +2720,20 @@ function todosFile(sessionId: string): string {
   return path.join(TODOS_DIR, `${sessionId}.json`);
 }
 
-export function saveTodos(sessionId: string, todos: any[]): void {
+export function saveTodos(sessionId: string, todos: Record<string, unknown>[]): void {
   ensureTodosDir();
   fs.writeFileSync(todosFile(sessionId), JSON.stringify(todos, null, 2), "utf-8");
 }
 
-export function getTodos(sessionId: string): any[] {
+export function getTodos(sessionId: string): Record<string, unknown>[] {
   ensureTodosDir();
   const file = todosFile(sessionId);
   if (!fs.existsSync(file)) {
     return [];
   }
   try {
-    return JSON.parse(fs.readFileSync(file, "utf-8"));
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf-8"));
+    return unknownArray(parsed).filter(isRecord);
   } catch {
     return [];
   }
@@ -2723,8 +2745,8 @@ export function getTodos(sessionId: string): any[] {
  * TaskCreated hooks, so rebuild missing native task rows from the full durable
  * history before sending the bounded resume page.
  */
-export function deriveClaudeTasksFromHistoryEntries(entries: HistoryEntry[]): any[] {
-  const derived = new Map<string, any>();
+export function deriveClaudeTasksFromHistoryEntries(entries: HistoryEntry[]): Record<string, unknown>[] {
+  const derived = new Map<string, Record<string, unknown>>();
   const pendingCreates = new Map<string, {
     subject: string;
     description?: string;
@@ -2784,7 +2806,7 @@ export function deriveClaudeTasksFromHistoryEntries(entries: HistoryEntry[]): an
   return Array.from(derived.values());
 }
 
-export function backfillClaudeTasksFromHistory(sessionId: string): any[] {
+export function backfillClaudeTasksFromHistory(sessionId: string): Record<string, unknown>[] {
   const current = getTodos(sessionId);
   if (CLAUDE_TASK_BACKFILL_SCANNED.has(sessionId)) return current;
   CLAUDE_TASK_BACKFILL_SCANNED.add(sessionId);
@@ -2820,8 +2842,8 @@ export function backfillClaudeTasksFromHistory(sessionId: string): any[] {
       taskKind: "claude_task",
       status: String(task.status || "pending"),
       taskSubject: String(task.content || "") || undefined,
-      taskDescription: task.description,
-      teammateName: task.teammateName,
+      taskDescription: typeof task.description === "string" ? task.description : undefined,
+      teammateName: typeof task.teammateName === "string" ? task.teammateName : undefined,
       isBackgrounded: false,
       timestamp: new Date().toISOString(),
     });
@@ -2881,7 +2903,7 @@ function sanitizeCwdToProjectDir(cwd: string): string {
 
 /** Build the path to Claude Code's JSONL session file */
 export function getJsonlPath(sessionId: string, cwd: string): string {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const projectDir = sanitizeCwdToProjectDir(cwd);
   return path.join(homeDir, ".claude", "projects", projectDir, `${sessionId}.jsonl`);
 }
@@ -2913,64 +2935,65 @@ export function getMissedMessages(
     const lines = fs.readFileSync(jsonlPath, "utf-8").split("\n").filter(Boolean);
 
     for (const line of lines) {
-      let msg: any;
+      let msg: unknown;
       try { msg = JSON.parse(line); } catch { continue; }
+      if (!isRecord(msg)) continue;
 
       // Skip messages before our cutoff
-      if (!msg.timestamp) continue;
+      if (typeof msg.timestamp !== "string" || !msg.timestamp) continue;
       const msgTime = new Date(msg.timestamp).getTime();
       if (msgTime <= afterTime) continue;
 
       // Convert to our HistoryEntry format
-      if (msg.type === "assistant" && msg.message?.content) {
+      if (msg.type === "assistant" && isRecord(msg.message) && msg.message.content) {
         const content = msg.message.content;
         // Extract text
         const textParts = Array.isArray(content)
-          ? content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+          ? extractJsonlUserText(content)
           : "";
         if (textParts) {
           entries.push({
             role: "assistant",
             content: textParts,
-            parentToolUseId: msg.parent_tool_use_id || null,
+            parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
             timestamp: msg.timestamp,
           });
         }
         // Extract tool calls
         if (Array.isArray(content)) {
-          for (const block of content) {
+          for (const block of unknownArray(content).filter(isRecord)) {
             if (block.type === "tool_use") {
               entries.push({
                 role: "tool_call",
                 content: "",
-                toolName: block.name,
-                toolInput: block.input,
-                toolUseId: block.id,
-                parentToolUseId: msg.parent_tool_use_id || null,
+                toolName: typeof block.name === "string" ? block.name : undefined,
+                toolInput: isRecord(block.input) ? block.input : undefined,
+                toolUseId: typeof block.id === "string" ? block.id : undefined,
+                parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
                 timestamp: msg.timestamp,
               });
             }
           }
         }
-      } else if (msg.type === "user" && msg.message?.content) {
+      } else if (msg.type === "user" && isRecord(msg.message) && msg.message.content) {
         const content = msg.message.content;
         if (Array.isArray(content)) {
-          for (const block of content) {
+          for (const block of unknownArray(content).filter(isRecord)) {
             if (block.type === "tool_result") {
               const output = typeof block.content === "string"
                 ? block.content
                 : Array.isArray(block.content)
-                  ? block.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+                  ? unknownArray(block.content).filter(isRecord).filter((c) => c.type === "text" && typeof c.text === "string").map((c) => c.text).join("\n")
                   : "";
               entries.push({
                 role: "tool_result",
                 content: "",
-                toolUseId: block.tool_use_id || "",
+                toolUseId: typeof block.tool_use_id === "string" ? block.tool_use_id : "",
                 toolOutput: output.slice(0, 2000), // Truncate large outputs
-                parentToolUseId: msg.parent_tool_use_id || null,
+                parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
                 timestamp: msg.timestamp,
               });
-            } else if (block.type === "text") {
+            } else if (block.type === "text" && typeof block.text === "string") {
               // SocketAgent's own restart continuation is in the transcript
               // because the model had to receive it, not because the user sent
               // it. Reading it back here would undo that.
@@ -3064,7 +3087,7 @@ function discardPendingSdkEvents(sessionId: string): void {
 }
 
 /** Queue SDK debug events and write them in batches instead of blocking once per delta. */
-export function appendSdkEvent(sessionId: string, event: Record<string, any>): void {
+export function appendSdkEvent(sessionId: string, event: Record<string, unknown>): void {
   const line = JSON.stringify(event) + "\n";
   const pending = pendingSdkEventLines.get(sessionId) || [];
   pending.push(line);
@@ -3079,15 +3102,15 @@ export function appendSdkEvent(sessionId: string, event: Record<string, any>): v
 }
 
 /** Read recent SDK events for a session. Raw history can be huge, so cap it. */
-export function getSdkEvents(sessionId: string, limit = 300): Record<string, any>[] {
+export function getSdkEvents(sessionId: string, limit = 300): Record<string, unknown>[] {
   flushSdkEventQueue(sessionId);
   ensureSdkEventsDir();
   const file = sdkEventsFile(sessionId);
   if (!fs.existsSync(file)) return [];
   try {
     return readJsonlTailLines(file, { maxLines: Math.max(1, limit), maxBytes: 16 * 1024 * 1024 })
-      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
-      .filter(Boolean) as Record<string, any>[];
+      .map((line): unknown => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(isRecord);
   } catch {
     return [];
   }
@@ -3096,7 +3119,7 @@ export function getSdkEvents(sessionId: string, limit = 300): Record<string, any
 /** Replace the bounded raw SDK event tail restored by a session transfer. */
 export function replaceSdkEvents(
   sessionId: string,
-  events: Record<string, any>[],
+  events: Record<string, unknown>[],
 ): void {
   discardPendingSdkEvents(sessionId);
   ensureSdkEventsDir();
@@ -3176,11 +3199,11 @@ export function getSdkEventCount(sessionId: string): number {
  * run durations. This intentionally avoids retaining multi-megabyte deltas,
  * tool payloads, and assistant content from the raw SDK event log.
  */
-export function getSdkRunLifecycleEvents(sessionId: string): Record<string, any>[] {
+export function getSdkRunLifecycleEvents(sessionId: string): Record<string, unknown>[] {
   flushSdkEventQueue(sessionId);
   const file = sdkEventsFile(sessionId);
   if (!fs.existsSync(file)) return [];
-  const lifecycle: Record<string, any>[] = [];
+  const lifecycle: Record<string, unknown>[] = [];
   const inspectLine = (line: string) => {
     if (!line || (!line.includes('"sdkType":"result"')
       && !line.includes('"method":"turn/started"')
@@ -3188,7 +3211,8 @@ export function getSdkRunLifecycleEvents(sessionId: string): Record<string, any>
       return;
     }
     try {
-      lifecycle.push(JSON.parse(line));
+      const parsed: unknown = JSON.parse(line);
+      if (isRecord(parsed)) lifecycle.push(parsed);
     } catch {}
   };
   let fd: number | undefined;
@@ -3331,7 +3355,7 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
       createdAt: session.createdAt,
       clearedAt,
       ...(session.backend ? { backend: session.backend } : {}),
-      ...((session as any).codexDriver ? { codexDriver: (session as any).codexDriver } : {}),
+      ...(session.codexDriver ? { codexDriver: session.codexDriver } : {}),
       ...(codexRolloutPath ? { codexRolloutPath } : {}),
     };
     fs.writeFileSync(path.join(ARCHIVE_DIR, metaName), JSON.stringify(meta, null, 2), "utf-8");
@@ -3340,8 +3364,8 @@ export function clearSessionContext(sessionId: string, cwd: string): void {
     // 6. Update session metadata to reflect the clear
     session.messagePreview = "(context cleared)";
     session.lastActive = new Date().toISOString();
-    (session as any).contextClearedAt = clearedAt;
-    delete (session as any).lastContextUsage;
+    session.contextClearedAt = clearedAt;
+    delete session.lastContextUsage;
     writeStore(sessions);
   }
 }
@@ -3411,7 +3435,7 @@ export function listArchives(): ArchiveEntry[] {
     const metaName = group.files.get("meta");
     if (metaName) {
       try {
-        const meta = JSON.parse(fs.readFileSync(path.join(ARCHIVE_DIR, metaName), "utf-8"));
+        const meta = parseJsonObject(fs.readFileSync(path.join(ARCHIVE_DIR, metaName), "utf-8"));
         if (typeof meta.title === "string" && meta.title) title = meta.title;
         if (typeof meta.cwd === "string" && meta.cwd) cwd = meta.cwd;
         if (meta.backend === "claude" || meta.backend === "codex") backend = meta.backend;
@@ -3446,7 +3470,7 @@ export function listArchives(): ArchiveEntry[] {
         const buf = fs.readFileSync(path.join(ARCHIVE_DIR, jsonlName), "utf-8");
         const firstLine = buf.split("\n", 1)[0];
         if (firstLine) {
-          const obj = JSON.parse(firstLine);
+          const obj = parseJsonObject(firstLine);
           if (typeof obj.cwd === "string") cwd = obj.cwd;
         }
       } catch {}
@@ -3457,8 +3481,8 @@ export function listArchives(): ArchiveEntry[] {
       try {
         const firstLine = fs.readFileSync(path.join(ARCHIVE_DIR, codexRolloutName), "utf-8").split("\n", 1)[0];
         if (firstLine) {
-          const obj = JSON.parse(firstLine);
-          if (obj?.type === "session_meta" && typeof obj.payload?.cwd === "string") {
+          const obj = parseJsonObject(firstLine);
+          if (obj?.type === "session_meta" && isRecord(obj.payload) && typeof obj.payload.cwd === "string") {
             cwd = obj.payload.cwd;
           }
         }
@@ -3526,7 +3550,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
       ...native,
       lastActive: restoredAt,
       codexDriver: "app-server",
-    } as SessionInfo;
+    };
     if (existingIdx >= 0) {
       sessions[existingIdx] = restored;
     } else {
@@ -3547,12 +3571,12 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
   let metaTitle = "";
   let metaCreatedAt = "";
   let metaBackend: Backend | undefined;
-  let metaCodexDriver: string | undefined;
+  let metaCodexDriver: SessionInfo["codexDriver"];
   let codexRolloutPath = "";
   let cwd = "";
   if (fs.existsSync(metaPath)) {
     try {
-      const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+      const meta = parseJsonObject(fs.readFileSync(metaPath, "utf-8"));
       if (typeof meta.title === "string") metaTitle = meta.title;
       if (typeof meta.createdAt === "string") metaCreatedAt = meta.createdAt;
       if (typeof meta.cwd === "string") cwd = meta.cwd;
@@ -3567,7 +3591,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     try {
       const firstLine = fs.readFileSync(jsonlArchive, "utf-8").split("\n", 1)[0];
       if (firstLine) {
-        const obj = JSON.parse(firstLine);
+        const obj = parseJsonObject(firstLine);
         if (typeof obj.cwd === "string") cwd = obj.cwd;
       }
     } catch {}
@@ -3576,8 +3600,8 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     try {
       const firstLine = fs.readFileSync(codexRolloutArchive, "utf-8").split("\n", 1)[0];
       if (firstLine) {
-        const obj = JSON.parse(firstLine);
-        if (obj?.type === "session_meta" && typeof obj.payload?.cwd === "string") {
+        const obj = parseJsonObject(firstLine);
+        if (obj?.type === "session_meta" && isRecord(obj.payload) && typeof obj.payload.cwd === "string") {
           cwd = obj.payload.cwd;
         }
       }
@@ -3596,7 +3620,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     fs.renameSync(jsonlArchive, liveJsonl);
   }
   if (fs.existsSync(codexRolloutArchive)) {
-    const homeDir = process.env.HOME || require("os").homedir();
+    const homeDir = process.env.HOME || os.homedir();
     const archivedRoot = path.resolve(path.join(homeDir, ".codex", "archived_sessions"));
     const metaRolloutPath = codexRolloutPath && !path.resolve(codexRolloutPath).startsWith(archivedRoot + path.sep)
       ? codexRolloutPath
@@ -3659,7 +3683,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
     messagePreview,
     turnCount,
     ...(metaBackend ? { backend: metaBackend } : {}),
-    ...(metaCodexDriver ? { codexDriver: metaCodexDriver as any } : {}),
+    ...(metaCodexDriver ? { codexDriver: metaCodexDriver } : {}),
   };
   if (existingIdx >= 0) {
     sessions[existingIdx] = restored;
@@ -3754,25 +3778,26 @@ function unixSecondsToIso(value: unknown, fallback = nowIso()): string {
   return new Date(n * 1000).toISOString();
 }
 
-function codexThreadTitle(thread: any): string {
+function codexThreadTitle(thread: Record<string, unknown>): string {
   const raw = String(thread?.name || thread?.preview || "").trim();
   const firstLine = raw.split(/\r?\n/)[0].trim();
   const title = firstLine || "Codex session";
   return title.length > 80 ? title.slice(0, 80) + "…" : title;
 }
 
-function codexThreadPreview(thread: any): string {
+function codexThreadPreview(thread: Record<string, unknown>): string {
   return String(thread?.preview || "").trim().slice(0, 200);
 }
 
-function codexThreadPayloadIsArchived(thread: any): boolean {
-  const archived = (thread as any)?.archived;
+function codexThreadPayloadIsArchived(thread: unknown): boolean {
+  const archived = isRecord(thread) ? thread.archived : undefined;
   if (archived === true || archived === 1 || archived === "1") return true;
   if (typeof archived === "string" && archived.toLowerCase() === "true") return true;
   return false;
 }
 
-export function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): SessionInfo | null {
+export function codexThreadToSessionInfo(thread: unknown, stored?: SessionInfo): SessionInfo | null {
+  if (!isRecord(thread)) return null;
   const id = String(thread?.id || thread?.threadId || "").trim();
   const cwd = String(thread?.cwd || stored?.cwd || "").trim();
   if (!id || !cwd) return null;
@@ -3791,16 +3816,16 @@ export function codexThreadToSessionInfo(thread: any, stored?: SessionInfo): Ses
     lastActive,
     messagePreview: stored?.messagePreview || preview || "",
     turnCount: normalizedTurnCount(stored?.turnCount) ?? 0,
-    historyCount: normalizedTurnCount((stored as any)?.historyCount),
+    historyCount: normalizedTurnCount(stored?.historyCount),
     backend: "codex",
     codexDriver: "app-server",
-  } as SessionInfo;
+  };
 }
 
-function codexThreadToArchiveEntry(thread: any): ArchiveEntry | null {
+function codexThreadToArchiveEntry(thread: Record<string, unknown>): ArchiveEntry | null {
   const session = codexThreadToSessionInfo(thread);
   if (!session) return null;
-  const archivedAt = unixSecondsToIso((thread as any)?.archivedAt, session.lastActive);
+  const archivedAt = unixSecondsToIso(thread.archivedAt, session.lastActive);
   return {
     sid: session.id,
     ts: `${CODEX_NATIVE_ARCHIVE_TS_PREFIX}${Math.floor(new Date(archivedAt).getTime() / 1000) || Date.now()}`,
@@ -3818,23 +3843,24 @@ function codexThreadToArchiveEntry(thread: any): ArchiveEntry | null {
 async function listAllCodexThreads(
   params: CodexAppServerThreadListParams,
   maxRowsLimit = CODEX_THREAD_LIST_LIMIT,
-): Promise<any[]> {
+): Promise<Record<string, unknown>[]> {
   return withCodexThreadListClient(getDefaultProcessCwd(), async (client) => {
     const maxRows = Math.max(
       1,
       Math.min(maxRowsLimit, Math.floor(Number(params.limit ?? maxRowsLimit))),
     );
-    const threads: any[] = [];
+    const threads: Record<string, unknown>[] = [];
     let cursor: string | null | undefined = params.cursor ?? null;
     do {
       const response = await client.listThreads({
         ...params,
         cursor,
         limit: Math.max(1, Math.min(maxRows - threads.length, maxRows)),
-      }) as any;
-      const page = Array.isArray(response?.data) ? response.data : [];
+      });
+      if (!isRecord(response)) throw new Error("Invalid Codex thread list response");
+      const page = unknownArray(response.data).filter(isRecord);
       threads.push(...page);
-      cursor = response?.nextCursor || null;
+      cursor = typeof response.nextCursor === "string" ? response.nextCursor || null : null;
     } while (cursor && threads.length < maxRows);
     return threads.slice(0, maxRows);
   });
@@ -3860,7 +3886,7 @@ async function listCodexNativeSessionsFromAppServer(useCache = true): Promise<Se
     useStateDbOnly: true,
   });
   const sessions = threads.flatMap((thread): SessionInfo[] => {
-    const id = String(thread?.id || "");
+    const id = String(thread.id || "");
     const info = codexThreadToSessionInfo(thread, storedById.get(id));
     return info ? [info] : [];
   });
@@ -3910,7 +3936,7 @@ function sdkSessionInfoToSessionInfo(info: SDKSessionInfo, tracked?: SessionInfo
     }),
     messagePreview,
     backend: "claude",
-  } as SessionInfo);
+  });
 }
 
 async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<SessionInfo[]> {
@@ -3940,8 +3966,8 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
           const session = sdkSessionInfoToSessionInfo(info, storedById.get(info.sessionId));
           if (session) deduped.set(session.id, session);
         }
-      } catch (err: any) {
-        console.warn(`[SdkSessions] Native Claude listSessions failed for ${cwd}: ${err?.message || err}`);
+      } catch (err: unknown) {
+        console.warn(`[SdkSessions] Native Claude listSessions failed for ${cwd}: ${errorMessage(err)}`);
       }
     }
   }));
@@ -3970,7 +3996,7 @@ function claudeNativeCwdCandidates(): string[] {
   // Claude's prompt history provides the machine-wide project inventory that
   // the SDK's directory-scoped listSessions API does not expose by itself.
   const historyPath = path.join(
-    process.env.HOME || require("os").homedir(),
+    process.env.HOME || os.homedir(),
     ".claude",
     "history.jsonl",
   );
@@ -3978,7 +4004,7 @@ function claudeNativeCwdCandidates(): string[] {
     for (const line of fs.readFileSync(historyPath, "utf8").split("\n")) {
       if (!line) continue;
       try {
-        add(JSON.parse(line)?.project);
+        add(parseJsonObject(line).project);
       } catch {}
     }
   } catch {}
@@ -3986,7 +4012,7 @@ function claudeNativeCwdCandidates(): string[] {
   // native project's real cwd from the transcript metadata instead of trying
   // to reverse Claude's lossy encoded directory name.
   const projectsRoot = path.join(
-    process.env.HOME || require("os").homedir(),
+    process.env.HOME || os.homedir(),
     ".claude",
     "projects",
   );
@@ -4018,8 +4044,8 @@ function claudeNativeCwdCandidates(): string[] {
           for (const line of buffer.toString("utf8").split("\n")) {
             if (!line) continue;
             try {
-              const entry = JSON.parse(line);
-              const candidate = entry?.cwd || entry?.project || entry?.message?.cwd;
+              const entry = parseJsonObject(line);
+              const candidate = entry?.cwd || entry?.project || (isRecord(entry.message) ? entry.message.cwd : undefined);
               if (candidate) {
                 add(candidate);
                 break;
@@ -4044,7 +4070,7 @@ function mergeClaudeNativeSession(existing: SessionInfo, nativeSession: SessionI
     ...mergeSessionTimestamps(existing, nativeSession),
     messagePreview: existing.messagePreview || nativeSession.messagePreview,
     backend: "claude",
-  } as SessionInfo);
+  });
 }
 
 export async function listSessionsWithNativeCodex(useCache = true): Promise<SessionInfo[]> {
@@ -4052,8 +4078,8 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
   let native: SessionInfo[];
   try {
     native = await listCodexNativeSessionsFromAppServer(useCache);
-  } catch (err: any) {
-    console.warn(`[CodexThreads] native session list failed: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[CodexThreads] native session list failed: ${errorMessage(err)}`);
     return stored.map(withCachedTurnCount);
   }
 
@@ -4072,13 +4098,13 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
           : nativeSession.title,
         messagePreview: session.messagePreview || nativeSession.messagePreview,
         turnCount: normalizedTurnCount(session.turnCount ?? nativeSession.turnCount) ?? 0,
-        historyCount: normalizedTurnCount((session as any).historyCount ?? (nativeSession as any).historyCount),
+        historyCount: normalizedTurnCount(session.historyCount ?? nativeSession.historyCount),
         lastUsage: session.lastUsage,
         scheduledTaskId: session.scheduledTaskId,
         permissionMode: session.permissionMode,
         contextClearedAt: session.contextClearedAt,
-        ...(session as any).lastContextUsage ? { lastContextUsage: (session as any).lastContextUsage } : {},
-      } as SessionInfo);
+        ...session.lastContextUsage ? { lastContextUsage: session.lastContextUsage } : {},
+      });
       nativeById.delete(session.id);
       continue;
     }
@@ -4087,8 +4113,8 @@ export async function listSessionsWithNativeCodex(useCache = true): Promise<Sess
       native.length > 0
       &&
       session.backend === "codex"
-      && (session as any).codexDriver === "app-server"
-      && !(session as any).contextClearedAt
+      && session.codexDriver === "app-server"
+      && !session.contextClearedAt
       && isCodexThreadArchived(session.id)
     ) {
       deleteSession(session.id);
@@ -4109,8 +4135,8 @@ export async function listSessionsWithNativeBackends(useCache = true): Promise<S
   let claudeNative: SessionInfo[];
   try {
     claudeNative = await listClaudeNativeSessionsFromSdk(useCache);
-  } catch (err: any) {
-    console.warn(`[SdkSessions] Native Claude global listSessions failed: ${err?.message || err}`);
+  } catch (err: unknown) {
+    console.warn(`[SdkSessions] Native Claude global listSessions failed: ${errorMessage(err)}`);
     warnIfSlow("session_list_native", startedAt, { count: merged.length, claude: "failed", useCache });
     return merged;
   }
@@ -4157,8 +4183,8 @@ export async function listArchivesWithNativeCodex(useCache = true): Promise<Arch
         return entry ? [entry] : [];
       });
       codexNativeArchivesCache = { at: nowMs, archives: nativeArchives };
-    } catch (err: any) {
-      console.warn(`[CodexThreads] native archive list failed: ${err?.message || String(err)}`);
+    } catch (err: unknown) {
+      console.warn(`[CodexThreads] native archive list failed: ${errorMessage(err)}`);
       nativeArchives = listCodexNativeArchives();
     }
   }
@@ -4175,12 +4201,12 @@ export async function getCodexNativeThreadSessionInfo(sessionId: string, cwd = g
   }
   try {
     return await withCodexThreadListClient(cwd, async (client) => {
-      const response = await client.readThread({ threadId: sessionId, includeTurns: false }) as any;
-      if (codexThreadPayloadIsArchived(response?.thread)) return null;
-      return codexThreadToSessionInfo(response?.thread);
+      const response = await client.readThread({ threadId: sessionId, includeTurns: false });
+      if (codexThreadPayloadIsArchived((isRecord(response) ? response.thread : undefined))) return null;
+      return codexThreadToSessionInfo((isRecord(response) ? response.thread : undefined));
     });
-  } catch (err: any) {
-    console.warn(`[CodexThreads] thread/read failed for ${sessionId}: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[CodexThreads] thread/read failed for ${sessionId}: ${errorMessage(err)}`);
     if (isCodexThreadArchived(sessionId)) return null;
     return getCodexThreadSessionInfo(sessionId);
   }
@@ -4189,18 +4215,18 @@ export async function getCodexNativeThreadSessionInfo(sessionId: string, cwd = g
 export async function restoreCodexNativeArchive(sessionId: string, cwd = getDefaultProcessCwd()): Promise<{ ok: true; session: SessionInfo } | { ok: false; reason: string }> {
   try {
     const session = await withCodexThreadListClient(cwd, async (client) => {
-      const response = await client.unarchiveThread(sessionId) as any;
-      const fromResponse = codexThreadToSessionInfo(response?.thread);
+      const response = await client.unarchiveThread(sessionId);
+      const fromResponse = codexThreadToSessionInfo((isRecord(response) ? response.thread : undefined));
       if (fromResponse) return fromResponse;
-      const read = await client.readThread({ threadId: sessionId, includeTurns: false }) as any;
-      return codexThreadToSessionInfo(read?.thread);
+      const read = await client.readThread({ threadId: sessionId, includeTurns: false });
+      return codexThreadToSessionInfo((isRecord(read) ? read.thread : undefined));
     });
     if (!session) return { ok: false, reason: "Codex thread not found" };
-    saveSession({ ...session, lastActive: nowIso(), codexDriver: "app-server" } as SessionInfo);
+    saveSession({ ...session, lastActive: nowIso(), codexDriver: "app-server" });
     invalidateCodexNativeListCache();
     return { ok: true, session: getSession(sessionId) || session };
-  } catch (err: any) {
-    return { ok: false, reason: err?.message || String(err) };
+  } catch (err: unknown) {
+    return { ok: false, reason: errorMessage(err) };
   }
 }
 
@@ -4236,7 +4262,7 @@ export async function listCodexNativeSdkSessions(cwd: string, limit = 30): Promi
     useStateDbOnly: true,
   }, SDK_SESSION_DISCOVERY_LIMIT);
   return threads.flatMap((thread): SdkSessionEntry[] => {
-    const id = String(thread?.id || "");
+    const id = String(thread.id || "");
     const info = codexThreadToSessionInfo(thread, trackedMap.get(id));
     if (!id || !info) return [];
     return [{
@@ -4318,7 +4344,7 @@ export interface SdkSessionEntry {
  * This file stores every prompt the user sent, with `display`, `sessionId`, and `project`.
  */
 function loadPromptHistory(cwd: string): Map<string, string> {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const historyPath = path.join(homeDir, ".claude", "history.jsonl");
   const map = new Map<string, string>();
   if (!fs.existsSync(historyPath)) return map;
@@ -4326,10 +4352,11 @@ function loadPromptHistory(cwd: string): Map<string, string> {
   try {
     const lines = fs.readFileSync(historyPath, "utf-8").split("\n").filter(Boolean);
     for (const line of lines) {
-      let obj: any;
+      let obj: unknown;
       try { obj = JSON.parse(line); } catch { continue; }
+      if (!isRecord(obj)) continue;
       // Match sessions for this project (CWD)
-      if (obj.project === cwd && obj.sessionId && obj.display) {
+      if (obj.project === cwd && typeof obj.sessionId === "string" && typeof obj.display === "string") {
         map.set(obj.sessionId, obj.display); // last prompt wins
       }
     }
@@ -4395,8 +4422,8 @@ export async function listSdkSessions(cwd: string, limit = 30): Promise<SdkSessi
     return [...deduped.values()]
       .sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime())
       .slice(0, limit);
-  } catch (err: any) {
-    console.warn(`[SdkSessions] Native Claude listSessions failed for ${cwd}: ${err?.message || err}`);
+  } catch (err: unknown) {
+    console.warn(`[SdkSessions] Native Claude listSessions failed for ${cwd}: ${errorMessage(err)}`);
     return listSdkSessionsFromFiles(cwd, limit);
   }
 }
@@ -4405,7 +4432,7 @@ export async function listSdkSessions(cwd: string, limit = 30): Promise<SdkSessi
  * Legacy fallback for older SDK failures. Scans ~/.claude/projects directly.
  */
 function listSdkSessionsFromFiles(cwd: string, limit = 30): SdkSessionEntry[] {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const projectDir = sanitizeCwdToProjectDir(cwd);
   const projectPath = path.join(homeDir, ".claude", "projects", projectDir);
 
@@ -4436,9 +4463,9 @@ function listSdkSessionsFromFiles(cwd: string, limit = 30): SdkSessionEntry[] {
         return null;
       }
     })
-    .filter(Boolean)
-    .sort((a, b) => b!.mtime - a!.mtime)
-    .slice(0, scanLimit) as { file: string; mtime: number }[];
+    .filter((entry) => entry !== null)
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, scanLimit);
 
   const results: SdkSessionEntry[] = [];
 
@@ -4491,15 +4518,16 @@ function listSdkSessionsFromFiles(cwd: string, limit = 30): SdkSessionEntry[] {
 
       const lines = buf.toString("utf-8").split("\n").filter(Boolean);
       for (const line of lines) {
-        let obj: any;
+        let obj: unknown;
         try { obj = JSON.parse(line); } catch { continue; }
+        if (!isRecord(obj)) continue;
 
-        if (obj.type === "user" && obj.message?.content) {
+        if (obj.type === "user" && isRecord(obj.message) && obj.message.content) {
           const content = obj.message.content;
           let text = "";
           if (Array.isArray(content)) {
-            const textBlock = content.find((b: any) => b.type === "text");
-            if (textBlock?.text) text = textBlock.text;
+            const textBlock = unknownArray(content).filter(isRecord).find((b) => b.type === "text" && typeof b.text === "string");
+            if (typeof textBlock?.text === "string") text = textBlock.text;
           } else if (typeof content === "string") {
             text = content;
           }
@@ -4571,7 +4599,7 @@ export function findCodexRolloutFile(sessionId: string): string | null {
   const indexedPath = findCodexRolloutPathFromStateDb(sessionId);
   if (indexedPath) return indexedPath;
 
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const roots = [
     path.join(homeDir, ".codex", "sessions"),
     path.join(homeDir, ".codex", "archived_sessions"),
@@ -4605,7 +4633,7 @@ export function findCodexRolloutFile(sessionId: string): string | null {
 }
 
 function archiveCodexNativeRollout(sessionId: string, rolloutPath: string): string {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const archiveDir = path.join(homeDir, ".codex", "archived_sessions");
   if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir, { recursive: true });
 
@@ -4622,7 +4650,7 @@ function archiveCodexNativeRollout(sessionId: string, rolloutPath: string): stri
 }
 
 function updateCodexThreadRolloutState(sessionId: string, rolloutPath: string, archived: boolean): void {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
   if (!fs.existsSync(dbPath)) return;
   const archivedAt = archived ? String(Math.floor(Date.now() / 1000)) : "NULL";
@@ -4640,13 +4668,13 @@ function updateCodexThreadRolloutState(sessionId: string, rolloutPath: string, a
       maxBuffer: 256 * 1024,
       windowsHide: true,
     });
-  } catch (err: any) {
-    console.warn(`[CodexArchive] failed to update Codex thread state for ${sessionId}: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[CodexArchive] failed to update Codex thread state for ${sessionId}: ${errorMessage(err)}`);
   }
 }
 
 function findCodexRolloutPathFromStateDb(sessionId: string): string | null {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
   if (!fs.existsSync(dbPath)) return null;
   const sql = `SELECT rollout_path FROM threads WHERE id = ${sqlStringLiteral(sessionId)} LIMIT 1;`;
@@ -4658,16 +4686,16 @@ function findCodexRolloutPathFromStateDb(sessionId: string): string | null {
       windowsHide: true,
     }).trim();
     if (!raw) return null;
-    const rows = JSON.parse(raw) as Array<{ rollout_path?: string }>;
+    const rows = unknownArray(JSON.parse(raw)).filter(isRecord);
     const rolloutPath = rows[0]?.rollout_path;
-    return rolloutPath && fs.existsSync(rolloutPath) ? rolloutPath : null;
+    return typeof rolloutPath === "string" && rolloutPath && fs.existsSync(rolloutPath) ? rolloutPath : null;
   } catch {
     return null;
   }
 }
 
 export function isCodexThreadArchived(sessionId: string): boolean {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
   if (!fs.existsSync(dbPath)) return false;
   const sql = `SELECT archived FROM threads WHERE id = ${sqlStringLiteral(sessionId)} LIMIT 1;`;
@@ -4679,14 +4707,14 @@ export function isCodexThreadArchived(sessionId: string): boolean {
       windowsHide: true,
     }).trim();
     return raw === "1";
-  } catch (err: any) {
-    console.warn(`[CodexArchive] failed to read archived state for ${sessionId}: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[CodexArchive] failed to read archived state for ${sessionId}: ${errorMessage(err)}`);
     return false;
   }
 }
 
 export function getCodexThreadSessionInfo(sessionId: string): SessionInfo | null {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
   if (!fs.existsSync(dbPath)) return null;
   const sql = `
@@ -4712,7 +4740,7 @@ export function getCodexThreadSessionInfo(sessionId: string): SessionInfo | null
       windowsHide: true,
     }).trim();
     if (!raw) return null;
-    const row = JSON.parse(raw)[0];
+    const row = unknownArray(JSON.parse(raw)).filter(isRecord)[0];
     if (!row?.id || !row?.cwd) return null;
     const createdAt = epochToIso(row.created_at_ms ?? row.created_at, nowIso());
     const lastActive = epochToIso(row.updated_at_ms ?? row.updated_at, createdAt);
@@ -4728,15 +4756,15 @@ export function getCodexThreadSessionInfo(sessionId: string): SessionInfo | null
       turnCount: 0,
       backend: "codex",
       codexDriver: "app-server",
-    } as SessionInfo;
-  } catch (err: any) {
-    console.warn(`[CodexArchive] failed to read thread metadata for ${sessionId}: ${err?.message || String(err)}`);
+    };
+  } catch (err: unknown) {
+    console.warn(`[CodexArchive] failed to read thread metadata for ${sessionId}: ${errorMessage(err)}`);
     return null;
   }
 }
 
 function listCodexNativeArchives(limit = 200): ArchiveEntry[] {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
   if (!fs.existsSync(dbPath)) return [];
   const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
@@ -4765,7 +4793,7 @@ function listCodexNativeArchives(limit = 200): ArchiveEntry[] {
       windowsHide: true,
     }).trim();
     if (!raw) return [];
-    const rows = JSON.parse(raw) as any[];
+    const rows = unknownArray(JSON.parse(raw)).filter(isRecord);
     return rows.flatMap((row): ArchiveEntry[] => {
       const sessionId = String(row.id || "");
       if (!sessionId) return [];
@@ -4786,8 +4814,8 @@ function listCodexNativeArchives(limit = 200): ArchiveEntry[] {
         hasJsonl: true,
       }];
     });
-  } catch (err: any) {
-    console.warn(`[CodexArchive] failed to list native Codex archives: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[CodexArchive] failed to list native Codex archives: ${errorMessage(err)}`);
     return [];
   }
 }
@@ -4797,8 +4825,8 @@ function buildCodexRolloutRestorePath(sessionId: string, archivePath: string): s
   try {
     const firstLine = fs.readFileSync(archivePath, "utf-8").split("\n", 1)[0];
     if (firstLine) {
-      const obj = JSON.parse(firstLine);
-      if (typeof obj?.payload?.timestamp === "string") timestamp = obj.payload.timestamp;
+      const obj = parseJsonObject(firstLine);
+      if (isRecord(obj.payload) && typeof obj.payload.timestamp === "string") timestamp = obj.payload.timestamp;
     }
   } catch {}
 
@@ -4808,7 +4836,7 @@ function buildCodexRolloutRestorePath(sessionId: string, archivePath: string): s
   const month = String(d.getUTCMonth() + 1).padStart(2, "0");
   const day = String(d.getUTCDate()).padStart(2, "0");
   const stamp = d.toISOString().slice(0, 19).replace(/:/g, "-");
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   return path.join(homeDir, ".codex", "sessions", year, month, day, `rollout-${stamp}-${sessionId}.jsonl`);
 }
 
@@ -4864,9 +4892,9 @@ export async function readCodexAppServerThreadHistory(sessionId: string): Promis
       },
     });
     const response = await client.readThread({ threadId: sessionId, includeTurns: true });
-    return codexAppServerThreadToHistory((response as any)?.thread);
-  } catch (err: any) {
-    console.warn(`[CodexHistory] app-server thread/read failed for ${sessionId}: ${err?.message || String(err)}`);
+    return codexAppServerThreadToHistory((isRecord(response) ? response.thread : undefined));
+  } catch (err: unknown) {
+    console.warn(`[CodexHistory] app-server thread/read failed for ${sessionId}: ${errorMessage(err)}`);
     return [];
   } finally {
     await client.stop().catch(() => {});
@@ -4894,7 +4922,7 @@ export interface CodexRolloutContextUsage {
     reasoning_output_tokens: number;
     total_tokens: number;
   };
-  rateLimits?: any;
+  rateLimits?: unknown;
 }
 
 export function readCodexRolloutAgentSettings(sessionId: string): Pick<AgentSessionSettings, "model" | "effort"> {
@@ -4907,9 +4935,10 @@ export function readCodexRolloutAgentSettings(sessionId: string): Pick<AgentSess
   let effort: AgentSessionSettings["effort"];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
-    let obj: any;
+    let obj: unknown;
     try { obj = JSON.parse(line); } catch { continue; }
-    if (obj?.type !== "turn_context" || !obj.payload) continue;
+    if (!isRecord(obj)) continue;
+    if (obj.type !== "turn_context" || !isRecord(obj.payload)) continue;
     if (typeof obj.payload.model === "string") model = obj.payload.model;
     const candidate = obj.payload.effort;
     if (candidate === "minimal" || candidate === "low" || candidate === "medium" || candidate === "high"
@@ -4935,18 +4964,19 @@ export function readCodexRolloutContextUsage(sessionId: string): CodexRolloutCon
   let raw: string;
   try { raw = fs.readFileSync(file, "utf8"); } catch { return null; }
 
-  let latestInfo: any = null;
-  let latestRateLimits: any = null;
+  let latestInfo: Record<string, unknown> | null = null;
+  let latestRateLimits: unknown;
   let latestModel: string | undefined;
   let latestEffort: string | undefined;
 
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
-    let obj: any;
+    let obj: unknown;
     try { obj = JSON.parse(line); } catch { continue; }
+    if (!isRecord(obj)) continue;
 
     const payload = obj.payload;
-    if (!payload || typeof payload !== "object") continue;
+    if (!isRecord(payload)) continue;
 
     if (obj.type === "turn_context" && typeof payload.model === "string") {
       latestModel = payload.model;
@@ -4954,13 +4984,14 @@ export function readCodexRolloutContextUsage(sessionId: string): CodexRolloutCon
       continue;
     }
 
-    if (obj.type === "event_msg" && payload.type === "token_count" && payload.info) {
+    if (obj.type === "event_msg" && payload.type === "token_count" && isRecord(payload.info)) {
       latestInfo = payload.info;
       latestRateLimits = payload.rate_limits;
     }
   }
 
-  const last = latestInfo?.last_token_usage;
+  const last = isRecord(latestInfo?.last_token_usage) ? latestInfo.last_token_usage : undefined;
+  const total = isRecord(latestInfo?.total_token_usage) ? latestInfo.total_token_usage : undefined;
   const maxTokens = Number(latestInfo?.model_context_window ?? 0);
   const inputTokens = Number(last?.input_tokens ?? 0);
   if (!last || inputTokens <= 0 || maxTokens <= 0) return null;
@@ -4986,13 +5017,13 @@ export function readCodexRolloutContextUsage(sessionId: string): CodexRolloutCon
       reasoning_output_tokens: Number(last.reasoning_output_tokens ?? 0),
       total_tokens: Number(last.total_tokens ?? 0),
     },
-    ...(latestInfo.total_token_usage ? {
+    ...(total ? {
       totalTokenUsage: {
-        input_tokens: Number(latestInfo.total_token_usage.input_tokens ?? 0),
-        cached_input_tokens: Number(latestInfo.total_token_usage.cached_input_tokens ?? 0),
-        output_tokens: Number(latestInfo.total_token_usage.output_tokens ?? 0),
-        reasoning_output_tokens: Number(latestInfo.total_token_usage.reasoning_output_tokens ?? 0),
-        total_tokens: Number(latestInfo.total_token_usage.total_tokens ?? 0),
+        input_tokens: Number(total.input_tokens ?? 0),
+        cached_input_tokens: Number(total.cached_input_tokens ?? 0),
+        output_tokens: Number(total.output_tokens ?? 0),
+        reasoning_output_tokens: Number(total.reasoning_output_tokens ?? 0),
+        total_tokens: Number(total.total_tokens ?? 0),
       },
     } : {}),
     ...(latestRateLimits ? { rateLimits: latestRateLimits } : {}),
@@ -5031,7 +5062,7 @@ function epochToIso(value: unknown, fallback: string): string {
 }
 
 function listCodexSessionsFromStateDb(cwdCandidates: Set<string>, limit: number, trackedMap: Map<string, SessionInfo>): SdkSessionEntry[] {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const dbPath = path.join(homeDir, ".codex", "state_5.sqlite");
   if (!fs.existsSync(dbPath) || cwdCandidates.size === 0) return [];
 
@@ -5063,7 +5094,7 @@ function listCodexSessionsFromStateDb(cwdCandidates: Set<string>, limit: number,
       windowsHide: true,
     }).trim();
     if (!raw) return [];
-    const rows = JSON.parse(raw) as any[];
+    const rows = unknownArray(JSON.parse(raw)).filter(isRecord);
     const results: SdkSessionEntry[] = [];
     for (const row of rows) {
       const sessionId = String(row.id || "");
@@ -5087,8 +5118,8 @@ function listCodexSessionsFromStateDb(cwdCandidates: Set<string>, limit: number,
       });
     }
     return results;
-  } catch (err: any) {
-    console.warn(`[CodexSessions] state DB lookup failed: ${err?.message || String(err)}`);
+  } catch (err: unknown) {
+    console.warn(`[CodexSessions] state DB lookup failed: ${errorMessage(err)}`);
     return [];
   }
 }
@@ -5103,7 +5134,7 @@ function nowIso(): string {
  * truth. Fall back to scanning rollout JSONL files for older installs.
  */
 export function listCodexSessions(cwd: string, limit = 30): SdkSessionEntry[] {
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   const sessionsDir = path.join(homeDir, ".codex", "sessions");
   const cwdCandidates = cwdLookupCandidates(cwd);
 
@@ -5143,14 +5174,15 @@ export function listCodexSessions(cwd: string, limit = 30): SdkSessionEntry[] {
     const firstLine = readFirstLineSync(filePath);
     if (!firstLine) continue;
 
-    let meta: any;
+    let meta: unknown;
     try { meta = JSON.parse(firstLine); } catch { continue; }
-    if (meta?.type !== "session_meta" || !meta.payload) continue;
+    if (!isRecord(meta)) continue;
+    if (meta.type !== "session_meta" || !isRecord(meta.payload)) continue;
     if (!cwdCandidates.has(path.resolve(String(meta.payload.cwd || "")).replace(/\/+$/, ""))) continue;
 
-    const sessionId = meta.payload.id as string | undefined;
+    const sessionId = typeof meta.payload.id === "string" ? meta.payload.id : undefined;
     if (!sessionId) continue;
-    const timestamp = (meta.payload.timestamp as string | undefined) || new Date(mtimeMs).toISOString();
+    const timestamp = typeof meta.payload.timestamp === "string" ? meta.payload.timestamp : new Date(mtimeMs).toISOString();
     const tracked = trackedMap.get(sessionId);
 
     let firstMessage = "Codex session";

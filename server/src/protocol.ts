@@ -1,3 +1,5 @@
+import { isRecord } from "./value-guards";
+
 // ── Backend selection ──
 
 /**
@@ -787,16 +789,16 @@ export const SESSION_EVENT_ACK_VERSION = 1;
 export const MONITOR_OUTPUT_ACK_VERSION = 2;
 
 export function supportsSessionEventAcknowledgement(message: unknown): boolean {
-  if (!message || typeof message !== "object") return false;
-  const version = (message as Record<string, unknown>).sessionEventAckVersion;
+  if (!isRecord(message)) return false;
+  const version = message.sessionEventAckVersion;
   return typeof version === "number"
     && Number.isInteger(version)
     && version >= SESSION_EVENT_ACK_VERSION;
 }
 
 export function supportsMonitorOutputAcknowledgement(message: unknown): boolean {
-  if (!message || typeof message !== "object") return false;
-  const version = (message as Record<string, unknown>).sessionEventAckVersion;
+  if (!isRecord(message)) return false;
+  const version = message.sessionEventAckVersion;
   return typeof version === "number"
     && Number.isInteger(version)
     && version >= MONITOR_OUTPUT_ACK_VERSION;
@@ -1793,6 +1795,8 @@ export interface SessionInfo {
   /** Durable user-visible logical-run statistics for this session. */
   runStats?: SessionRunStats;
   lastUsage?: UsageInfo & { costUsd?: number; numTurns?: number };
+  /** Provider context snapshot; older provider fields survive server upgrades. */
+  lastContextUsage?: Record<string, unknown>;
   scheduledTaskId?: string;
   /** Backend that drives this session. Absent on legacy sessions = "claude". */
   backend?: Backend;

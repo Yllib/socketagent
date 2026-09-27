@@ -4,6 +4,10 @@ import * as os from "os";
 import * as path from "path";
 import * as zlib from "zlib";
 import { promisify } from "util";
+import { z } from "zod";
+import { isRecord } from "./value-guards";
+import { historyEntrySchema } from "./history-schema";
+import { sessionInfoSchema } from "./session-schema";
 import type { Backend, HistoryEntry, SessionInfo } from "./protocol";
 import {
   deleteSessionArtifacts,
@@ -48,9 +52,9 @@ export interface SessionTransferBundle {
   };
   session: SessionInfo;
   history: HistoryEntry[];
-  todos: any[];
+  todos: Record<string, unknown>[];
   htmlPlans: unknown[];
-  sdkEvents: Record<string, any>[];
+  sdkEvents: Record<string, unknown>[];
   handoffContext: string;
   native?: {
     kind: "claude-jsonl" | "codex-rollout";
@@ -137,7 +141,7 @@ function historyLine(entry: HistoryEntry): string {
 export function buildSessionHandoffContext(
   session: SessionInfo,
   history: HistoryEntry[],
-  todos: any[],
+  todos: Record<string, unknown>[],
 ): string {
   const header = [
     "SocketAgent transferred this conversation from another native agent session.",
@@ -249,18 +253,32 @@ export async function exportSessionTransfer(sessionId: string): Promise<SessionT
   };
 }
 
+const transferBundleSchema = z.object({
+  schema: z.literal(TRANSFER_SCHEMA), version: z.literal(TRANSFER_VERSION),
+  bundleId: z.string(), createdAt: z.string(),
+  source: z.object({
+    serverLabel: z.string(), sessionId: z.string().min(1), backend: z.enum(["claude", "codex"]),
+    cwd: z.string(),
+  }).passthrough(),
+  session: sessionInfoSchema,
+  history: z.array(historyEntrySchema),
+  todos: z.array(z.record(z.string(), z.unknown())).default([]),
+  htmlPlans: z.array(z.unknown()).default([]),
+  sdkEvents: z.array(z.record(z.string(), z.unknown())).default([]),
+  handoffContext: z.string(),
+  native: z.object({ kind: z.enum(["claude-jsonl", "codex-rollout"]), content: z.string() }).optional(),
+} satisfies { [K in keyof SessionTransferBundle]-?: z.ZodType<SessionTransferBundle[K]> }).passthrough();
+
 function validateBundle(value: unknown): SessionTransferBundle {
-  const bundle = value as SessionTransferBundle;
-  if (!bundle || bundle.schema !== TRANSFER_SCHEMA || bundle.version !== TRANSFER_VERSION) {
+  if (!isRecord(value) || value.schema !== TRANSFER_SCHEMA || value.version !== TRANSFER_VERSION) {
     throw new Error("Unsupported SocketAgent session transfer bundle");
   }
-  if (!bundle.source?.sessionId || !bundle.session || !Array.isArray(bundle.history)) {
-    throw new Error("Incomplete SocketAgent session transfer bundle");
+  const parsed = transferBundleSchema.safeParse(value);
+  if (!parsed.success) {
+    const field = parsed.error.issues[0]?.path.join(".") || "bundle";
+    throw new Error(`Incomplete or invalid SocketAgent session transfer bundle (${field})`);
   }
-  if (bundle.source.backend !== "claude" && bundle.source.backend !== "codex") {
-    throw new Error("Invalid source backend");
-  }
-  return bundle;
+  return parsed.data;
 }
 
 function validateClaudeJsonl(content: string): void {

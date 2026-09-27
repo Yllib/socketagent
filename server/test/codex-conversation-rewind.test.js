@@ -122,3 +122,23 @@ test('rewind errors keep protocol method dumps out of the chat banner', () => {
  assert.equal(codexRewindErrorMessage(new Error('Stop running work first')),'Stop running work first');
  assert.match(codexRewindErrorMessage(new Error('x'.repeat(1000))),/server log/);
 });
+
+test('rewind maintenance does not emit agent activity, raw transcript events or transient errors', () => {
+ const {CodexSession}=require('../dist/codex-session');
+ const sent=[];
+ const session=new CodexSession({readyState:1,send:raw=>sent.push(JSON.parse(raw))},'/tmp');
+ session.sessionId=session.threadId='rewind-maintenance';
+ session._rewindPending=true;
+ session.handleAppServerNotification('thread/status/changed',{threadId:session.threadId,status:{type:'active'}});
+ session.handleAppServerNotification('thread/status/changed',{threadId:session.threadId,status:{type:'systemError'}});
+ session.handleAppServerNotification('thread/started',{thread:{id:session.threadId}});
+ session.handleAppServerNotification('turn/started',{threadId:session.threadId,turn:{id:'maintenance'}});
+ session.handleAppServerErrorNotification({message:'thread unloaded during revert'});
+ assert.equal(session.isBusy,true);
+ assert.equal(session.isRunning,false);
+ assert.deepEqual(sent,[]);
+ assert.equal(session.appServerSystemErrorTimer,null);
+ session._rewindPending=false;
+ session.handleAppServerNotification('thread/status/changed',{threadId:session.threadId,status:{type:'active'}});
+ assert.ok(sent.some(message=>message.type==='session_state_changed'&&message.state==='running'));
+});

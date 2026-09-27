@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import * as fs from "fs";
 import * as path from "path";
@@ -444,6 +445,13 @@ export class TranscriptDatabase {
         AND json_extract(entry_json, '$.content') LIKE '[compact_boundary:%'
     `).get(sessionId) as unknown as { value: number };
     return Number(row.value);
+  }
+
+  windowDigest(sessionId: string, offset: number, limit: number): string {
+    const rows = this.db.prepare(`SELECT session_seq, entry_id, revision FROM transcript_entries
+      WHERE session_id=? ORDER BY session_seq LIMIT ? OFFSET ?`).all(sessionId, limit, offset);
+    return createHash("sha256").update(rows.map(row =>
+      `${row.session_seq}:${row.entry_id}:${row.revision}\n`).join("")).digest("hex");
   }
 
   getPage(sessionId: string, offset: number, limit: number): HistoryEntry[] {

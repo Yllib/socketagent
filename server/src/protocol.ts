@@ -21,6 +21,8 @@ export type TransportLane = "control" | "bulk";
 // ── Client → Server messages ──
 
 export interface PromptMessage {
+  /** Stable draft identity before the native backend assigns a session ID. */
+  clientConversationId?: string;
   type: "prompt";
   text: string;
   /** Stable client identity used for acknowledgement and idempotent retry. */
@@ -340,6 +342,8 @@ export interface NewSessionMessage {
 }
 
 export interface ResumeSessionMessage {
+  /** Hash of the cached entries and revisions, not just the last position. */
+  knownHistoryDigest?: string;
   type: "resume_session";
   sessionId: string;
   /** Correlates the initial history snapshot with the view that requested it. */
@@ -1089,7 +1093,7 @@ export interface RestoreScheduledTaskMessage {
   taskId: string;
 }
 
-export type ClientMessage =
+export type ClientMessage = { commandId?: string } & (
   | PromptMessage
   | RetractQueuedPromptMessage
   | AnswerMessage
@@ -1244,7 +1248,7 @@ export type ClientMessage =
   | { type: "marketplaces_list" }
   | { type: "marketplaces_add"; url: string }
   | { type: "marketplaces_update"; name: string }
-  | { type: "marketplaces_remove"; name: string };
+  | { type: "marketplaces_remove"; name: string });
 
 // ── Server → Client messages ──
 
@@ -2789,7 +2793,17 @@ export interface BrowserSessionErrorServerMessage {
   message: string;
 }
 
+/** Acceptance means dispatched, not that the backend finished the work. */
+export interface CommandReceiptServerMessage {
+  type: "command_receipt";
+  commandId: string;
+  status: "accepted" | "pending" | "uncertain" | "conflict";
+  sessionId?: string;
+  message?: string;
+}
+
 export type ServerMessage =
+  | CommandReceiptServerMessage
   | TextServerMessage
   | ToolCallServerMessage
   | ToolResultServerMessage

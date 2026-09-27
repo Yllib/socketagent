@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Publishes the Windows desktop installer to the public download URL.
 #
-# The phone's file-transfer download does not work on the desktop client, so
-# desktop updates are fetched from a stable URL instead. Run it standalone to
+# This stable URL is for manual downloads. The app's update checker uses the
+# versioned GitHub installer attached by build-app.sh --deploy. Run standalone to
 # republish or roll back without redoing an app release; build-app.sh --deploy
 # calls it as its last step.
 #

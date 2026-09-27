@@ -2408,6 +2408,7 @@ export interface ResumeHistoryPage extends BoundedHistoryPage {
 }
 
 export interface ResumeHistoryOptions {
+  knownHistoryDigest?: string;
   knownSessionSeq?: number;
   knownHistoryOffset?: number;
   knownHistoryEntryCount?: number;
@@ -2543,7 +2544,9 @@ export function getResumeHistoryPage(
       Number.isSafeInteger(knownHistoryEntryCount) && knownHistoryEntryCount! > 0) {
     const knownIndex = database.offsetForSessionSeq(sessionId, knownSessionSeq!);
     const cacheIsContiguous = knownIndex !== undefined &&
-      knownHistoryOffset! + knownHistoryEntryCount! === knownIndex + 1;
+      knownHistoryOffset! + knownHistoryEntryCount! === knownIndex + 1 &&
+      (!options.knownHistoryDigest || options.knownHistoryDigest ===
+        database.windowDigest(sessionId, knownHistoryOffset!, knownHistoryEntryCount!));
     if (cacheIsContiguous) {
       const deltaCount = total - knownIndex! - 1;
       if (deltaCount <= maxDeltaEntries) {

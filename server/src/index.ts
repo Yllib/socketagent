@@ -1,3 +1,4 @@
+import { CommandReceipts } from "./command-receipts";
 import { SessionTransferJobs } from "./session-transfer-jobs";
 import { modelDownloadArchive } from "./model-download-archive";
 import { serveDownloadFile } from "./http-file-download";
@@ -754,6 +755,22 @@ function completeRecoverableRun(session: Session): void {
   restartRecovery.complete(owner.sessionId, owner.id);
   recoveryOwners.delete(session);
 }
+const commandReceipts = new CommandReceipts();
+const commandReplies = new WeakMap<object, Record<string, unknown>[]>();
+const clientConversationOwners = new WeakMap<Session, string>();
+const firstPromptReceipts = new WeakMap<Session, { commandId: string; messageId: string }>();
+function bindClientConversation(session: Session): void {
+  const clientId = clientConversationOwners.get(session);
+  const sessionId = session.getSessionId();
+  const prompt = firstPromptReceipts.get(session);
+  if (sessionId && prompt && persistedPromptSubmission(sessionId, prompt.messageId)) {
+    commandReceipts.confirmPrompt(prompt.commandId, prompt.messageId, sessionId);
+    firstPromptReceipts.delete(session);
+  }
+  if (!clientId || !sessionId) return;
+  commandReceipts.bindConversation(clientId, sessionId);
+  clientConversationOwners.delete(session);
+}
 const acceptedPromptSubmissions = new Map<
   string,
   { acceptedAt: number; sessionId: string }
@@ -1422,6 +1439,7 @@ function serverCapabilitiesPayload(
       bulk: true,
     },
     uploadAckVersion: UPLOAD_ACK_VERSION,
+    commandReceiptVersion: 1,
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 2 },
@@ -1705,6 +1723,7 @@ function attachSessionLifecycleCallbacks(session: Session): void {
   };
   syncLiveSessionInstance(session);
   session.onActivity = () => {
+    bindClientConversation(session);
     syncLiveSessionInstance(session);
     if (!sessionIsBusy(session)) completeRecoverableRun(session);
     notifySessionActivity();
@@ -1727,6 +1746,7 @@ function attachSessionLifecycleCallbacks(session: Session): void {
   };
   session.onAgentSessionRequest = (args) => manageAgentSession(session, args);
   (session as any).onSessionIdChanged = (previousSessionId: string, nextSessionId: string) => {
+    commandReceipts.remapConversation(previousSessionId, nextSessionId);
     const owner = recoveryOwners.get(session);
     if (owner) {
       restartRecovery.rekey(owner.sessionId, nextSessionId, owner.id);
@@ -3078,6 +3098,7 @@ function syncCodexRolloutHistory(sessionInfo: SessionInfo): any[] {
 
 const EXTERNAL_NATIVE_ACTIVE_TTL_MS = 15_000;
 const externalNativeSessionActivity = new Map<string, number>();
+const rewoundNativeHistoryFingerprints = new Map<string, string>();
 
 function nativeHistoryPathForSession(sessionInfo: SessionInfo): string | null {
   if (sessionInfo.backend === "codex") {
@@ -3454,6 +3475,10 @@ function createConnectionHandler(
       const fileChanged = !!fingerprint && fingerprint !== externalNativeWatchFingerprint;
       if (fingerprint) externalNativeWatchFingerprint = fingerprint;
       if (!fileChanged) return;
+      // Native rewind updates the file without running an agent. Consume the
+      // change as the watch baseline, including ticks just after rewind ends.
+      if (isCodexRewinding(sessionInfo.id) || hasBusyLiveSession(sessionInfo.id)
+          || fingerprint === rewoundNativeHistoryFingerprints.get(sessionInfo.id)) return;
 
       const added = syncExternalNativeHistory(sessionInfo);
       if (added.length > 0) {
@@ -3726,16 +3751,96 @@ function createConnectionHandler(
   }
 
   async function handleMessage(msg: ClientMessage): Promise<void> {
-    const targetSessionId = String((msg as any).sessionId || activeSessionId || "");
+    let targetSessionId = String((msg as any).sessionId
+      || (msg.type === "prompt" && msg.clientConversationId ? "" : activeSessionId) || "");
     if ((restartPreparing || shuttingDown || continuationStarting.has(targetSessionId))
         && ["prompt", "new_session", "answer", "compact_context"].includes(msg.type)) {
       sendJson({ type: "error", message: "Session recovery or server restart is in progress. Please retry shortly." });
       return;
     }
+    // A stable command identity covers retries from another connection and
+    // survives server restarts. Legacy clients still use prompt messageId.
+    const requestedId = (msg as ClientMessage & { commandId?: string }).commandId;
+    const commandId = requestedId || (msg.type === "prompt" ? msg.messageId : undefined);
+    const receipted = !!commandId && ["prompt", "answer", "abort", "rewind", "rewind_conversation", "compact_context"].includes(msg.type);
+    const reply = (value: Record<string, unknown>) => sendJson(value,
+      (msg as ClientMessage & { __relayPeerId?: string }).__relayPeerId);
+    const clientConversationId = msg.type === "prompt" && !msg.sessionId ? msg.clientConversationId : undefined;
+    const conversation = clientConversationId ? commandReceipts.conversation(clientConversationId) : undefined;
+    if (conversation && !conversation.sessionId && conversation.firstCommandId !== commandId) {
+      reply({ type: "command_receipt", commandId, status: conversation.currentProcess ? "pending" : "uncertain",
+        message: "The first message has not confirmed this conversation yet. Check the conversation before trying again." });
+      return;
+    }
+    if (receipted) {
+      const claim = commandReceipts.claim(commandId!, msg);
+      if (claim.status !== "new") {
+        if (claim.status === "accepted" && msg.type === "prompt") {
+          const receiptSessionId = String(msg.sessionId || conversation?.sessionId
+            || claim.replies.find(response => response.type === "prompt_received")?.sessionId || "");
+          const persisted = persistedPromptSubmission(receiptSessionId, msg.messageId || "");
+          const failed = claim.replies.some(response => response.type === "prompt_failed" || response.type === "injection_failed");
+          if (persisted) reply({ type: "prompt_received", messageId: msg.messageId, sessionId: receiptSessionId, duplicate: true });
+          for (const response of claim.replies) {
+            if (response.type !== "prompt_received") reply(response);
+          }
+          reply({ type: "command_receipt", commandId, sessionId: receiptSessionId,
+            status: persisted || failed ? "accepted" : claim.currentProcess ? "pending" : "uncertain",
+            ...(!persisted && !failed && !claim.currentProcess
+              ? { message: "The computer restarted before confirming that this message was saved. Check the conversation before sending again." } : {}),
+          });
+          return;
+        }
+        if (claim.status === "accepted") {
+          for (const response of claim.replies) reply(msg.type === "rewind_conversation"
+            ? { ...response, replayed: true } : response);
+          if (msg.type === "rewind_conversation" && claim.replies.some(response => response.success === true)) {
+            // Never replay an old transcript snapshot over newer conversation.
+            const page = getResumeHistoryPage(targetSessionId);
+            reply({ type: "session_history", historyKind: "append", receiptReplay: true, sessionId: targetSessionId,
+              messages: page.entries, total: page.total, offset: page.offset });
+            broadcastStatusSync();
+          }
+        }
+        reply({ type: "command_receipt", commandId, status: claim.status,
+          sessionId: targetSessionId,
+          ...(claim.status === "uncertain" ? { message: "The computer restarted while accepting this request. Check the conversation before sending it again." } : {}),
+          ...(claim.status === "conflict" ? { message: "This request ID was already used for a different request." } : {}),
+        });
+        return;
+      }
+      commandReplies.set(msg, []);
+      if (clientConversationId) {
+        commandReceipts.reserveConversation(clientConversationId, commandId!);
+        // Hash the original request before resolving its draft address.
+        if (msg.type === "prompt" && conversation?.sessionId) {
+          msg.sessionId = conversation.sessionId;
+          targetSessionId = conversation.sessionId;
+        }
+      }
+    }
     const reserve = msg.type === "prompt" && !!targetSessionId;
     if (reserve) continuationStarting.add(targetSessionId);
-    try { await handleMessageImpl(msg); }
-    finally { if (reserve) continuationStarting.delete(targetSessionId); }
+    try {
+      await handleMessageImpl(msg);
+      if (receipted) {
+        const replies = commandReplies.get(msg) || [];
+        commandReceipts.accept(commandId!, replies);
+        const savedPrompt = msg.type !== "prompt" || persistedPromptSubmission(
+          msg.sessionId || (msg.clientConversationId ? commandReceipts.conversation(msg.clientConversationId)?.sessionId : undefined) || "",
+          msg.messageId || "",
+        ) || replies.some(response => response.type === "prompt_failed" || response.type === "injection_failed");
+        // Keep the phone's durable copy until the transcript owns the prompt.
+        // Starting a backend query alone does not prove its input was saved.
+        reply({ type: "command_receipt", commandId, status: savedPrompt ? "accepted" : "pending", sessionId: targetSessionId });
+      }
+    } catch (error) {
+      if (!receipted) throw error;
+      commandReceipts.uncertain(commandId!);
+      reply({ type: "command_receipt", commandId, status: "uncertain", sessionId: targetSessionId,
+        message: "The request could not be confirmed. Check the conversation before trying again." });
+      console.error(`[Command] ${msg.type} ${commandId} did not finish dispatching:`, error);
+    } finally { if (reserve) continuationStarting.delete(targetSessionId); }
   }
 
   const sendConnectionJson = sendJson;
@@ -3743,7 +3848,25 @@ function createConnectionHandler(
     const peerId = (msg as ClientMessage & { __relayPeerId?: string }).__relayPeerId;
     // Request responses belong to the requesting device. Live broadcasts use
     // the connection sender and still reach all attached devices.
-    const sendJson = (value: Record<string, unknown>): void => sendConnectionJson(value, peerId);
+    const sendJson = (value: Record<string, unknown>): void => {
+      if (msg.type === "prompt" && value.type === "error") value = {
+        ...value, type: "prompt_failed", messageId: msg.messageId,
+        sessionId: value.sessionId || msg.sessionId,
+      };
+      if (msg.type === "prompt" && value.type === "prompt_failed" && msg.clientConversationId && msg.messageId) {
+        commandReceipts.releaseUnstartedConversation(msg.clientConversationId, msg.commandId || msg.messageId);
+      }
+      const replies = commandReplies.get(msg);
+      if (replies) {
+        // Keep the final direct replies, not streaming events. Commit before
+        // delivery so a lost acknowledgment can be recovered after restart.
+        if (value.type !== "session_history") replies.push(value);
+        const id = (msg as ClientMessage & { commandId?: string }).commandId
+          || (msg.type === "prompt" ? msg.messageId : undefined);
+        if (id && ["prompt_received", "prompt_failed", "injection_failed"].includes(String(value.type))) commandReceipts.accept(id, replies);
+      }
+      sendConnectionJson(value, peerId);
+    };
     // Wire-format handshake — relay path absorbs this earlier in relay-client,
     // so the only callers reaching here are direct-WS clients. Reply so the
     // app knows binary uploads are supported.
@@ -4414,6 +4537,7 @@ function createConnectionHandler(
         const rawKnownOffset = Number((msg as any).knownHistoryOffset);
         const rawKnownEntryCount = Number((msg as any).knownHistoryEntryCount);
         const page = getResumeHistoryPage(msg.sessionId, {
+          knownHistoryDigest: msg.knownHistoryDigest,
           knownSessionSeq: Number.isSafeInteger(rawKnownSeq) && rawKnownSeq >= 0
             ? rawKnownSeq
             : undefined,
@@ -4615,6 +4739,7 @@ function createConnectionHandler(
           if (!promptMessageId) return;
           const acceptedSessionId = String(sessionId || "");
           rememberAcceptedPromptSubmission(promptMessageId, acceptedSessionId);
+          if (!persistedPromptSubmission(acceptedSessionId, promptMessageId)) return;
           sendJson({
             type: "prompt_received",
             messageId: promptMessageId,
@@ -4649,6 +4774,16 @@ function createConnectionHandler(
         const promptCodexFastMode = typeof (msg as any).codexFastMode === "boolean"
           ? Boolean((msg as any).codexFastMode)
           : undefined;
+        if ((msg as ClientMessage & { commandId?: string }).commandId && !msg.sessionId) {
+          if (activeSession?.isRunning) activeSession.detachWebSocket();
+          activeSession = null;
+          activeSessionId = null;
+        }
+        if (msg.clientConversationId && msg.sessionId && !getSession(msg.sessionId) && !activeSessions.has(msg.sessionId)) {
+          sendJson({ type: "prompt_failed", messageId: promptMessageId, sessionId: msg.sessionId,
+            message: "This conversation is no longer available on this computer." });
+          break;
+        }
         if (msg.sessionId) {
           const runningForPrompt = await recoverCanonicalLiveSession(msg.sessionId);
           if (runningForPrompt && activeSession !== runningForPrompt) {
@@ -4855,6 +4990,8 @@ function createConnectionHandler(
         };
 
         const sessionForRun = activeSession;
+        if (promptMessageId) firstPromptReceipts.set(sessionForRun, { commandId: msg.commandId || promptMessageId, messageId: promptMessageId });
+        if (msg.clientConversationId && !msg.sessionId) clientConversationOwners.set(sessionForRun, msg.clientConversationId);
         // This handler is reached only for an idle runner. Keep a stored run
         // open only when delegated work still belongs to it. Otherwise repair
         // its missing boundary before starting the user's new prompt.
@@ -4874,6 +5011,7 @@ function createConnectionHandler(
               promptMessageId || undefined,
             );
         acknowledgePrompt(resumeId || sessionForRun.getSessionId() || undefined);
+        bindClientConversation(sessionForRun);
         if (unlockedByUserPrompt) retryDeferredAutomationAfterUserPrompt();
         let sessionStartedPushSent = false;
         const maybeSendSessionStartedPush = () => {
@@ -4882,6 +5020,7 @@ function createConnectionHandler(
         };
         maybeSendSessionStartedPush();
         runPromise.then(() => {
+          bindClientConversation(sessionForRun);
           const sid = sessionForRun.getSessionId();
           if (sid && activeSessions.get(sid) === sessionForRun) {
             // Keep session in pool if auth login is pending
@@ -4898,6 +5037,7 @@ function createConnectionHandler(
           clearBackendHealthOverride(sessionForRun instanceof CodexSession ? "codex" : "claude");
           broadcastSessionList();
         }).catch((err: any) => {
+          bindClientConversation(sessionForRun);
           const sid = sessionForRun.getSessionId();
           sendJson({
             type: "prompt_failed",
@@ -5057,8 +5197,9 @@ function createConnectionHandler(
         }
         if (answerHandled) break;
         // Expired transcript approvals never become prompts or authorize a later request.
-        if (qId.startsWith("transcript_access_")) {
+        if (qId.startsWith("transcript_access_") || qId.startsWith("resume_context_")) {
           const resolved = answerSession?.resolveQuestion(qId, msg.answers) ?? false;
+          if (!resolved && answerSid && qId.startsWith("resume_context_")) markQuestionAnswered(answerSid, qId, {});
           sendJson({ type: "question_answered", questionId: qId, sessionId: answerSid,
             answers: resolved ? msg.answers : {} });
           break;
@@ -7866,6 +8007,7 @@ function createConnectionHandler(
           sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: "No message UUID" });
           break;
         }
+        const removedThroughSeq = getLastHistorySessionSeq(sessionId);
         const rewindSessionInfo = getSession(sessionId);
         const target = activeSessions.get(sessionId)
           || ((activeSession?.getSessionId() || (activeSession as any)?._resumeSessionId) === sessionId ? activeSession : undefined);
@@ -7875,18 +8017,31 @@ function createConnectionHandler(
           try {
             if (shouldRewindFiles) throw new Error("Codex conversation rewind does not restore files");
             if (target && sessionIsBusy(target)) throw new Error("Stop running work before rewinding this conversation");
+            externalNativeSessionActivity.delete(sessionId);
             const result = target instanceof CodexSession
               ? await target.rewindConversationToMessage(uuid, dryRun, sessionId)
               : await rewindCodexAppServerToMessage(sessionId, rewindSessionInfo?.cwd || getDefaultCwd(), uuid, dryRun);
             const resultMessage = { type: "rewind_conversation_result", sessionId, success: true,
-              userMessageUuid: uuid, dryRun, ...result };
+              userMessageUuid: uuid, dryRun, ...result,
+              retainedThroughSeq: getLastHistorySessionSeq(sessionId), removedThroughSeq };
+            if (!dryRun && msg.commandId) {
+              const replies = commandReplies.get(msg);
+              if (replies) {
+                replies.push(resultMessage);
+                commandReceipts.accept(msg.commandId, replies);
+              }
+            }
             if (dryRun) sendJson(resultMessage);
             if (!dryRun) {
+              externalNativeSessionActivity.delete(sessionId);
+              const fingerprint = rewindSessionInfo && nativeHistoryFingerprintForSession(rewindSessionInfo);
+              if (fingerprint) rewoundNativeHistoryFingerprints.set(sessionId, fingerprint);
               const page = getHistoryPageToLastPrompt(sessionId);
               const historyMessage = { type: "session_history", historyKind: "rewind", sessionId, messages: page.entries, total: page.total, offset: page.offset };
               broadcastHeadlessSessionMessage(JSON.stringify(resultMessage), sessionId);
               broadcastHeadlessSessionMessage(JSON.stringify(historyMessage), sessionId);
               broadcastSessionList();
+              broadcastStatusSync();
             }
             console.log(`[CodexRewind] completed session=${sessionId} turns=${result.numTurns} ms=${Date.now() - rewindStartedAt} dryRun=${dryRun}`);
           } catch (error: any) {
@@ -7957,12 +8112,14 @@ function createConnectionHandler(
             success: true,
             userMessageUuid: uuid,
             messagesRemoved: removed >= 0 ? removed : 0,
+            retainedThroughSeq: getLastHistorySessionSeq(sessionId), removedThroughSeq,
           });
 
           // Send truncated history so app can update its UI
           const page = getHistoryPageToLastPrompt(sessionId);
           sendJson({
             type: "session_history",
+            historyKind: "rewind",
             sessionId,
             messages: page.entries,
             total: page.total,

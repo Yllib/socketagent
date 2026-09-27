@@ -2803,6 +2803,12 @@ export class CodexSession {
   }
 
   private handleAppServerErrorNotification(params: any): void {
+    if (this._rewindPending) {
+      // Rewind RPCs report their own failures. Runtime shutdown/resume can
+      // emit transient errors that must not become agent transcript messages.
+      console.warn(`[CodexRewind] runtime notice: ${codexAppServerErrorMessage(params, "Codex runtime notice")}`);
+      return;
+    }
     if (isRecoverableCodexAppServerError(params)) {
       const sid = this.sessionId;
       if (sid) {
@@ -3921,6 +3927,9 @@ export class CodexSession {
   }
 
   private handleAppServerNotification(method: string, params: unknown): void {
+    // Resuming/replacing the native history is maintenance, not an agent turn.
+    // Suppress raw-event delivery too: clients derive activity from those events.
+    if (this._rewindPending) return;
     const p = params as any;
     this.emitAppServerRawEvent(method, p);
     switch (method) {
@@ -5850,7 +5859,6 @@ export function createSession(
   }
   // Lazy require keeps the cycle (CodexSession → ClaudeSession via type-only
   // import) from blowing up at runtime.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { ClaudeSession: CS } = require("./claude-session") as typeof import("./claude-session");
   return new CS(ws, cwd, plugins);
 }

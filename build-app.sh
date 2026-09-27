@@ -17,9 +17,8 @@ fi
 #   ./build-app.sh --deploy --bump minor   # Build, bump minor, deploy
 #   ./build-app.sh --deploy --skip-desktop # Deploy Android only
 #
-# A deploy also builds the Windows desktop app and publishes its installer to
-# the public download URL, because the desktop client has no update banner and
-# no working in-app file transfer.
+# A deploy also builds Windows, publishes its installer to the public download
+# URL, and attaches it to GitHub so desktop clients can discover the update.
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 REPO_PARENT="$(cd "$REPO_ROOT/.." && pwd)"
@@ -183,6 +182,7 @@ BUILD_START=$SECONDS
 # Sync app source to remote via tar (Windows SSH doesn't have rsync)
 echo "  Syncing source..."
 tar cf - -C "$APP_DIR" \
+  --exclude='.git' \
   --exclude='build' \
   --exclude='.dart_tool' \
   --exclude='.gradle' \
@@ -358,6 +358,9 @@ else
   echo "Building the Windows desktop app..."
   "$REPO_ROOT/build-windows-app.sh"
   "$REPO_ROOT/publish-desktop-installer.sh" --version "$NEW_VERSION"
+  gh release upload "v$NEW_VERSION" \
+    "$APP_DIR/build/windows/packages/SocketAgent-Desktop-Setup.exe" \
+    --repo "$SERVER_REPO"
   DESKTOP_URL="${SOCKETAGENT_DOWNLOAD_URL:-https://rubanoenterprises.com/socketagent_desktop_installer.exe}"
 fi
 

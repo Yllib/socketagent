@@ -4,6 +4,7 @@ import { z } from "zod";
 import { ClaudeStreamIdentity } from "./claude-stream-identity";
 import { claudeTotalUsage } from "./claude-usage";
 import { readClaudeSupportedModels } from "./claude-model-discovery";
+import { handleClaudeResumeDialog } from "./claude-resume-dialog";
 import { waitForInteractiveAnswer } from "./interactive-answer";
 import { prepareCodexMcpElicitation, resolveCodexMcpElicitation } from "./codex-elicitation";
 import * as crypto from "crypto";
@@ -2911,9 +2912,10 @@ export class ClaudeSession {
     if (pending) {
       pending.resolve(answers);
       this.pendingQuestions.delete(questionId);
-      // Mark as answered in persisted history
-      if (this.sessionId) {
-        markQuestionAnswered(this.sessionId, questionId, answers);
+      // A native resume dialog can arrive before the SDK emits session init.
+      const questionSessionId = this.sessionId || (pending.questionData && "sessionId" in pending.questionData ? pending.questionData.sessionId : undefined);
+      if (questionSessionId) {
+        markQuestionAnswered(questionSessionId, questionId, answers);
       }
       return true;
     }
@@ -4384,6 +4386,25 @@ export class ClaudeSession {
 
             return this._requestClaudeToolApproval(toolName, input, signal, decisionReason);
           },
+          supportedDialogKinds: messageId ? ["resume_return"] : [],
+          onUserDialog: (request, { signal }) => handleClaudeResumeDialog(request, signal, async (question) => {
+            const questionId = createInteractiveRequestId("resume_context");
+            const message: ServerMessage = {
+              type: "question", questionId, sessionId: this.sessionId || resumeSessionId || "",
+              questions: [question],
+            };
+            if (this.sessionId || resumeSessionId) appendHistory((this.sessionId || resumeSessionId)!, {
+              role: "question", content: "", questionId, questions: [question],
+              timestamp: new Date().toISOString(),
+            });
+            const waiting = this._waitForQuestion(questionId, message, signal);
+            this.send(message);
+            const answers = await waiting;
+            if (!answers) this.abortController?.abort();
+            else this.send({ type: "question_answered", questionId,
+              sessionId: this.sessionId || resumeSessionId || "", answers });
+            return answers;
+          }),
           onElicitation: (request, { signal }) => this._handleClaudeElicitation(request, signal),
         },
       });

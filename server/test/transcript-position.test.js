@@ -503,3 +503,21 @@ test("task lifecycle progress revises one durable history row", () => {
     deleteSessionArtifacts(sessionId);
   }
 });
+
+test('resume rejects a matching cursor when an earlier cached revision changed', () => {
+  const {createHash}=require('node:crypto');
+  const id=`digest-${randomUUID()}`;
+  const digest=entries=>createHash('sha256').update(entries.map(e=>`${e.sessionSeq}:${e.entryId}:${e.revision}\n`).join('')).digest('hex');
+  try {
+    const first=appendHistory(id,{role:'assistant',content:'partial',timestamp:new Date().toISOString(),streamId:'digest-stream'});
+    appendHistory(id,{role:'user',content:'later',uuid:'digest-user',timestamp:new Date().toISOString()});
+    const cached=getHistory(id);
+    const checkpoint={knownSessionSeq:cached.at(-1).sessionSeq,knownHistoryOffset:0,knownHistoryEntryCount:cached.length,knownHistoryDigest:digest(cached)};
+    assert.equal(getResumeHistoryPage(id,checkpoint).historyKind,'delta');
+    appendHistory(id,{...first,content:'complete',revision:2});
+    const refresh=getResumeHistoryPage(id,checkpoint);
+    assert.equal(refresh.historyKind,'initial');
+    assert.equal(refresh.entries[0].content,'complete');
+    assert.equal(getResumeHistoryPage(id,{...checkpoint,knownHistoryDigest:digest(getHistory(id))}).historyKind,'delta');
+  } finally {deleteSessionArtifacts(id);}
+});

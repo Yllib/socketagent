@@ -60,6 +60,17 @@ rollout, a 579 ms transcript backup, and 76 ms suffix deletion. It removed
 exactly three local entries, from 28,858 to 28,855. No real conversation was
 changed, no model turn was started, and no credentials were copied.
 
+Rewind UX keeps maintenance separate from agent work: Codex notifications and
+raw events emitted while rewinding do not create running states or transcript
+errors. Native history watchers consume rewind's file change without marking
+external activity. Completion clears stale activity and broadcasts fresh status.
+Both backends label the authoritative replacement `historyKind: rewind`.
+The app trims the discarded suffix in place, reconciles the retained tail while
+preserving card instances and older loaded pages, and does not increment the
+chat window revision. Success clears the progress notice without adding a card;
+failure leaves history intact and shows one persistent notice. Encrypted client
+tests cover these cases, duplicate snapshots, and rewinding to empty history.
+
 The JSONL response reader accumulates chunks until a newline before joining
 them. Repeatedly splitting the accumulated buffer made large thread reads
 quadratic: a 166 MB Wakespeed transcript took about 62 seconds before the fix,

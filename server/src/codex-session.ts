@@ -1467,10 +1467,17 @@ export class CodexSession {
 
   async rollbackAppServerThread(numTurns: number, threadId = this.threadId || this.sessionId || this._resumeSessionId): Promise<void> {
     if (!threadId) throw new Error("No Codex thread id to roll back");
+    if (this.isBusy) throw new Error("Stop running work before rewinding this conversation");
     if (!Number.isFinite(numTurns) || numTurns < 1) throw new Error("Rollback must drop at least one turn");
-    await this.ensureAppServer();
-    await this.appServer!.rollbackThread(threadId, Math.floor(numTurns));
-    invalidateCodexInstructions(threadId);
+    this._rewindPending = true;
+    try {
+      await this.ensureAppServer();
+      await this.appServer!.rollbackThread(threadId, Math.floor(numTurns));
+      invalidateCodexInstructions(threadId);
+    } finally {
+      this._rewindPending = false;
+      this.scheduleAppServerIdleStop();
+    }
   }
 
   async getAppServerGoal(

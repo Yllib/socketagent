@@ -21,7 +21,7 @@ function secureSecretFileMode(filePath: string): void {
 secureSecretFileMode(ENV_PATH);
 dotenv.config({ path: ENV_PATH });
 
-import { isCodexRewinding } from "./codex-conversation-rewind";
+import { codexRewindErrorMessage, isCodexRewinding } from "./codex-conversation-rewind";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as http from "http";
@@ -5921,8 +5921,10 @@ function createConnectionHandler(
           } as any);
           sendJson({ type: "codex_rollback_result", sessionId: targetSid, success: true, numTurns });
         }).catch((e: any) => {
-          sendJson({ type: "codex_rollback_result", sessionId: targetSid, success: false, numTurns, error: e.message || String(e) });
-          sendJson({ type: "error", message: `Codex rollback failed: ${e.message || String(e)}` });
+          console.warn(`[CodexRewind] rollback failed session=${targetSid}: ${e.message || String(e)}`);
+          const error = codexRewindErrorMessage(e);
+          sendJson({ type: "codex_rollback_result", sessionId: targetSid, success: false, numTurns, error });
+          sendJson({ type: "error", message: `Codex rollback failed: ${error}` });
         });
         break;
       }
@@ -7889,7 +7891,7 @@ function createConnectionHandler(
             console.log(`[CodexRewind] completed session=${sessionId} turns=${result.numTurns} ms=${Date.now() - rewindStartedAt} dryRun=${dryRun}`);
           } catch (error: any) {
             console.warn(`[CodexRewind] failed session=${sessionId} ms=${Date.now() - rewindStartedAt}: ${error.message || String(error)}`);
-            sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, dryRun, error: error.message || String(error) });
+            sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, dryRun, error: codexRewindErrorMessage(error) });
           }
           break;
         }

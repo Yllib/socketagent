@@ -39,14 +39,26 @@ These are separate runs, not an identical-boundary benchmark. Regression tests
 forbid writes to retained rows, cover FTS and fallback search, verify concurrent
 snapshot writes, and reject full transcript hydration in the rewind path.
 
-Codex CLI 0.155.1's generated schema still exposes `thread/rollback`, but marks
-it deprecated. Official documentation also warns it will be removed:
-https://learn.chatgpt.com/docs/app-server#roll-back-recent-turns
-Paginated native threads reject that legacy command. They use `thread/revert`
+Codex CLI 0.157.1 removed `thread/rollback`. Older releases still support it.
+Paginated native threads use `thread/revert`
 with the selected `beforeTurnId`, then verify the retained IDs through
 `thread/turns/list`; revert's response contains metadata, not retained turns.
-If the runtime rejects either operation, SocketAgent keeps its history and
-shows the error. Rewind progress and results remain above the chat viewport.
+Legacy threads need Codex's native `migrate-rollouts --apply --thread <id>`
+before they can use revert. On an explicit unsupported-method response only,
+SocketAgent stops its idle app-server to release the writer, migrates just the
+requested thread, reinitializes the client, and verifies every turn ID before
+reverting. Unsubscribe alone does not release the writer in 0.157.1. A busy
+writer, failed migration, changed turn IDs, or ambiguous RPC failure prevents
+the fallback mutation. The local transcript is only truncated after the native
+retained prefix has been verified. Protocol dumps stay in the server log;
+rewind errors sent to the app are short.
+
+On 2026-09-27, an isolated copy of the affected General-Dev legacy conversation
+preserved all 198 turn IDs through native migration, then reverted to 197.
+The full SocketAgent helper took 5,221 ms, including migration of a 200 MB
+rollout, a 579 ms transcript backup, and 76 ms suffix deletion. It removed
+exactly three local entries, from 28,858 to 28,855. No real conversation was
+changed, no model turn was started, and no credentials were copied.
 
 The JSONL response reader accumulates chunks until a newline before joining
 them. Repeatedly splitting the accumulated buffer made large thread reads

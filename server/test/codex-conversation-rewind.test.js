@@ -110,3 +110,15 @@ test('rewind avoids full transcript hydration and invalidates cached positions',
  assert.ok(appended.sessionSeq>removed.sessionSeq);
  assert.equal(getHistory(sid).length,2);
 });
+
+test('rewind errors keep protocol method dumps out of the chat banner', () => {
+ const {codexRewindErrorMessage}=require('../dist/codex-conversation-rewind');
+ const {CodexAppServerProtocolError}=require('../dist/codex-app-server-client');
+ const detail='Invalid request: unknown variant `thread/rollback`, expected '+('method,'.repeat(1000));
+ const error=new CodexAppServerProtocolError('thread/rollback',{code:-32600,message:detail},detail);
+ assert.match(codexRewindErrorMessage(error),/does not support/);
+ assert.ok(codexRewindErrorMessage(error).length<200);
+ assert.equal(error.detail,detail);
+ assert.equal(codexRewindErrorMessage(new Error('Stop running work first')),'Stop running work first');
+ assert.match(codexRewindErrorMessage(new Error('x'.repeat(1000))),/server log/);
+});

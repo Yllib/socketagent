@@ -1,9 +1,20 @@
 import type { HistoryEntry } from "./protocol";
+import { CodexAppServerProtocolError } from "./codex-app-server-client";
 import { invalidateCodexInstructions } from "./codex-instruction-delivery";
 import { archiveHistorySnapshot, getConversationRewindBoundary, truncateConversationHistory } from "./session-store";
 
 const rewinding = new Set<string>();
 export function isCodexRewinding(sessionId: string): boolean { return rewinding.has(sessionId); }
+
+/** Keep wire-protocol dumps in server logs, not in the chat error banner. */
+export function codexRewindErrorMessage(error: unknown): string {
+  if (error instanceof CodexAppServerProtocolError) {
+    if (error.unsupportedMethod) return "This Codex version does not support the requested rewind. Update Codex and try again";
+    if (error.detail.length <= 400) return error.detail;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length <= 400 ? message : "Codex could not complete the rewind. Check the server log for details";
+}
 
 export function codexRewindTarget(thread: any, target: HistoryEntry): { numTurns: number; turnIndex: number } {
   if (thread?.status?.type === "active") throw new Error("Stop the running Codex turn before rewinding");

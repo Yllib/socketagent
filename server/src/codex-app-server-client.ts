@@ -1,5 +1,43 @@
-import { spawn, spawnSync, ChildProcessWithoutNullStreams } from "child_process";
+import { execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
+
+export class CodexAppServerProtocolError extends Error {
+  readonly code?: number;
+  readonly detail: string;
+
+  constructor(readonly method: string, error: unknown, message: string) {
+    super(message);
+    this.name = "CodexAppServerProtocolError";
+    const data = error && typeof error === "object" ? error as Record<string, unknown> : {};
+    this.code = typeof data.code === "number" ? data.code : undefined;
+    this.detail = typeof data.message === "string" ? data.message : message;
+  }
+
+  get unsupportedMethod(): boolean {
+    return this.code === -32601 || (this.code === -32600
+      && this.detail.includes(`unknown variant \`${this.method}\``));
+  }
+}
+
+interface RewindThread {
+  id: string;
+  historyMode?: string;
+  status?: { type: string };
+  turns: Array<{ id: string }>;
+}
+
+function rewindThreadFrom(response: unknown): RewindThread {
+  const thread = (response as { thread?: RewindThread } | null)?.thread;
+  if (!thread || !Array.isArray(thread.turns)
+      || thread.turns.some(turn => !turn || typeof turn.id !== "string")) {
+    throw new Error("Codex did not return the conversation turns");
+  }
+  if (thread.status?.type === "active") throw new Error("Stop the running Codex turn before rewinding");
+  return thread;
+}
 
 export type CodexAppServerSandbox =
   | "read-only"
@@ -199,6 +237,7 @@ export class CodexAppServerClient extends EventEmitter {
   private stdoutChunks: string[] = [];
   private stderrTail = "";
   private closed = false;
+  private initializeParams?: CodexAppServerInitializeParams;
 
   constructor(private readonly options: CodexAppServerOptions) {
     super();
@@ -257,6 +296,7 @@ export class CodexAppServerClient extends EventEmitter {
   async initialize(params: CodexAppServerInitializeParams): Promise<unknown> {
     const result = await this.request("initialize", params, this.options.startupTimeoutMs);
     this.notify("initialized", {});
+    this.initializeParams = params;
     return result;
   }
 
@@ -402,7 +442,67 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   async rollbackThread(threadId: string, numTurns: number): Promise<unknown> {
-    return this.request("thread/rollback", { threadId, numTurns });
+    if (!Number.isSafeInteger(numTurns) || numTurns < 1) throw new Error("Rollback must drop at least one turn");
+    try {
+      return await this.request("thread/rollback", { threadId, numTurns });
+    } catch (error) {
+      // Only an explicit unsupported-method response permits another mutation.
+      // A timeout or transport failure could mean the original rollback succeeded.
+      if (!(error instanceof CodexAppServerProtocolError) || !error.unsupportedMethod) throw error;
+    }
+    const original = rewindThreadFrom(await this.readThread({ threadId, includeTurns: true }));
+    const keep = original.turns.length - numTurns;
+    if (keep < 0) throw new Error("Rollback exceeds the number of conversation turns");
+    if (original.historyMode !== "paginated") {
+      await this.migrateLegacyThread(threadId);
+      await this.resumeThread({ threadId });
+      const migrated = rewindThreadFrom(await this.readThread({ threadId, includeTurns: true }));
+      if (migrated.historyMode !== "paginated" || migrated.turns.length !== original.turns.length
+          || migrated.turns.some((turn, i) => turn.id !== original.turns[i].id)) {
+        throw new Error("Codex history changed during preparation. Nothing was rewound. Reconnect before trying again");
+      }
+    }
+    await this.revertThread(threadId, original.turns[keep].id);
+    const result = await this.readThread({ threadId, includeTurns: true });
+    const retained = rewindThreadFrom(result);
+    if (retained.turns.length !== keep || retained.turns.some((turn, i) => turn.id !== original.turns[i].id)) {
+      throw new Error("Codex returned an unexpected rewind result. Reconnect to check the conversation before trying again");
+    }
+    return result;
+  }
+
+  private async migrateLegacyThread(threadId: string): Promise<void> {
+    // The native migrator preserves thread identity and checks writer leases.
+    // Never edit Codex's database or rollout ourselves, or migrate other threads.
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId) || !this.initializeParams) {
+      throw new Error("Cannot prepare this Codex conversation for rewind");
+    }
+    await this.stop("SIGTERM", 3000, true);
+    this.stdoutChunks = [];
+    try {
+      const { stdout } = await execFileAsync(this.options.command ?? "codex",
+        ["migrate-rollouts", "--apply", "--thread", threadId, "--json"], {
+          cwd: this.options.cwd, env: this.options.env ?? process.env,
+          shell: this.options.shell, windowsHide: true, timeout: 120_000, maxBuffer: 1024 * 1024,
+        });
+      const report: unknown = JSON.parse(stdout);
+      const outcomes = (report as { outcomes?: Array<{ thread_id?: string; status?: string }> } | null)?.outcomes;
+      const outcome = Array.isArray(outcomes) ? outcomes.find(item => item.thread_id === threadId) : undefined;
+      if (outcome?.status === "skipped_busy") {
+        throw new Error("This conversation is open in another Codex process. Close it there before rewinding");
+      }
+      if (outcome?.status !== "migrated" && outcome?.status !== "already_paginated") {
+        throw new Error("Codex could not prepare this conversation for rewind. Nothing was rewound");
+      }
+    } catch (error) {
+      console.warn(`[CodexRewind] legacy migration failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (error instanceof Error && (error.message.startsWith("This conversation is open")
+          || error.message.startsWith("Codex could not prepare"))) throw error;
+      throw new Error("Codex could not prepare this conversation for rewind. Nothing was rewound. Check the server log for details");
+    } finally {
+      // Keep the same client usable by its owning session even if migration fails.
+      await this.initialize(this.initializeParams);
+    }
   }
 
   async revertThread(threadId: string, beforeTurnId: string): Promise<unknown> {
@@ -606,7 +706,8 @@ export class CodexAppServerClient extends EventEmitter {
     this.pending.delete(msg.id);
     clearTimeout(pending.timer);
     if (msg.error) {
-      pending.reject(new Error(this.formatProtocolError(pending.method, msg.error)));
+      pending.reject(new CodexAppServerProtocolError(pending.method, msg.error,
+        this.formatProtocolError(pending.method, msg.error)));
     } else {
       pending.resolve(msg.result);
     }

@@ -5,6 +5,7 @@ const test = require("node:test");
 const {
   CodexAppServerClient,
   CodexAppServerRequestTimeoutError,
+  CodexAppServerProtocolError,
 } = require("../dist/codex-app-server-client");
 const { isTimedOutCodexThreadResume } = require("../dist/codex-session");
 
@@ -192,4 +193,80 @@ test('paginated rewind sends an exclusive turn boundary and paginated verificati
   const page=await client.listThreadTurns({threadId:'thread',cursor:'next',limit:100,sortDirection:'asc',itemsView:'notLoaded'});
   assert.equal(page.method,'thread/turns/list');assert.equal(page.params.cursor,'next');assert.equal(page.params.itemsView,'notLoaded');
  }finally{await client.stop();}
+});
+
+function removedRollback() {
+  return new CodexAppServerProtocolError('thread/rollback', {
+    code: -32600, message: 'Invalid request: unknown variant `thread/rollback`, expected `thread/revert`',
+  }, 'raw RPC error');
+}
+
+for (const mode of ['legacy', 'paginated']) {
+  test(`removed rollback uses revert for ${mode} history and verifies the retained prefix`, async () => {
+    const client = new CodexAppServerClient({cwd: process.cwd()});
+    const calls = [];
+    let migrated = mode === 'paginated', reverted = false;
+    client.migrateLegacyThread = async id => {calls.push(['migrate', id]); migrated = true;};
+    client.request = async (method, params) => {
+      calls.push([method, params]);
+      if (method === 'thread/rollback') throw removedRollback();
+      if (method === 'thread/read') return {thread: {
+        historyMode: migrated ? 'paginated' : 'legacy',
+        turns: (reverted ? ['one'] : ['one', 'two', 'three']).map(id => ({id})),
+      }};
+      if (method === 'thread/resume') return {};
+      if (method === 'thread/revert') {
+        assert.deepEqual(params, {threadId: 'target', beforeTurnId: 'two'});
+        assert.equal(migrated, true); reverted = true; return {};
+      }
+      assert.fail(method);
+    };
+    const result = await client.rollbackThread('target', 2);
+    assert.deepEqual(result.thread.turns, [{id: 'one'}]);
+    assert.equal(calls.filter(([method]) => method === 'migrate').length, mode === 'legacy' ? 1 : 0);
+  });
+}
+
+test('rollback never retries an ambiguous failure or an unrelated invalid request', async () => {
+  for (const failure of [new CodexAppServerRequestTimeoutError('thread/rollback', 100),
+    new Error('transport closed'), new CodexAppServerProtocolError('thread/rollback',
+      {code: -32600, message: 'thread is busy'}, 'busy')]) {
+    const client = new CodexAppServerClient({cwd: process.cwd()});
+    let calls = 0;
+    client.request = async method => {calls++; assert.equal(method, 'thread/rollback'); throw failure;};
+    await assert.rejects(client.rollbackThread('target', 1), error => error === failure);
+    assert.equal(calls, 1);
+  }
+});
+
+test('migration failure or changed turn IDs never calls revert', async () => {
+  for (const failure of [true, false]) {
+    const client = new CodexAppServerClient({cwd: process.cwd()});
+    let migrated = false;
+    client.migrateLegacyThread = async () => {
+      if (failure) throw new Error('another writer');
+      migrated = true;
+    };
+    client.request = async method => {
+      if (method === 'thread/rollback') throw removedRollback();
+      if (method === 'thread/read') return {thread: {
+        historyMode: migrated ? 'paginated' : 'legacy', turns: [{id: migrated ? 'changed' : 'one'}],
+      }};
+      if (method === 'thread/resume') return {};
+      assert.fail(`Must not mutate after failed preparation: ${method}`);
+    };
+    await assert.rejects(client.rollbackThread('target', 1), failure ? /another writer/ : /history changed/);
+  }
+});
+
+test('rewind fallback rejects active threads and out-of-range counts', async () => {
+  for (const active of [true, false]) {
+    const client = new CodexAppServerClient({cwd: process.cwd()});
+    client.request = async method => {
+      if (method === 'thread/rollback') throw removedRollback();
+      if (method === 'thread/read') return {thread: {status: {type: active ? 'active' : 'idle'}, turns: [{id:'one'}]}};
+      assert.fail(method);
+    };
+    await assert.rejects(client.rollbackThread('target', 2), active ? /Stop the running/ : /exceeds/);
+  }
 });

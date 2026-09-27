@@ -65,7 +65,7 @@ Use the report command for current rule and file counts.
 | Enforcement | Implemented | Checks in tests and pre-push; shrinking source-specific baseline; test rejection of new debt and bypasses. |
 | Codex transport, rewind, sign-in | Complete | Raw RPC responses stay unknown; validate consumed rewind, compaction, migration, and login fields. No baseline entries in these modules. |
 | Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
-| Provider adapters | In progress | `codex-session.ts` has zero diagnostics, including native notifications, approvals, questions, and item translation. Remaining work: Codex history/elicitation helpers and Claude adapter. Test streaming, completion, approvals, cancellation, and subagents. |
+| Provider adapters | In progress | Codex session, native history, and elicitation helpers have zero diagnostics. Remaining work: Claude adapter. Test streaming, completion, approvals, cancellation, and subagents. |
 | Persisted history | Pending | Validate JSON and database rows, including supported legacy records, in `session-store.ts` and `transcript-database.ts`. Test recovery, pagination, rewind, and archive reads. |
 | WebSocket routing | Pending | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
 | Remaining code and tests | Pending | MCP tools, plugins API, relay client, helpers, JS fixtures and scripts. Audit additional repositories and ignored private plugins separately. |
@@ -107,7 +107,7 @@ not a new auto-update policy.
   model records, subagent reconciliation, error handling, and file-change helpers.
   Session delivery preserves its caller's message type across acknowledgement,
   retry, and replay. Plugin session sends now use the declared server protocol.
-- Codex native event translation: no remaining unsafe types or assertions in
+- Server `a123dbe`: Codex native event translation. No remaining unsafe types or assertions in
   `codex-session.ts`. Provider data is checked before use, including supported
   legacy event shapes. Rate-limit normalization is clean too. App tool callbacks
   now preserve `ServerMessage` and `HistoryEntry`; secure-input messages have a
@@ -135,3 +135,6 @@ not a new auto-update policy.
   approval, subagent, delivery, rate-limit, and task tests 91 passed, one skipped.
   Output: `/tmp/sa-codex-native-full-tests.log` and `/tmp/sa-codex-native-tests.log`.
   Final model/instruction checks: nine passed, one skipped. Baseline: 7,668.
+- Codex history/elicitation helpers: build and lint passed; 19 focused tests
+  passed for elicitation, history, and native subagent lifecycle. Both helpers
+  have zero diagnostics. Baseline: 7,416.

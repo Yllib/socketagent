@@ -1,3 +1,4 @@
+import { isRecord, unknownArray } from "./value-guards";
 import { QuestionItem } from "./protocol";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
 const elicitationValidator = new AjvJsonSchemaValidator();
@@ -13,7 +14,7 @@ export interface CodexMcpElicitationResponse {
 interface ElicitationAnswerBinding {
   property: string;
   question: string;
-  schema: Record<string, any>;
+  schema: Record<string, unknown>;
   optionValues: Map<string, unknown>;
 }
 
@@ -27,28 +28,26 @@ export interface PreparedCodexMcpElicitation {
   questions: QuestionItem[];
   bindings: ElicitationAnswerBinding[];
   fallbackApproval: boolean;
-  requestedSchema: Record<string, any>;
+  requestedSchema: Record<string, unknown>;
 }
 
-function asObject(value: unknown): Record<string, any> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, any>
-    : {};
+function asObject(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
 }
 
-function optionPairs(schema: Record<string, any>): Array<{ label: string; value: unknown }> {
+function optionPairs(schema: Record<string, unknown>): Array<{ label: string; value: unknown }> {
   if (Array.isArray(schema.oneOf)) {
-    return schema.oneOf
-      .filter((entry: unknown) => entry && typeof entry === "object" && "const" in (entry as object))
-      .map((entry: Record<string, any>) => ({
+    return unknownArray(schema.oneOf)
+      .filter(isRecord).filter((entry) => "const" in entry)
+      .map((entry: Record<string, unknown>) => ({
         label: String(entry.title ?? entry.const),
         value: entry.const,
       }));
   }
 
   if (Array.isArray(schema.enum)) {
-    const names = Array.isArray(schema.enumNames) ? schema.enumNames : [];
-    return schema.enum.map((value: unknown, index: number) => ({
+    const names = unknownArray(schema.enumNames);
+    return unknownArray(schema.enum).map((value: unknown, index: number) => ({
       label: String(names[index] ?? value),
       value,
     }));
@@ -56,15 +55,15 @@ function optionPairs(schema: Record<string, any>): Array<{ label: string; value:
 
   const items = asObject(schema.items);
   if (Array.isArray(items.anyOf)) {
-    return items.anyOf
-      .filter((entry: unknown) => entry && typeof entry === "object" && "const" in (entry as object))
-      .map((entry: Record<string, any>) => ({
+    return unknownArray(items.anyOf)
+      .filter(isRecord).filter((entry) => "const" in entry)
+      .map((entry: Record<string, unknown>) => ({
         label: String(entry.title ?? entry.const),
         value: entry.const,
       }));
   }
   if (Array.isArray(items.enum)) {
-    return items.enum.map((value: unknown) => ({ label: String(value), value }));
+    return unknownArray(items.enum).map((value: unknown) => ({ label: String(value), value }));
   }
 
   if (schema.type === "boolean") {
@@ -104,9 +103,7 @@ export function prepareCodexMcpElicitation(rawParams: unknown): PreparedCodexMcp
   const requestedSchema = asObject(source.requestedSchema ?? source.requested_schema);
   const properties = asObject(requestedSchema.properties);
   const required = new Set(
-    Array.isArray(requestedSchema.required)
-      ? requestedSchema.required.map((entry: unknown) => String(entry))
-      : [],
+    unknownArray(requestedSchema.required).map((entry) => String(entry)),
   );
   const questions: QuestionItem[] = [];
   const bindings: ElicitationAnswerBinding[] = [];

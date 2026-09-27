@@ -1,4 +1,6 @@
 import * as fs from "fs";
+import * as os from "os";
+import { isRecord, unknownArray } from "./value-guards";
 import * as path from "path";
 import type { HistoryEntry } from "./protocol";
 import { normalizeCodexSubagentStatus, codexSubagentIsActive } from "./codex-subagent-state";
@@ -24,9 +26,9 @@ function epochToIso(value: unknown, fallback = nowIso()): string {
 function extractText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return content.map((b: any) => {
+    return unknownArray(content).map((b) => {
       if (typeof b === "string") return b;
-      if (b && typeof b === "object" && typeof b.text === "string") return b.text;
+      if (isRecord(b) && typeof b.text === "string") return b.text;
       return "";
     }).join("");
   }
@@ -39,13 +41,11 @@ function jsonPreview(value: unknown): string {
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
+  if (isRecord(value)) return value;
   if (typeof value !== "string") return {};
   try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    const parsed: unknown = JSON.parse(value);
+    return isRecord(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -66,11 +66,11 @@ function generatedImagePath(threadId: unknown, itemId: unknown): string | null {
   const thread = String(threadId || "").trim();
   const item = String(itemId || "").trim();
   if (!thread || !item) return null;
-  const homeDir = process.env.HOME || require("os").homedir();
+  const homeDir = process.env.HOME || os.homedir();
   return path.join(homeDir, ".codex", "generated_images", thread, `${item}.png`);
 }
 
-function imageFromResult(threadId: unknown, item: any): { filePath: string; mimeType: string } | null {
+function imageFromResult(threadId: unknown, item: Record<string, unknown>): { filePath: string; mimeType: string } | null {
   const explicitPath = typeof item?.savedPath === "string" ? item.savedPath : "";
   const filePath = explicitPath || generatedImagePath(threadId, item?.id) || "";
   if (!filePath) return null;
@@ -132,12 +132,11 @@ export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: st
   let explicitTurns = false;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
-    let obj: any;
+    let obj: unknown;
     try { obj = JSON.parse(line); } catch { continue; }
-
-    const timestamp = (obj.timestamp as string) || nowIso();
+    if (!isRecord(obj) || !isRecord(obj.payload)) continue;
+    const timestamp = typeof obj.timestamp === "string" && obj.timestamp ? obj.timestamp : nowIso();
     const payload = obj.payload;
-    if (!payload || typeof payload !== "object") continue;
 
     if (obj.type === "event_msg") {
       if (payload.type === "task_started") {
@@ -196,7 +195,7 @@ export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: st
         content: toolCallContent(toolName, args),
         toolName,
         toolInput: args,
-        toolUseId: payload.call_id,
+        toolUseId: typeof payload.call_id === "string" ? payload.call_id : undefined,
         timestamp,
       });
       continue;
@@ -216,7 +215,7 @@ export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: st
         content: toolCallContent(toolName, args, input),
         toolName,
         toolInput: args,
-        toolUseId: payload.call_id,
+        toolUseId: typeof payload.call_id === "string" ? payload.call_id : undefined,
         timestamp,
       });
       continue;
@@ -234,7 +233,7 @@ export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: st
         content: toolCallContent("ToolSearch", args),
         toolName: "ToolSearch",
         toolInput: args,
-        toolUseId: payload.call_id,
+        toolUseId: typeof payload.call_id === "string" ? payload.call_id : undefined,
         timestamp,
       });
       continue;
@@ -247,14 +246,14 @@ export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: st
     }
 
     if (payload.type === "web_search_call") {
-      const action = payload.action ?? {};
+      const action = isRecord(payload.action) ? payload.action : {};
       const query = typeof action.query === "string" ? action.query : jsonPreview(action);
       result.push({
         role: "tool_call",
         content: query,
         toolName: "WebSearch",
         toolInput: action,
-        toolUseId: payload.call_id || `web_${timestamp}`,
+        toolUseId: typeof payload.call_id === "string" && payload.call_id ? payload.call_id : `web_${timestamp}`,
         timestamp,
       });
       continue;
@@ -292,24 +291,25 @@ export function codexRolloutJsonlToHistory(raw: string, options: { threadId?: st
   return result.filter((entry) => entry.role !== "tool_result" || !!entry.toolUseId);
 }
 
-function appServerUserInputToText(input: any): string {
-  if (!input || typeof input !== "object") return "";
+function appServerUserInputToText(input: unknown): string {
+  if (!isRecord(input)) return "";
   if (input.type === "text") return String(input.text ?? "");
   if (input.type === "skill") return `/${String(input.name ?? "skill")}`;
   return "";
 }
 
-export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
+export function codexAppServerThreadToHistory(thread: unknown): HistoryEntry[] {
   const result: HistoryEntry[] = [];
+  if (!isRecord(thread)) return result;
   const threadId = thread?.id || thread?.sessionId || "";
   const agents = new Map<string, { card: HistoryEntry; status: string }>();
-  const ensureAgent = (agentId: string, timestamp: string, details: any = {}) => {
+  const ensureAgent = (agentId: string, timestamp: string, details: Record<string, unknown> = {}) => {
     if (!agentId || agentId === threadId) return undefined;
     let agent = agents.get(agentId);
     if (!agent) {
-      const description = details.prompt?.trim().slice(0, 160)
-        || details.agentPath?.split('/').filter(Boolean).at(-1)?.replace(/[_-]+/g, ' ')
-        || 'Codex agent';
+      const prompt = typeof details.prompt === "string" ? details.prompt.trim().slice(0, 160) : "";
+      const leaf = typeof details.agentPath === "string" ? details.agentPath.split('/').filter(Boolean).at(-1)?.replace(/[_-]+/g, ' ') : "";
+      const description = prompt || leaf || 'Codex agent';
       const card: HistoryEntry = {
         role: 'tool_call', toolName: 'Agent', content: description,
         toolUseId: `codex-subagent:${agentId}`, timestamp,
@@ -322,7 +322,7 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
     for (const key of ['prompt', 'model', 'reasoningEffort', 'agentPath']) {
       if (typeof details[key] === 'string' && details[key]) agent.card.toolInput![key] = details[key];
     }
-    if (details.prompt) {
+    if (typeof details.prompt === "string" && details.prompt) {
       agent.card.content = details.prompt.trim().slice(0, 160);
       agent.card.toolInput!.description = agent.card.content;
     }
@@ -340,12 +340,13 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
         content: output, toolOutput: output, subagentStatus: status, timestamp });
     }
   };
-  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  const turns = unknownArray(thread.turns);
   for (const turn of turns) {
+    if (!isRecord(turn)) continue;
     const timestamp = epochToIso(turn?.startedAt ?? turn?.completedAt, nowIso());
-    const items = Array.isArray(turn?.items) ? turn.items : [];
+    const items = unknownArray(turn.items);
     for (const item of items) {
-      if (!item || typeof item !== "object") continue;
+      if (!isRecord(item)) continue;
 
       if (item.type === 'subAgentActivity') {
         const id = String(item.agentThreadId || '');
@@ -363,21 +364,23 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
       }
       if (item.type === 'collabAgentToolCall') {
         if (item.tool === 'spawnAgent') {
-          for (const id of item.receiverThreadIds || []) ensureAgent(String(id), timestamp, item);
+          for (const id of unknownArray(item.receiverThreadIds)) ensureAgent(String(id), timestamp, item);
         }
-        for (const [id, state] of Object.entries(item.agentsStates || {}) as [string, any][]) {
-          setAgentStatus(id, state?.status, timestamp, state?.message);
+        const states = isRecord(item.agentsStates) ? item.agentsStates : {};
+        for (const [id, state] of Object.entries(states)) {
+          if (!isRecord(state)) continue;
+          setAgentStatus(id, state.status, timestamp, typeof state.message === "string" ? state.message : undefined);
         }
         continue;
       }
 
       if (item.type === "userMessage") {
-        const content = (Array.isArray(item.content) ? item.content : [])
+        const content = unknownArray(item.content)
           .map(appServerUserInputToText)
           .filter(Boolean)
           .join("\n")
           .trim();
-        if (content) result.push({ role: "user", content, timestamp, ...(item.clientId ? { uuid: item.clientId } : {}) });
+        if (content) result.push({ role: "user", content, timestamp, ...(typeof item.clientId === "string" && item.clientId ? { uuid: item.clientId } : {}) });
         continue;
       }
 
@@ -394,7 +397,7 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
           content: command,
           toolName: "Bash",
           toolInput: { command, cwd: item.cwd },
-          toolUseId: item.id,
+          toolUseId: typeof item.id === "string" ? item.id : undefined,
           timestamp,
         });
         if (item.aggregatedOutput != null || item.exitCode != null) {
@@ -408,13 +411,13 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
         const toolName = item.type === "mcpToolCall"
           ? `${item.server || "mcp"}.${item.tool || "tool"}`
           : `${item.namespace || "dynamic"}.${item.tool || "tool"}`;
-        const args = item.arguments ?? {};
+        const args = isRecord(item.arguments) ? item.arguments : {};
         result.push({
           role: "tool_call",
           content: jsonPreview(args),
           toolName,
           toolInput: args,
-          toolUseId: item.id,
+          toolUseId: typeof item.id === "string" ? item.id : undefined,
           timestamp,
         });
         const output = jsonPreview(item.result ?? item.error ?? item.contentItems ?? "");
@@ -423,13 +426,13 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
       }
 
       if (item.type === "fileChange") {
-        const changes = Array.isArray(item.changes) ? item.changes : [];
+        const changes = unknownArray(item.changes);
         result.push({
           role: "tool_call",
           content: jsonPreview(changes),
           toolName: "ApplyPatch",
           toolInput: { changes },
-          toolUseId: item.id,
+          toolUseId: typeof item.id === "string" ? item.id : undefined,
           timestamp,
         });
         pushToolResult(result, String(item.id || ""), item.status ? `Patch ${item.status}` : "Patch complete", timestamp);
@@ -443,14 +446,14 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
           content: imagePath,
           toolName: "ViewImage",
           toolInput: { path: imagePath },
-          toolUseId: item.id,
+          toolUseId: typeof item.id === "string" ? item.id : undefined,
           timestamp,
         });
         if (imagePath) {
           result.push({
             role: "tool_image",
             content: "",
-            toolUseId: item.id,
+            toolUseId: typeof item.id === "string" ? item.id : undefined,
             filePath: imagePath,
             mimeType: "image/png",
             timestamp,
@@ -468,14 +471,14 @@ export function codexAppServerThreadToHistory(thread: any): HistoryEntry[] {
           content: "ImageGeneration",
           toolName: "ImageGeneration",
           toolInput: input,
-          toolUseId: item.id,
+          toolUseId: typeof item.id === "string" ? item.id : undefined,
           timestamp,
         });
         if (image) {
           result.push({
             role: "tool_image",
             content: "",
-            toolUseId: item.id,
+            toolUseId: typeof item.id === "string" ? item.id : undefined,
             filePath: image.filePath,
             mimeType: image.mimeType,
             timestamp,

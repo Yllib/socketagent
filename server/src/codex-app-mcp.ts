@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { errorMessage } from "./value-guards";
 import {
   AppToolContext,
   handleBrowserSessionTool,
@@ -140,8 +141,8 @@ function unregisterCodexAppMcp(token: string): void {
   if (!registration) return;
   registrations.delete(token);
   for (const transport of registration.transports.values()) {
-    void transport.close().catch((err) => {
-      console.warn(`[Codex MCP] Failed to close transport: ${err.message}`);
+    void transport.close().catch((err: unknown) => {
+      console.warn(`[Codex MCP] Failed to close transport: ${errorMessage(err)}`);
     });
   }
   registration.transports.clear();
@@ -164,7 +165,7 @@ function createServer(context: AppToolContext): McpServer {
         plan_id: z.string().optional().describe("Existing plan ID to update. Omit to create a new plan."),
       },
     },
-    async (args) => handleHtmlPlanTool(context, args as any),
+    async (args) => handleHtmlPlanTool(context, args),
   );
 
   const workReviewTargetSchema = z.object({
@@ -207,7 +208,7 @@ function createServer(context: AppToolContext): McpServer {
         include_archived: z.boolean().optional().describe("Include archived reviews for list/export"),
       },
     },
-    async (args) => handleWorkReviewTool(context, args as any),
+    async (args) => handleWorkReviewTool(context, args),
   );
 
   server.registerTool(
@@ -255,7 +256,7 @@ function createServer(context: AppToolContext): McpServer {
         limit: z.number().optional().describe("Maximum number of skills to return, 1-25"),
       },
     },
-    async (args) => handleSearchSkillsTool(context, args as any),
+    async (args) => handleSearchSkillsTool(context, args),
   );
 
   server.registerTool(
@@ -268,7 +269,7 @@ function createServer(context: AppToolContext): McpServer {
         filePath: z.string().optional().describe("Exact skill file path returned by SearchSkills"),
       },
     },
-    async (args) => handleReadSkillTool(context, args as any),
+    async (args) => handleReadSkillTool(context, args),
   );
 
   server.registerTool(
@@ -280,7 +281,7 @@ function createServer(context: AppToolContext): McpServer {
         text: z.string().describe("The text to speak aloud to the user"),
       },
     },
-    async (args) => handleSpeakTool(context, args as { text: string }),
+    async (args) => handleSpeakTool(context, args),
   );
 
   server.registerTool(
@@ -292,7 +293,7 @@ function createServer(context: AppToolContext): McpServer {
         file_path: z.string().describe("Absolute path to the file to send"),
       },
     },
-    async (args) => handleSendFileTool(context, args as { file_path: string }),
+    async (args) => handleSendFileTool(context, args),
   );
 
   server.registerTool(
@@ -308,7 +309,7 @@ function createServer(context: AppToolContext): McpServer {
         timeoutSeconds: z.number().optional().describe("How long to wait for the user, 30-3600 seconds. Default: 600"),
       },
     },
-    async (args) => handleRequestSecureInputTool(context, args as any),
+    async (args) => handleRequestSecureInputTool(context, args),
   );
 
   server.registerTool(
@@ -322,7 +323,7 @@ function createServer(context: AppToolContext): McpServer {
         scheduledTime: z.string().describe("When to fire the reminder, in ISO 8601 format"),
       },
     },
-    async (args) => handleScheduleReminderTool(context, args as { title: string; body?: string; scheduledTime: string }),
+    async (args) => handleScheduleReminderTool(context, args),
   );
 
   server.registerTool(
@@ -335,7 +336,7 @@ function createServer(context: AppToolContext): McpServer {
         body: z.string().optional().describe("Optional notification body"),
       },
     },
-    async (args) => handleNotifyUserTool(context, args as { title: string; body?: string }),
+    async (args) => handleNotifyUserTool(context, args),
   );
 
   server.registerTool(
@@ -358,7 +359,7 @@ function createServer(context: AppToolContext): McpServer {
         notificationMode: z.enum(["completion", "quiet"]).optional().describe("completion sends the normal completion notification. quiet sends no automatic notifications; the scheduled agent must call NotifyUser if the user should be alerted."),
       },
     },
-    async (args) => handleScheduleTaskTool(context, args as any),
+    async (args) => handleScheduleTaskTool(context, args),
   );
 
   server.registerTool(
@@ -381,7 +382,7 @@ function createServer(context: AppToolContext): McpServer {
         task_ids: z.array(z.string()).max(200).optional().describe("Task IDs for delete"),
       },
     },
-    async (args) => handleTaskBatchTool(context, args as any),
+    async (args) => handleTaskBatchTool(context, args),
   );
 
   server.registerTool(
@@ -394,7 +395,7 @@ function createServer(context: AppToolContext): McpServer {
         prompt: z.string().describe("The complete readable assignment from the NEW_TASK payload"),
       },
     },
-    async (args) => handleReportSubagentAssignmentTool(context, args as any),
+    async (args) => handleReportSubagentAssignmentTool(context, args),
   );
 
   server.registerTool(
@@ -417,7 +418,7 @@ function createServer(context: AppToolContext): McpServer {
         permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
       },
     },
-    async (args) => handleAgentSessionTool(context, args as any),
+    async (args) => handleAgentSessionTool(context, args),
   );
 
   server.registerTool(
@@ -443,7 +444,7 @@ function createServer(context: AppToolContext): McpServer {
         max_chars: z.number().int().min(2000).max(200000).optional().describe("Maximum returned text size. Default 60000"),
       },
     },
-    async (args) => handleRememberTool(context, args as any),
+    async (args) => handleRememberTool(context, args),
   );
 
   server.registerTool(
@@ -462,7 +463,7 @@ function createServer(context: AppToolContext): McpServer {
         source_entry_id: z.string().optional().describe("Optional supporting transcript entry ID"),
       },
     },
-    async (args) => handleSessionMemoryTool(context, args as any),
+    async (args) => handleSessionMemoryTool(context, args),
   );
 
   server.registerTool(
@@ -478,7 +479,7 @@ function createServer(context: AppToolContext): McpServer {
         enabled: z.boolean().optional().describe("Set false to stop monitoring a Monitor-started task"),
       },
     },
-    async (args) => handleMonitorTool(context, args as any),
+    async (args) => handleMonitorTool(context, args),
   );
 
   return server;
@@ -497,8 +498,11 @@ function getHeaderValue(req: IncomingMessage, name: string): string | undefined 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   if (req.method === "GET" || req.method === "DELETE") return undefined;
   const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const input: AsyncIterable<unknown> = req;
+  for await (const chunk of input) {
+    if (Buffer.isBuffer(chunk)) chunks.push(chunk);
+    else if (typeof chunk === "string" || chunk instanceof Uint8Array) chunks.push(Buffer.from(chunk));
+    else throw new Error("Invalid HTTP body chunk");
   }
   if (chunks.length === 0) return undefined;
   const text = Buffer.concat(chunks).toString("utf8");
@@ -540,10 +544,10 @@ export async function handleCodexAppMcpRequest(req: IncomingMessage, res: Server
   let body: unknown;
   try {
     body = await readJsonBody(req);
-  } catch (err: any) {
+  } catch (err) {
     writeJson(res, 400, {
       jsonrpc: "2.0",
-      error: { code: -32700, message: `Invalid JSON: ${err.message}` },
+      error: { code: -32700, message: `Invalid JSON: ${errorMessage(err)}` },
       id: null,
     });
     return;
@@ -579,8 +583,8 @@ export async function handleCodexAppMcpRequest(req: IncomingMessage, res: Server
 
   try {
     await transport.handleRequest(req, res, body);
-  } catch (err: any) {
-    console.error(`[Codex MCP] Request failed: ${err.message}`, err.stack);
+  } catch (err) {
+    console.error(`[Codex MCP] Request failed: ${errorMessage(err)}`, err instanceof Error ? err.stack : undefined);
     if (!res.headersSent) {
       writeJson(res, 500, {
         jsonrpc: "2.0",

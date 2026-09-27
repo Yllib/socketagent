@@ -1,9 +1,9 @@
 import * as crypto from "crypto";
-import { isRecord, unknownArray } from "./value-guards";
+import { isRecord, unknownArray, errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import type { Backend, CodexDriver, HistoryEntry, ServerMessage } from "./protocol";
-import type { WorkReviewAgentView } from "./work-review-types";
+import type { WorkReviewAgentView, WorkReviewItemInput } from "./work-review-types";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
@@ -146,7 +146,7 @@ export function publishBrowserSessionCard(
   session: BrowserSessionSummary,
   fallbackUrl: string,
   runtimeRequired = false,
-): Record<string, any> | undefined {
+): HistoryEntry | undefined {
   const url = session.url || fallbackUrl;
   const toolInput = {
     profile: session.profile,
@@ -330,7 +330,7 @@ export async function handleBrowserSessionTool(
 
     return { content: [{ type: "text", text: `Browser profile ${profile} accepted ${args.action}.` }] };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Browser session operation failed.";
+    const message = error instanceof Error ? errorMessage(error) : "Browser session operation failed.";
     if (args.action === "open"
       && args.url
       && /No supported Chrome, Chromium, or Edge installation was found/.test(message)) {
@@ -383,7 +383,7 @@ export async function handlePrivateIntegrationAuthTool(
       content: [{
         type: "text",
         text: error instanceof Error
-          ? error.message
+          ? errorMessage(error)
           : "Private integration authorization failed.",
       }],
       isError: true,
@@ -558,7 +558,7 @@ function boundedTaskText(
   return text || undefined;
 }
 
-function taskBatchView(task: Record<string, any>): Record<string, unknown> {
+function taskBatchView(task: Record<string, unknown>): Record<string, unknown> {
   return {
     task_id: String(task.id || task.taskId || ""),
     subject: String(task.content || ""),
@@ -574,8 +574,8 @@ function taskBatchView(task: Record<string, any>): Record<string, unknown> {
 function taskFromBatchItem(
   item: TaskBatchItem,
   id: string,
-  previous?: Record<string, any>,
-): Record<string, any> {
+  previous?: Record<string, unknown>,
+): Record<string, unknown> {
   const subject = boundedTaskText(
     item.subject ?? previous?.content,
     "subject",
@@ -594,11 +594,11 @@ function taskFromBatchItem(
   ) || subject;
   const status = item.status || previous?.status || "pending";
   const owner = boundedTaskText(item.owner ?? previous?.owner, "owner", 500);
-  const blockedBy = (item.blocked_by ?? previous?.blockedBy ?? [])
+  const blockedBy = unknownArray(item.blocked_by ?? previous?.blockedBy)
     .map(String)
     .filter(Boolean)
     .slice(0, TASK_BATCH_LIMIT);
-  const blocks = (item.blocks ?? previous?.blocks ?? [])
+  const blocks = unknownArray(item.blocks ?? previous?.blocks)
     .map(String)
     .filter(Boolean)
     .slice(0, TASK_BATCH_LIMIT);
@@ -736,11 +736,11 @@ export async function handleTaskBatchTool(
         }, null, 2),
       }],
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     return {
       content: [{
         type: "text",
-        text: `TaskBatch error: ${error?.message || String(error)}`,
+        text: `TaskBatch error: ${errorMessage(error) || String(error)}`,
       }],
       isError: true,
     };
@@ -828,9 +828,9 @@ export async function handleAgentSessionTool(
         text: `${response.message || "AgentSession request completed."}\n${JSON.stringify(summary, null, 2)}${guidance}`,
       }],
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     return {
-      content: [{ type: "text", text: `AgentSession error: ${err?.message || String(err)}` }],
+      content: [{ type: "text", text: `AgentSession error: ${errorMessage(err) || String(err)}` }],
       isError: true,
     };
   }
@@ -927,15 +927,15 @@ export async function handleHtmlPlanTool(
         text: `HTML plan presented to the user. Plan ID: ${saved.planId}. Reuse this plan_id to update it instead of creating another plan.`,
       }],
     };
-  } catch (e: any) {
+  } catch (e: unknown) {
     return {
-      content: [{ type: "text", text: `HTML plan error: ${e.message || String(e)}` }],
+      content: [{ type: "text", text: `HTML plan error: ${errorMessage(e) || String(e)}` }],
       isError: true,
     };
   }
 }
 
-function workReviewItems(items: WorkReviewItemArgs[] | undefined): Record<string, unknown>[] {
+function workReviewItems(items: WorkReviewItemArgs[] | undefined): WorkReviewItemInput[] {
   return (items || []).map((item) => ({
     ...(item.item_id ? { itemId: item.item_id } : {}),
     title: item.title,
@@ -1040,9 +1040,9 @@ export async function handleWorkReviewTool(
           summary: args.summary,
           instructions: args.instructions,
           approvalMeaning: args.approval_meaning,
-          items: workReviewItems(args.items) as any,
+          items: workReviewItems(args.items),
         });
-        const card = publishWorkReviewCard(ctx, review as any);
+        const card = publishWorkReviewCard(ctx, review);
         result = {
           review,
           ...(card ? {
@@ -1085,7 +1085,7 @@ export async function handleWorkReviewTool(
         }
         const existing = getWorkReview(args.review_id.trim());
         if (!existing) throw new Error(`Work review not found: ${args.review_id.trim()}`);
-        if (String((existing as any).originSessionId || "") !== originSessionId) {
+        if (String(existing.originSessionId || "") !== originSessionId) {
           throw new Error("Only the originating session can create a new review round");
         }
         const review = await createWorkReviewRound(args.review_id.trim(), {
@@ -1096,9 +1096,9 @@ export async function handleWorkReviewTool(
           summary: args.summary,
           instructions: args.instructions,
           approvalMeaning: args.approval_meaning,
-          items: workReviewItems(args.items) as any,
+          items: workReviewItems(args.items),
         });
-        const card = publishWorkReviewCard(ctx, review as any);
+        const card = publishWorkReviewCard(ctx, review);
         result = { review, ...(card ? { card: {
           entryId: card.entryId,
           sessionSeq: card.sessionSeq,
@@ -1110,11 +1110,11 @@ export async function handleWorkReviewTool(
         if (!args.review_id?.trim()) throw new Error("review_id is required");
         const existing = getWorkReview(args.review_id.trim());
         if (!existing) throw new Error(`Work review not found: ${args.review_id.trim()}`);
-        if (String((existing as any).originSessionId || "") !== originSessionId) {
+        if (String(existing.originSessionId || "") !== originSessionId) {
           throw new Error("Only the originating session can archive a work review");
         }
         const review = await archiveWorkReview(args.review_id.trim());
-        const card = publishWorkReviewCard(ctx, review as any);
+        const card = publishWorkReviewCard(ctx, review);
         result = { review, ...(card ? { card: {
           entryId: card.entryId,
           sessionSeq: card.sessionSeq,
@@ -1128,11 +1128,11 @@ export async function handleWorkReviewTool(
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     return {
       content: [{
         type: "text",
-        text: `WorkReview error: ${error?.message || String(error)}`,
+        text: `WorkReview error: ${errorMessage(error) || String(error)}`,
       }],
       isError: true,
     };
@@ -1184,7 +1184,7 @@ export async function handleSpeakTool(
       type: "speak",
       text: args.text,
       sessionId: ctx.getSessionId(),
-    } as any);
+    });
 
     if (ctx.getTtsEngine() === "kokoro_server") {
       try {
@@ -1195,7 +1195,7 @@ export async function handleSpeakTool(
             audioData: wavBuffer.toString("base64"),
             text: args.text,
             sessionId: ctx.getSessionId(),
-          } as any);
+          });
         }
       } catch (e) {
         console.error("[KokoroTTS] Error generating audio:", e);
@@ -1205,9 +1205,9 @@ export async function handleSpeakTool(
     console.log("[MCP:Speak] Returning result");
     const resultText = "Speaking to user.";
     return { content: [{ type: "text", text: resultText }] };
-  } catch (e: any) {
-    console.error(`[MCP:Speak] Error: ${e.message}`, e.stack);
-    return { content: [{ type: "text", text: `Speak error: ${e.message}` }], isError: true };
+  } catch (e: unknown) {
+    console.error(`[MCP:Speak] Error: ${errorMessage(e)}`, e instanceof Error ? e.stack : undefined);
+    return { content: [{ type: "text", text: `Speak error: ${errorMessage(e)}` }], isError: true };
   }
 }
 
@@ -1265,9 +1265,9 @@ export async function handleSendFileTool(
           fileVersion,
           advertisedAtMs,
         });
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error(
-          `[MCP:SendFile] Could not persist delivery metadata: ${error?.message || String(error)}`,
+          `[MCP:SendFile] Could not persist delivery metadata: ${errorMessage(error) || String(error)}`,
         );
       }
       if (attachedEntry) {
@@ -1295,9 +1295,9 @@ export async function handleSendFileTool(
     // tool_call/tool_result pair. Writing another synthetic pair here made
     // the same card occupy two history offsets and move across page loads.
     return { content: [{ type: "text", text: resultText }] };
-  } catch (e: any) {
-    console.error(`[MCP:SendFile] Error: ${e.message}`, e.stack);
-    return { content: [{ type: "text", text: `SendFile error: ${e.message}` }], isError: true };
+  } catch (e: unknown) {
+    console.error(`[MCP:SendFile] Error: ${errorMessage(e)}`, e instanceof Error ? e.stack : undefined);
+    return { content: [{ type: "text", text: `SendFile error: ${errorMessage(e)}` }], isError: true };
   }
 }
 
@@ -1357,8 +1357,8 @@ export async function handleRequestSecureInputTool(
       resultText,
     );
     return { content: [{ type: "text", text: resultText }] };
-  } catch (e: any) {
-    return { content: [{ type: "text", text: `Secure input request failed: ${e.message || e}` }], isError: true };
+  } catch (e: unknown) {
+    return { content: [{ type: "text", text: `Secure input request failed: ${errorMessage(e) || e}` }], isError: true };
   }
 }
 
@@ -1384,7 +1384,7 @@ export async function handleScheduleReminderTool(
     scheduledTime: args.scheduledTime,
     notificationId,
     sessionId: ctx.getSessionId(),
-  } as any);
+  });
 
   const when = scheduledDate.toLocaleString();
   return { content: [{ type: "text", text: `Reminder scheduled: "${args.title}" at ${when}` }] };
@@ -1415,7 +1415,7 @@ export async function handleNotifyUserTool(
     // The tool handler owns delivery. Headless task forwarding must not send
     // this same event through FCM a second time.
     fcmDispatched: true,
-  } as any);
+  });
   sendPushNotification({
     title,
     body,
@@ -1431,8 +1431,8 @@ export async function handleNotifyUserTool(
     if (result.attempted > 0) {
       console.log(`[Push] FCM sent ${result.sent}/${result.attempted} for NotifyUser session=${ctx.getSessionId() || "none"}`);
     }
-  }).catch((err) => {
-    console.warn(`[Push] NotifyUser push error: ${err?.message || err}`);
+  }).catch((err: unknown) => {
+    console.warn(`[Push] NotifyUser push error: ${errorMessage(err)}`);
   });
   ctx.appendHistory?.({
     role: "notification",
@@ -1499,7 +1499,7 @@ export async function handleScheduleTaskTool(
   ctx.send({
     type: "scheduled_task_update",
     task,
-  } as any);
+  });
 
   const when = scheduledDate.toLocaleString();
   const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
@@ -1707,7 +1707,7 @@ export async function handleRememberTool(
     }
   } catch (error) {
     return {
-      content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      content: [{ type: "text", text: error instanceof Error ? errorMessage(error) : String(error) }],
       isError: true,
     };
   }
@@ -1765,7 +1765,7 @@ export async function handleSessionMemoryTool(
     };
   } catch (error) {
     return {
-      content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      content: [{ type: "text", text: error instanceof Error ? errorMessage(error) : String(error) }],
       isError: true,
     };
   }
@@ -1857,11 +1857,11 @@ function publishMonitorOutput(taskId: string, content: string): void {
     snapshot: true,
     sessionId,
     ...((positioned && typeof positioned === "object") ? {
-      entryId: (positioned as any).entryId,
-      sessionSeq: (positioned as any).sessionSeq,
-      revision: (positioned as any).revision,
+      entryId: positioned.entryId,
+      sessionSeq: positioned.sessionSeq,
+      revision: positioned.revision,
     } : {}),
-  } as any);
+  });
 }
 
 /** Read every byte written since the last poll before reporting/injecting it. */
@@ -1888,8 +1888,8 @@ function readMonitorOutput(taskId: string): void {
         void flushMonitorBuffer(taskId);
       }, 5000);
     }
-  } catch (err: any) {
-    console.error(`[AppMonitor] Reader error for ${taskId}: ${err.message}`);
+  } catch (err: unknown) {
+    console.error(`[AppMonitor] Reader error for ${taskId}: ${errorMessage(err)}`);
   }
 }
 
@@ -1906,10 +1906,11 @@ function startMonitorReader(taskId: string): void {
     readMonitorOutput(taskId);
     if (state.debounceTimer) clearTimeout(state.debounceTimer);
     state.debounceTimer = null;
+    const finalStatus = latest.status;
     void flushMonitorBuffer(taskId).then((delivered) => {
       if (delivered) {
         const exitCode = latest.exitCode ?? "unknown";
-        finishAppMonitor(taskId, latest.status as "completed" | "failed", `Process exited with code ${exitCode}`);
+        finishAppMonitor(taskId, finalStatus, `Process exited with code ${exitCode}`);
       } else if (appMonitors.get(taskId) === state) {
         state.completing = false;
         startMonitorReader(taskId);
@@ -1938,10 +1939,10 @@ async function deliverMonitorBuffer(taskId: string, state: AppMonitorState): Pro
       state.outputBuffer.splice(0, deliveredLines);
       updateDurableMonitorRecord(taskId, { agentOffset: deliveredEnd });
       return true;
-    } catch (err: any) {
+    } catch (err: unknown) {
       state.agentReadOffset = getDurableMonitorRecord(taskId)?.agentOffset || 0;
       state.outputBuffer = [];
-      console.error(`[AppMonitor] Inject error for ${taskId}: ${err.message}`);
+      console.error(`[AppMonitor] Inject error for ${taskId}: ${errorMessage(err)}`);
       return false;
     }
   }
@@ -1990,14 +1991,14 @@ function finishAppMonitor(taskId: string, status: "completed" | "failed", summar
     description: state.description,
     monitoring: false,
     sessionId: state.record.sessionId,
-  } as any);
+  });
   state.ctx.send({
     type: "task_notification",
     taskId,
     status,
     summary,
     sessionId: state.record.sessionId,
-  } as any);
+  });
 }
 
 export function stopAppMonitor(taskId: string, flush = true, killProcess = false): boolean {
@@ -2020,7 +2021,7 @@ export function stopAppMonitor(taskId: string, flush = true, killProcess = false
     description: state.description,
     monitoring: false,
     sessionId: state.record.sessionId,
-  } as any);
+  });
   return true;
 }
 
@@ -2040,7 +2041,7 @@ export async function stopAppMonitorsForSession(sessionId: string): Promise<numb
       description: state.description,
       monitoring: false,
       sessionId,
-    } as any);
+    });
   }
   await Promise.all(owned.map(([taskId]) => stopDurableMonitorAndWait(taskId, true)));
   return owned.length;
@@ -2090,7 +2091,7 @@ export function restoreAppMonitors(
       description: record.description,
       taskType: "monitor",
       sessionId: record.sessionId,
-    } as any);
+    });
     state.ctx.send({
       type: "monitor_started",
       taskId: record.taskId,
@@ -2098,7 +2099,7 @@ export function restoreAppMonitors(
       monitoring: true,
       command: record.command,
       sessionId: record.sessionId,
-    } as any);
+    });
     restored++;
   }
   return restored;
@@ -2198,8 +2199,8 @@ export async function handleMonitorTool(
 
     scheduleMonitorTimeout(taskId, state);
 
-    ctx.send({ type: "task_started", taskId, toolUseId: `monitor-${taskId}`, description, taskType: "monitor", sessionId } as any);
-    ctx.send({ type: "monitor_started", taskId, description, monitoring: true, command, sessionId } as any);
+    ctx.send({ type: "task_started", taskId, toolUseId: `monitor-${taskId}`, description, taskType: "monitor", sessionId });
+    ctx.send({ type: "monitor_started", taskId, description, monitoring: true, command, sessionId });
 
     let launched = record;
     for (let i = 0; i < 20 && !launched.processPid && launched.status === "starting"; i++) {
@@ -2207,8 +2208,8 @@ export async function handleMonitorTool(
       launched = getDurableMonitorRecord(taskId) || launched;
     }
     return { content: [{ type: "text", text: `Process started and monitoring enabled. Task ID: ${taskId}. PID: ${launched.processPid || "starting"}.${args.timeoutSeconds ? ` Monitoring timeout: ${args.timeoutSeconds}s.` : ""}` }] };
-  } catch (e: any) {
-    console.error(`[AppMonitor] Error: ${e.message}`, e.stack);
-    return { content: [{ type: "text", text: `Monitor error: ${e.message}` }], isError: true };
+  } catch (e: unknown) {
+    console.error(`[AppMonitor] Error: ${errorMessage(e)}`, e instanceof Error ? e.stack : undefined);
+    return { content: [{ type: "text", text: `Monitor error: ${errorMessage(e)}` }], isError: true };
   }
 }

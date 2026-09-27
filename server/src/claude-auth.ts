@@ -1,4 +1,5 @@
 import * as crypto from "crypto";
+import { z } from "zod";
 import * as fs from "fs";
 import * as https from "https";
 import * as os from "os";
@@ -65,7 +66,14 @@ function credentialsPath(): string {
   return path.join(home, ".claude", ".credentials.json");
 }
 
-function saveOAuthTokens(tokens: any): void {
+const oauthTokensSchema = z.object({
+  access_token: z.string().min(1),
+  refresh_token: z.string().nullable().optional(),
+  expires_in: z.number().nonnegative().optional(),
+  scope: z.string().optional(),
+});
+
+function saveOAuthTokens(tokens: z.infer<typeof oauthTokensSchema>): void {
   const credPath = credentialsPath();
   const expiresAt = tokens.expires_in
     ? Date.now() + tokens.expires_in * 1000
@@ -114,7 +122,7 @@ export async function exchangeClaudeAuthCode(
       },
     }, (res) => {
       let responseBody = "";
-      res.on("data", (chunk) => { responseBody += chunk; });
+      res.on("data", (chunk: Buffer) => { responseBody += chunk.toString(); });
       res.on("end", () => {
         if (res.statusCode === 200) {
           resolve(responseBody);
@@ -128,6 +136,8 @@ export async function exchangeClaudeAuthCode(
     req.end();
   });
 
-  saveOAuthTokens(JSON.parse(body));
+  const tokens = oauthTokensSchema.safeParse(JSON.parse(body));
+  if (!tokens.success) throw new Error("Claude returned an invalid token response.");
+  saveOAuthTokens(tokens.data);
 }
 

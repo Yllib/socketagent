@@ -2,6 +2,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { socketAgentDataPath } from "./socket-agent-paths";
+import { isRecord, unknownArray } from "./value-guards";
 
 const PLAN_DIR = socketAgentDataPath("html-plans");
 export const MAX_HTML_PLAN_BYTES = 512 * 1024;
@@ -54,8 +55,8 @@ function planFile(sessionId: string): string {
   return path.join(PLAN_DIR, `${safeSessionId(sessionId)}.json`);
 }
 
-function normalizeStoredPlan(entry: any, sessionId: string): StoredHtmlPlanRecord | null {
-  if (!entry || typeof entry.planId !== "string" || typeof entry.html !== "string") return null;
+function normalizeStoredPlan(entry: unknown, sessionId: string): StoredHtmlPlanRecord | null {
+  if (!isRecord(entry) || typeof entry.planId !== "string" || typeof entry.html !== "string") return null;
   const createdAt = String(entry.createdAt || entry.updatedAt || new Date().toISOString());
   const updatedAt = String(entry.updatedAt || createdAt);
   const legacyRevision: HtmlPlanRevisionRecord = {
@@ -64,13 +65,15 @@ function normalizeStoredPlan(entry: any, sessionId: string): StoredHtmlPlanRecor
     html: entry.html,
     createdAt: updatedAt,
   };
-  const hasStoredRevisions = Array.isArray(entry.revisions) && entry.revisions.length > 0;
+  const storedRevisions = unknownArray(entry.revisions);
+  const hasStoredRevisions = storedRevisions.length > 0;
   // v1.0.144 briefly stored snapshots as 1-based revisions. Convert those
   // records on read so creation is version 0 and the first change is revision 1.
   const legacyOffset = hasStoredRevisions && entry.revisionScheme !== 2 ? -1 : 0;
-  const revisions = (hasStoredRevisions ? entry.revisions : [legacyRevision])
-    .filter((revision: any) => revision && Number.isInteger(Number(revision.revision)) && typeof revision.html === "string")
-    .map((revision: any): HtmlPlanRevisionRecord => ({
+  const revisions = (hasStoredRevisions ? storedRevisions : [legacyRevision])
+    .flatMap((revision): HtmlPlanRevisionRecord[] => {
+      if (!isRecord(revision) || !Number.isInteger(Number(revision.revision)) || typeof revision.html !== "string") return [];
+      return [{
       revision: Number(revision.revision) + legacyOffset,
       title: String(revision.title || entry.title || "Plan"),
       html: revision.html,
@@ -78,8 +81,9 @@ function normalizeStoredPlan(entry: any, sessionId: string): StoredHtmlPlanRecor
       ...(Number.isInteger(Number(revision.restoredFromRevision))
         ? { restoredFromRevision: Number(revision.restoredFromRevision) + legacyOffset }
         : {}),
-    }))
-    .sort((left: HtmlPlanRevisionRecord, right: HtmlPlanRevisionRecord) => left.revision - right.revision);
+      }];
+    })
+    .sort((left, right) => left.revision - right.revision);
   if (revisions.length === 0) revisions.push(legacyRevision);
   const current = revisions[revisions.length - 1];
   return {
@@ -100,9 +104,8 @@ function readPlans(sessionId: string): StoredHtmlPlanRecord[] {
   const file = planFile(sessionId);
   if (!fs.existsSync(file)) return [];
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (!Array.isArray(parsed)) return [];
-    return parsed
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+    return unknownArray(parsed)
       .map((entry) => normalizeStoredPlan(entry, sessionId))
       .filter((entry): entry is StoredHtmlPlanRecord => entry !== null);
   } catch {
@@ -193,13 +196,12 @@ export function getHtmlPlan(sessionId: string, planId: string): HtmlPlanRecord |
 
 /** Complete revision-preserving representation used by encrypted session transfer. */
 export function exportHtmlPlansForSession(sessionId: string): unknown[] {
-  return readPlans(sessionId).map((plan) => JSON.parse(JSON.stringify(plan)));
+  return readPlans(sessionId).map((plan) => structuredClone(plan));
 }
 
 /** Restore plans while rebinding every record to the destination session. */
 export function importHtmlPlansForSession(sessionId: string, rawPlans: unknown): void {
-  if (!Array.isArray(rawPlans) || rawPlans.length === 0) return;
-  const normalized = rawPlans
+  const normalized = unknownArray(rawPlans)
     .map((entry) => normalizeStoredPlan(entry, sessionId))
     .filter((entry): entry is StoredHtmlPlanRecord => entry !== null)
     .map((entry) => ({ ...entry, sessionId }));

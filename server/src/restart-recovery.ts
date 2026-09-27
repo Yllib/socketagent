@@ -1,4 +1,6 @@
 import * as fs from "fs";
+import { z } from "zod";
+import { errorMessage } from "./value-guards";
 import * as path from "path";
 import { randomUUID } from "crypto";
 
@@ -32,14 +34,18 @@ export class RestartRecoveryStore {
 
   constructor(private readonly file: string) {
     if (!fs.existsSync(file)) return;
-    const data = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (data.version !== 1 || !Array.isArray(data.runs)) throw new Error("Invalid restart recovery journal");
-    this.completed = Array.isArray(data.completed) ? data.completed.slice(-1000) : [];
+    const data = z.object({
+      version: z.literal(1),
+      runs: z.array(z.object({
+        sessionId: z.string(), id: z.string(),
+        state: z.enum(["active", "pending", "failed"]),
+        attempts: z.number().int().nonnegative(), nextAttemptAt: z.number(),
+        error: z.string().optional(),
+      })),
+      completed: z.array(z.string()).default([]),
+    }).parse(JSON.parse(fs.readFileSync(file, "utf8")));
+    this.completed = data.completed.slice(-1000);
     for (const run of data.runs) {
-      if (typeof run.sessionId !== "string" || typeof run.id !== "string"
-          || !["active", "pending", "failed"].includes(run.state)) {
-        throw new Error("Invalid restart recovery run");
-      }
       // An active run belonged to the previous process, not this one.
       this.runs.set(run.sessionId, { ...run, state: run.state === "active" ? "pending" : run.state });
     }
@@ -152,8 +158,8 @@ export class RestartRecoveryWorker {
       if (this.hooks.busy(run.sessionId)) continue;
       if (!this.store.claim(run.sessionId, run.id)) continue;
       this.starting.add(run.sessionId);
-      void Promise.resolve().then(() => this.hooks.launch(run)).catch(error => {
-        this.store.retry(run.sessionId, run.id, String(error?.message || error));
+      void Promise.resolve().then(() => this.hooks.launch(run)).catch((error: unknown) => {
+        this.store.retry(run.sessionId, run.id, errorMessage(error));
         const failed = this.store.get(run.sessionId)?.state === "failed";
         this.hooks.notice(run.sessionId, failed
           ? "Could not resume after five attempts. Send a message to retry."

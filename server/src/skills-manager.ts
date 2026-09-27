@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { isRecord, parseJsonObject, unknownArray } from "./value-guards";
 import { execFile, execFileSync } from "child_process";
 
 export type SkillAgent = "claude" | "codex";
@@ -369,19 +370,19 @@ export interface MarketplacePlugin {
 }
 
 /** Read enabledPlugins from ~/.claude/settings.json — the SDK's native plugin state */
-function readEnabledPluginsSetting(): Record<string, any> {
+function readEnabledPluginsSetting(): Record<string, unknown> {
   const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
   try {
     if (fs.existsSync(settingsPath)) {
-      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
-      return settings.enabledPlugins || {};
+      const settings = parseJsonObject(fs.readFileSync(settingsPath, "utf-8"));
+      return isRecord(settings.enabledPlugins) ? settings.enabledPlugins : {};
     }
   } catch {}
   return {};
 }
 
 /** Resolve the local path for a plugin — check relative source paths and the SDK cache */
-function resolvePluginPath(mpDir: string, pluginName: string, marketplace: string, source: any): string | null {
+function resolvePluginPath(mpDir: string, pluginName: string, marketplace: string, source: unknown): string | null {
   // Relative path within the marketplace repo (internal plugins)
   if (typeof source === "string" && source.startsWith("./")) {
     const resolved = path.resolve(mpDir, source);
@@ -422,22 +423,24 @@ export function listMarketplacePlugins(): MarketplacePlugin[] {
       const marketplaceJsonPath = path.join(mpDir, ".claude-plugin", "marketplace.json");
       if (!fs.existsSync(marketplaceJsonPath)) continue;
 
-      let registry: any;
+      let registry: Record<string, unknown>;
       try {
-        registry = JSON.parse(fs.readFileSync(marketplaceJsonPath, "utf-8"));
+        registry = parseJsonObject(fs.readFileSync(marketplaceJsonPath, "utf-8"));
       } catch { continue; }
 
-      const plugins = registry.plugins || [];
+      const plugins = unknownArray(registry.plugins).filter(isRecord);
       for (const entry of plugins) {
-        const name = entry.name || "";
+        const name = typeof entry.name === "string" ? entry.name : "";
         if (!name) continue;
 
         const id = `${name}@${marketplace}`;
-        const description = entry.description || "";
-        const author = entry.author?.name || registry.owner?.name || "";
-        const version = entry.version || "";
-        const category = entry.category || "";
-        const homepage = entry.homepage || "";
+        const description = typeof entry.description === "string" ? entry.description : "";
+        const authorName = isRecord(entry.author) ? entry.author.name : undefined;
+        const ownerName = isRecord(registry.owner) ? registry.owner.name : undefined;
+        const author = typeof authorName === "string" && authorName ? authorName : typeof ownerName === "string" ? ownerName : "";
+        const version = typeof entry.version === "string" ? entry.version : "";
+        const category = typeof entry.category === "string" ? entry.category : "";
+        const homepage = typeof entry.homepage === "string" ? entry.homepage : "";
 
         // Check install/enable state from settings.json enabledPlugins
         const settingValue = enabledSettings[id];
@@ -565,10 +568,10 @@ export function listMarketplaces(): MarketplaceInfo[] {
     const jsonPath = path.join(mpDir, ".claude-plugin", "marketplace.json");
     try {
       if (fs.existsSync(jsonPath)) {
-        const registry = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
-        pluginCount = (registry.plugins || []).length;
-        owner = registry.owner?.name || "";
-        description = registry.description || "";
+        const registry = parseJsonObject(fs.readFileSync(jsonPath, "utf-8"));
+        pluginCount = unknownArray(registry.plugins).length;
+        owner = isRecord(registry.owner) && typeof registry.owner.name === "string" ? registry.owner.name : "";
+        description = typeof registry.description === "string" ? registry.description : "";
       }
     } catch {}
 

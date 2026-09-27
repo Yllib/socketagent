@@ -232,3 +232,12 @@ not a new auto-update policy.
 - Validation: 43 focused tests and 11 compatibility tests passed; full suite 553
   passed, one skipped. Baseline: 2,043. Output:
   `/tmp/sa-tools-full-tests.log`. No deployment or live server restart.
+
+- Server `3017c32`: provider settings, durable tool delivery, and plugin boundary checkpoint.
+- Tool/helper checkpoint: app-tool handlers and Codex MCP registrations use
+  their schema-inferred input and declared output types. Speak messages now have
+  a protocol declaration. Stored HTML plans, skill marketplace metadata, image
+  comparison JSON, credential records, and restart journals validate incoming
+  data. OAuth token responses are checked before writing credentials.
+- Validation: full suite 553 passed, one skipped. Baseline: 1,729. Output:
+  `/tmp/sa-helper-full-tests.log`. All changes remain local.

@@ -1,4 +1,6 @@
 import { randomUUID } from "crypto";
+import { fileURLToPath } from "url";
+import { z } from "zod";
 import { inlineImageStore, InlineImageStore } from "./inline-image-store";
 
 interface Replacement { start: number; end: number; value: Promise<string> }
@@ -21,7 +23,7 @@ export async function snapshotInlineImages(
       try {
         let input = source;
         if (source.startsWith("socketagent://image?")) input = new URL(source).searchParams.get("path") || "";
-        if (source.startsWith("file://")) input = require("url").fileURLToPath(source);
+        if (source.startsWith("file://")) input = fileURLToPath(source);
         return (await store.prepare(input, sessionId)).uri;
       } catch {
         // A failed capture stays missing. Never reread a changing source later.
@@ -45,10 +47,14 @@ export async function snapshotInlineImages(
     const bodyEnd = endFence?.index ?? content.length;
     if (fence[2].trim() === "socketagent-compare") {
       try {
-        const spec = JSON.parse(content.slice(bodyStart, bodyEnd));
-        const items = Array.isArray(spec) ? spec : spec.images;
-        if (Array.isArray(items) && items.length >= 1 && items.length <= 12 && items.every((item) => typeof (typeof item === "string" ? item : item?.src) === "string")) {
-          const value = Promise.all(items.map(async (item: any) => typeof item === "string" ? save(item) : { ...item, src: await save(item.src) }))
+        const image = z.union([z.string(), z.object({ src: z.string() }).passthrough()]);
+        const images = z.array(image).min(1).max(12);
+        const parsed = z.union([images, z.object({ images }).passthrough()])
+          .safeParse(JSON.parse(content.slice(bodyStart, bodyEnd)));
+        if (parsed.success) {
+          const spec = parsed.data;
+          const items = Array.isArray(spec) ? spec : spec.images;
+          const value = Promise.all(items.map(async (item) => typeof item === "string" ? save(item) : { ...item, src: await save(item.src) }))
             .then((images) => JSON.stringify(Array.isArray(spec) ? images : { ...spec, images }) + "\n");
           replacements.push({ start: bodyStart, end: bodyEnd, value });
         }
@@ -57,7 +63,7 @@ export async function snapshotInlineImages(
     masked = masked.slice(0, fence.index) + " ".repeat(end - fence.index) + masked.slice(end);
     fences.lastIndex = end;
   }
-  masked = masked.replace(/(`+)([\s\S]*?)\1/g, (match) => " ".repeat(match.length));
+  masked = masked.replace(/(`+)([\s\S]*?)\1/g, (match: string) => " ".repeat(match.length));
   // Markdown destinations may be angle-bracketed (spaces) or contain balanced
   // parentheses. Scan their delimiters rather than truncating filenames at ')'.
   const starts = /!\[(?:\\.|[^\]\\])*\]\(\s*/g;

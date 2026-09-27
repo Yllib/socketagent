@@ -10,6 +10,7 @@
  */
 
 import * as fs from "fs";
+import { isRecord } from "./value-guards";
 import * as os from "os";
 import * as path from "path";
 
@@ -78,8 +79,8 @@ export function claudeAuthStateFromCredentials(
   if ((env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || "").trim()) {
     return { authenticated: true };
   }
-  const oauth = (raw as any)?.claudeAiOauth;
-  if (!oauth || typeof oauth !== "object") {
+  const oauth = isRecord(raw) ? raw.claudeAiOauth : undefined;
+  if (!isRecord(oauth)) {
     return { authenticated: false, reason: "Claude is not signed in on this computer." };
   }
   if (!String(oauth.accessToken || "").trim()) {
@@ -101,12 +102,12 @@ export function claudeAuthStateFromCredentials(
 
 /** Reads a Codex auth record. `auth_mode` of `apikey` needs no OAuth tokens. */
 export function codexAuthStateFromAuthJson(raw: unknown): BackendAuthState {
-  const auth = raw as any;
-  if (!auth || typeof auth !== "object") {
+  const auth = raw;
+  if (!isRecord(auth)) {
     return { authenticated: false, reason: "Codex is not signed in on this computer." };
   }
   if (String(auth.OPENAI_API_KEY || "").trim()) return { authenticated: true };
-  if (String(auth.tokens?.access_token || "").trim()) return { authenticated: true };
+  if ((isRecord(auth.tokens) && typeof auth.tokens.access_token === "string" && auth.tokens.access_token.trim())) return { authenticated: true };
   return { authenticated: false, reason: "Codex's saved sign-in has no usable credentials." };
 }
 

@@ -2541,6 +2541,12 @@ export interface TtsAudioServerMessage {
   sessionId: string;
 }
 
+export interface SpeakServerMessage {
+  type: "speak";
+  text: string;
+  sessionId: string;
+}
+
 export interface ActiveSubagentsServerMessage {
   type: "active_subagents";
   sessionId: string;
@@ -3069,6 +3075,7 @@ export type ServerMessage =
   | RewindConversationResultServerMessage
   | BranchResultServerMessage
   | TtsAudioServerMessage
+  | SpeakServerMessage
   | ThinkingServerMessage
   | ThinkingTokensServerMessage
   | ToolImageServerMessage

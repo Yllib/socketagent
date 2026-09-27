@@ -693,7 +693,7 @@ export function appendClaudeResourceLinks(output: string, value: unknown): strin
 
 export function filterClaudePhoneCommands(
   commands: unknown[],
-  terminalCommands: Iterable<string>,
+  terminalCommands: Iterable<string, unknown, unknown>,
 ): Array<Record<string, unknown>> {
   const hidden = new Set(
     [...terminalCommands].map((command) => String(command).replace(/^\//, "").trim()),

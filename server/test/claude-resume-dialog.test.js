@@ -3,7 +3,8 @@ const assert=require('node:assert/strict');
 const {handleClaudeResumeDialog,resumeQuestion}=require('#server/claude-resume-dialog');
 const request={dialogKind:'resume_return',payload:{}};
 test('resume blocks until an explicit supported choice and returns the native result',async()=>{
-  let answer;
+  /** @type {(value:Record<string,string> | null)=>void} */
+  let answer = () => {throw new Error("Question not ready");};
   const signal=new AbortController().signal;
   let finished=false;
   const waiting=handleClaudeResumeDialog(request,signal,()=>new Promise(resolve=>{answer=resolve})).then(result=>{finished=true;return result});

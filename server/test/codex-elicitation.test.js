@@ -102,6 +102,7 @@ test("holds an app-server elicitation until the routed SocketAgent answer arrive
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);
+  /** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerRequestResponder>[0] | undefined} */
   let response;
   const pending = session.handleMcpServerElicitation({
     threadId: "",
@@ -143,6 +144,7 @@ test("routes native Codex request_user_input questions and restores question ids
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);
+  /** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerRequestResponder>[0] | undefined} */
   let response;
   const pending = session.handleAppServerRequest({
     method: "item/tool/requestUserInput",
@@ -219,6 +221,7 @@ test("offers and remembers connected-app approval for the SocketAgent session", 
     backend: "codex",
   });
   try {
+  /** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerRequestResponder>[0] | undefined} */
   let firstResponse;
   const first = session.handleAppServerRequest(githubApprovalRequest(), (value) => {
     firstResponse = value;
@@ -242,6 +245,7 @@ test("offers and remembers connected-app approval for the SocketAgent session", 
   });
   assert.deepEqual(getSession(sessionId).agentSettings.connectedAppApprovals, ["github"]);
 
+  /** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerRequestResponder>[0] | undefined} */
   let secondResponse;
   const questionCount = sent.filter((message) => message.type === "question").length;
   const resumed = new CodexSession(socket, process.cwd(), []);
@@ -271,6 +275,7 @@ test("Super Yolo auto-accepts GitHub connected-app confirmations", async () => {
   };
   const session = new CodexSession(socket, process.cwd(), []);
   await session.setPermissionMode("superYolo", { recordHistory: false });
+  /** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerRequestResponder>[0] | undefined} */
   let response;
   await session.handleAppServerRequest(githubApprovalRequest(), (value) => {
     response = value;
@@ -292,6 +297,7 @@ test("switching to Super Yolo accepts an already pending GitHub confirmation", a
     },
   };
   const session = new CodexSession(socket, process.cwd(), []);
+  /** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerRequestResponder>[0] | undefined} */
   let response;
   const pending = session.handleAppServerRequest(githubApprovalRequest(), (value) => {
     response = value;
@@ -318,6 +324,7 @@ test("Super Yolo also auto-accepts GitHub MCP elicitation confirmations", async 
   };
   const session = new CodexSession(socket, process.cwd(), []);
   await session.setPermissionMode("superYolo", { recordHistory: false });
+  /** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerRequestResponder>[0] | undefined} */
   let response;
   await session.handleMcpServerElicitation({
     threadId: "",

@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const {z} = require('zod');
 const {CodexSession} = require('#server/codex-session');
 const {CodexAppServerClient} = require('#server/codex-app-server-client');
 
@@ -12,8 +13,9 @@ test('account payload preserves real quota windows, reset credits, and unknown u
     readAccountUsage: async () => ({summary:{lifetimeTokens:null, peakDailyTokens:123, currentStreakDays:null},dailyUsageBuckets:null}),
   };
   const {payload} = await session.buildStatusResult('thread');
-  assert.equal(payload.limits[0].primary.windowDurationMins,10080);
-  assert.equal(payload.limits[0].secondary,null);
+  const limit = z.object({primary:z.object({windowDurationMins:z.number()}), secondary:z.unknown()}).parse(payload.limits[0]);
+  assert.equal(limit.primary.windowDurationMins,10080);
+  assert.equal(limit.secondary,null);
   assert.equal(payload.resetCredits.availableCount,2);
   assert.equal(payload.usage.todayTokens,null);
   assert.equal(payload.usage.lifetimeTokens,null);
@@ -22,6 +24,7 @@ test('account payload preserves real quota windows, reset credits, and unknown u
 
 test('reset RPC validates and preserves the same idempotency key on retry', async () => {
   const client = new CodexAppServerClient({cwd:'/tmp'});
+  /** @type {{method:string,params:unknown}[]} */
   const sent=[];
   client.request=async (method,params)=>{sent.push({method,params});return {outcome:'alreadyRedeemed'}};
   await assert.rejects(client.consumeAccountRateLimitReset(' '),/attempt ID/);

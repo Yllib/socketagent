@@ -26,7 +26,7 @@ const { handleMonitorTool } = require("#server/app-tool-handlers");
   if (exitDelay > 0) await new Promise((resolve) => setTimeout(resolve, exitDelay));
   process.stdout.write(`${taskId}\n`);
   process.exit(0);
-})().catch((error) => {
-  process.stderr.write(`${error.stack || error}\n`);
+})().catch((/** @type {unknown} */ error) => {
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
   process.exit(1);
 });

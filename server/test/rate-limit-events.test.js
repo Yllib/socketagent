@@ -176,6 +176,7 @@ const LIVE_LIMITS = [
   { kind: "weekly_scoped", group: "weekly", percent: 4, severity: "normal", resets_at: "2026-09-24T12:59:59.716305+00:00", scope: { model: { id: null, display_name: "Fable" }, surface: null }, is_active: false },
 ];
 
+/** @param {unknown} limits */
 const usage = (limits) => ({ rate_limits_available: true, rate_limits: limits });
 
 test("the normalized limits array is read in preference to the named windows", () => {

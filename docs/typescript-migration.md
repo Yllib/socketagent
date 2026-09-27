@@ -1,6 +1,6 @@
 # TypeScript safety migration
 
-Started 2026-09-27. Work stays local on master until deployment is requested.
+Completed 2026-09-27. Work stays local on master until deployment is requested.
 
 ## Goal and scope
 
@@ -17,7 +17,7 @@ Existing functional changes in both repositories predate this migration. Keep
 them intact and distinguish them when staging. No app changes or deployment are
 part of this batch. The server's starting HEAD is `64a82b1`.
 
-## Checks and baseline
+## Permanent checks
 
 From `server`:
 
@@ -25,7 +25,6 @@ From `server`:
 npm run build
 npm run type-safety
 npm run type-safety:report
-npm run type-safety:prune
 npm test
 ```
 
@@ -49,17 +48,15 @@ configuration cannot disable these checks. TypeScript strict compilation remains
 enabled for production source. Existing JavaScript tests have typed linting but
 are not yet subject to full `checkJs` compiler diagnostics.
 
-The baseline identifies diagnostics by file, rule, and a hash of the offending
-source line and range, with multiplicity for duplicates. It is not a per-file
-error budget. Adding an unsafe expression elsewhere fails even if another was
-removed. Moving unchanged lines within a file does not require baseline churn.
-Changing an unsafe line requires fixing its diagnostics, not refreshing allowances.
+The compiler audit also rejects inferred/evolving bindings, unsafe generic
+arguments (including empty collections and library defaults), and unsafe return
+types. It covers the same source, scripts, and tests as ESLint. Dependency
+implementation members are not recursively audited.
 
-`type-safety:prune` refuses new violations and only removes resolved entries.
-Normal checks fail if resolved entries remain, so old allowances cannot linger.
-The one-time bootstrap uses exclusive file creation and refuses to overwrite an
-existing baseline. Do not manually grow the baseline or disable rules. Changes to
-the check configuration and baseline still require code review.
+There is no baseline or allowance file. Every diagnostic fails the check, and
+configuration/parser errors and attempted inline rule disables also fail.
+Bootstrap and prune commands were removed after all 9,349 original diagnostics
+were resolved. `type-safety:report` reports current counts without accepting debt.
 
 Initial inventory: 1,503 explicit `any` nodes in 42 TypeScript files; 664
 unannotated declarations inferred as `any`; 43 double assertions. These are
@@ -71,14 +68,14 @@ Use the report command for current rule and file counts.
 
 | Batch | Status | Scope and exit condition |
 | --- | --- | --- |
-| Enforcement | Implemented | Checks in tests and pre-push; shrinking source-specific baseline; test rejection of new debt and bypasses. |
+| Enforcement | Complete | Zero-tolerance checks in tests and pre-push; compiler audit covers inferred bindings, generics, and returns; tests reject bypasses. |
 | Codex transport, rewind, sign-in | Complete | Raw RPC responses stay unknown; validate consumed rewind, compaction, migration, and login fields. No baseline entries in these modules. |
 | Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
 | Provider adapters | Complete | Codex and Claude sessions, stream identity, native history, elicitation, and interactive answer helpers have zero diagnostics. Test streaming, completion, approvals, cancellation, and subagents. |
 | Persisted history | Complete | SQLite rows, history JSON, session metadata, task lists, native history readers, and transfer bundles are validated. `session-store.ts`, `transcript-database.ts`, and `session-transfer.ts` have zero diagnostics. Test recovery, pagination, rewind, and archive reads. |
 | WebSocket routing | Complete | Generated incoming-message validation, typed routing and provider dispatch; `index.ts` and relay client have zero diagnostics. |
-| Remaining code and tests | In progress | MCP tools, helpers, JS fixtures and scripts. Plugin loading and hook results are validated, including private SDK copies. Audit private plugin implementation debt separately. |
-| Final enforcement | Pending | Zero baseline; remove baseline handling; review lingering assertions and inferred unsafe types, not just the explicit-any count. |
+| Remaining code and tests | Complete | MCP tools, helpers, JS fixtures and standalone scripts have zero diagnostics. Plugin exports and hook results are validated; private plugin implementation debt remains outside this scope. |
+| Final enforcement | Complete | Baseline removed; no non-constant assertions in production; full suite and generated-contract checks required. |
 
 Work shared definitions before consumers to avoid repeated edits. Keep each batch
 reviewable and test it before moving to the next. If work is delegated later,
@@ -285,3 +282,22 @@ not a new auto-update policy.
 - Validation: 23 installer/browser/restart tests passed; typed lint has no new
   violations. Baseline: 264, all in tests. Output:
   `/tmp/sa-scripts-focused-tests.log`. The live Codex probe was not executed.
+
+
+- Server `cd50221`: standalone installation and diagnostic script checkpoint.
+- Final fixtures use typed captures and validate emitted JSON with protocol or
+  fixture schemas. Session run tests reuse the stored-run validator. Empty maps,
+  iterators, generators, and asynchronous helpers specify their generic contracts
+  instead of inheriting library `any` defaults.
+- Removed all baseline machinery and the prune/bootstrap paths. The permanent
+  gate checks 675 files with zero ESLint or inferred-any diagnostics. Enforcement
+  tests cover unused implicit parameters, empty collections, nested generic
+  defaults, destructured external values, unsafe returns, casts, and suppression
+  attempts. Production has no type assertions except literal `as const`.
+- Final validation: `npm test` passed strict build, both protocol schema checks,
+  stored-data schema checks, the zero-diagnostic gate, and 555 tests. One optional
+  installed-Codex/local-model test remains skipped. Output:
+  `/tmp/sa-migration-complete-tests.log`. `codex:check-contracts` matched all 34
+  methods from installed Codex CLI 0.157.1.
+- All checkpoints are local commits on master. The app is unchanged by this
+  migration. No push, deployment, release bump, or live server restart occurred.

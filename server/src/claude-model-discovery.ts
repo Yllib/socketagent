@@ -11,7 +11,7 @@ export async function readClaudeSupportedModels(options: DiscoveryOptions) {
   let closeInput!: () => void;
   const inputClosed = new Promise<void>((resolve) => { closeInput = resolve; });
   // Keep stdin open for the initialization response, but never yield a user message.
-  async function* emptyInput(): AsyncGenerator<SDKUserMessage> {
+  async function* emptyInput(): AsyncGenerator<SDKUserMessage, void, unknown> {
     await inputClosed;
   }
   let probe: ReturnType<typeof query> | undefined;

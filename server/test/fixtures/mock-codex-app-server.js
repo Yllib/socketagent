@@ -1,10 +1,13 @@
 const readline = require("node:readline");
 
+const { parseJsonObject } = require("#server/value-guards");
+/** @type {string[]} */
 const methods = [];
 const lines = readline.createInterface({ input: process.stdin });
 
 lines.on("line", (line) => {
-  const message = JSON.parse(line);
+  const message = parseJsonObject(line);
+  if (typeof message.method !== "string") throw new Error("Expected RPC method");
   methods.push(message.method);
   if (message.method === "initialize") {
     process.stdout.write(`${JSON.stringify({ id: message.id, result: { userAgent: "mock" } })}\n`);

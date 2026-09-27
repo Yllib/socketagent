@@ -4,8 +4,9 @@ const test = require("node:test");
 const { SessionEventDelivery } = require("#server/session-event-delivery");
 
 test("tool cards retry until acknowledged", async () => {
+  /** @type {Record<string, unknown>[]} */
   const sent = [];
-  const delivery = new SessionEventDelivery((message) => sent.push(message), 10);
+  const delivery = new SessionEventDelivery((/** @type {Record<string, unknown>} */ message) => sent.push(message), 10);
   const prepared = delivery.prepare({
     type: "tool_call",
     sessionId: "session-1",
@@ -27,9 +28,10 @@ test("tool cards retry until acknowledged", async () => {
 });
 
 test("automatic retries are bounded while the event remains reconnectable", async () => {
+  /** @type {Record<string, unknown>[]} */
   const sent = [];
   const delivery = new SessionEventDelivery(
-    (message) => sent.push(message),
+    (/** @type {Record<string, unknown>} */ message) => sent.push(message),
     5,
     100,
     10_000,
@@ -46,6 +48,7 @@ test("automatic retries are bounded while the event remains reconnectable", asyn
   assert.equal(sent.length, 2);
   assert.equal(delivery.pendingCount, 1);
 
+  /** @type {Record<string, unknown>[]} */
   const replayed = [];
   delivery.replayTo((message) => replayed.push(message));
   assert.equal(replayed.length, 1);
@@ -97,6 +100,7 @@ test("user prompt positions require acknowledgement", () => {
 test("pending cards replay immediately to a reattached client", () => {
   const delivery = new SessionEventDelivery(() => {});
   const prepared = delivery.prepare({ type: "tool_result", toolUseId: "tool-1" });
+  /** @type {Record<string, unknown>[]} */
   const replayed = [];
   delivery.replayTo((message) => replayed.push(message));
   assert.equal(replayed.length, 1);
@@ -120,8 +124,9 @@ test("HTML plan cards use acknowledged delivery", () => {
 });
 
 test("Work Review cards use acknowledged delivery and stable replay IDs", () => {
+  /** @type {Record<string, unknown>[]} */
   const sent = [];
-  const delivery = new SessionEventDelivery((message) => sent.push(message), 10_000);
+  const delivery = new SessionEventDelivery((/** @type {Record<string, unknown>} */ message) => sent.push(message), 10_000);
   const prepared = delivery.prepare({
     type: "work_review_card",
     sessionId: "review-session",
@@ -131,6 +136,7 @@ test("Work Review cards use acknowledged delivery and stable replay IDs", () => 
     revision: 2,
   });
   assert.ok(prepared.deliveryId);
+  /** @type {Record<string, unknown>[]} */
   const replayed = [];
   delivery.replayTo((message) => replayed.push(message));
   assert.equal(replayed.length, 1);

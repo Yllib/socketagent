@@ -829,7 +829,7 @@ function serverMessagePositionKey(message: PositionableMessage): string | null {
 function syncTranscriptPositionState(sessionId: string, entries: HistoryEntry[]): TranscriptPositionState {
   let state = transcriptPositionStates.get(sessionId);
   if (!state) {
-    state = { nextSeq: 1, byKey: new Map(), byEntryId: new Map() };
+    state = { nextSeq: 1, byKey: new Map<string, TranscriptPosition>(), byEntryId: new Map<string, TranscriptPosition>() };
     transcriptPositionStates.set(sessionId, state);
   }
 
@@ -871,8 +871,8 @@ function transcriptPositionState(sessionId: string): TranscriptPositionState {
   ensureHistoryDatabaseSession(sessionId);
   const state: TranscriptPositionState = {
     nextSeq: historyDatabase().maxSessionSeq(sessionId) + 1,
-    byKey: new Map(),
-    byEntryId: new Map(),
+    byKey: new Map<string, TranscriptPosition>(),
+    byEntryId: new Map<string, TranscriptPosition>(),
   };
   transcriptPositionStates.set(sessionId, state);
   return state;
@@ -1737,7 +1737,7 @@ export function truncateConversationHistory(sessionId: string, entry: HistoryEnt
   const nextSeq = transcriptPositionStates.get(sessionId)?.nextSeq ?? database.maxSessionSeq(sessionId) + 1;
   const removed = database.truncateFrom(sessionId, entry.sessionSeq!, entry.entryId!);
   // Discard positions for removed streams without loading the retained transcript.
-  transcriptPositionStates.set(sessionId, { nextSeq, byKey: new Map(), byEntryId: new Map() });
+  transcriptPositionStates.set(sessionId, { nextSeq, byKey: new Map<string, TranscriptPosition>(), byEntryId: new Map<string, TranscriptPosition>() });
   historyCache.delete(sessionId);
   updateSessionHistoryMetadataFromDatabase(sessionId);
   return removed;
@@ -3417,7 +3417,7 @@ export function listArchives(): ArchiveEntry[] {
     const key = `${parsed.sid}_${parsed.ts}`;
     let group = groups.get(key);
     if (!group) {
-      group = { sid: parsed.sid, ts: parsed.ts, files: new Map() };
+      group = { sid: parsed.sid, ts: parsed.ts, files: new Map<string, string>() };
       groups.set(key, group);
     }
     group.files.set(parsed.kind, f);

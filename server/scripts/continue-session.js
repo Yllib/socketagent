@@ -53,7 +53,7 @@ const req = http.request({
   },
 }, (res) => {
   let data = "";
-  res.on("data", (chunk) => { data += chunk; });
+  res.on("data", (/** @type {Buffer} */ chunk) => { data += chunk.toString("utf8"); });
   res.on("end", () => {
     if (res.statusCode === 200) {
       console.log("Continuation accepted. Check session history for its outcome.");

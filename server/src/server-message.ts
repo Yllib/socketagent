@@ -1,4 +1,4 @@
-import { Ajv } from "ajv";
+import { Ajv, type ErrorObject } from "ajv";
 import type { ServerMessage } from "./protocol";
 import schema from "./generated/server-protocol.schema.json";
 import { isRecord, unknownArray } from "./value-guards";
@@ -27,7 +27,7 @@ export function parseServerMessage(value: unknown): ServerMessage {
   const validate = contracts.get(value.type);
   if (!validate) throw new Error("Unsupported server message type");
   if (!validate(value)) {
-    const detail = validate.errors?.map(error => `${error.instancePath || "/"}: ${error.keyword}`).join(", ");
+    const detail = validate.errors?.map((error: ErrorObject<string, Record<string, unknown>>) => `${error.instancePath || "/"}: ${error.keyword}`).join(", ");
     throw new Error(`Invalid server message (${detail || "schema mismatch"})`);
   }
   return value;

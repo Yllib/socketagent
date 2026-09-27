@@ -5,6 +5,7 @@ const path = require("node:path");
 
 process.env.SOCKETAGENT_SESSION_STORE_FLUSH_MS = "60000";
 const dataDir = require("./test-data-dir");
+const {parseStoredSessions} = require("#server/session-schema");
 const {
   flushSessionStore,
   getSession,
@@ -29,13 +30,13 @@ test("coalesces hot session metadata while keeping memory immediately current", 
   updateSessionActivity(sessionId, "latest update");
   updateSessionContextUsage(sessionId, { used: 42 });
 
-  const durableBeforeFlush = JSON.parse(fs.readFileSync(storeFile, "utf8"))[0];
+  const durableBeforeFlush = parseStoredSessions(JSON.parse(fs.readFileSync(storeFile, "utf8")))[0];
   assert.equal(durableBeforeFlush.messagePreview, "before");
   assert.equal(getSession(sessionId).messagePreview, "latest update");
   assert.deepEqual(getSession(sessionId).lastContextUsage, { used: 42 });
 
   flushSessionStore();
-  const durableAfterFlush = JSON.parse(fs.readFileSync(storeFile, "utf8"))[0];
+  const durableAfterFlush = parseStoredSessions(JSON.parse(fs.readFileSync(storeFile, "utf8")))[0];
   assert.equal(durableAfterFlush.messagePreview, "latest update");
   assert.deepEqual(durableAfterFlush.lastContextUsage, { used: 42 });
 });

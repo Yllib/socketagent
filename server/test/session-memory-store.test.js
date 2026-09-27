@@ -152,7 +152,9 @@ test("session-list summary exposes a manually queued fresh thread", () => {
 
 test("SessionMemory tool validates and edits the durable set", async () => {
   const sessionId = "memory-tool-session";
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const packets = [];
+  /** @type {import("#server/app-tool-handlers").AppToolContext} */
   const ctx = {
     getSessionId: () => sessionId,
     send: (message) => packets.push(message),

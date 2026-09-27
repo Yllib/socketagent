@@ -14,6 +14,7 @@ function fixture(t) {
   const file = path.join(dir, "runs.json");
   return { dir, file, store: new RestartRecoveryStore(file) };
 }
+/** @returns {Promise<void>} */
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
 test("journal survives process loss, keeps all interrupted runs, and excludes completed work", t => {
@@ -91,6 +92,7 @@ test("worker respects readiness, Stop, deleted sessions, and a racing user promp
   for (const sid of ["run", "stopped", "deleted", "user"]) store.start(sid);
   const reboot = new RestartRecoveryStore(file);
   let ready = false;
+  /** @type {string[]} */
   const launched = [];
   const worker = new RestartRecoveryWorker(reboot, {
     ready: () => ready, exists: s => s !== "deleted", stopped: s => s === "stopped", busy: s => s === "user",
@@ -128,6 +130,7 @@ test("worker bounds simultaneous setup and never launches a claimed run twice", 
   const { file, store } = fixture(t);
   for (let i = 0; i < 5; i++) store.start(String(i));
   const reboot = new RestartRecoveryStore(file);
+  /** @type {string[]} */
   const started = [];
   /** @type {(() => void)[]} */
   const releases = [];

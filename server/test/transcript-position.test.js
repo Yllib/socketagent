@@ -167,6 +167,7 @@ test("live revisions and persisted history share one transcript position", () =>
 test("bounded history resumes with only entries newer than the cached sequence", () => {
   const sessionId = `test-transcript-delta-${randomUUID()}`;
   try {
+    /** @type {import("#server/protocol").HistoryEntry[]} */
     const entries = [];
     for (let index = 0; index < 8; index++) {
       entries.push(appendHistory(sessionId, {
@@ -259,6 +260,7 @@ test("default delta budget retains a large active-turn transcript", () => {
 test("resume history returns the complete recent prompt window in one page", () => {
   const sessionId = `test-transcript-resume-window-${randomUUID()}`;
   try {
+    /** @type {import("#server/protocol").HistoryEntry[]} */
     const entries = [];
     const userIndexes = new Set([5, 40, 80, 115]);
     for (let index = 0; index < 120; index++) {
@@ -296,7 +298,7 @@ test("resume history returns the complete recent prompt window in one page", () 
     assert.equal(completeCache.offset, 110);
     assert.deepEqual(
       completeCache.entries.map((entry) => entry.content),
-      Array.from({ length: 10 }, (_, index) => `message-${index + 110}`),
+      Array.from({ length: 10 }, (/** @type {unknown} */ _, index) => `message-${index + 110}`),
     );
   } finally {
     deleteSessionArtifacts(sessionId);
@@ -507,6 +509,7 @@ test("task lifecycle progress revises one durable history row", () => {
 test('resume rejects a matching cursor when an earlier cached revision changed', () => {
   const {createHash}=require('node:crypto');
   const id=`digest-${randomUUID()}`;
+  /** @param {readonly import("#server/protocol").HistoryEntry[]} entries */
   const digest=entries=>createHash('sha256').update(entries.map(e=>`${e.sessionSeq}:${e.entryId}:${e.revision}\n`).join('')).digest('hex');
   try {
     const first=appendHistory(id,{role:'assistant',content:'partial',timestamp:new Date().toISOString(),streamId:'digest-stream'});

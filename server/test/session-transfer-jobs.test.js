@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { SessionTransferJobs } = require('#server/session-transfer-jobs');
 const { generateKeyPair } = require('#server/relay-crypto');
+/** @returns {Promise<void>} */
 const delay = (/** @type {number} */ ms) => new Promise(resolve => setTimeout(resolve, ms));
 /** @param {() => boolean} predicate */
 async function until(predicate) {

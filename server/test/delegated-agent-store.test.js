@@ -82,6 +82,7 @@ test("persists delegation lineage, runs, and pending completion reports", () => 
 });
 
 test("AgentSession handler returns stable child IDs and follow-up guidance", async () => {
+  /** @type {Parameters<NonNullable<import("#server/app-tool-handlers").AppToolContext["manageAgentSession"]>>[0][]} */
   const calls = [];
   const result = await handleAgentSessionTool(
     {
@@ -121,6 +122,7 @@ test("AgentSession handler returns stable child IDs and follow-up guidance", asy
 });
 
 test("AgentSession handler returns cursor-based child activity tails", async () => {
+  /** @type {Parameters<NonNullable<import("#server/app-tool-handlers").AppToolContext["manageAgentSession"]>>[0][]} */
   const calls = [];
   const result = await handleAgentSessionTool(
     {
@@ -183,6 +185,7 @@ test("AgentSession handler returns cursor-based child activity tails", async () 
 });
 
 test("scheduled continuations retain the canonical delegation supervisor", async () => {
+  /** @type {string | undefined} */
   let savedTaskId;
   const result = await handleScheduleTaskTool(
     {
@@ -190,7 +193,7 @@ test("scheduled continuations retain the canonical delegation supervisor", async
       getDelegationSupervisorSessionId: () => "original-supervisor",
       getBackend: () => "claude",
       send: (message) => {
-        savedTaskId = message.task.id;
+        if (message.type === "scheduled_task_update") savedTaskId = message.task.id;
       },
       getTtsEngine: () => "system",
       getKokoroVoice: () => "",

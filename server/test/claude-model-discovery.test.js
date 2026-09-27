@@ -3,10 +3,13 @@ const test = require("node:test");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { z } = require("zod");
+const requestSchema = z.object({type:z.string(), request:z.object({subtype:z.string()})});
 const { readClaudeSupportedModels } = require("#server/claude-model-discovery");
 
 // Exercise the real SDK transport. The child only answers initialization;
 // a user prompt or persisted session would be visible in its recorded input.
+/** @param {import("node:test").TestContext} t @param {boolean} [fail] */
 function fixture(t, fail = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-discovery-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -35,10 +38,10 @@ test("model discovery reads initialization metadata without a prompt or persiste
     const models = await readClaudeSupportedModels(options);
     assert.equal(models[0].value, "opus-test");
   }
-  const args = JSON.parse(fs.readFileSync(path.join(dir, "args.json"), "utf8"));
+  const args = z.array(z.string()).parse(JSON.parse(fs.readFileSync(path.join(dir, "args.json"), "utf8")));
   assert.ok(args.includes("--no-session-persistence"));
   const requests = fs.readFileSync(path.join(dir, "requests.jsonl"), "utf8")
-    .trim().split("\n").map(JSON.parse);
+    .trim().split("\n").map(line => requestSchema.parse(JSON.parse(line)));
   assert.equal(requests.length, 2);
   assert.ok(requests.every((r) => r.type === "control_request" && r.request.subtype === "initialize"));
 });
@@ -47,7 +50,7 @@ test("initialization failure rejects without submitting a fallback prompt", asyn
   const { dir, options } = fixture(t, true);
   await assert.rejects(readClaudeSupportedModels(options), /Initialization unavailable/);
   const requests = fs.readFileSync(path.join(dir, "requests.jsonl"), "utf8")
-    .trim().split("\n").map(JSON.parse);
+    .trim().split("\n").map(line => requestSchema.parse(JSON.parse(line)));
   assert.equal(requests.length, 1);
   assert.equal(requests[0].request.subtype, "initialize");
 });

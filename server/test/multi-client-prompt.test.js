@@ -5,11 +5,14 @@ require("./test-data-dir");
 const { ClaudeSession } = require("#server/claude-session");
 const { recordUserPrompt, getHistory } = require("#server/session-store");
 
+const { parseServerMessage } = require("#server/server-message");
+
+/** @param {import("#server/protocol").ServerMessage[]} sent @returns {import("#server/client-transport").ClientTransport} */
 function testSocket(sent) {
   return {
     readyState: 1,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
 }
@@ -36,7 +39,9 @@ test("a recorded prompt is announced with the text clients need to render it", (
 // A phone and a desktop can watch one session at once. Every attached client
 // has to see the prompt, not only the one that sent it.
 test("a prompt reaches every client attached to the session", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const phone = [];
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const desktop = [];
   const session = new ClaudeSession(testSocket(phone), process.cwd(), []);
   session.sessionId = "shared-session";

@@ -1,3 +1,5 @@
+const {z} = require('zod');
+const requestSchema = z.object({method:z.string(),params:z.unknown()});
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -29,26 +31,32 @@ process.stdin.on('data', c => {
   }
 });`;
 
+/** @param {import("node:test").TestContext} t @param {boolean} [complete] */
 async function fixture(t, complete = false) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'codex-browser-login-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const record=path.join(dir,'requests.jsonl');
+  /** @type {(string | undefined)[]} */
   const received=[];
   const completeFile=path.join(dir,'login-completed');
   const callbackServer=http.createServer((req,res)=>{received.push(req.url);if(req.url==='/success'){fs.writeFileSync(completeFile,'done');res.writeHead(200);}else res.writeHead(302,{Location:'/success'});res.end();});
   await new Promise(resolve=>callbackServer.listen(0,'127.0.0.1',resolve));
-  t.after(()=>new Promise(resolve=>callbackServer.close(resolve)));
-  const redirect=`http://127.0.0.1:${callbackServer.address().port}/auth/callback`;
+  t.after(async () => { await new Promise(resolve=>callbackServer.close(resolve)); });
+  const address = callbackServer.address();
+  assert.ok(address && typeof address === "object");
+  const redirect=`http://127.0.0.1:${address.port}/auth/callback`;
   const authUrl=`https://auth.openai.com/oauth/authorize?state=fixture-state&redirect_uri=${encodeURIComponent(redirect)}`;
   return {
     options:{cwd:dir,command:process.execPath,args:['-e',mock],env:{...process.env,RECORD:record,AUTH_URL:authUrl,COMPLETE_FILE:completeFile,COMPLETE:complete?'yes':'no'},timeoutMs:2000,onReady:()=>{}},
     authUrl,redirect,received,
-    requests:()=>fs.readFileSync(record,'utf8').trim().split('\n').map(JSON.parse),
+    requests:()=>fs.readFileSync(record,'utf8').trim().split('\n').map(line=>requestSchema.parse(JSON.parse(line))),
   };
 }
 
 test('returns normal browser link, forwards callback and completes the local success route', async t=>{
-  const f=await fixture(t,true); let forwarded;
+  const f=await fixture(t,true);
+  /** @type {Promise<void> | undefined} */
+  let forwarded;
   await runCodexBrowserAuth({...f.options,onReady:(url,accept)=>{
     assert.equal(url,f.authUrl);
     forwarded=accept(`${f.redirect}?state=fixture-state&code=test-code`);
@@ -62,7 +70,9 @@ test('returns normal browser link, forwards callback and completes the local suc
 });
 
 test('rejects callbacks for other hosts, paths, states and duplicate state values', async t=>{
-  const f=await fixture(t);const controller=new AbortController();let checks;
+  const f=await fixture(t);const controller=new AbortController();
+  /** @type {Promise<void> | undefined} */
+  let checks;
   await assert.rejects(runCodexBrowserAuth({...f.options,signal:controller.signal,onReady:(_,accept)=>{
     checks=(async()=>{
       for(const url of [

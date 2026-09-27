@@ -22,6 +22,7 @@ function session(Type) {
   value.send = (/** @type {import("#server/protocol").ServerMessage} */ message) => sent.push(positionSessionMessage(value.getSessionId(), message));
   return { value, sent };
 }
+/** @returns {Promise<void>} */
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test("Claude streamed blocks sharing an API id retain separate durable cards", () => {
@@ -143,6 +144,7 @@ test("Codex accepts string request ids and returns integer protocol errors", () 
 test("Codex restrictive approval waits for an answer and resolves cancellation", async () => {
   const { value, sent } = session(CodexSession);
   value._permissionMode = "default";
+  /** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerRequestResponder>[0] | undefined} */
   let result;
   const waiting = value.handleAppServerRequest({ id: "approval", method: "item/commandExecution/requestApproval", params: { command: "example" } }, response => { result = response; });
   await tick();
@@ -161,6 +163,7 @@ test("Codex restrictive approval waits for an answer and resolves cancellation",
 
 test("Codex structured write paths reach policy checks and unknown paths fail closed", async () => {
   const { value } = session(CodexSession);
+  /** @type {unknown[]} */
   const checked = [];
   value._plugins = [{ canUseToolInterceptor: async (name, input) => { checked.push(input.file_path); return { behavior: "deny" }; } }];
   assert.equal(await value.canApprovePermissionRequest({ fileSystem: { entries: [{ access: "write", path: { type: "path", path: "/protected/file" } }] } }), false);

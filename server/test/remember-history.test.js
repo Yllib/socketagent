@@ -1,3 +1,5 @@
+const {z} = require("zod");
+const positionSchema = z.object({session_seq:z.number()});
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const fs = require("node:fs");
@@ -71,7 +73,9 @@ test("Remember searches stable entries and retrieves bounded surrounding context
   const context = rememberHistoryContext(sessionId, entries[1].sessionSeq, 1, 1);
   assert.deepEqual(context.map((entry) => entry.role), ["user", "assistant", "tool_call"]);
 
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const packets = [];
+  /** @type {import("#server/app-tool-handlers").AppToolContext} */
   const ctx = {
     getSessionId: () => sessionId,
     send: (message) => packets.push(message),
@@ -84,7 +88,7 @@ test("Remember searches stable entries and retrieves bounded surrounding context
     query: "accounting transition",
   });
   assert.equal(searchResult.isError, undefined);
-  const searchPayload = JSON.parse(searchResult.content[0].text);
+  const searchPayload = z.object({results:z.array(positionSchema)}).parse(JSON.parse(searchResult.content[0].text));
   assert.equal(searchPayload.results[0].session_seq, entries[0].sessionSeq);
 
   const getResult = await handleRememberTool(ctx, {
@@ -99,11 +103,11 @@ test("Remember searches stable entries and retrieves bounded surrounding context
     direction: "before",
     limit: 2,
   });
-  const listed = JSON.parse(listResult.content[0].text).entries;
+  const listed = z.object({entries:z.array(positionSchema)}).parse(JSON.parse(listResult.content[0].text)).entries;
   assert.deepEqual(listed.map((entry) => entry.session_seq), [entries[1].sessionSeq, entries[2].sessionSeq]);
 
   const runsResult = await handleRememberTool(ctx, { action: "runs", limit: 5 });
-  const runs = JSON.parse(runsResult.content[0].text).runs;
+  const runs = z.object({runs:z.array(z.object({outcome:z.string(),duration_ms:z.number()}))}).parse(JSON.parse(runsResult.content[0].text)).runs;
   assert.equal(runs[0].outcome, "completed");
   assert.equal(runs[0].duration_ms, 3000);
   deleteSessionArtifacts(sessionId);

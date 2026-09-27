@@ -83,7 +83,8 @@ test('reconnect reads missed terminal outcome without resuming a child', async (
 test('stale reconciliation cannot overwrite a newly started turn', async () => {
     const f = fixture();
     f.start('t1');
-    let resolve;
+    /** @type {(value:unknown)=>void} */
+    let resolve = () => {throw new Error("Not initialized");};
     f.s.appServer = { readThread: () => new Promise(r => resolve = r) };
     const p = f.s.reconcileCodexSubagents();
     f.start('t2');

@@ -37,9 +37,12 @@ server.listen(0,'127.0.0.1', () => fs.writeFileSync(path.join(profile,'DevToolsA
     const error = fs.openSync(path.join(fixture, 'stderr'), 'w');
     try {
       const result = await validateWindowsLaunch(executable, profile, output, error);
-      assert.equal(result.status, mode === 'good' ? 0 : 1, result.error?.message);
+      assert.equal(result.status, mode === 'good' ? 0 : 1, result.error instanceof Error ? result.error.message : undefined);
       assert.equal(fs.readFileSync(path.join(fixture, 'stdout'), 'utf8'), '');
-      if (mode === 'bad') assert.match(result.error.message, /could not render/);
+      if (mode === 'bad') {
+        assert.ok(result.error instanceof Error);
+        assert.match(result.error.message, /could not render/);
+      }
     } finally {
       fs.closeSync(output); fs.closeSync(error);
       fs.rmSync(fixture, { recursive: true, force: true });

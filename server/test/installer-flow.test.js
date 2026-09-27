@@ -7,6 +7,7 @@ const test = require("node:test");
 
 const repoRoot = path.resolve(__dirname, "../..");
 
+/** @param {string} relativePath */
 function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }

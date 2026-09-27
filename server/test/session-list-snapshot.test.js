@@ -6,9 +6,11 @@ const {
   createNativeRefreshCoordinator,
 } = require("#server/session-list-snapshot");
 
+/** @param {string} id @param {Partial<import("#server/protocol").SessionInfo>} [overrides] @returns {import("#server/protocol").SessionInfo} */
 function session(id, overrides = {}) {
   return {
     id,
+    cwd: "/tmp",
     title: `title-${id}`,
     messagePreview: `preview-${id}`,
     createdAt: "2026-09-01T00:00:00.000Z",
@@ -17,6 +19,7 @@ function session(id, overrides = {}) {
   };
 }
 
+/** @param {readonly Pick<import("#server/protocol").SessionInfo, "id">[]} sessions */
 const ids = (sessions) => sessions.map((s) => s.id);
 
 test("an archived session left in the native snapshot stays out of the list", () => {
@@ -76,7 +79,8 @@ test("merged list is newest first", () => {
 
 /** Resolves only when release() is called, so a scan can be held open. */
 function deferred() {
-  let release;
+  let release = () => { throw new Error("Deferred promise not initialized"); };
+  /** @type {Promise<void>} */
   const promise = new Promise((resolve) => {
     release = resolve;
   });
@@ -84,6 +88,7 @@ function deferred() {
 }
 
 test("a request during a scan re-runs it afterwards", async () => {
+  /** @type {string[]} */
   const reasons = [];
   const gate = deferred();
   const request = createNativeRefreshCoordinator(async (reason) => {
@@ -101,6 +106,7 @@ test("a request during a scan re-runs it afterwards", async () => {
 });
 
 test("many requests during one scan collapse into a single re-run", async () => {
+  /** @type {string[]} */
   const reasons = [];
   const gate = deferred();
   const request = createNativeRefreshCoordinator(async (reason) => {
@@ -119,6 +125,7 @@ test("many requests during one scan collapse into a single re-run", async () => 
 });
 
 test("a failed scan does not wedge the coordinator", async () => {
+  /** @type {string[]} */
   const reasons = [];
   const request = createNativeRefreshCoordinator(async (reason) => {
     reasons.push(reason);
@@ -212,7 +219,7 @@ test('list summaries exclude stored context and per-run records without altering
     pendingHandoffContext: 'private context',
     runStats: { completedCount: 500, totalDurationMs: 9000,
       current: { runId: 'running', startedAt: '2026-09-25T00:00:00Z' },
-      recentRuns: Array.from({length:500}, (_,i)=>({runId:`run-${i}`, durationMs:18})) },
+      recentRuns: Array.from({length:500}, (/** @type {unknown} */ _,i)=>({runId:`run-${i}`, runNumber:i+1, startedAt:"2026-09-25T00:00:00Z", finishedAt:"2026-09-25T00:00:01Z", outcome:"completed", durationMs:18})) },
   });
   const summary = sessionListSummary(original);
   assert.equal(summary.runStats.completedCount, 500);

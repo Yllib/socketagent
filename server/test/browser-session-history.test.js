@@ -17,8 +17,13 @@ test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
 test("every browser card send appends at its exact transcript position", () => {
   const sessionId = "browser-card-session";
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const packets = [];
+  /** @type {import("#server/app-tool-handlers").AppToolContext} */
   const ctx = {
+    getTtsEngine: () => "system",
+    getKokoroVoice: () => "",
+    getKokoroSpeed: () => 1,
     getSessionId: () => sessionId,
     appendHistory: (entry) => appendHistory(sessionId, entry),
     send: (message) => packets.push(message),
@@ -48,6 +53,7 @@ test("every browser card send appends at its exact transcript position", () => {
   assert.notEqual(second.entryId, first.entryId);
   assert.ok(second.sessionSeq > first.sessionSeq);
   assert.equal(packets.length, 2);
+  assert.ok(packets[1].type === "browser_session_open");
   assert.equal(packets[1].entryId, cards[1].entryId);
   assert.equal(packets[1].sessionSeq, cards[1].sessionSeq);
   assert.equal(packets[1].revision, cards[1].revision);

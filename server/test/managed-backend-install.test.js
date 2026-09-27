@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { installManagedBackendSafely } = require('#server/managed-backend-install');
 
+/** @param {import("node:test").TestContext} t */
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-repair-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -81,8 +82,9 @@ test('low disk space rejects repair before touching the live installation', asyn
 test('a failed promotion restores the original prefix', async t => {
   const f = fixture(t);
   const rename = fs.renameSync;
-  t.mock.method(fs, 'renameSync', (source, dest) => {
-    if (path.basename(source) === 'prefix') throw new Error('promotion denied');
+  t.mock.method(fs, 'renameSync', (/** @type {Parameters<typeof rename>} */ ...args) => {
+    const [source, dest] = args;
+    if (path.basename(String(source)) === 'prefix') throw new Error('promotion denied');
     return rename(source, dest);
   });
   await assert.rejects(installManagedBackendSafely({ prefix: f.prefix, packageName: '@anthropic-ai/claude-code',
@@ -94,7 +96,8 @@ test('a failed promotion restores the original prefix', async t => {
 test('disk filling while writing the lock cannot leave repair permanently locked', async t => {
   const f = fixture(t);
   const write = fs.writeFileSync;
-  t.mock.method(fs, 'writeFileSync', (target, ...args) => {
+  t.mock.method(fs, 'writeFileSync', (/** @type {Parameters<typeof write>} */ ...params) => {
+    const [target, ...args] = params;
     if (typeof target === 'number') throw new Error('ENOSPC');
     return write(target, ...args);
   });

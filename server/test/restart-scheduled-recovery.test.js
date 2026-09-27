@@ -10,6 +10,7 @@ process.env.SOCKET_AGENT_HOME = dir;
 const { saveScheduledTask, getScheduledTask, reconcileInterruptedScheduledTasks, finishRecoveredScheduledTask } = require("#server/scheduled-task-store");
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
+/** @param {string} id @param {Partial<import("#server/scheduled-task-store").ScheduledTask>} [extra] @returns {import("#server/scheduled-task-store").ScheduledTask} */
 function task(id, extra = {}) {
   return {
     id, prompt: "Test only", cwd: dir, status: "running", sessionId: id,

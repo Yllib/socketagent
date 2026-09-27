@@ -4,6 +4,7 @@ require('./test-data-dir');
 const {codexRewindTarget,rewindCodexConversation,isCodexRewinding}=require('#server/codex-conversation-rewind');
 const {appendHistory,getHistory,rememberSearchAllHistory}=require('#server/session-store');
 const {codexRolloutJsonlToHistory}=require('#server/codex-native-history');
+/** @param {string} id @param {string | null} uuid @param {string} text */
 const turn=(id,uuid,text)=>({id,items:[{type:'userMessage',id:'item-'+id,clientId:uuid,content:[{type:'text',text}]}]});
 
 test('rewind maps client ID to native turns, including repeated prompts and automatic turns',()=>{
@@ -28,7 +29,7 @@ test('rewind archives old history, commits local truncation after native success
    appendHistory(sid,{role:'assistant',content:'response '+text,timestamp:'2026-09-22T10:00:01Z'});
  }
  let calls=0;
- const client={resumeThread:async()=>{},readThread:async()=>({thread:{turns:native}}),rollbackThread:async(id,n)=>{
+ const client={resumeThread:async()=>{},readThread:async()=>({thread:{turns:native}}),rollbackThread:async(/** @type {string} */ id,/** @type {number} */ n)=>{
    assert.equal(isCodexRewinding(sid),true); assert.equal(id,sid);assert.equal(n,1);calls++;
    return {thread:{turns:[native[0]]}};
  }};
@@ -43,9 +44,16 @@ test('rewind archives old history, commits local truncation after native success
 
 test('failed native rollback preserves local history and rejects simultaneous requests',async()=>{
  const sid='rewind-failure';appendHistory(sid,{role:'user',uuid:'u1',content:'keep me',timestamp:'2026-09-22T10:00:00Z'});
- let reject, reachedRollback;
+ /** @type {(reason:unknown)=>void} */
+ let reject = () => {throw new Error("Not initialized");};
+ let reachedRollback = () => {throw new Error("Not initialized");};
+ /** @type {Promise<void>} */
  const ready = new Promise(resolve => reachedRollback = resolve);
- const client={resumeThread:async()=>{},readThread:async()=>({thread:{turns:[turn('1','u1','keep me')]}}),rollbackThread:()=>new Promise((_,r)=>{reject=r;reachedRollback();})};
+ const client={resumeThread:async()=>{},readThread:async()=>({thread:{turns:[turn('1','u1','keep me')]}}),rollbackThread:async()=>{
+   /** @type {Promise<unknown>} */
+   const failed = new Promise((_,r)=>{reject=r;reachedRollback();});
+   return failed;
+ }};
  const pending=rewindCodexConversation(client,sid,'/tmp','u1');
  await ready;
  await assert.rejects(rewindCodexConversation(client,sid,'/tmp','u1'),/already/);
@@ -55,7 +63,10 @@ test('failed native rollback preserves local history and rejects simultaneous re
 });
 
 test('native rollout rollback markers do not reimport discarded turns on reconnect',()=>{
- const events=[];const add=(type,payload)=>events.push(JSON.stringify({type,payload,timestamp:'2026-09-22T10:00:00Z'}));
+ /** @type {string[]} */
+ const events=[];
+ /** @param {string} type @param {unknown} payload */
+ const add=(type,payload)=>events.push(JSON.stringify({type,payload,timestamp:'2026-09-22T10:00:00Z'}));
  for(const id of ['1','2','3']){
    add('event_msg',{type:'task_started',turn_id:id});
    add('event_msg',{type:'user_message',message:'prompt '+id});
@@ -72,13 +83,14 @@ test('paginated rewind uses native revert and verifies every retained turn page'
  const sid='rewind-paginated';
  const native=[turn('1','u1','keep'),turn('2','u2','also keep'),turn('3','u3','drop')];
  for(const [i,text] of ['keep','also keep','drop'].entries()) appendHistory(sid,{role:'user',uuid:'u'+(i+1),content:text,timestamp:'2026-09-22T10:00:00Z'});
+ /** @type {(string | null | undefined)[]} */
  const cursors=[];let reverted=false;
  const client={
    resumeThread:async()=>({thread:{historyMode:'paginated'}}),
    readThread:async()=>({thread:{turns:native}}),
    rollbackThread:async()=>assert.fail('legacy rollback must not be used'),
-   revertThread:async(id,before)=>{assert.equal(id,sid);assert.equal(before,'3');reverted=true;return {thread:{turns:[]}};},
-   listThreadTurns:async params=>{assert.equal(reverted,true);assert.equal(params.itemsView,'notLoaded');assert.equal(params.sortDirection,'asc');cursors.push(params.cursor);return params.cursor?{data:[native[1]],nextCursor:null}:{data:[native[0]],nextCursor:'next'};},
+   revertThread:async(/** @type {string} */ id,/** @type {string} */ before)=>{assert.equal(id,sid);assert.equal(before,'3');reverted=true;return {thread:{turns:[]}};},
+   listThreadTurns:async (/** @type {Parameters<import("#server/codex-app-server-client").CodexAppServerClient["listThreadTurns"]>[0]} */ params)=>{assert.equal(reverted,true);assert.equal(params.itemsView,'notLoaded');assert.equal(params.sortDirection,'asc');cursors.push(params.cursor);return params.cursor?{data:[native[1]],nextCursor:null}:{data:[native[0]],nextCursor:'next'};},
  };
  await rewindCodexConversation(client,sid,'/tmp','u3');
  assert.deepEqual(cursors,[undefined,'next']);assert.equal(getHistory(sid).length,2);
@@ -125,8 +137,10 @@ test('rewind errors keep protocol method dumps out of the chat banner', () => {
 
 test('rewind maintenance does not emit agent activity, raw transcript events or transient errors', () => {
  const {CodexSession}=require('#server/codex-session');
+ /** @type {import("#server/protocol").ServerMessage[]} */
  const sent=[];
- const session=new CodexSession({readyState:1,send:raw=>sent.push(JSON.parse(raw))},'/tmp');
+ const {parseServerMessage} = require("#server/server-message");
+ const session=new CodexSession({readyState:1,send:raw=>sent.push(parseServerMessage(JSON.parse(raw)))},'/tmp');
  session.sessionId=session.threadId='rewind-maintenance';
  session._rewindPending=true;
  session.handleAppServerNotification('thread/status/changed',{threadId:session.threadId,status:{type:'active'}});

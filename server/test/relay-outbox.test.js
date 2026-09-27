@@ -15,6 +15,7 @@ test("relay capability handshake uses the authoritative server payload", () => {
     htmlPlans: { version: 2 },
     backends: ["claude", "codex"],
   };
+  /** @type {{binaryEnvelope:boolean,lane:string}[]} */
   const calls = [];
   const client = new RelayClient({
     relayUrl: "wss://relay.invalid",
@@ -32,6 +33,7 @@ test("relay capability handshake uses the authoritative server payload", () => {
     onStatusChange() {},
   });
 
+  /** @type {Record<string,unknown> | undefined} */
   let sent;
   client.sendToPeer = (_peerId, message) => {
     sent = message;
@@ -43,6 +45,7 @@ test("relay capability handshake uses the authoritative server payload", () => {
 
   assert.deepEqual(calls, [{ binaryEnvelope: true, lane: "control" }]);
   assert.equal(sent, expected);
+  assert.ok(sent);
   assert.deepEqual(sent.sessionTransfer, { version: 1 });
 });
 
@@ -130,6 +133,7 @@ test('request replies target one peer; live events still broadcast', () => {
     keyPair:crypto.generateKeyPair(), serverCapabilities:()=>({}), onMessage(){}, onStatusChange(){} });
   client.ws = {readyState: WebSocket.OPEN};
   for (const id of ['phone','desktop']) client.getPeer(id).publicKey = crypto.generateKeyPair().publicKey;
+  /** @type {[string,unknown][]} */
   const sends = [];
   client.sendToPeer = (id,msg) => sends.push([id,msg.type]);
   const socket = new VirtualRelaySocket(client);

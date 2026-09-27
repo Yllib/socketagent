@@ -47,7 +47,7 @@ export class SessionInstanceRegistry<T extends object> {
     }
   }
 
-  instances(sessionId: string, extras: Iterable<T | null | undefined> = []): T[] {
+  instances(sessionId: string, extras: Iterable<T | null | undefined, unknown, unknown> = []): T[] {
     const result = new Set<T>(this.bySessionId.get(sessionId.trim()) || []);
     for (const instance of extras) {
       if (instance) result.add(instance);

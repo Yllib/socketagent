@@ -1,3 +1,6 @@
+const {z} = require("zod");
+const {runStatsSchema} = require("#server/session-schema");
+const {historyEntrySchema} = require("#server/history-schema");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { randomUUID } = require("node:crypto");
@@ -47,7 +50,7 @@ test("logical runs persist exact aggregate durations and transcript boundaries",
       env: { ...process.env, SOCKET_AGENT_DATA_DIR: dataDir },
       encoding: "utf8",
     });
-    const { stats, boundaries } = JSON.parse(output);
+    const { stats, boundaries } = z.object({stats:runStatsSchema,boundaries:z.array(historyEntrySchema)}).parse(JSON.parse(output));
     assert.equal(stats.current, undefined);
     assert.equal(stats.completedCount, 2);
     assert.equal(stats.totalDurationMs, 180_000);
@@ -121,7 +124,7 @@ test("historical run backfill is durable, versioned, and idempotent", () => {
       env: { ...process.env, SOCKET_AGENT_DATA_DIR: dataDir },
       encoding: "utf8",
     });
-    const result = JSON.parse(output);
+    const result = z.object({first:runStatsSchema,second:runStatsSchema,forced:runStatsSchema,stored:runStatsSchema}).parse(JSON.parse(output));
     for (const stats of [result.first, result.second, result.forced, result.stored]) {
       assert.equal(stats.backfillVersion, 1);
       assert.equal(stats.completedCount, 2);

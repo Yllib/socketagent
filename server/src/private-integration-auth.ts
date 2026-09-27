@@ -41,7 +41,7 @@ export function startPrivateIntegrationAuthorization(
     // Settings-initiated sign-in is intentionally not attached to a
     // transcript. The plugin retains and validates its private request.
     appendHistory: () => {},
-    pendingQuestions: new Map(),
+    pendingQuestions: new Map<string, Parameters<SessionContext["pendingQuestions"]["set"]>[1]>(),
     questionCounter: { next: () => "" },
   };
 

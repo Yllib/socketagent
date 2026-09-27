@@ -1,3 +1,4 @@
+import type { ReadableStreamDefaultReader } from "node:stream/web";
 import * as fs from "fs";
 import * as path from "path";
 import { randomUUID } from "crypto";
@@ -32,7 +33,7 @@ export class InlineImageStore {
     if (/^https?:\/\//i.test(source)) {
       const response = await fetch(source, { signal: AbortSignal.timeout(30_000) });
       if (!response.ok || !response.body) throw new Error(`Image download failed: HTTP ${response.status}`);
-      const reader = response.body.getReader();
+      const reader: ReadableStreamDefaultReader<unknown> = response.body.getReader();
       const chunks: Buffer[] = [];
       let length = 0;
       try {

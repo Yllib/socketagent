@@ -6,6 +6,7 @@ const { HardAbortCoordinator } = require("#server/hard-abort");
 test("concurrent and repeated hard-abort requests terminate a session once", async () => {
   const coordinator = new HardAbortCoordinator(1000);
   let abortCalls = 0;
+  /** @type {import("#server/hard-abort").AbortableSession | null} */
   let target = {
     async abort() {
       abortCalls++;
@@ -13,6 +14,7 @@ test("concurrent and repeated hard-abort requests terminate a session once", asy
     },
   };
   const lookup = () => target;
+  /** @param {import("#server/hard-abort").AbortableSession} session */
   const remove = (session) => {
     if (target === session) target = null;
   };

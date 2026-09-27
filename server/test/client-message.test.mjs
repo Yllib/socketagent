@@ -43,6 +43,7 @@ test('relay validates encrypted JSON and keeps valid traffic and peer routing in
   /** @type {import('#server/protocol').ClientMessage[]} */
   const received = [];
   let finish = () => {};
+  /** @type {Promise<void>} */
   const finished = new Promise(resolve => { finish = () => resolve(undefined); });
   const client = new RelayClient({
     relayUrl: `ws://127.0.0.1:${address.port}`, pairingToken: 'test', keyPair: serverKeys,

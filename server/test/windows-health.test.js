@@ -26,10 +26,12 @@ test('installer health rejects unrelated listeners, failed auth, and a server th
     fs.copyFileSync(path.resolve(__dirname, '../scripts/check-health.js'), path.join(fixture, 'scripts/check-health.js'));
     fs.writeFileSync(path.join(fixture, '.env'), `PORT=${server.address().port}\nAUTH_TOKEN=lab-token\n`);
     for (mode of ['unrelated', 'auth', 'starting', 'ready', 'legacy', 'legacy-invalid']) {
-      const code = await new Promise(resolve => {
+      /** @type {Promise<number | null>} */
+      const exited = new Promise(resolve => {
         const child = spawn(process.execPath, [path.join(fixture, 'scripts/check-health.js')], { stdio: 'ignore' });
         child.on('exit', resolve);
       });
+      const code = await exited;
       assert.equal(code, ['ready', 'legacy'].includes(mode) ? 0 : 1, mode);
     }
   } finally { server.close(); fs.rmSync(fixture, { recursive: true, force: true }); }

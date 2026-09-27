@@ -112,6 +112,7 @@ test('installed Codex delivers image guidance in new and resumed model requests'
     await client.initialize({ clientInfo: { name: 'socketagent_instruction_test', version: '1' }, capabilities: { experimentalApi: true } });
   };
   const turn = async () => {
+    /** @type {Promise<unknown[]>} */
     const completed = once(client, 'turn/completed', { signal: AbortSignal.timeout(10000) });
     await client.startTurn({ threadId, model: 'gpt-6-astra', input: [{ type: 'text', text: 'Capture this local test request.', text_elements: [] }] });
     await completed;

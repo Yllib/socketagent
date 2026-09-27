@@ -127,7 +127,7 @@ export function registerCodexAppMcp(context: AppToolContext): { token: string; u
   const registration: CodexMcpRegistration = {
     token,
     context,
-    transports: new Map(),
+    transports: new Map<string, StreamableHTTPServerTransport>(),
   };
   registrations.set(token, registration);
   return {
@@ -498,7 +498,7 @@ function getHeaderValue(req: IncomingMessage, name: string): string | undefined 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   if (req.method === "GET" || req.method === "DELETE") return undefined;
   const chunks: Buffer[] = [];
-  const input: AsyncIterable<unknown> = req;
+  const input: AsyncIterable<unknown, unknown, unknown> = req;
   for await (const chunk of input) {
     if (Buffer.isBuffer(chunk)) chunks.push(chunk);
     else if (typeof chunk === "string" || chunk instanceof Uint8Array) chunks.push(Buffer.from(chunk));

@@ -24,12 +24,15 @@ const {
 const { ClaudeSession } = require("#server/claude-session");
 const { CodexSession } = require("#server/codex-session");
 
+const { parseServerMessage } = require("#server/server-message");
+
+/** @param {import("#server/protocol").ServerMessage[]} sent @returns {import("#server/client-transport").ClientTransport} */
 function testSocket(sent) {
   return {
     readyState: 1,
     supportsSessionEventAck: false,
     send(payload) {
-      sent.push(JSON.parse(payload));
+      sent.push(parseServerMessage(JSON.parse(payload)));
     },
   };
 }
@@ -65,7 +68,14 @@ test("invalidates only the updated backend catalog and persists the result", () 
   assert.equal(getCachedModelCatalog("claude"), undefined);
   assert.equal(getCachedModelCatalog("codex").models[0].value, "gpt-test");
 
-  const stored = JSON.parse(fs.readFileSync(path.join(tempDir, "model-catalogs.json"), "utf8"));
+  const { z } = require("zod");
+  const stored = z.object({
+    schemaVersion: z.number(),
+    catalogs: z.object({
+      claude: z.unknown().optional(),
+      codex: z.object({models: z.array(z.object({value: z.string()}))}),
+    }),
+  }).parse(JSON.parse(fs.readFileSync(path.join(tempDir, "model-catalogs.json"), "utf8")));
   assert.equal(stored.schemaVersion, 2);
   assert.equal(stored.catalogs.claude, undefined);
   assert.equal(stored.catalogs.codex.models[0].value, "gpt-test");
@@ -73,6 +83,7 @@ test("invalidates only the updated backend catalog and persists the result", () 
 
 test("Claude sends a fresh cached catalog without starting a query", async () => {
   saveCachedModelCatalog("claude", [{ value: "fable", displayName: "Fable" }]);
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
 
@@ -86,6 +97,7 @@ test("Claude sends a fresh cached catalog without starting a query", async () =>
 
 test("Codex sends a fresh cached catalog without starting app-server", async () => {
   saveCachedModelCatalog("codex", [{ value: "gpt-test", displayName: "GPT Test" }]);
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
 

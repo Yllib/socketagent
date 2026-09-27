@@ -10,6 +10,7 @@ const { appendHistory, appendHistoryBulk, getHistory, onInlineImagesSaved, waitF
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=', 'base64');
 const source = path.join(root, 'image (original).png');
 fs.writeFileSync(source, png);
+/** @param {string} text */
 const snapshotUris = text => [...text.matchAll(/socketagent:\/\/image\?id=[a-f0-9-]+&name=[a-z.]+/g)].map(match => match[0]);
 
 test('plain image paths and URL arrays are captured without agent tools', async () => {
@@ -17,7 +18,9 @@ test('plain image paths and URL arrays are captured without agent tools', async 
   const web = http.createServer((req, res) => res.end(png));
   await new Promise(resolve => web.listen(0, '127.0.0.1', resolve));
   try {
-    const url = `http://127.0.0.1:${web.address().port}/image.png`;
+    const address = web.address();
+    assert.ok(address && typeof address === "object");
+    const url = `http://127.0.0.1:${address.port}/image.png`;
     const input = `First paragraph.\n\n![Screen](<${source}>)\n\nMiddle.\n\n\`\`\`socketagent-compare\n${JSON.stringify([source, url])}\n\`\`\`\n\nLast paragraph.`;
     const result = await snapshotInlineImages(input, 'session', store);
     const uris = snapshotUris(result);
@@ -42,6 +45,7 @@ test('ordinary code and inline code stay literal; labels and parentheses survive
 
 test('history captures immediately, sends a positioned update and preserves native text', async () => {
   const input = `\`\`\`socketagent-compare\n${JSON.stringify({title:'Compare', images:[{src:source,label:'Before'}]})}\n\`\`\``;
+  /** @type {{session:string,entry:import("#server/protocol").HistoryEntry}[]} */
   const messages = [];
   const unsubscribe = onInlineImagesSaved((session, entry) => messages.push({session,entry}));
   try {
@@ -66,14 +70,17 @@ test('history captures immediately, sends a positioned update and preserves nati
 });
 
 test('capture finishing after rewind never resurrects removed messages', async () => {
-  let release;
+  let release = () => { throw new Error("Not initialized"); };
+  /** @type {Promise<void>} */
   const received = new Promise(resolve => { release = resolve; });
-  let respond;
-  const web = http.createServer((req, res) => { respond = () => res.end(png); release(); });
+  let respond = () => { throw new Error("Request not received"); };
+  const web = http.createServer((req, res) => { respond = () => { res.end(png); }; release(); });
   await new Promise(resolve => web.listen(0, '127.0.0.1', resolve));
   try {
+    const address = web.address();
+    assert.ok(address && typeof address === "object");
     const anchor = appendHistory('rewind-images', {role:'user',content:'Prompt',uuid:'anchor',timestamp:new Date().toISOString()});
-    appendHistory('rewind-images', {role:'assistant',content:`![Image](http://127.0.0.1:${web.address().port}/image.png)`,streamId:'later',timestamp:new Date().toISOString()});
+    appendHistory('rewind-images', {role:'assistant',content:`![Image](http://127.0.0.1:${address.port}/image.png)`,streamId:'later',timestamp:new Date().toISOString()});
     await received;
     truncateConversationHistory('rewind-images', anchor);
     respond();

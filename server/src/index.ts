@@ -979,7 +979,7 @@ async function invalidateCodexAuthenticationForLiveSessions(): Promise<void> {
 
 function abortGroupForSession(
   sessionId: string,
-  extras: Iterable<Session | null | undefined> = [],
+  extras: Iterable<Session | null | undefined, unknown, unknown> = [],
 ): (AbortableSession & { abortTargets: Session[] }) | null {
   const exactExtras = [...extras].filter(
     (candidate): candidate is Session => !!candidate && sessionInstanceId(candidate) === sessionId,
@@ -5171,7 +5171,7 @@ function createConnectionHandler(
               cwd: getDefaultCwd(),
               send: (m) => sendJson({ ...m }),
               appendHistory: () => {},
-              pendingQuestions: new Map(),
+              pendingQuestions: new Map<string, Parameters<SessionContext["pendingQuestions"]["set"]>[1]>(),
               questionCounter: { next: () => "" },
             };
         for (const plugin of plugins) {
@@ -5349,7 +5349,8 @@ function createConnectionHandler(
         void (async () => {
           try {
             let input: BrowserPhoneInput;
-            switch (msg.action) {
+            const requestedAction = msg.action;
+            switch (requestedAction) {
               case "tap":
                 input = { action: "tap", x: Number(msg.x), y: Number(msg.y) };
                 break;
@@ -5368,7 +5369,7 @@ function createConnectionHandler(
               case "reload":
               case "back":
               case "forward":
-                input = { action: msg.action };
+                input = { action: requestedAction };
                 break;
               case "clipboard_read": {
                 const text = await browserSessionManager.readClipboard(msg.profile);
@@ -5379,7 +5380,7 @@ function createConnectionHandler(
                 await browserSessionManager.writeClipboard(msg.profile, String(msg.text || ""));
                 return;
               default: {
-                const action = String((msg as { action?: unknown }).action || "unknown");
+                const action = String(requestedAction || "unknown");
                 throw new Error(`This server version does not support browser action: ${action}`);
               }
             }
@@ -5466,7 +5467,7 @@ function createConnectionHandler(
               const descendant = relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
               if (!(exact || (recursive && descendant))) return [];
             }
-            const backend = (session.backend ?? "claude") as "claude" | "codex";
+            const backend = session.backend ?? "claude";
             const preview = session.messagePreview || session.title || "Untitled";
             if (needle && ![
               session.title,
@@ -7669,7 +7670,7 @@ function createConnectionHandler(
       case "plugins_enable":
       case "plugins_disable": {
         const data = msg;
-        const pluginId = data.pluginId as string;
+        const pluginId = data.pluginId;
         const action = { plugins_install: "install", plugins_uninstall: "uninstall",
           plugins_enable: "enable", plugins_disable: "disable" } as const;
         const pluginAction = action[msg.type];

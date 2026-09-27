@@ -106,7 +106,9 @@ test("correlates inventory replies without exposing secret values", () => {
 });
 
 test("emits metadata-only lifecycle states for a secure input card", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
+  /** @type {{message:Record<string,unknown>,status:import("#server/secure-input-store").SecureInputRequestStatus}[]} */
   const states = [];
   const pending = requestSecureInput(
     (message) => sent.push(message),
@@ -121,6 +123,7 @@ test("emits metadata-only lifecycle states for a secure input card", async () =>
     (message, status) => states.push({ message, status }),
   );
 
+  assert.ok(sent[0].type === "secure_input_request");
   const requestId = sent[0].requestId;
   completeSecureInputRequest(requestId, "history-secret-must-not-leak");
   await pending;
@@ -175,6 +178,7 @@ test("completes a live request with stored metadata without reading its value", 
     scope: "project",
     cwd,
   });
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];
   const pending = requestSecureInput(
     (message) => sent.push(message),
@@ -182,6 +186,7 @@ test("completes a live request with stored metadata without reading its value", 
     "stored-request-session",
     cwd,
   );
+  assert.ok(sent[0].type === "secure_input_request");
   const requestId = sent[0].requestId;
 
   const completed = completeSecureInputRequestWithSavedSecret(

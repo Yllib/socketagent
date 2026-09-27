@@ -1,4 +1,4 @@
-import { Ajv } from "ajv";
+import { Ajv, type ErrorObject } from "ajv";
 import type { StoredDataContracts } from "./stored-data-contracts";
 import schema from "./generated/stored-data.schema.json";
 
@@ -12,7 +12,7 @@ export function parseStoredData<K extends keyof StoredDataContracts>(kind: K, va
   );
   if (!validate || "$async" in validate) throw new Error(`Missing stored data contract: ${kind}`);
   if (!validate(value)) {
-    const detail = validate.errors?.map(error => `${error.instancePath || "/"}: ${error.keyword}`).join(", ");
+    const detail = validate.errors?.map((error: ErrorObject<string, Record<string, unknown>>) => `${error.instancePath || "/"}: ${error.keyword}`).join(", ");
     throw new Error(`Invalid ${kind} record (${detail || "schema mismatch"})`);
   }
   return value;

@@ -8,6 +8,7 @@ const {
   startPrivateIntegrationAuthorization,
 } = require("#server/private-integration-auth");
 
+/** @param {Partial<import("#server/app-tool-handlers").AppToolContext>} [overrides] @returns {import("#server/app-tool-handlers").AppToolContext} */
 function context(overrides = {}) {
   return {
     getSessionId: () => "session-1",
@@ -20,6 +21,7 @@ function context(overrides = {}) {
 }
 
 test("private-integration authorization delegates to the owning session plugin", async () => {
+  /** @type {string[]} */
   const calls = [];
   const result = await handlePrivateIntegrationAuthTool(
     context({
@@ -47,6 +49,7 @@ test("private-integration authorization fails closed when unavailable", async ()
 });
 
 test("settings can start private integration auth without a session", async () => {
+  /** @type {Record<string, unknown>[]} */
   const sent = [];
   startPrivateIntegrationAuthorization({
     plugins: [{
@@ -76,6 +79,7 @@ test("settings can start private integration auth without a session", async () =
 });
 
 test("settings auth reports an unavailable integration", () => {
+  /** @type {Record<string, unknown>[]} */
   const sent = [];
   startPrivateIntegrationAuthorization({
     plugins: [],
@@ -88,5 +92,7 @@ test("settings auth reports an unavailable integration", () => {
   assert.equal(sent.length, 1);
   assert.equal(sent[0].type, "private_integration_auth_result");
   assert.equal(sent[0].started, false);
+  assert.equal(typeof sent[0].error, "string");
+  if (typeof sent[0].error !== "string") assert.fail("Missing error text");
   assert.match(sent[0].error, /not available/);
 });

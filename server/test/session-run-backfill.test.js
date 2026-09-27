@@ -6,27 +6,33 @@ const {
   extractEngineIntervals,
 } = require("#server/session-run-backfill");
 
+/** @param {number} seconds */
 const iso = (seconds) => new Date(Date.UTC(2026, 7, 4, 10, 0, seconds)).toISOString();
+/** @param {number} seconds @param {string} [content] @returns {import("#server/protocol").HistoryEntry} */
 const user = (seconds, content = "Do the work") => ({
   role: "user",
   content,
   timestamp: iso(seconds),
 });
+/** @param {number} seconds @param {string} [content] @returns {import("#server/protocol").HistoryEntry} */
 const assistant = (seconds, content = "Done") => ({
   role: "assistant",
   content,
   timestamp: iso(seconds),
 });
+/** @param {number} endSeconds @param {number} durationMs */
 const claudeResult = (endSeconds, durationMs) => ({
   sdkType: "result",
   ts: iso(endSeconds),
   durationMs,
 });
+/** @param {string} id @param {number} seconds */
 const codexStarted = (id, seconds) => ({
   method: "turn/started",
   ts: iso(seconds),
   params: { turn: { id } },
 });
+/** @param {string} id @param {number} seconds @param {number} durationMs */
 const codexCompleted = (id, seconds, durationMs) => ({
   method: "turn/completed",
   ts: iso(seconds),

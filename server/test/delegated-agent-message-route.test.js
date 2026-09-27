@@ -6,6 +6,7 @@ const {
 } = require("#server/delegated-agent-message-route");
 
 test("injects a message into a running delegated child at the next safe boundary", async () => {
+  /** @type {Parameters<import("#server/delegated-agent-message-route").RunningDelegatedAgentMessageTarget["injectMessage"]>[]} */
   const calls = [];
   const result = await routeRunningDelegatedAgentMessage({
     target: {
@@ -27,6 +28,7 @@ test("injects a message into a running delegated child at the next safe boundary
 });
 
 test("injects a child completion report immediately without a delivery queue", async () => {
+  /** @type {Parameters<import("#server/delegated-agent-message-route").RunningDelegatedAgentMessageTarget["injectMessage"]>[]} */
   const calls = [];
   const result = await routeRunningDelegatedAgentMessage({
     target: {
@@ -64,6 +66,7 @@ test("surfaces an injection failure so durable pending state can be the fallback
 });
 
 test("starts a normal follow-up turn when the delegated child is idle", async () => {
+  /** @type {Parameters<import("#server/delegated-agent-message-route").RunningDelegatedAgentMessageTarget["injectMessage"]>[]} */
   const calls = [];
   const result = await routeRunningDelegatedAgentMessage({
     target: {

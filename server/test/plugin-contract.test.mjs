@@ -24,10 +24,12 @@ test('plugin contracts preserve hook binding and validate dynamic results', asyn
 });
 
 test('plugin contracts reject malformed approval results', async () => {
+  /** @type {import('#server/plugin-api').SessionContext['pendingQuestions']} */
+  const pendingQuestions = new Map();
   /** @type {import('#server/plugin-api').SessionContext} */
   const ctx = {
     sessionId: 's1', cwd: '/project', send() {}, appendHistory() {},
-    pendingQuestions: new Map(), questionCounter: { next: () => 'q1' },
+    pendingQuestions, questionCounter: { next: () => 'q1' },
   };
   const allowed = parseSocketAgentPlugin({ name: 'allowed',
     canUseToolInterceptor: () => ({ behavior: 'allow', updatedInput: { command: 'pwd' } }),

@@ -69,10 +69,9 @@ export function decryptBinary(
   theirPublicKey: Uint8Array,
   mySecretKey: Uint8Array
 ): Uint8Array {
-  const buf = envelope instanceof Buffer ? envelope : Buffer.from(envelope);
-  if (buf.length < nacl.box.nonceLength) throw new Error("Envelope too short");
-  const nonce = new Uint8Array(buf.subarray(0, nacl.box.nonceLength));
-  const ciphertext = new Uint8Array(buf.subarray(nacl.box.nonceLength));
+  if (envelope.length < nacl.box.nonceLength) throw new Error("Envelope too short");
+  const nonce = new Uint8Array(envelope.subarray(0, nacl.box.nonceLength));
+  const ciphertext = new Uint8Array(envelope.subarray(nacl.box.nonceLength));
   const plaintext = nacl.box.open(ciphertext, nonce, theirPublicKey, mySecretKey);
   if (!plaintext) throw new Error("Decryption failed — invalid key or corrupted message");
   return plaintext;

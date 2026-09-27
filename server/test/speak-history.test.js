@@ -59,7 +59,9 @@ test("preserves later Speak calls with the same text", () => {
 });
 
 test("Speak emits audio delivery without writing synthetic history", async () => {
+  /** @type {import("#server/protocol").ServerMessage[]} */
   const packets = [];
+  /** @type {import("#server/protocol").HistoryEntry[]} */
   const history = [];
   const result = await handleSpeakTool({
     getSessionId: () => "session-1",

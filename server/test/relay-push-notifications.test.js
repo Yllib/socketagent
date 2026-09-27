@@ -1,3 +1,4 @@
+const {z} = require("zod");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -24,6 +25,7 @@ const pushEnvironmentKeys = [
   "SOCKETAGENT_TEST_MODE",
 ];
 
+/** @param {()=>void | Promise<void>} run */
 function withCleanPushEnvironment(run) {
   const previous = Object.fromEntries(
     pushEnvironmentKeys.map((key) => [key, process.env[key]]),
@@ -120,18 +122,21 @@ test("reports unreadable Firebase credential files and relay availability", asyn
 });
 
 test("routes authoritative FCM payloads through the configured relay", async () => {
-  let received;
+  /** @type {unknown} */
+  let rawReceived;
   const server = http.createServer((request, response) => {
+    /** @type {Buffer[]} */
     const chunks = [];
-    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("data", (/** @type {Buffer} */ chunk) => chunks.push(chunk));
     request.on("end", () => {
-      received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      rawReceived = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ ok: true, sent: 1, attempted: 1 }));
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
+  assert.ok(address && typeof address === "object");
   const oldRelay = process.env.RELAY_URL;
   const oldPairing = process.env.PAIRING_TOKEN;
   process.env.RELAY_URL = `ws://127.0.0.1:${address.port}`;
@@ -153,6 +158,7 @@ test("routes authoritative FCM payloads through the configured relay", async () 
       },
     });
     assert.deepEqual(result, { sent: 1, attempted: 1 });
+    const received = z.object({pairingToken:z.string(),kind:z.string(),showNotification:z.boolean(),data:z.record(z.string(),z.string())}).parse(rawReceived);
     assert.equal(received.pairingToken, "pairing-secret");
     assert.equal(received.kind, "session_finished");
     assert.equal(received.showNotification, false);

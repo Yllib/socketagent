@@ -1,4 +1,4 @@
-import { Ajv } from "ajv";
+import { Ajv, type ErrorObject } from "ajv";
 import type { JsonClientMessage } from "./protocol";
 import schema from "./generated/client-protocol.schema.json";
 import { isRecord } from "./value-guards";
@@ -18,7 +18,7 @@ export function parseClientMessage(value: unknown): JsonClientMessage {
   const validate = contracts.get(value.type);
   if (!validate) throw new Error("Unsupported client message type");
   if (!validate(value)) {
-    const detail = validate.errors?.map(error => `${error.instancePath || "/"}: ${error.keyword}`).join(", ");
+    const detail = validate.errors?.map((error: ErrorObject<string, Record<string, unknown>>) => `${error.instancePath || "/"}: ${error.keyword}`).join(", ");
     throw new Error(`Invalid client message (${detail || "schema mismatch"})`);
   }
   return value;

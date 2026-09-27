@@ -7,7 +7,6 @@
     "build": "tsc",
     "test": "npm run build && npm run type-safety && node --test test/*.test.js test/*.test.mjs",
     "type-safety": "npm run protocol:check && npm run storage:check && node scripts/check-type-safety.mjs",
-    "type-safety:prune": "node scripts/check-type-safety.mjs --prune",
     "type-safety:report": "node scripts/check-type-safety.mjs --report",
     "codex:generate-contracts": "node scripts/generate-codex-contracts.mjs",
     "codex:check-contracts": "node scripts/generate-codex-contracts.mjs --check",

@@ -646,7 +646,7 @@ export class TranscriptDatabase {
       reader.exec("BEGIN");
       reader.prepare("SELECT 1 FROM transcript_sessions WHERE session_id = ?").get(sessionId);
       file = await fs.promises.open(filePath, "wx", 0o600);
-      const rows = reader.prepare(`SELECT entry_json FROM transcript_entries
+      const rows: Iterable<Record<string, unknown>, unknown, unknown> = reader.prepare(`SELECT entry_json FROM transcript_entries
         WHERE session_id = ? ORDER BY session_seq`).iterate(sessionId);
       let batch = "[";
       let first = true;

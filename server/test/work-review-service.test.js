@@ -10,6 +10,7 @@ const {
 } = require("#server/work-review-service");
 const { WorkReviewStore } = require("#server/work-review-store");
 
+/** @type {string[]} */
 const roots = [];
 
 function service() {
@@ -297,8 +298,12 @@ test("serializes concurrent draft mutations with optimistic revision checks", as
     }),
   ]);
   assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-  assert.equal(results.filter((result) =>
-    result.status === "rejected" && result.reason.code === "revision_conflict").length, 1);
+  assert.equal(results.filter((result) => {
+    if (result.status !== "rejected") return false;
+    /** @type {unknown} */
+    const reason = result.reason;
+    return reason instanceof Error && "code" in reason && reason.code === "revision_conflict";
+  }).length, 1);
 });
 
 test("applies the complete final client draft and seals it in one finish mutation", async () => {
@@ -373,6 +378,7 @@ test("falls back to the previous valid record when authoritative JSON is corrupt
   assert.equal(snapshot.reviewId, created.reviewId);
   // The backup is intentionally the prior complete record, never a partial write.
   assert.equal(snapshot.currentDraft.revision, 0);
-  assert.doesNotThrow(() =>
-    JSON.parse(fs.readFileSync(path.join(recordsDir, recordName), "utf8")));
+  assert.doesNotThrow(() => {
+    JSON.parse(fs.readFileSync(path.join(recordsDir, recordName), "utf8"));
+  });
 });

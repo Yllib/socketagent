@@ -7,8 +7,10 @@ const {
 } = require("#server/control-message-scheduler");
 
 function deferred() {
-  let resolve;
-  let reject;
+  let resolve = () => {throw new Error("Not initialized");};
+  /** @type {(reason:unknown)=>void} */
+  let reject = () => {throw new Error("Not initialized");};
+  /** @type {Promise<void>} */
   const promise = new Promise((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
@@ -16,6 +18,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+/** @returns {Promise<void>} */
 function nextTurn() {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -43,6 +46,7 @@ test("classifies priority, concurrent, per-session, and lifecycle messages", () 
 test("serializes one session while allowing another session to proceed", async () => {
   const scheduler = new ControlMessageScheduler();
   const gate = deferred();
+  /** @type {string[]} */
   const events = [];
 
   const firstA = scheduler.run(
@@ -77,6 +81,7 @@ test("serializes one session while allowing another session to proceed", async (
 test("cached reads bypass a blocked connection lifecycle operation", async () => {
   const scheduler = new ControlMessageScheduler();
   const gate = deferred();
+  /** @type {string[]} */
   const events = [];
 
   const prompt = scheduler.run(
@@ -102,6 +107,7 @@ test("cached reads bypass a blocked connection lifecycle operation", async () =>
 test("keeps active-runner lifecycle changes in connection order", async () => {
   const scheduler = new ControlMessageScheduler();
   const gate = deferred();
+  /** @type {string[]} */
   const events = [];
 
   const prompt = scheduler.run(
@@ -130,6 +136,7 @@ test("keeps active-runner lifecycle changes in connection order", async () => {
 test("lifecycle work also preserves ordering within its target session", async () => {
   const scheduler = new ControlMessageScheduler();
   const gate = deferred();
+  /** @type {string[]} */
   const events = [];
 
   const prompt = scheduler.run(

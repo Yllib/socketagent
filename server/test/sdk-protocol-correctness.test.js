@@ -302,6 +302,7 @@ test("remaps a Claude conversation reset without losing session metadata", () =>
   const newId = `claude-reset-new-${crypto.randomUUID()}`;
   const session = new ClaudeSession(testSocket(sent), process.cwd(), []);
   session.sessionId = oldId;
+  /** @type {[string,string] | undefined} */
   let remapped;
   session.onSessionIdChanged = (previous, next) => { remapped = [previous, next]; };
   saveSession({

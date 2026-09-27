@@ -41,7 +41,7 @@ const currentRunSchema = z.object({
   pendingOutcome: sessionRunOutcomeSchema.optional(),
 } satisfies Shape<SessionRunCurrent>).passthrough();
 
-const runStatsSchema = z.object({
+export const runStatsSchema = z.object({
   current: currentRunSchema.optional(), completedCount: z.number(),
   totalDurationMs: z.number(), averageDurationMs: optionalNumber,
   longestDurationMs: optionalNumber, shortestDurationMs: optionalNumber,

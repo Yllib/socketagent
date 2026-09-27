@@ -5,6 +5,11 @@ const {
   routeMonitorOutputToSession,
 } = require("#server/monitor-output-route");
 
+/**
+ * @param {string} id
+ * @param {boolean} [running]
+ * @returns {import("#server/monitor-output-route").MonitorOutputSession & {injected: {text: string, priority?: "next"}[], queries: {text: string, sessionId?: string}[]}}
+ */
 function fakeSession(id, running = false) {
   return {
     isRunning: running,
@@ -24,6 +29,7 @@ test("idle Monitor output stays bound to its owning session", async () => {
   const owner = fakeSession("owner-session");
   const unrelated = fakeSession("other-session");
   let activeSession = owner;
+  /** @type {(string | null)[]} */
   const completed = [];
 
   // Reproduce the original race: the user opens another session after the

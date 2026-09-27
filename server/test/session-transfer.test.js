@@ -36,6 +36,7 @@ const {
 
 test.after(() => fs.rmSync(testHome, { recursive: true, force: true }));
 
+/** @param {string} id @param {"claude" | "codex"} backend @param {string} cwd @param {string} [title] @returns {import("#server/protocol").SessionInfo} */
 function makeSession(id, backend, cwd, title = "Transfer test") {
   const now = "2026-07-26T12:00:00.000Z";
   return {

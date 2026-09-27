@@ -3,13 +3,15 @@ const test = require("node:test");
 
 const { LatestSnapshotDispatcher } = require("#server/latest-snapshot-dispatcher");
 
+/** @param {number} ms @returns {Promise<void>} */
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 test("snapshot dispatcher sends the first frame and latest queued revision", async () => {
+  /** @type {{revision: number, content?: string, final?: boolean}[]} */
   const sent = [];
-  const dispatcher = new LatestSnapshotDispatcher((message) => sent.push(message), 20);
+  const dispatcher = new LatestSnapshotDispatcher((/** @type {{revision: number, content?: string, final?: boolean}} */ message) => sent.push(message), 20);
 
   dispatcher.push("text:stream-1", { revision: 1, content: "a" });
   dispatcher.push("text:stream-1", { revision: 2, content: "ab" });
@@ -22,8 +24,9 @@ test("snapshot dispatcher sends the first frame and latest queued revision", asy
 });
 
 test("discard prevents a stale queued snapshot after a final frame", async () => {
+  /** @type {{revision: number, content?: string, final?: boolean}[]} */
   const sent = [];
-  const dispatcher = new LatestSnapshotDispatcher((message) => sent.push(message), 20);
+  const dispatcher = new LatestSnapshotDispatcher((/** @type {{revision: number, content?: string, final?: boolean}} */ message) => sent.push(message), 20);
 
   dispatcher.push("text:stream-1", { revision: 1 });
   dispatcher.push("text:stream-1", { revision: 2 });

@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const {z} = require("zod");
+const echoSchema = z.object({method:z.string(),params:z.record(z.string(),z.unknown())});
 const test = require("node:test");
 
 const {
@@ -27,6 +29,7 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
+/** @param {import("node:events").EventEmitter} emitter @param {string} name @returns {Promise<unknown>} */
 function waitForEvent(emitter, name) {
   return Promise.race([
     new Promise((resolve) => emitter.once(name, resolve)),
@@ -47,7 +50,7 @@ test("completes the app-server initialize handshake before other requests", asyn
   try {
     const initialized = waitForEvent(client, "test/initialized_seen");
     await client.initialize({ clientInfo: { name: "socketagent" } });
-    const event = await initialized;
+    const event = z.object({methods:z.array(z.string())}).parse(await initialized);
     assert.deepEqual(event.methods, ["initialize", "initialized"]);
 
     const metadata = await client.updateThreadMetadata({
@@ -71,18 +74,18 @@ test("thread resume excludes the native turn transcript by default", async () =>
     requestTimeoutMs: 1000,
   });
   try {
-    const result = await client.resumeThread({ threadId: "large-thread" });
+    const result = echoSchema.parse(await client.resumeThread({ threadId: "large-thread" }));
     assert.equal(result.method, "thread/resume");
     assert.equal(result.params.threadId, "large-thread");
     assert.equal(result.params.excludeTurns, true);
 
-    const explicit = await client.resumeThread({
+    const explicit = echoSchema.parse(await client.resumeThread({
       threadId: "history-client",
       excludeTurns: false,
-    });
+    }));
     assert.equal(explicit.params.excludeTurns, false);
 
-    const unsubscribe = await client.unsubscribeThread("large-thread");
+    const unsubscribe = echoSchema.parse(await client.unsubscribeThread("large-thread"));
     assert.equal(unsubscribe.method, "thread/unsubscribe");
     assert.equal(unsubscribe.params.threadId, "large-thread");
   } finally {
@@ -98,20 +101,20 @@ test("sends stable client user message IDs on turns and steers", async () => {
     requestTimeoutMs: 1000,
   });
   try {
-    const turn = await client.startTurn({
+    const turn = echoSchema.parse(await client.startTurn({
       threadId: "thread-1",
       clientUserMessageId: "phone-message-1",
       input: [{ type: "text", text: "hello" }],
       model: "test-model",
-    });
+    }));
     assert.equal(turn.params.clientUserMessageId, "phone-message-1");
 
-    const steer = await client.steerTurn({
+    const steer = echoSchema.parse(await client.steerTurn({
       threadId: "thread-1",
       expectedTurnId: "turn-1",
       clientUserMessageId: "phone-message-2",
       input: [{ type: "text", text: "more context" }],
-    });
+    }));
     assert.equal(steer.params.clientUserMessageId, "phone-message-2");
   } finally {
     await client.stop();
@@ -164,7 +167,7 @@ test("large fragmented thread responses finish without starving the request dead
     requestTimeoutMs: 5000,
   });
   try {
-    const result = await client.readThread({threadId: 'large', includeTurns: true});
+    const result = z.object({text:z.string()}).parse(await client.readThread({threadId: 'large', includeTurns: true}));
     assert.equal(result.text.length, bytes);
     assert.equal(result.text.at(-1), 'x');
   } finally { await client.stop(); }
@@ -172,9 +175,10 @@ test("large fragmented thread responses finish without starving the request dead
 
 test("JSONL framing preserves split lines, multiple messages, and malformed-line recovery", () => {
   const client = new CodexAppServerClient({cwd: process.cwd()});
+  /** @type {{method:string,params?:Record<string,unknown>}[]} */
   const seen = [];
   let malformed = 0;
-  client.on('notification', item => seen.push(item));
+  client.on('notification', (/** @type {unknown} */ item) => seen.push(z.object({method:z.string(),params:z.record(z.string(),z.unknown()).optional()}).parse(item)));
   client.on('malformed', () => malformed++);
   client.handleStdout('{"method":"first","params":{"text":"');
   client.handleStdout('hello"}}\n\ninvalid\n{"method":"second",');
@@ -190,7 +194,7 @@ test('paginated rewind sends an exclusive turn boundary and paginated verificati
  try{
   const revert=await client.revertThread('thread','turn');
   assert.deepEqual(revert,{method:'thread/revert',params:{threadId:'thread',beforeTurnId:'turn'}});
-  const page=await client.listThreadTurns({threadId:'thread',cursor:'next',limit:100,sortDirection:'asc',itemsView:'notLoaded'});
+  const page=echoSchema.parse(await client.listThreadTurns({threadId:'thread',cursor:'next',limit:100,sortDirection:'asc',itemsView:'notLoaded'}));
   assert.equal(page.method,'thread/turns/list');assert.equal(page.params.cursor,'next');assert.equal(page.params.itemsView,'notLoaded');
  }finally{await client.stop();}
 });
@@ -204,6 +208,7 @@ function removedRollback() {
 for (const mode of ['legacy', 'paginated']) {
   test(`removed rollback uses revert for ${mode} history and verifies the retained prefix`, async () => {
     const client = new CodexAppServerClient({cwd: process.cwd()});
+    /** @type {[string,unknown][]} */
     const calls = [];
     let migrated = mode === 'paginated', reverted = false;
     client.migrateLegacyThread = async id => {calls.push(['migrate', id]); migrated = true;};
@@ -221,7 +226,7 @@ for (const mode of ['legacy', 'paginated']) {
       }
       assert.fail(method);
     };
-    const result = await client.rollbackThread('target', 2);
+    const result = z.object({thread:z.object({turns:z.array(z.object({id:z.string()}))})}).parse(await client.rollbackThread('target', 2));
     assert.deepEqual(result.thread.turns, [{id: 'one'}]);
     assert.equal(calls.filter(([method]) => method === 'migrate').length, mode === 'legacy' ? 1 : 0);
   });

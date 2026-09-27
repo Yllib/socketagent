@@ -23,7 +23,7 @@ export class ClaudeStreamIdentity {
   private state(key: string): MessageState {
     let state = this.messages.get(key);
     if (!state) {
-      state = { blocks: [], completed: new Map() };
+      state = { blocks: [], completed: new Map<string, string[]>() };
       this.messages.set(key, state);
       // Keep completed-message reconciliation bounded in warm sessions.
       if (this.messages.size > 512) this.messages.delete(this.messages.keys().next().value!);

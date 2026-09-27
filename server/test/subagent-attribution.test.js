@@ -153,9 +153,10 @@ test("recycles a systemError app-server and surfaces its detailed error once", a
 
 test("releases the Codex thread writer while keeping the app-server warm", async () => {
   const session = new CodexSession(testSocket([]), process.cwd(), []);
+  /** @type {string[]} */
   const released = [];
   const client = {
-    unsubscribeThread: async (threadId) => { released.push(threadId); },
+    unsubscribeThread: async (/** @type {string} */ threadId) => { released.push(threadId); },
   };
   session.threadId = "shared-with-desktop";
   session.appServer = client;
@@ -1452,6 +1453,7 @@ test("Codex injection retries immediately with the authoritative active turn id"
   const rootId = `test-steer-recovery-${crypto.randomUUID()}`;
   const staleTurnId = "019fce7c-abc4-7c81-b004-9d0888edb621";
   const activeTurnId = "38a59137-3940-4f02-a974-79d121dd6e7e";
+  /** @type {string[]} */
   const attemptedTurnIds = [];
   const session = new CodexSession(testSocket(sent), process.cwd(), []);
   session.sessionId = rootId;

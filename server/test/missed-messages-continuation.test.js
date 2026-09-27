@@ -14,6 +14,7 @@ const { RESTART_CONTINUATION_PROMPT } = require("#server/restart-recovery");
 const SESSION_ID = "test-continuation-00000000-0000-4000-8000-000000000001";
 const CWD = path.join(os.tmpdir(), "socketagent-missed-messages-test");
 
+/** @param {unknown[]} lines */
 function writeTranscript(lines) {
   const p = getJsonlPath(SESSION_ID, CWD);
   fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -21,6 +22,7 @@ function writeTranscript(lines) {
   return p;
 }
 
+/** @param {string | {type: string, text: string}[]} content @param {string} timestamp */
 function userMessage(content, timestamp) {
   return { type: "user", timestamp, message: { role: "user", content } };
 }

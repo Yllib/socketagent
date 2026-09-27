@@ -61,6 +61,7 @@ const {
 } = require("#server/native-transcript-filter");
 const { mergeSessionListBase } = require("#server/session-list-snapshot");
 
+/** @param {string} name */
 const commandBlock = (name) =>
   `<command-name>/${name}</command-name>\n  <command-message>${name}</command-message>`;
 
@@ -165,8 +166,10 @@ test("a user-set title keeps the session listed", () => {
 // Rows exactly as the session list showed them. A tracked session is listed
 // straight out of the store and never meets the SDK converters, so the check
 // has to run on the assembled row as well.
+/** @param {string} id @param {string} title @param {string} messagePreview @returns {import("#server/protocol").SessionInfo} */
 const listRow = (id, title, messagePreview) => ({
   id,
+  cwd: "/tmp",
   title,
   messagePreview,
   createdAt: "2026-08-12T00:00:00.000Z",

@@ -28,6 +28,7 @@ function guidance() {
 
 test('new threads receive image guidance in developerInstructions, not collaboration settings', async () => {
   const session = new CodexSession({ readyState: 1, send() {} }, os.tmpdir(), []);
+  session.setModel('test-model');
   session.appServerConfig = () => ({});
   const instructions = session.buildAppServerThreadParams().developerInstructions;
   assert.match(instructions, /Inline chat images/);

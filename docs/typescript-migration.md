@@ -64,7 +64,7 @@ Use the report command for current rule and file counts.
 | --- | --- | --- |
 | Enforcement | Implemented | Checks in tests and pre-push; shrinking source-specific baseline; test rejection of new debt and bypasses. |
 | Codex transport, rewind, sign-in | Complete | Raw RPC responses stay unknown; validate consumed rewind, compaction, migration, and login fields. No baseline entries in these modules. |
-| Generated Codex contracts | Next | Generate from a recorded CLI version; typed method/response map for used APIs; verify schema drift. Keep runtime validation. |
+| Generated Codex contracts | Complete | Codex 0.157.1 snapshot, 34 typed request/response pairs, JSON schemas, manifest/hash checks, runtime response decoder. Goal APIs use generated validation; remaining responses migrate with adapters. |
 | Provider adapters | Pending | Migrate `codex-session.ts` and `claude-session.ts` using generated Codex and exported Claude types. Test streaming, completion, approvals, cancellation, and subagents. |
 | Persisted history | Pending | Validate JSON and database rows, including supported legacy records, in `session-store.ts` and `transcript-database.ts`. Test recovery, pagination, rewind, and archive reads. |
 | WebSocket routing | Pending | Validate incoming messages and narrow discriminated protocol types in `index.ts`. Test send, retry, receipt, reconnect, and session routing. |
@@ -87,9 +87,22 @@ assign nonoverlapping file ownership and give shared protocol types one owner.
 - Added boundary and enforcement tests using typed imports, without new baseline
   allowances. Existing provider behavior tests remain in place.
 
-Generated provider types and staged backend-update compatibility checks are not
-implemented in this batch. The targeted validators describe only fields actually
-consumed here, not the entire provider protocol.
+The first batch's targeted validators describe only fields consumed by those
+boundaries. Generated contracts now complement them. Staged backend-update
+activation checks remain separate work; this migration adds reproducible
+`npm run codex:generate-contracts` and `npm run codex:check-contracts` commands,
+not a new auto-update policy.
+
+## Local checkpoints
+
+- Server `735ae1c`: pending reliability, resume, and rewind UX work preserved.
+- App `d49b94d`: pending voice, auth, and reliable delivery work preserved.
+- Server `dbd064c`: initial type-safety gate and Codex boundary migration.
+- Generated contracts: validated locally before the next checkpoint. Request
+  aliases now follow the exported API. Config values use JSON types, collaboration
+  mode settings validate their supported values, and raw results remain unknown
+  unless a runtime decoder validates them. Tests that inspect collaboration
+  settings now select a model, as the real send path does.
 
 ## Validation log
 
@@ -102,3 +115,6 @@ consumed here, not the entire provider protocol.
   to add together. All four first-batch source modules have zero diagnostics.
 - `git diff --check` passed in both repositories. No push, deployment, server
   restart, or app rebuild was performed.
+- Contract checkpoint: build, lint, exported-protocol drift check, and full suite
+  passed; 539 tests passed, one skipped. Baseline is 9,258 diagnostics.
+  Output: `/tmp/sa-contract-full-tests.log`.

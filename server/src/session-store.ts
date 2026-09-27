@@ -3694,8 +3694,8 @@ export function isCodexNativeArchiveTs(ts: string): boolean {
   return ts.startsWith(CODEX_NATIVE_ARCHIVE_TS_PREFIX);
 }
 
-const CODEX_THREAD_LIST_SOURCE_KINDS = ["cli", "vscode", "appServer", "unknown"];
-const CODEX_THREAD_LOOKUP_SOURCE_KINDS = ["cli", "exec", "vscode", "appServer", "unknown"];
+const CODEX_THREAD_LIST_SOURCE_KINDS: CodexAppServerThreadListParams["sourceKinds"] = ["cli", "vscode", "appServer", "unknown"];
+const CODEX_THREAD_LOOKUP_SOURCE_KINDS: CodexAppServerThreadListParams["sourceKinds"] = ["cli", "exec", "vscode", "appServer", "unknown"];
 const CODEX_THREAD_LIST_LIMIT = 500;
 const SDK_SESSION_DISCOVERY_LIMIT = 2000;
 export const CLAUDE_NATIVE_CWD_LIMIT = 100;

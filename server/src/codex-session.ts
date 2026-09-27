@@ -1,4 +1,8 @@
 import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
+import type { JsonValue } from "./generated/codex/types/serde_json/JsonValue";
+import type { CollaborationMode } from "./generated/codex/types/CollaborationMode";
+import type { ModeKind } from "./generated/codex/types/ModeKind";
+import { isCodexRecord } from "./codex-rewind-contract";
 import { deliverCodexInstructions, invalidateCodexInstructions } from "./codex-instruction-delivery";
 import { requestTranscriptAccess } from "./transcript-access-approval";
 /**
@@ -91,15 +95,6 @@ function playReviewModeEnabled(): boolean {
   return process.env.SOCKETAGENT_PLAY_REVIEW_MODE === "1";
 }
 
-const CODEX_GOAL_STATUSES = new Set<CodexGoalStatus>([
-  "active",
-  "paused",
-  "blocked",
-  "usageLimited",
-  "budgetLimited",
-  "complete",
-]);
-
 export function codexThreadGitInfo(cwd: string): {
   sha?: string;
   branch?: string;
@@ -138,14 +133,13 @@ export function isCodexActiveWriterError(error: unknown): boolean {
 }
 
 function normalizeCodexGoal(value: unknown): CodexGoal | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const raw = value as Record<string, unknown>;
+  if (!isCodexRecord(value)) return null;
+  const raw = value;
   const threadId = typeof raw.threadId === "string" ? raw.threadId : "";
   const objective = typeof raw.objective === "string" ? raw.objective : "";
-  const status = typeof raw.status === "string" && CODEX_GOAL_STATUSES.has(raw.status as CodexGoalStatus)
-    ? raw.status as CodexGoalStatus
-    : null;
-  if (!threadId || !status) return null;
+  const status = raw.status;
+  if (!threadId || (status !== "active" && status !== "paused" && status !== "blocked"
+      && status !== "usageLimited" && status !== "budgetLimited" && status !== "complete")) return null;
   const finiteInt = (candidate: unknown): number => {
     const number = Number(candidate);
     return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
@@ -602,7 +596,7 @@ export class CodexSession {
   private _pendingTransferContext: string | null = null;
   private _preparedRolloverSessionId: string | null = null;
   private _disallowedTools: string[] = [];
-  private _collaborationMode = "default";
+  private _collaborationMode: ModeKind = "default";
   private _ttsEnabled = false;
   private _ttsEngine: "system" | "kokoro_server" | "kokoro_device" = "system";
   private _kokoroVoice = "af_heart";
@@ -1320,8 +1314,9 @@ export class CodexSession {
     this.setPendingTransferContext(context);
   }
   setCodexCollaborationMode(mode: string): void {
-    const trimmed = (mode || "default").trim();
-    this._collaborationMode = trimmed || "default";
+    const trimmed = mode.trim() || "default";
+    if (trimmed !== "default" && trimmed !== "plan") throw new Error(`Unsupported Codex collaboration mode: ${trimmed}`);
+    this._collaborationMode = trimmed;
     this.persistAgentSettings({ codexCollaborationMode: this._collaborationMode });
   }
   getCodexCollaborationMode(): string {
@@ -1485,7 +1480,7 @@ export class CodexSession {
   ): Promise<CodexGoal | null> {
     if (!threadId) throw new Error("No Codex thread id for goal");
     await this.ensureAppServer();
-    const result = await this.appServer!.getGoal(threadId) as { goal?: unknown };
+    const result = await this.appServer!.getGoal(threadId);
     return normalizeCodexGoal(result?.goal);
   }
 
@@ -1495,7 +1490,7 @@ export class CodexSession {
   ): Promise<CodexGoal> {
     if (!threadId) throw new Error("No Codex thread id for goal");
     await this.ensureAppServer();
-    const result = await this.appServer!.setGoal(threadId, update) as { goal?: unknown };
+    const result = await this.appServer!.setGoal(threadId, update);
     const goal = normalizeCodexGoal(result?.goal);
     if (!goal) throw new Error("Codex returned an invalid goal state");
     return goal;
@@ -3082,7 +3077,7 @@ export class CodexSession {
     approvalPolicy: CodexAppServerApprovalPolicy;
     approvalsReviewer: CodexAppServerApprovalsReviewer;
     model?: string;
-    config: Record<string, unknown>;
+    config: Record<string, JsonValue>;
     experimentalRawEvents: boolean;
     persistExtendedHistory: boolean;
   } {
@@ -3100,16 +3095,17 @@ export class CodexSession {
     };
   }
 
-  private appServerConfig(): Record<string, unknown> {
+  private appServerConfig(): Record<string, JsonValue> {
     if (!this.appServerMcpRegistration) {
       this.appServerMcpRegistration = registerCodexAppMcp(this.createAppToolContext());
     }
     const mcpUrl = this.buildCodexMcpUrl(this.appServerMcpRegistration.token);
-    const config: Record<string, unknown> = {
+    return {
       model_reasoning_effort: this.codexReasoningEffort(),
       suppress_unstable_features_warning: true,
       features: {
         default_mode_request_user_input: true,
+        ...(this._fastMode ? { fast_mode: true } : {}),
       },
       tools: {
         update_plan: { enabled: true },
@@ -3119,15 +3115,8 @@ export class CodexSession {
           url: mcpUrl,
         },
       },
+      ...(this._fastMode ? { service_tier: "fast" } : {}),
     };
-    if (this._fastMode) {
-      config.service_tier = "fast";
-      config.features = {
-        ...(config.features as Record<string, unknown>),
-        fast_mode: true,
-      };
-    }
-    return config;
   }
 
   private buildCodexTurnText(prompt: string): string {
@@ -4118,7 +4107,7 @@ export class CodexSession {
           this._effort = effort;
         }
         const collaborationMode = String(settings?.collaborationMode?.mode || "").trim();
-        if (collaborationMode) this._collaborationMode = collaborationMode;
+        if (collaborationMode === "default" || collaborationMode === "plan") this._collaborationMode = collaborationMode;
         const cwd = String(settings.cwd || "").trim();
         if (cwd) this.cwd = cwd;
         this.persistAgentSettings(this.getAgentSettings());
@@ -5804,12 +5793,13 @@ export class CodexSession {
     return parts.length > 0 ? parts.join("\n\n") : null;
   }
 
-  private codexCollaborationMode(): Record<string, unknown> | undefined {
+  private codexCollaborationMode(): CollaborationMode | undefined {
     const model = this.codexModel();
+    if (!model) return undefined;
     return {
       mode: this._collaborationMode,
       settings: {
-        ...(model ? { model } : {}),
+        model,
         reasoning_effort: this.codexReasoningEffort(),
         // Keep built-in mode instructions on older Codex versions. Current
         // versions ignore this field; integration guidance is delivered via
@@ -5949,7 +5939,7 @@ export async function rollbackCodexAppServerThread(threadId: string, cwd: string
 
 export async function getCodexAppServerGoal(threadId: string, cwd: string): Promise<CodexGoal | null> {
   return withStandaloneAppServerClient(cwd, async (client) => {
-    const result = await client.getGoal(threadId) as { goal?: unknown };
+    const result = await client.getGoal(threadId);
     return normalizeCodexGoal(result?.goal);
   });
 }
@@ -5960,7 +5950,7 @@ export async function setCodexAppServerGoal(
   update: { objective?: string; status?: CodexGoalStatus; tokenBudget?: number | null },
 ): Promise<CodexGoal> {
   return withStandaloneAppServerClient(cwd, async (client) => {
-    const result = await client.setGoal(threadId, update) as { goal?: unknown };
+    const result = await client.setGoal(threadId, update);
     const goal = normalizeCodexGoal(result?.goal);
     if (!goal) throw new Error("Codex returned an invalid goal state");
     return goal;

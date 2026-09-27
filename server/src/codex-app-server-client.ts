@@ -2,7 +2,20 @@ import { execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from "chil
 import { EventEmitter } from "events";
 import { promisify } from "util";
 import { z } from "zod";
+import type { CodexMethods } from "./generated/codex/methods";
+import type { SandboxMode } from "./generated/codex/types/v2/SandboxMode";
+import type { AskForApproval } from "./generated/codex/types/v2/AskForApproval";
+import type { ApprovalsReviewer } from "./generated/codex/types/v2/ApprovalsReviewer";
+import type { UserInput } from "./generated/codex/types/v2/UserInput";
+import type { InitializeCapabilities } from "./generated/codex/types/InitializeCapabilities";
+import type { ReviewTarget } from "./generated/codex/types/v2/ReviewTarget";
+
+type CodexRequestParams = { [M in keyof CodexMethods]: CodexMethods[M]["params"] } & {
+  // Retained only for older CLIs. Current versions use the verified revert fallback.
+  "thread/rollback": { threadId: string; numTurns: number };
+};
 import { isCodexRecord, parseRewindResponse } from "./codex-rewind-contract";
+import { parseCodexResponse } from "./codex-contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,42 +49,10 @@ const compactionNotificationSchema = z.object({
   willRetry: z.boolean().optional(),
 });
 
-export type CodexAppServerSandbox =
-  | "read-only"
-  | "workspace-write"
-  | "danger-full-access";
-
-export type CodexAppServerApprovalPolicy =
-  | "untrusted"
-  | "on-failure"
-  | "on-request"
-  | {
-      granular: {
-        sandbox_approval: boolean;
-        rules: boolean;
-        skill_approval: boolean;
-        request_permissions: boolean;
-        mcp_elicitations: boolean;
-      };
-    }
-  | "never";
-
-export type CodexAppServerApprovalsReviewer =
-  | "user"
-  | "auto_review"
-  | "guardian_subagent";
-
-export type CodexAppServerUserInput =
-  | {
-      type: "text";
-      text: string;
-      text_elements?: unknown[];
-    }
-  | {
-      type: "skill";
-      name: string;
-      path: string;
-    };
+export type CodexAppServerSandbox = SandboxMode;
+export type CodexAppServerApprovalPolicy = AskForApproval;
+export type CodexAppServerApprovalsReviewer = ApprovalsReviewer;
+export type CodexAppServerUserInput = Extract<UserInput, { type: "text" | "skill" }>;
 
 export interface CodexAppServerClientInfo {
   name: string;
@@ -92,101 +73,18 @@ export interface CodexAppServerOptions {
 
 export interface CodexAppServerInitializeParams {
   clientInfo: CodexAppServerClientInfo;
-  capabilities?: {
-    experimentalApi?: boolean;
-    requestAttestation?: boolean;
-    [key: string]: unknown;
-  };
+  capabilities?: Partial<InitializeCapabilities>;
 }
 
-export interface CodexAppServerThreadStartParams {
-  cwd: string;
-  developerInstructions?: string | null;
-  sandbox?: CodexAppServerSandbox;
-  approvalPolicy?: CodexAppServerApprovalPolicy;
-  approvalsReviewer?: CodexAppServerApprovalsReviewer;
-  model?: string;
-  config?: unknown;
-  experimentalRawEvents?: boolean;
-  persistExtendedHistory?: boolean;
-  [key: string]: unknown;
-}
-
-export interface CodexAppServerThreadResumeParams {
-  threadId: string;
-  developerInstructions?: string | null;
-  cwd?: string;
-  sandbox?: CodexAppServerSandbox;
-  approvalPolicy?: CodexAppServerApprovalPolicy;
-  approvalsReviewer?: CodexAppServerApprovalsReviewer;
-  model?: string;
-  config?: unknown;
-  experimentalRawEvents?: boolean;
-  persistExtendedHistory?: boolean;
-  /**
-   * Resume the runtime without serializing every historical turn into the
-   * response. SocketAgent hydrates chat history through its own paginated
-   * store, so returning the native transcript is both redundant and
-   * prohibitively expensive for long-running sessions.
-   */
-  excludeTurns?: boolean;
-  [key: string]: unknown;
-}
-
-export interface CodexAppServerTurnStartParams {
-  threadId: string;
-  clientUserMessageId?: string | null;
-  input: CodexAppServerUserInput[];
-  model: string;
-  cwd?: string;
-  collaborationMode?: unknown;
-  [key: string]: unknown;
-}
-
-export interface CodexAppServerTurnSteerParams {
-  threadId: string;
-  clientUserMessageId?: string | null;
-  expectedTurnId: string;
-  input: CodexAppServerUserInput[];
-  responsesapiClientMetadata?: Record<string, unknown> | null;
-}
-
-export interface CodexAppServerTurnInterruptParams {
-  threadId: string;
-  turnId?: string;
-}
-
-export interface CodexAppServerThreadReadParams {
-  threadId: string;
-  includeTurns: boolean;
-}
-
-export interface CodexAppServerThreadListParams {
-  archived?: boolean | null;
-  cursor?: string | null;
-  cwd?: string | string[] | null;
-  limit?: number | null;
-  modelProviders?: string[] | null;
-  searchTerm?: string | null;
-  sortDirection?: "asc" | "desc" | null;
-  sortKey?: "created_at" | "updated_at" | null;
-  sourceKinds?: string[] | null;
-  useStateDbOnly?: boolean;
-}
-
-export interface CodexAppServerThreadLoadedListParams {
-  cursor?: string | null;
-  limit?: number | null;
-}
-
-export interface CodexAppServerThreadMetadataUpdateParams {
-  threadId: string;
-  gitInfo?: {
-    sha?: string | null;
-    branch?: string | null;
-    originUrl?: string | null;
-  } | null;
-}
+export type CodexAppServerThreadStartParams = CodexMethods["thread/start"]["params"];
+export type CodexAppServerThreadResumeParams = CodexMethods["thread/resume"]["params"];
+export type CodexAppServerTurnStartParams = CodexMethods["turn/start"]["params"];
+export type CodexAppServerTurnSteerParams = CodexMethods["turn/steer"]["params"];
+export type CodexAppServerTurnInterruptParams = CodexMethods["turn/interrupt"]["params"];
+export type CodexAppServerThreadReadParams = CodexMethods["thread/read"]["params"];
+export type CodexAppServerThreadListParams = CodexMethods["thread/list"]["params"];
+export type CodexAppServerThreadLoadedListParams = CodexMethods["thread/loaded/list"]["params"];
+export type CodexAppServerThreadMetadataUpdateParams = CodexMethods["thread/metadata/update"]["params"];
 
 export interface CodexAppServerNotification<T = unknown> {
   method: string;
@@ -291,7 +189,14 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   async initialize(params: CodexAppServerInitializeParams): Promise<unknown> {
-    const result = await this.request("initialize", params, this.options.startupTimeoutMs);
+    const result = await this.request("initialize", {
+      clientInfo: { name: params.clientInfo.name, title: params.clientInfo.title ?? null, version: params.clientInfo.version ?? "1.0.0" },
+      capabilities: params.capabilities ? {
+        ...params.capabilities,
+        experimentalApi: params.capabilities.experimentalApi ?? false,
+        requestAttestation: params.capabilities.requestAttestation ?? false,
+      } : null,
+    }, this.options.startupTimeoutMs);
     this.notify("initialized", {});
     this.initializeParams = params;
     return result;
@@ -319,7 +224,7 @@ export class CodexAppServerClient extends EventEmitter {
     });
   }
 
-  async forkThread(params: CodexAppServerThreadResumeParams): Promise<unknown> {
+  async forkThread(params: CodexMethods["thread/fork"]["params"]): Promise<unknown> {
     return this.request("thread/fork", params);
   }
 
@@ -399,12 +304,12 @@ export class CodexAppServerClient extends EventEmitter {
     } finally { cleanup(); }
   }
 
-  async getGoal(threadId: string): Promise<unknown> {
-    return this.request("thread/goal/get", { threadId });
+  async getGoal(threadId: string) {
+    return parseCodexResponse("thread/goal/get", await this.request("thread/goal/get", { threadId }));
   }
 
-  async setGoal(threadId: string, params: { objective?: string; status?: string; tokenBudget?: number | null }): Promise<unknown> {
-    return this.request("thread/goal/set", { threadId, ...params });
+  async setGoal(threadId: string, params: Omit<CodexMethods["thread/goal/set"]["params"], "threadId">) {
+    return parseCodexResponse("thread/goal/set", await this.request("thread/goal/set", { threadId, ...params }));
   }
 
   async clearGoal(threadId: string): Promise<unknown> {
@@ -412,7 +317,7 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   async startReview(threadId: string, instructions?: string): Promise<unknown> {
-    const target = instructions && instructions.trim()
+    const target: ReviewTarget = instructions && instructions.trim()
       ? { type: "custom", instructions: instructions.trim() }
       : { type: "uncommittedChanges" };
     return this.request("review/start", { threadId, target, delivery: "inline" });
@@ -515,8 +420,7 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("thread/revert", { threadId, beforeTurnId });
   }
 
-  async listThreadTurns(params: { threadId: string; cursor?: string; limit?: number;
-    sortDirection?: "asc" | "desc"; itemsView?: "notLoaded" | "summary" | "full" }): Promise<unknown> {
+  async listThreadTurns(params: CodexMethods["thread/turns/list"]["params"]): Promise<unknown> {
     return this.request("thread/turns/list", params);
   }
 
@@ -544,9 +448,9 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("collaborationMode/list", {});
   }
 
-  async request(
-    method: string,
-    params: object | undefined,
+  async request<M extends keyof CodexRequestParams>(
+    method: M,
+    params: CodexRequestParams[M],
     timeoutMs = this.options.requestTimeoutMs ?? 30_000,
   ): Promise<unknown> {
     this.start();

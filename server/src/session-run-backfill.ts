@@ -21,6 +21,7 @@ function timestampMs(value: unknown): number | undefined {
 function isSyntheticPrompt(content: string): boolean {
   const text = content.trimStart();
   return text.startsWith("<socketagent_delegation_report")
+    || text.startsWith("<socketagent_scheduled_task_report")
     || text.startsWith("<local-command-")
     || text.startsWith("<command-name>")
     || text.startsWith("[System:")

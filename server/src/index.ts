@@ -35,6 +35,7 @@ import * as os from "os";
 import * as path from "path";
 import { RestartRecoveryStore, RestartRecoveryWorker, boundedRecoverySetup, RESTART_CONTINUATION_PROMPT } from "./restart-recovery";
 import { finishRecoveredScheduledTask } from "./scheduled-task-store";
+import { ScheduledTaskCallbacks, scheduledTaskReportMarker, scheduledTaskReportPrompt } from "./scheduled-task-callbacks";
 import { flushSessionStore, flushSdkEventQueue } from "./session-store";
 import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
@@ -2367,14 +2368,22 @@ async function runDelegatedSupervisorReport(
 ): Promise<void> {
   publishDelegatedAgentResultCard(record, run);
   if (delegatedReportAlreadyPersisted(record, run)) return;
-  assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
-  reactivateLogicalRun(record.supervisorSessionId);
-  const text = delegatedReportPrompt(record, run);
-  const existing = activeSessions.get(record.supervisorSessionId);
+  await runSessionReport(record.supervisorSessionId, delegatedReportPrompt(record, run),
+    `delegated-report:${record.delegationId}:${run.runId}`, "delegated agent completion");
+}
+
+/** Shared continuation route for delegated work and explicitly linked schedules. */
+async function runSessionReport(sessionId: string, text: string, messageId: string, reason: string): Promise<void> {
+  if (!serverReady || restartPreparing || shuttingDown || continuationStarting.has(sessionId) || isCodexRewinding(sessionId)) {
+    throw new Error("Session is not ready for an automated report");
+  }
+  assertSessionAutomationAllowed(sessionId, reason);
+  reactivateLogicalRun(sessionId);
+  const existing = activeSessions.get(sessionId);
   if (existing) {
     const initialization = existing._socketAgentInitialization;
     if (initialization) await initialization;
-    assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
+    assertSessionAutomationAllowed(sessionId, reason);
     if (existing.isRunning) {
       // Exactly the same safe-boundary injection used for a user's mid-run
       // message. There is no per-parent delivery queue in front of this call.
@@ -2382,25 +2391,25 @@ async function runDelegatedSupervisorReport(
         target: existing,
         isRunning: existing.isRunning,
         prompt: text,
-        messageId: `delegated-report:${record.delegationId}:${run.runId}`,
+        messageId,
       });
     } else if (existing.isCompacting === true) {
-      throw new Error(`Supervisor session ${record.supervisorSessionId} is compacting`);
+      throw new Error(`Supervisor session ${sessionId} is compacting`);
     } else {
-      await existing.runQuery(text, record.supervisorSessionId);
+      await existing.runQuery(text, sessionId);
     }
     return;
   }
 
-  const supervisorInfo = getSession(record.supervisorSessionId);
+  const supervisorInfo = getSession(sessionId);
   if (!supervisorInfo) {
-    throw new Error(`Supervisor session ${record.supervisorSessionId} no longer exists`);
+    throw new Error(`Supervisor session ${sessionId} no longer exists`);
   }
   let supervisor: Session;
   const headlessSocket = {
     readyState: WebSocket.OPEN,
     send: (data: string) =>
-      broadcastHeadlessSessionMessage(data, supervisor?.getSessionId() || record.supervisorSessionId),
+      broadcastHeadlessSessionMessage(data, supervisor?.getSessionId() || sessionId),
   };
   supervisor = createSession(
     supervisorInfo.backend,
@@ -2409,22 +2418,22 @@ async function runDelegatedSupervisorReport(
     plugins,
     getStoredCodexDriver(supervisorInfo),
   );
-  supervisor._resumeSessionId = record.supervisorSessionId;
+  supervisor._resumeSessionId = sessionId;
   attachSessionLifecycleCallbacks(supervisor);
   const initialization = (async () => {
     await restorePersistedPermissionMode(supervisor, supervisorInfo);
     await restorePersistedAgentSettings(supervisor, supervisorInfo);
   })();
   supervisor._socketAgentInitialization = initialization;
-  activeSessions.set(record.supervisorSessionId, supervisor);
+  activeSessions.set(sessionId, supervisor);
   try {
     await initialization;
     delete supervisor._socketAgentInitialization;
-    assertSessionAutomationAllowed(record.supervisorSessionId, "delegated agent completion");
-    await supervisor.runQuery(text, record.supervisorSessionId);
+    assertSessionAutomationAllowed(sessionId, reason);
+    await supervisor.runQuery(text, sessionId);
   } finally {
     delete supervisor._socketAgentInitialization;
-    const sid = supervisor.getSessionId() || record.supervisorSessionId;
+    const sid = supervisor.getSessionId() || sessionId;
     if (supervisor.isWarmIdle) {
       await supervisor.closeWarmIdle();
     }
@@ -5578,6 +5587,10 @@ function createConnectionHandler(
       // ── Scheduled tasks ──
 
       case "schedule_task": {
+        if (msg.linkedSessionId && !getSession(msg.linkedSessionId)) {
+          sendJson({ type: "error", message: "The linked session no longer exists on this computer" });
+          break;
+        }
         const recurrence = msg.recurrence;
         const backend = msg.backend === "codex" ? "codex" : "claude";
         const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
@@ -5598,6 +5611,7 @@ function createConnectionHandler(
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
           ...(permissionMode ? { permissionMode } : {}),
+          ...(msg.linkedSessionId ? { linkedSessionId: msg.linkedSessionId } : {}),
           scheduledTime: msg.scheduledTime,
           createdAt: new Date().toISOString(),
           status: "pending",
@@ -9015,6 +9029,7 @@ function appendRecoveryNotice(sessionId: string, content: string): void {
 function settleRecoveredSchedule(sessionId: string, outcome: "completed" | "failed", summary: string): void {
   const task = finishRecoveredScheduledTask(sessionId, outcome, summary);
   if (!task) return;
+  void scheduledTaskCallbacks.flush();
   broadcastScheduledTaskList();
   if (scheduledTaskUsesAutomaticNotifications(task)) {
     broadcastScheduledTaskNotification(`${scheduledTaskDisplayName(task)} ${outcome}`, summary, sessionId, outcome, { scheduledTaskId: task.id });
@@ -10017,7 +10032,11 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
   const originalStatus = task.status;
   const runNumber = (task.runCount || 0) + 1;
   const currentRun: import("./scheduled-task-store").TaskRun = {
-    sessionId: task.sessionId || "",
+    ...(task.linkedSessionId ? {
+      callbackSessionId: task.linkedSessionId,
+      callbackStatus: "pending" as const,
+    } : {}),
+    sessionId: "",
     startedAt: new Date().toISOString(),
     status: "running",
     trigger,
@@ -10042,6 +10061,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       if (manualRun) finishManualScheduledTask(task, originalStatus, false);
       else task.status = "failed";
       saveScheduledTask(task);
+      void scheduledTaskCallbacks.flush();
       broadcastScheduledTaskList();
       if (scheduledTaskUsesAutomaticNotifications(task)) {
         broadcastScheduledTaskNotification(
@@ -10181,6 +10201,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         task.status = "completed";
       }
       saveScheduledTask(task);
+      void scheduledTaskCallbacks.flush();
 
       broadcastScheduledTaskList();
       broadcastSessionList();
@@ -10249,6 +10270,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         task.status = "failed";
       }
       saveScheduledTask(task);
+      void scheduledTaskCallbacks.flush();
 
       broadcastScheduledTaskList();
       broadcastSessionList();
@@ -10289,6 +10311,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     if (manualRun) finishManualScheduledTask(task, originalStatus, false);
     else task.status = "failed";
     saveScheduledTask(task);
+    void scheduledTaskCallbacks.flush();
     broadcastScheduledTaskList();
     if (scheduledTaskUsesAutomaticNotifications(task)) {
       broadcastScheduledTaskNotification(
@@ -10302,8 +10325,35 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
   }
 }
 
+const scheduledTaskCallbacks = new ScheduledTaskCallbacks({
+  list: listScheduledTasks,
+  get: getScheduledTask,
+  save: (task) => { saveScheduledTask(task); broadcastScheduledTaskList(); },
+  deliver: async (task, run) => {
+    const sessionId = run.callbackSessionId;
+    if (!sessionId) return;
+    // The durable prompt is also the receipt if the process dies before saving
+    // the outbox acknowledgement. Never inject the same run twice.
+    if (hasPersistedUserContentPrefix(sessionId, scheduledTaskReportMarker(task, run))) return;
+    const result = run.status === "failed"
+      ? run.error || "Scheduled task failed"
+      : run.sessionId ? delegatedAgentResult(run.sessionId, run.startedAt)
+      : run.resultSummary || "Task completed without a final text response.";
+    await runSessionReport(sessionId, scheduledTaskReportPrompt(task, run, result),
+      `scheduled-report:${task.id}:${run.startedAt}`, "scheduled task completion");
+    if (!hasPersistedUserContentPrefix(sessionId, scheduledTaskReportMarker(task, run))) {
+      throw new Error("The session has not acknowledged the scheduled result yet");
+    }
+    const active = activeSessions.get(sessionId);
+    if (!active || !sessionIsBusy(active)) setSessionRunSupervisorSettled(sessionId, true, "completed");
+    maybeFinalizeLogicalRun(sessionId);
+  },
+  onError: (error) => console.warn(`[Scheduler] Session callback pending: ${errorMessage(error)}`),
+});
+
 async function checkScheduledTasks(): Promise<void> {
   if (!serverReady || restartPreparing || shuttingDown) return;
+  void scheduledTaskCallbacks.flush();
   const dueTasks = getDueTasks();
   for (const task of dueTasks) {
     executeScheduledTask(task).catch((err: unknown) => {

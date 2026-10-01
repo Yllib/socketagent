@@ -3028,6 +3028,9 @@
         {
           "type": "object",
           "properties": {
+            "linkedSessionId": {
+              "type": "string"
+            },
             "type": {
               "type": "string",
               "const": "schedule_task"

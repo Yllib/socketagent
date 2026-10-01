@@ -17,6 +17,10 @@ export interface RecurrenceConfig {
 export type ScheduledTaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export interface TaskRun {
+  /** Captured at launch so later schedule edits cannot redirect a result. */
+  callbackSessionId?: string;
+  callbackStatus?: "pending" | "delivered";
+  callbackDeliveredAt?: string;
   sessionId: string;
   codexDriver?: CodexDriver;
   startedAt: string;
@@ -45,6 +49,8 @@ export interface ScheduledTask {
   resultSummary?: string;
   error?: string;
   createdBySessionId?: string;
+  /** Opt-in destination for results and automatic agent continuation. */
+  linkedSessionId?: string;
   // Recurrence
   recurrence?: RecurrenceConfig;
   /** Carry bounded context from recent runs. The wire name is kept for client compatibility. */
@@ -189,7 +195,9 @@ function readTasks(): ScheduledTask[] {
 
 function writeTasks(tasks: ScheduledTask[]): void {
   ensureDir();
-  fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2), "utf-8");
+  const temporary = `${TASKS_FILE}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(tasks, null, 2), "utf-8");
+  fs.renameSync(temporary, TASKS_FILE);
 }
 
 export function listScheduledTasks(): ScheduledTask[] {
@@ -219,6 +227,18 @@ export function saveScheduledTask(task: ScheduledTask): void {
   const tasks = readTasks();
   const idx = tasks.findIndex((t) => t.id === task.id);
   if (idx >= 0) {
+    // A running scheduler holds an older task object while callbacks are
+    // acknowledged. Its next save must not put acknowledged results back in
+    // the outbox, particularly after a recurring task starts another run.
+    const delivered = new Map((tasks[idx].runs || [])
+      .filter(run => run.callbackStatus === "delivered")
+      .map(run => [run.startedAt, run]));
+    task = { ...task, runs: task.runs?.map(run => {
+      const previous = delivered.get(run.startedAt);
+      return previous && previous.callbackSessionId === run.callbackSessionId
+        ? { ...run, callbackStatus: previous.callbackStatus, callbackDeliveredAt: previous.callbackDeliveredAt }
+        : run;
+    }) };
     tasks[idx] = task;
   } else {
     tasks.push(task);

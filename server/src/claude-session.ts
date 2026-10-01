@@ -31,7 +31,6 @@ import {
   WorkflowStatePayload,
 } from "./protocol";
 import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, recordUserPrompt, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, cacheToolImage, positionSessionMessage, clearSessionPendingHandoffContext, removeHistoryEntriesByUuids } from "./session-store";
-import { saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
   AppToolContext,
@@ -43,6 +42,7 @@ import {
   handleRememberTool,
   handleRequestSecureInputTool,
   handleScheduleReminderTool,
+  handleScheduleTaskTool,
   handleSendFileTool,
   handleSpeakTool,
   handleTaskBatchTool,
@@ -3542,61 +3542,10 @@ export class ClaudeSession {
               recurrenceType: z.enum(["once", "daily", "weekly", "monthly", "custom"]).optional().describe("How often to repeat. Default: once (no recurrence)"),
               customIntervalMs: z.number().optional().describe("Custom interval in milliseconds (only used when recurrenceType is 'custom')"),
               reuseSession: z.boolean().optional().describe("If true and recurring, start each occurrence in a fresh session with summaries from the two most recent runs"),
+              linkToSession: z.boolean().optional().describe("If true, link to this session and automatically return each run result here so this agent can continue. The task still runs independently. Omit or false for a standalone task."),
               notificationMode: z.enum(["completion", "quiet"]).optional().describe("completion sends the normal completion notification. quiet sends no automatic notifications; the scheduled agent must call NotifyUser if the user should be alerted."),
             },
-            async (args) => {
-              const scheduledDate = new Date(args.scheduledTime);
-              if (isNaN(scheduledDate.getTime())) {
-                return { content: [{ type: "text" as const, text: `Invalid date format: ${args.scheduledTime}. Use ISO 8601 format.` }] };
-              }
-              if (scheduledDate.getTime() <= Date.now()) {
-                return { content: [{ type: "text" as const, text: `Scheduled time is in the past. Please provide a future time.` }] };
-              }
-
-              const recurrenceType = args.recurrenceType || "once";
-              const recurrence: RecurrenceConfig | undefined = recurrenceType !== "once" ? {
-                type: recurrenceType,
-                intervalMs: recurrenceType === "custom" ? args.customIntervalMs : undefined,
-              } : undefined;
-
-              const backend = args.backend || "claude";
-              const task: ScheduledTask = {
-                id: crypto.randomUUID(),
-                ...(args.name?.trim() ? { name: args.name.trim() } : {}),
-                prompt: args.prompt,
-                cwd: args.cwd,
-                backend,
-                ...(backend === "codex" ? { codexDriver: "app-server" as const } : {}),
-                ...(args.model?.trim() ? { model: args.model.trim() } : {}),
-                ...(args.effort ? { effort: args.effort } : {}),
-                ...(args.permissionMode ? { permissionMode: args.permissionMode } : {}),
-                scheduledTime: args.scheduledTime,
-                createdAt: new Date().toISOString(),
-                status: "pending",
-                createdBySessionId:
-                  appToolContext.getDelegationSupervisorSessionId?.() ||
-                  this.sessionId ||
-                  undefined,
-                recurrence,
-                reuseSession: args.reuseSession || false,
-                notificationMode: args.notificationMode === "quiet" ? "quiet" : "completion",
-                runCount: 0,
-                runs: [],
-              };
-              saveScheduledTask(task);
-
-              // Notify the app about the new task
-              this.send({
-                type: "scheduled_task_update",
-                task,
-              });
-
-              const when = scheduledDate.toLocaleString();
-              const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
-              const notificationLabel = task.notificationMode === "quiet" ? " Quiet mode is on." : "";
-              const label = task.name ? `"${task.name}"` : "Task";
-              return { content: [{ type: "text" as const, text: `${label} scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
-            }
+            async (args) => handleScheduleTaskTool(appToolContext, args),
           ),
           tool(
             "TaskBatch",

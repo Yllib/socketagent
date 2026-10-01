@@ -356,6 +356,7 @@ function createServer(context: AppToolContext): McpServer {
         recurrenceType: z.enum(["once", "daily", "weekly", "monthly", "custom"]).optional().describe("How often to repeat. Default: once"),
         customIntervalMs: z.number().optional().describe("Custom interval in milliseconds when recurrenceType is custom"),
         reuseSession: z.boolean().optional().describe("If true and recurring, start each occurrence in a fresh session with summaries from the two most recent runs"),
+        linkToSession: z.boolean().optional().describe("If true, link to this session and automatically return each run result here so this agent can continue. The task still runs independently. Omit or false for a standalone task."),
         notificationMode: z.enum(["completion", "quiet"]).optional().describe("completion sends the normal completion notification. quiet sends no automatic notifications; the scheduled agent must call NotifyUser if the user should be alerted."),
       },
     },

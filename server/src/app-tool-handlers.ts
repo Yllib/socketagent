@@ -403,6 +403,7 @@ export interface NotifyUserArgs {
 }
 
 export interface ScheduleTaskArgs {
+  linkToSession?: boolean;
   name?: string;
   prompt: string;
   cwd: string;
@@ -1462,6 +1463,11 @@ export async function handleScheduleTaskTool(
     return { content: [{ type: "text", text: "Scheduled time is in the past. Please provide a future time." }] };
   }
 
+  const linkedSessionId = args.linkToSession ? ctx.getSessionId() : undefined;
+  if (args.linkToSession && !linkedSessionId) {
+    return { isError: true, content: [{ type: "text", text: "This task cannot be linked until the current session has an ID." }] };
+  }
+
   const recurrenceType = args.recurrenceType || "once";
   const recurrence: RecurrenceConfig | undefined = recurrenceType !== "once" ? {
     type: recurrenceType,
@@ -1488,6 +1494,7 @@ export async function handleScheduleTaskTool(
       ctx.getDelegationSupervisorSessionId?.() ||
       ctx.getSessionId() ||
       undefined,
+    ...(linkedSessionId ? { linkedSessionId } : {}),
     recurrence,
     reuseSession: args.reuseSession || false,
     notificationMode: args.notificationMode === "quiet" ? "quiet" : "completion",
@@ -1503,7 +1510,8 @@ export async function handleScheduleTaskTool(
 
   const when = scheduledDate.toLocaleString();
   const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
-  const notificationLabel = task.notificationMode === "quiet" ? " Quiet mode is on." : "";
+  const notificationLabel = (task.notificationMode === "quiet" ? " Quiet mode is on." : "")
+    + (linkedSessionId ? " Results will return to this session and continue its agent." : "");
   const label = task.name ? `"${task.name}"` : "Task";
   return { content: [{ type: "text", text: `${label} scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
 }

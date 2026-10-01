@@ -1041,6 +1041,8 @@ export interface ListSdkSessionsMessage {
 }
 
 export interface ScheduleTaskMessage {
+  /** Optional session on this server to receive results and continue its agent. */
+  linkedSessionId?: string;
   type: "schedule_task";
   name?: string;
   prompt: string;

@@ -411,6 +411,9 @@
         "createdBySessionId": {
           "type": "string"
         },
+        "linkedSessionId": {
+          "type": "string"
+        },
         "recurrence": {
           "$ref": "#/definitions/RecurrenceConfig"
         },
@@ -496,6 +499,19 @@
     "TaskRun": {
       "type": "object",
       "properties": {
+        "callbackSessionId": {
+          "type": "string"
+        },
+        "callbackStatus": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "delivered"
+          ]
+        },
+        "callbackDeliveredAt": {
+          "type": "string"
+        },
         "sessionId": {
           "type": "string"
         },

@@ -3827,7 +3827,9 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
         });
         for (const info of sdkSessions) {
           if (archivedIds.has(info.sessionId)) continue;
-          const session = sdkSessionInfoToSessionInfo(info, storedById.get(info.sessionId));
+          const tracked = storedById.get(info.sessionId);
+          if (!tracked && isHeadlessClaudeSession(info.sessionId, info.cwd || cwd)) continue;
+          const session = sdkSessionInfoToSessionInfo(info, tracked);
           if (session) deduped.set(session.id, session);
         }
       } catch (err: unknown) {
@@ -3839,6 +3841,39 @@ async function listClaudeNativeSessionsFromSdk(useCache = true): Promise<Session
     .sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
   claudeNativeSessionsCache = { at: nowMs, sessions };
   return sessions;
+}
+
+const headlessClaudeSessions = new Map<string, boolean>();
+
+/**
+ * True when another program started this Claude session through the Agent
+ * SDK, such as the Feedback Hub worker. SocketAgent's own SDK sessions are in
+ * the store, so an untracked SDK transcript belongs to someone else. These stay
+ * out of the list the same way Codex `exec` threads do. A session's entrypoint
+ * never changes, so the answer is cached.
+ */
+function isHeadlessClaudeSession(sessionId: string, cwd: string): boolean {
+  const cached = headlessClaudeSessions.get(sessionId);
+  if (cached !== undefined) return cached;
+  const headless = isHeadlessClaudeTranscript(getJsonlPath(sessionId, cwd));
+  headlessClaudeSessions.set(sessionId, headless);
+  return headless;
+}
+
+/** Reads the transcript's entrypoint from its first entries. Unreadable means not headless. */
+export function isHeadlessClaudeTranscript(filePath: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const head = Buffer.alloc(64 * 1024);
+    const length = fs.readSync(fd, head, 0, head.length, 0);
+    const entrypoint = /"entrypoint":"([^"]+)"/.exec(head.toString("utf8", 0, length))?.[1];
+    return entrypoint?.startsWith("sdk-") ?? false;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 export async function getClaudeNativeSessionInfo(sessionId: string): Promise<SessionInfo | undefined> {

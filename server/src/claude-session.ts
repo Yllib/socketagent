@@ -1852,6 +1852,27 @@ export class ClaudeSession {
     }
   }
 
+  /**
+   * Stores the record for a conversation this stream started, titled from its
+   * first prompt. A pooled stream reports init again on later turns, and by
+   * then the record holds the user's rename, run stats, and settings, so only
+   * the first init creates it.
+   */
+  private _createSessionRecord(sessionId: string, firstPrompt: string): void {
+    if (getSession(sessionId)) return;
+    const now = new Date().toISOString();
+    saveSession({
+      id: sessionId,
+      title: firstPrompt.slice(0, 50) + (firstPrompt.length > 50 ? "..." : ""),
+      cwd: this.cwd,
+      createdAt: now,
+      lastActive: now,
+      messagePreview: "",
+      backend: "claude",
+      agentSettings: this.getAgentSettings(),
+    });
+  }
+
   private _handleClaudeConversationReset(message: unknown): void {
     if (!isRecord(message)) return;
     const previousSessionId = this.sessionId || String(message?.session_id || "");
@@ -4595,18 +4616,7 @@ export class ClaudeSession {
             this.onSessionIdChanged?.(replacesSessionId, message.session_id);
             this.replacesSessionId = undefined;
           } else if (!resumeSessionId) {
-            const title = prompt.slice(0, 50) + (prompt.length > 50 ? "..." : "");
-            const sessionInfo: SessionInfo = {
-              id: message.session_id,
-              title,
-              cwd: this.cwd,
-              createdAt: new Date().toISOString(),
-              lastActive: new Date().toISOString(),
-              messagePreview: "",
-              backend: "claude",
-              agentSettings: this.getAgentSettings(),
-            };
-            saveSession(sessionInfo);
+            this._createSessionRecord(message.session_id, prompt);
           }
 
           this.send({

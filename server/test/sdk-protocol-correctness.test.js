@@ -295,6 +295,21 @@ test("retracts superseded Claude messages from durable and live history", () => 
   }
 });
 
+test("a repeated Claude init keeps the stored session record", () => {
+  const sessionId = `claude-init-${crypto.randomUUID()}`;
+  const session = new ClaudeSession(testSocket([]), process.cwd(), []);
+  try {
+    session._createSessionRecord(sessionId, "first prompt");
+    const created = getSession(sessionId);
+    assert.equal(created?.title, "first prompt");
+    saveSession({ ...created, title: "Renamed" });
+    session._createSessionRecord(sessionId, "first prompt");
+    assert.equal(getSession(sessionId)?.title, "Renamed");
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});
+
 test("remaps a Claude conversation reset without losing session metadata", () => {
   /** @type {import("#server/protocol").ServerMessage[]} */
   const sent = [];

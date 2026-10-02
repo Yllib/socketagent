@@ -49,6 +49,8 @@ export interface BrowserSnapshotElement {
   /** Present only on things that can be on or off. */
   checked?: boolean;
   disabled: boolean;
+  /** The embedded frame holding the element. Absent for the page itself. */
+  frame?: number;
 }
 
 export interface BrowserSnapshot {
@@ -57,6 +59,8 @@ export interface BrowserSnapshot {
   title: string;
   text: string;
   elements: BrowserSnapshotElement[];
+  /** Embedded frames with content, numbered as elements reference them. */
+  frames: Array<{ frame: number; url: string }>;
 }
 
 export type BrowserPhoneInput =
@@ -72,6 +76,8 @@ export type BrowserPhoneInput =
 interface CdpResponse {
   id?: number;
   method?: string;
+  /** Set on traffic for an attached child target, such as an out-of-process frame. */
+  sessionId?: string;
   params?: JsonRecord;
   result?: JsonRecord;
   error?: { message?: string };
@@ -115,7 +121,25 @@ interface RunningBrowserSession {
   lastUsedAt: string;
   idleTimer?: NodeJS.Timeout;
   watch?: BrowserWatch;
+  /** CDP sessions of attached out-of-process frames. */
+  frameTargets: Set<string>;
+  /** The frame each element ref from the latest snapshot lives in. */
+  refFrames: Map<string, PageFrame>;
+  /** The isolated world agent scripts use in each embedded frame, by frame ID. */
+  frameContexts: Map<string, number>;
 }
+
+/** One frame of the page, as the agent's scripts reach it. */
+interface PageFrame {
+  frameId: string;
+  /** CDP session of the out-of-process frame hosting it. Absent when it runs in the page's process. */
+  target?: string;
+  parentFrameId?: string;
+  url: string;
+}
+
+/** A frame's content box in page viewport coordinates. */
+interface FrameBox { x: number; y: number; width: number; height: number }
 
 const DEFAULT_WIDTH = 430;
 const DEFAULT_HEIGHT = 860;
@@ -133,6 +157,15 @@ const IDLE_CLOSE_MS = 2 * 60 * 60_000;
 const WATCH_TTL_MS = 20_000;
 /** Floor on the gap between pushed frames, so a busy page cannot flood a phone. */
 const FRAME_INTERVAL_MS = 200;
+/** Element refs a snapshot hands out per frame and in total. */
+const SNAPSHOT_FRAME_ELEMENTS = 300;
+const SNAPSHOT_TOTAL_ELEMENTS = 600;
+/** Text a snapshot keeps from the page itself, from each embedded frame, and in total. */
+const SNAPSHOT_PAGE_TEXT = 30_000;
+const SNAPSHOT_FRAME_TEXT = 10_000;
+const SNAPSHOT_TOTAL_TEXT = 60_000;
+/** Chrome runs cross-site frames in their own processes; this attaches to each as it appears. */
+const FRAME_AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: [{ type: "iframe" }] };
 
 interface BrowserDisplay {
   headless: boolean;
@@ -371,7 +404,7 @@ class CdpClient {
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
   }>();
-  private listeners = new Map<string, Set<(params: JsonRecord) => void>>();
+  private listeners = new Map<string, Set<(params: JsonRecord, sessionId?: string) => void>>();
 
   private constructor(socket: WebSocket) {
     this.socket = socket;
@@ -396,7 +429,8 @@ class CdpClient {
     return new CdpClient(socket);
   }
 
-  async command(method: string, params: JsonRecord = {}): Promise<JsonRecord> {
+  /** Sends a command to the page, or to the attached child target [sessionId]. */
+  async command(method: string, params: JsonRecord = {}, sessionId?: string): Promise<JsonRecord> {
     if (this.socket.readyState !== WebSocket.OPEN) throw new Error("Browser connection is not open.");
     const id = ++this.nextId;
     return await new Promise<JsonRecord>((resolve, reject) => {
@@ -405,12 +439,15 @@ class CdpClient {
         reject(new Error(`Browser command timed out: ${method}`));
       }, 20_000);
       this.pending.set(id, { resolve, reject, timer });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
 
-  /** Subscribe to a CDP event. Returns the unsubscribe function. */
-  on(method: string, handler: (params: JsonRecord) => void): () => void {
+  /**
+   * Subscribe to a CDP event. Handlers also get the child session it came
+   * from, if any. Returns the unsubscribe function.
+   */
+  on(method: string, handler: (params: JsonRecord, sessionId?: string) => void): () => void {
     const handlers = this.listeners.get(method) ?? new Set();
     handlers.add(handler);
     this.listeners.set(method, handlers);
@@ -428,7 +465,7 @@ class CdpClient {
     let message: CdpResponse;
     try {
       message = z.object({
-        id: z.number().optional(), method: z.string().optional(),
+        id: z.number().optional(), method: z.string().optional(), sessionId: z.string().optional(),
         params: z.record(z.string(), z.unknown()).optional(),
         result: z.record(z.string(), z.unknown()).optional(),
         error: z.object({ message: z.string().optional() }).optional(),
@@ -439,7 +476,7 @@ class CdpClient {
       // Events carry a method instead of an id.
       if (typeof message.method !== "string") return;
       for (const handler of this.listeners.get(message.method) ?? []) {
-        try { handler(message.params ?? {}); } catch {}
+        try { handler(message.params ?? {}, message.sessionId); } catch {}
       }
       return;
     }
@@ -478,6 +515,136 @@ function runtimeExceptionDescription(result: JsonRecord): string {
   }
   return typeof record.text === "string" ? record.text.slice(0, 300) : "";
 }
+
+/**
+ * Attaches to every out-of-process frame, now and as frames load, and keeps
+ * [targets] in step. Cross-site frames run in their own renderer, so scripts
+ * in the page cannot see into them.
+ */
+async function trackFrameTargets(cdp: CdpClient, targets: Set<string>): Promise<void> {
+  cdp.on("Target.attachedToTarget", (params) => {
+    const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
+    if (!sessionId || !isRecord(params.targetInfo) || params.targetInfo.type !== "iframe") return;
+    targets.add(sessionId);
+    // A cross-site frame's own cross-site frames attach through it.
+    void cdp.command("Target.setAutoAttach", FRAME_AUTO_ATTACH, sessionId).catch(() => {});
+    void cdp.command("DOM.enable", {}, sessionId).catch(() => {});
+  });
+  cdp.on("Target.detachedFromTarget", (params) => {
+    if (typeof params.sessionId === "string") targets.delete(params.sessionId);
+  });
+  await cdp.command("Target.setAutoAttach", FRAME_AUTO_ATTACH);
+}
+
+const snapshotFrameSchema = z.object({
+  url: z.string(), title: z.string(), text: z.string(),
+  elements: z.array(z.object({
+    ref: z.string(), tag: z.string(), role: z.string().optional(), name: z.string(),
+    type: z.string().optional(), value: z.string().optional(),
+    checked: z.boolean().optional(), disabled: z.boolean(),
+  })),
+});
+
+/**
+ * Lists one frame's text and visible controls, tagging each control with a
+ * ref numbered from [start] so refs stay unique across frames.
+ */
+function snapshotExpression(start: number, limit: number, textLimit: number): string {
+  return String.raw`(() => {
+    const visible = (el) => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+    };
+    document.querySelectorAll('[data-socketagent-ref]').forEach((el) => el.removeAttribute('data-socketagent-ref'));
+    const selector = [
+      'a','button','input','textarea','select','summary',
+      '[contenteditable="true"]',
+      // Component libraries build controls out of divs with a role, so
+      // without these a checkbox or menu item is invisible and unclickable.
+      '[role="button"]','[role="link"]','[role="checkbox"]','[role="radio"]',
+      '[role="switch"]','[role="tab"]','[role="option"]','[role="combobox"]',
+      '[role="menuitem"]','[role="menuitemcheckbox"]','[role="menuitemradio"]',
+      '[role="treeitem"]','[role="slider"]'
+    ].join(',');
+    const elements = Array.from(document.querySelectorAll(selector)).filter(visible).slice(0, ${limit}).map((el, index) => {
+      const ref = 'sa-' + (${start} + index + 1);
+      el.setAttribute('data-socketagent-ref', ref);
+      const type = String(el.getAttribute('type') || '').toLowerCase();
+      const secretHint = [type, el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase();
+      const secret = type === 'password' || /(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(secretHint);
+      const checkedAttr = el.getAttribute('aria-checked') ?? el.getAttribute('aria-selected');
+      const checked = checkedAttr === null
+        ? (type === 'checkbox' || type === 'radio' ? Boolean(el.checked) : undefined)
+        : checkedAttr === 'true';
+      return {
+        ref,
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute('role') || undefined,
+        ...(checked === undefined ? {} : { checked }),
+        name: String(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || '').trim().slice(0, 240),
+        type: type || undefined,
+        value: secret ? undefined : (typeof el.value === 'string' ? el.value.slice(0, 500) : undefined),
+        disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')
+      };
+    });
+    return JSON.stringify({
+      url: location.href,
+      title: document.title,
+      text: String(document.body && document.body.innerText || '').slice(0, ${textLimit}),
+      elements
+    });
+  })()`;
+}
+
+/**
+ * Scrolls a tagged element into view and returns its center in its frame's
+ * viewport. With [forTyping], it refuses credential fields and focuses the
+ * element instead.
+ */
+function elementExpression(ref: string, forTyping: boolean): string {
+  return `(() => {
+    const el = document.querySelector('[data-socketagent-ref="${ref}"]');
+    if (!el) return '';
+    if (${forTyping}) {
+      const hint = [el.getAttribute('type'), el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase();
+      if (/(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(hint)) return JSON.stringify({ secret: true });
+    }
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    if (${forTyping}) el.focus();
+    const r = el.getBoundingClientRect();
+    return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  })()`;
+}
+
+/** A tagged element's center in its frame's viewport, without scrolling. */
+function elementCenterExpression(ref: string): string {
+  return `(() => {
+    const el = document.querySelector('[data-socketagent-ref="${ref}"]');
+    if (!el) return '';
+    const r = el.getBoundingClientRect();
+    return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  })()`;
+}
+
+const elementPointSchema = z.union([
+  z.object({ secret: z.literal(true) }),
+  z.object({ x: z.number(), y: z.number() }),
+]);
+
+/** Run on an iframe element: its content box in the parent frame's viewport, or null when hidden. */
+const FRAME_BOX_FUNCTION = `function () {
+  const style = getComputedStyle(this);
+  if (style.visibility === 'hidden' || style.display === 'none') return 'null';
+  const rect = this.getBoundingClientRect();
+  const left = this.clientLeft + parseFloat(style.paddingLeft || '0');
+  const top = this.clientTop + parseFloat(style.paddingTop || '0');
+  const width = this.clientWidth - parseFloat(style.paddingLeft || '0') - parseFloat(style.paddingRight || '0');
+  const height = this.clientHeight - parseFloat(style.paddingTop || '0') - parseFloat(style.paddingBottom || '0');
+  return JSON.stringify({ x: rect.left + left, y: rect.top + top, width, height });
+}`;
+
+const frameBoxSchema = z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }).nullable();
 
 function boundedLabel(value: string | undefined, profile: string): string {
   const label = String(value || "").trim().replace(/[\r\n\t]+/g, " ").slice(0, 80);
@@ -718,7 +885,9 @@ export class BrowserSessionManager {
       const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
       if (!page?.webSocketDebuggerUrl) throw new Error("Browser did not create an interactive page.");
       const cdp = await CdpClient.connect(page.webSocketDebuggerUrl);
+      const frameTargets = new Set<string>();
       await Promise.all([
+        trackFrameTargets(cdp, frameTargets),
         cdp.command("Page.enable"),
         cdp.command("Runtime.enable"),
         cdp.command("DOM.enable"),
@@ -742,6 +911,9 @@ export class BrowserSessionManager {
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         lastUsedAt: new Date().toISOString(),
+        frameTargets,
+        refFrames: new Map<string, PageFrame>(),
+        frameContexts: new Map<string, number>(),
       };
       processHandle.once("exit", () => {
         const current = this.sessions.get(profile);
@@ -877,93 +1049,281 @@ export class BrowserSessionManager {
     }
   }
 
+  /**
+   * Lists the page's text and visible controls, including those inside
+   * embedded frames, and tags each control with a ref for click and type.
+   */
   async snapshot(profileValue: string): Promise<BrowserSnapshot> {
     const session = this.require(normalizeBrowserProfile(profileValue));
     this.touch(session);
-    const expression = String.raw`(() => {
-      const visible = (el) => {
-        const style = getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-      };
-      document.querySelectorAll('[data-socketagent-ref]').forEach((el) => el.removeAttribute('data-socketagent-ref'));
-      const selector = [
-        'a','button','input','textarea','select','summary',
-        '[contenteditable="true"]',
-        // Component libraries build controls out of divs with a role, so
-        // without these a checkbox or menu item is invisible and unclickable.
-        '[role="button"]','[role="link"]','[role="checkbox"]','[role="radio"]',
-        '[role="switch"]','[role="tab"]','[role="option"]','[role="combobox"]',
-        '[role="menuitem"]','[role="menuitemcheckbox"]','[role="menuitemradio"]',
-        '[role="treeitem"]','[role="slider"]'
-      ].join(',');
-      const elements = Array.from(document.querySelectorAll(selector)).filter(visible).slice(0, 300).map((el, index) => {
-        const ref = 'sa-' + (index + 1);
-        el.setAttribute('data-socketagent-ref', ref);
-        const type = String(el.getAttribute('type') || '').toLowerCase();
-        const secretHint = [type, el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase();
-        const secret = type === 'password' || /(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(secretHint);
-        const checkedAttr = el.getAttribute('aria-checked') ?? el.getAttribute('aria-selected');
-        const checked = checkedAttr === null
-          ? (type === 'checkbox' || type === 'radio' ? Boolean(el.checked) : undefined)
-          : checkedAttr === 'true';
-        return {
-          ref,
-          tag: el.tagName.toLowerCase(),
-          role: el.getAttribute('role') || undefined,
-          ...(checked === undefined ? {} : { checked }),
-          name: String(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || '').trim().slice(0, 240),
-          type: type || undefined,
-          value: secret ? undefined : (typeof el.value === 'string' ? el.value.slice(0, 500) : undefined),
-          disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')
-        };
-      });
-      return JSON.stringify({
-        url: location.href,
-        title: document.title,
-        text: String(document.body && document.body.innerText || '').slice(0, 30000),
-        elements
-      });
-    })()`;
-    const result = await session.cdp.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
-    const serialized = readStringResult(result);
-    if (!serialized) throw new Error("Browser page could not be inspected.");
-    const parsed = z.object({
-      url: z.string(), title: z.string(), text: z.string(),
-      elements: z.array(z.object({
-        ref: z.string(), tag: z.string(), role: z.string().optional(), name: z.string(),
-        type: z.string().optional(), value: z.string().optional(),
-        checked: z.boolean().optional(), disabled: z.boolean(),
-      })),
-    }).parse(JSON.parse(serialized));
-    session.url = parsed.url || session.url;
-    return { profile: session.profile, ...parsed };
+    const frames = await this.listFrames(session);
+    const boxes = new Map<string, FrameBox | undefined>();
+    session.refFrames.clear();
+    const elements: BrowserSnapshotElement[] = [];
+    const listedFrames: BrowserSnapshot["frames"] = [];
+    let text = "";
+    let url = session.url;
+    let title = session.title;
+    for (const frame of frames.values()) {
+      const top = !frame.parentFrameId;
+      if (!top && !(await this.frameBox(session, frames, frame, boxes).catch(() => undefined))) continue;
+      const start = elements.length;
+      const limit = Math.min(SNAPSHOT_FRAME_ELEMENTS, SNAPSHOT_TOTAL_ELEMENTS - start);
+      const textLimit = Math.min(top ? SNAPSHOT_PAGE_TEXT : SNAPSHOT_FRAME_TEXT, Math.max(0, SNAPSHOT_TOTAL_TEXT - text.length));
+      let result: z.infer<typeof snapshotFrameSchema>;
+      try {
+        const serialized = readStringResult(await this.evaluateInFrame(session, frame, snapshotExpression(start, limit, textLimit)));
+        if (!serialized) throw new Error("Browser page could not be inspected.");
+        result = snapshotFrameSchema.parse(JSON.parse(serialized));
+      } catch (error) {
+        // A frame can navigate away or detach mid-snapshot. Only the page itself must answer.
+        if (top) throw error;
+        continue;
+      }
+      let frameNumber: number | undefined;
+      if (top) {
+        url = result.url;
+        title = result.title;
+        text = result.text;
+      } else if (result.elements.length || result.text.trim()) {
+        frameNumber = listedFrames.length + 1;
+        listedFrames.push({ frame: frameNumber, url: result.url });
+        text += `\n\n[Frame ${frameNumber}: ${result.url}]\n${result.text}`;
+      } else {
+        continue;
+      }
+      for (const element of result.elements) {
+        session.refFrames.set(element.ref, frame);
+        elements.push(frameNumber ? { ...element, frame: frameNumber } : element);
+      }
+    }
+    session.url = url || session.url;
+    return { profile: session.profile, url, title, text: text.slice(0, SNAPSHOT_TOTAL_TEXT), elements, frames: listedFrames };
   }
 
   async click(profileValue: string, ref: string): Promise<void> {
     const session = this.require(normalizeBrowserProfile(profileValue));
-    const safeRef = String(ref).trim();
-    if (!/^sa-[1-9][0-9]{0,3}$/.test(safeRef)) throw new Error("Browser element reference is invalid. Refresh the snapshot.");
-    const expression = `(() => { const el = document.querySelector('[data-socketagent-ref="${safeRef}"]'); if (!el) return ''; el.scrollIntoView({block:'center',inline:'center'}); const r = el.getBoundingClientRect(); return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2}); })()`;
-    const result = await session.cdp.command("Runtime.evaluate", { expression, returnByValue: true });
-    const serialized = readStringResult(result);
-    if (!serialized) throw new Error("Browser element is no longer available. Refresh the snapshot.");
-    const point = z.object({ x: z.number(), y: z.number() }).parse(JSON.parse(serialized));
+    const point = await this.elementPoint(session, ref, false);
     await this.phoneInput(session.profile, { action: "tap", x: point.x, y: point.y });
   }
 
   async type(profileValue: string, ref: string, text: string): Promise<void> {
     const session = this.require(normalizeBrowserProfile(profileValue));
-    const safeRef = String(ref).trim();
-    if (!/^sa-[1-9][0-9]{0,3}$/.test(safeRef)) throw new Error("Browser element reference is invalid. Refresh the snapshot.");
     if (text.length > 16_384) throw new Error("Browser text input is too large.");
-    const expression = `(() => { const el = document.querySelector('[data-socketagent-ref="${safeRef}"]'); if (!el) return false; const hint = [el.getAttribute('type'), el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase(); if (/(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(hint)) return 'password'; el.focus(); if ('select' in el) el.select(); return true; })()`;
-    const result = await session.cdp.command("Runtime.evaluate", { expression, returnByValue: true });
-    const nested = isRecord(result.result) ? result.result : undefined;
-    if (nested?.value === "password") throw new Error("The agent cannot type into password fields. Open the protected phone browser.");
-    if (nested?.value !== true) throw new Error("Browser element is no longer available. Refresh the snapshot.");
+    const point = await this.elementPoint(session, ref, true);
+    // Script focus inside a cross-origin frame does not move keyboard focus to that
+    // frame, so a real tap does it. The page's own fields only need the script focus.
+    if (point.frame) {
+      await this.phoneInput(session.profile, { action: "tap", x: point.x, y: point.y });
+      await this.waitForFocus(session, point.frame, ref);
+    }
     await this.pressKey(session, "CTRL+A");
     await session.cdp.command("Input.insertText", { text });
+  }
+
+  /** Taps a point in the viewport, for elements a snapshot cannot list. */
+  async tap(profileValue: string, x: number, y: number): Promise<void> {
+    const session = this.require(normalizeBrowserProfile(profileValue));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > session.width || y > session.height) {
+      throw new Error(`Tap coordinates must be inside the ${session.width}x${session.height} viewport.`);
+    }
+    await this.phoneInput(session.profile, { action: "tap", x, y });
+  }
+
+  /**
+   * The page's frames in document order, keyed by frame ID. Chrome reports
+   * each out-of-process frame's subtree through that frame's own session.
+   */
+  private async listFrames(session: RunningBrowserSession): Promise<Map<string, PageFrame>> {
+    const found = new Map<string, Omit<PageFrame, "target">>();
+    const ownRoots = new Map<string, string>();
+    const visit = (tree: unknown, target?: string, root = true): void => {
+      if (!isRecord(tree) || !isRecord(tree.frame) || typeof tree.frame.id !== "string") return;
+      const { id, parentId, url } = tree.frame;
+      const known = found.get(id);
+      found.set(id, {
+        frameId: id,
+        parentFrameId: typeof parentId === "string" ? parentId : known?.parentFrameId,
+        url: typeof url === "string" ? url : known?.url ?? "",
+      });
+      if (target && root) ownRoots.set(id, target);
+      for (const child of unknownArray(tree.childFrames)) visit(child, target, false);
+    };
+    visit((await session.cdp.command("Page.getFrameTree")).frameTree);
+    for (const target of [...session.frameTargets]) {
+      try {
+        visit((await session.cdp.command("Page.getFrameTree", {}, target)).frameTree, target);
+      } catch {
+        // Detached between listing and asking.
+      }
+    }
+    // A frame belongs to the nearest out-of-process frame at or above it.
+    const targetOf = (frameId: string): string | undefined => {
+      for (let id: string | undefined = frameId, depth = 0; id && depth < 64; depth++) {
+        const own = ownRoots.get(id);
+        if (own) return own;
+        id = found.get(id)?.parentFrameId;
+      }
+      return undefined;
+    };
+    const children = new Map<string, string[]>();
+    let rootId: string | undefined;
+    for (const frame of found.values()) {
+      if (!frame.parentFrameId) rootId ??= frame.frameId;
+      else children.set(frame.parentFrameId, [...children.get(frame.parentFrameId) ?? [], frame.frameId]);
+    }
+    const ordered = new Map<string, PageFrame>();
+    const walk = (frameId: string): void => {
+      const frame = found.get(frameId);
+      if (!frame || ordered.has(frameId)) return;
+      const target = targetOf(frameId);
+      ordered.set(frameId, { ...frame, ...(target ? { target } : {}) });
+      for (const child of children.get(frameId) ?? []) walk(child);
+    };
+    if (rootId) walk(rootId);
+    return ordered;
+  }
+
+  /**
+   * Runs [use] with the execution context for agent scripts in [frame]: the
+   * page's own context for the top frame, otherwise an isolated world, which
+   * shares the DOM but not page scripts. A frame that navigated loses its
+   * world, so a stale one is replaced once.
+   */
+  private async withFrameContext<T>(
+    session: RunningBrowserSession,
+    frame: PageFrame,
+    use: (contextId: number | undefined) => Promise<T>,
+  ): Promise<T> {
+    if (!frame.parentFrameId) return await use(undefined);
+    for (let attempt = 0; ; attempt++) {
+      let contextId = session.frameContexts.get(frame.frameId);
+      if (contextId === undefined) {
+        const created = await session.cdp.command("Page.createIsolatedWorld", { frameId: frame.frameId, worldName: "socketagent" }, frame.target);
+        if (typeof created.executionContextId !== "number") throw new Error("Browser frame could not be inspected.");
+        contextId = created.executionContextId;
+        session.frameContexts.set(frame.frameId, contextId);
+      }
+      try {
+        return await use(contextId);
+      } catch (error) {
+        session.frameContexts.delete(frame.frameId);
+        if (attempt > 0) throw error;
+      }
+    }
+  }
+
+  private async evaluateInFrame(session: RunningBrowserSession, frame: PageFrame, expression: string): Promise<JsonRecord> {
+    return await this.withFrameContext(session, frame, async (contextId) => {
+      const result = await session.cdp.command("Runtime.evaluate", {
+        expression, returnByValue: true, awaitPromise: true, ...(contextId === undefined ? {} : { contextId }),
+      }, frame.target);
+      if (contextId !== undefined && isRecord(result.exceptionDetails)) {
+        throw new Error(runtimeExceptionDescription(result) || "Browser frame script failed.");
+      }
+      return result;
+    });
+  }
+
+  /**
+   * Where [frame]'s content sits in the page viewport, found by adding up the
+   * offset of each frame element above it. Undefined when it or any frame
+   * above it is hidden. [cache] is shared across one snapshot.
+   */
+  private async frameBox(
+    session: RunningBrowserSession,
+    frames: Map<string, PageFrame>,
+    frame: PageFrame,
+    cache = new Map<string, FrameBox | undefined>(),
+  ): Promise<FrameBox | undefined> {
+    if (!frame.parentFrameId) return { x: 0, y: 0, width: session.width, height: session.height };
+    if (cache.has(frame.frameId)) return cache.get(frame.frameId);
+    const parent = frames.get(frame.parentFrameId);
+    let box: FrameBox | undefined;
+    const parentBox = parent ? await this.frameBox(session, frames, parent, cache) : undefined;
+    if (parent && parentBox) {
+      const owner = await session.cdp.command("DOM.getFrameOwner", { frameId: frame.frameId }, parent.target);
+      if (typeof owner.backendNodeId === "number") {
+        const backendNodeId = owner.backendNodeId;
+        const local = await this.withFrameContext(session, parent, async (contextId) => {
+          const resolved = await session.cdp.command("DOM.resolveNode", {
+            backendNodeId, ...(contextId === undefined ? {} : { executionContextId: contextId }),
+          }, parent.target);
+          const objectId = isRecord(resolved.object) && typeof resolved.object.objectId === "string" ? resolved.object.objectId : "";
+          if (!objectId) return null;
+          try {
+            const result = await session.cdp.command("Runtime.callFunctionOn", {
+              objectId, functionDeclaration: FRAME_BOX_FUNCTION, returnByValue: true,
+            }, parent.target);
+            return frameBoxSchema.parse(JSON.parse(readStringResult(result) || "null"));
+          } finally {
+            void session.cdp.command("Runtime.releaseObject", { objectId }, parent.target).catch(() => {});
+          }
+        });
+        if (local && local.width > 0 && local.height > 0) {
+          box = { x: parentBox.x + local.x, y: parentBox.y + local.y, width: local.width, height: local.height };
+        }
+      }
+    }
+    cache.set(frame.frameId, box);
+    return box;
+  }
+
+  /**
+   * Scrolls a snapshot element into view and returns its center in page
+   * viewport coordinates, plus the embedded frame holding it, if any.
+   */
+  private async elementPoint(
+    session: RunningBrowserSession,
+    ref: string,
+    forTyping: boolean,
+  ): Promise<{ x: number; y: number; frame?: PageFrame }> {
+    const safeRef = String(ref).trim();
+    if (!/^sa-[1-9][0-9]{0,3}$/.test(safeRef)) throw new Error("Browser element reference is invalid. Refresh the snapshot.");
+    const unavailable = new Error("Browser element is no longer available. Refresh the snapshot.");
+    const tagged = session.refFrames.get(safeRef);
+    if (!tagged) throw unavailable;
+    // Frame IDs are stable, but the session hosting a frame can change as it navigates.
+    const frames = tagged.parentFrameId ? await this.listFrames(session) : undefined;
+    const frame = frames ? frames.get(tagged.frameId) : tagged;
+    if (!frame) throw unavailable;
+    const serialized = readStringResult(await this.evaluateInFrame(session, frame, elementExpression(safeRef, forTyping)));
+    if (!serialized) throw unavailable;
+    const point = elementPointSchema.parse(JSON.parse(serialized));
+    if ("secret" in point) throw new Error("The agent cannot type into password fields. Open the protected phone browser.");
+    if (!frames) return point;
+    // Scrolling inside a cross-site frame scrolls the page around it from another
+    // process, which finishes later. Measure until the position holds still.
+    let previous: { x: number; y: number } | undefined;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const box = await this.frameBox(session, frames, frame);
+      if (!box) throw new Error("The frame holding this element is hidden. Refresh the snapshot.");
+      const center = attempt === 0
+        ? point
+        : z.object({ x: z.number(), y: z.number() }).parse(JSON.parse(
+          readStringResult(await this.evaluateInFrame(session, frame, elementCenterExpression(safeRef))) || "null",
+        ));
+      const current = { x: box.x + center.x, y: box.y + center.y };
+      if (previous && previous.x === current.x && previous.y === current.y) return { ...current, frame };
+      previous = current;
+      await wait(50);
+    }
+    throw new Error("The browser element kept moving. Refresh the snapshot and retry.");
+  }
+
+  /**
+   * Waits for keyboard focus to reach a frame element after a tap. Focus
+   * crosses into another renderer process asynchronously, and typed text sent
+   * before it lands goes nowhere.
+   */
+  private async waitForFocus(session: RunningBrowserSession, frame: PageFrame, ref: string): Promise<void> {
+    const expression = `document.hasFocus() && document.activeElement?.getAttribute('data-socketagent-ref') === ${JSON.stringify(ref.trim())}`;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const result = await this.evaluateInFrame(session, frame, expression);
+      if (isRecord(result.result) && result.result.value === true) return;
+      await wait(50);
+    }
+    throw new Error("The browser field did not take focus. Refresh the snapshot and retry.");
   }
 
   async navigate(profileValue: string, rawUrl: string): Promise<void> {

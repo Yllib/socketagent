@@ -106,14 +106,24 @@ export interface McpTextResult {
   isError?: boolean;
 }
 
+/** A tool result that may also carry images, such as a browser screenshot. */
+export interface McpMediaResult {
+  [key: string]: unknown;
+  content: Array<McpTextResult["content"][number] | { type: "image"; data: string; mimeType: string }>;
+  isError?: boolean;
+}
+
 export interface BrowserSessionToolArgs {
-  action: "open" | "show" | "list" | "status" | "snapshot" | "navigate" | "click" | "type" | "key" | "scroll" | "clipboard_read" | "clipboard_write" | "clipboard_to_secret" | "close" | "clear";
+  action: "open" | "show" | "list" | "status" | "snapshot" | "screenshot" | "navigate" | "click" | "type" | "tap" | "key" | "scroll" | "clipboard_read" | "clipboard_write" | "clipboard_to_secret" | "close" | "clear";
   profile?: string;
   url?: string;
   label?: string;
   ref?: string;
   text?: string;
   key?: string;
+  /** Tap position in screenshot pixels, which are viewport CSS pixels. */
+  x?: number;
+  y?: number;
   delta_y?: number;
   secret_label?: string;
   secret_scope?: SecureInputScope;
@@ -178,7 +188,7 @@ export function publishBrowserSessionCard(
 export async function handleBrowserSessionTool(
   ctx: AppToolContext,
   args: BrowserSessionToolArgs,
-): Promise<McpTextResult> {
+): Promise<McpMediaResult> {
   try {
     if (args.action === "list") {
       return { content: [{ type: "text", text: JSON.stringify(browserSessionManager.list(), null, 2) }] };
@@ -222,6 +232,18 @@ export async function handleBrowserSessionTool(
       }
       case "snapshot":
         return { content: [{ type: "text", text: JSON.stringify(await browserSessionManager.snapshot(profile), null, 2) }] };
+      case "screenshot": {
+        const frame = await browserSessionManager.frame(profile);
+        return {
+          content: [
+            { type: "image", data: frame.imageBase64, mimeType: frame.mimeType },
+            {
+              type: "text",
+              text: `Viewport ${frame.width}x${frame.height} at ${frame.url}. Tap takes x and y in these image pixels.`,
+            },
+          ],
+        };
+      }
       case "navigate":
         if (!args.url) throw new Error("BrowserSession navigate requires a URL.");
         await browserSessionManager.navigate(profile, args.url);
@@ -234,6 +256,12 @@ export async function handleBrowserSessionTool(
         if (!args.ref) throw new Error("BrowserSession type requires an element ref from snapshot.");
         if (typeof args.text !== "string") throw new Error("BrowserSession type requires text.");
         await browserSessionManager.type(profile, args.ref, args.text);
+        break;
+      case "tap":
+        if (typeof args.x !== "number" || typeof args.y !== "number") {
+          throw new Error("BrowserSession tap requires x and y from a screenshot.");
+        }
+        await browserSessionManager.tap(profile, args.x, args.y);
         break;
       case "key":
         if (!args.key) throw new Error("BrowserSession key requires a supported key.");

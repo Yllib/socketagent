@@ -31,6 +31,13 @@ import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "
 import { deleteSendFileDelivery } from "./send-file-store";
 import { ByteBoundedLru } from "./byte-bounded-lru";
 import {
+  cloneHistoryEntry,
+  compactHistoryEntryForStorage,
+  historyPositionKey,
+  hydrateHistoryEntry,
+  toolOutputSessionDir,
+} from "./history-storage";
+import {
   TranscriptDatabase,
   type TranscriptLegacyFingerprint,
   type TranscriptSearchHit,
@@ -40,7 +47,6 @@ import {
 const STORE_DIR = socketAgentDataPath();
 const STORE_FILE = path.join(STORE_DIR, "sessions.json");
 const HISTORY_DIR = path.join(STORE_DIR, "history");
-const TOOL_OUTPUT_DIR = path.join(STORE_DIR, "tool-output");
 const TOOL_IMAGE_CACHE_DIR = path.join(STORE_DIR, "tool-images");
 const ARCHIVED_SESSION_IDS_FILE = path.join(STORE_DIR, "archived-session-ids.json");
 const TRANSCRIPT_IDENTITY_REPAIR_MARKER = path.join(STORE_DIR, ".transcript-identity-repair-v1");
@@ -52,8 +58,6 @@ const SESSION_STORE_FLUSH_MS = Number.isFinite(configuredSessionStoreFlushMs)
   && configuredSessionStoreFlushMs >= 0
   ? configuredSessionStoreFlushMs
   : 100;
-const TOOL_OUTPUT_BLOB_THRESHOLD = Number(process.env.SOCKETAGENT_TOOL_OUTPUT_BLOB_THRESHOLD || 8 * 1024);
-const TOOL_OUTPUT_PREVIEW_CHARS = Number(process.env.SOCKETAGENT_TOOL_OUTPUT_PREVIEW_CHARS || 1024);
 const HISTORY_COMPACT_MIN_BYTES = Number(process.env.SOCKETAGENT_HISTORY_COMPACT_MIN_BYTES || 8 * 1024 * 1024);
 const configuredHistoryCacheMaxBytes = Number(process.env.SOCKETAGENT_HISTORY_CACHE_MAX_BYTES);
 const HISTORY_CACHE_MAX_BYTES = Number.isFinite(configuredHistoryCacheMaxBytes)
@@ -604,149 +608,6 @@ function historyBackupFile(sessionId: string): string {
   return `${historyFile(sessionId)}.bak`;
 }
 
-function toolOutputSessionDir(sessionId: string): string {
-  const root = path.resolve(TOOL_OUTPUT_DIR);
-  const resolved = path.resolve(TOOL_OUTPUT_DIR, sessionId);
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-    throw new Error(`Invalid tool output session id: ${sessionId}`);
-  }
-  return resolved;
-}
-
-function ensureToolOutputDir(sessionId?: string): string {
-  const dir = sessionId ? toolOutputSessionDir(sessionId) : TOOL_OUTPUT_DIR;
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  return dir;
-}
-
-function sanitizeBlobSegment(value: string): string {
-  const safe = value.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
-  return safe.slice(0, 80) || "entry";
-}
-
-function toolOutputBlobRef(sessionId: string, entry: HistoryEntry, index: number, output: string): string {
-  const idPart = sanitizeBlobSegment(entry.toolUseId || `${entry.role}-${index}`);
-  const hash = crypto
-    .createHash("sha256")
-    .update(sessionId)
-    .update("\0")
-    .update(entry.toolUseId || "")
-    .update("\0")
-    .update(entry.timestamp || "")
-    .update("\0")
-    .update(String(index))
-    .update("\0")
-    .update(output)
-    .digest("hex")
-    .slice(0, 16);
-  return `${sessionId}/${idPart}-${hash}.txt.gz`;
-}
-
-function toolOutputBlobPath(ref: string | undefined): string | null {
-  if (!ref) return null;
-  const root = path.resolve(TOOL_OUTPUT_DIR);
-  const resolved = path.resolve(TOOL_OUTPUT_DIR, ref);
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) return null;
-  return resolved;
-}
-
-function writeToolOutputBlob(sessionId: string, entry: HistoryEntry, index: number, output: string): {
-  ref: string;
-  bytes: number;
-  storedBytes: number;
-} {
-  const ref = toolOutputBlobRef(sessionId, entry, index, output);
-  const file = toolOutputBlobPath(ref);
-  if (!file) throw new Error(`Invalid tool output blob ref for ${sessionId}`);
-  ensureToolOutputDir(sessionId);
-  if (!fs.existsSync(file)) {
-    const compressed = zlib.gzipSync(Buffer.from(output, "utf8"));
-    fs.writeFileSync(file, compressed);
-  }
-  const stat = fs.statSync(file);
-  return {
-    ref,
-    bytes: Buffer.byteLength(output, "utf8"),
-    storedBytes: stat.size,
-  };
-}
-
-function readToolOutputBlob(entry: HistoryEntry): string | undefined {
-  const file = toolOutputBlobPath(entry.toolOutputRef);
-  if (!file || !fs.existsSync(file)) return undefined;
-  try {
-    const raw = fs.readFileSync(file);
-    return entry.toolOutputEncoding === "gzip"
-      ? zlib.gunzipSync(raw).toString("utf8")
-      : raw.toString("utf8");
-  } catch (err: unknown) {
-    console.warn(`[HistoryBlob] Failed to read ${entry.toolOutputRef}: ${errorMessage(err)}`);
-    return undefined;
-  }
-}
-
-function cloneHistoryEntry(entry: HistoryEntry): HistoryEntry {
-  return { ...entry, toolInput: entry.toolInput ? { ...entry.toolInput } : entry.toolInput };
-}
-
-function compactHistoryEntryForStorage(sessionId: string, entry: HistoryEntry, index: number): HistoryEntry {
-  const compacted = cloneHistoryEntry(entry);
-  if (compacted.role !== "tool_result") return compacted;
-  if (compacted.toolOutputRef && typeof compacted.toolOutput !== "string") {
-    const preview = (compacted.toolOutputPreview || compacted.content || "").slice(0, TOOL_OUTPUT_PREVIEW_CHARS);
-    compacted.content = preview;
-    compacted.toolOutputPreview = preview;
-    return compacted;
-  }
-
-  const output = typeof compacted.toolOutput === "string"
-    ? compacted.toolOutput
-    : typeof compacted.content === "string"
-      ? compacted.content
-      : "";
-
-  if (!output) {
-    delete compacted.toolOutputRef;
-    delete compacted.toolOutputBytes;
-    delete compacted.toolOutputStoredBytes;
-    delete compacted.toolOutputPreview;
-    delete compacted.toolOutputEncoding;
-    return compacted;
-  }
-
-  if (Buffer.byteLength(output, "utf8") <= TOOL_OUTPUT_BLOB_THRESHOLD) {
-    compacted.toolOutput = output;
-    compacted.content = typeof compacted.content === "string" ? compacted.content : output;
-    delete compacted.toolOutputRef;
-    delete compacted.toolOutputBytes;
-    delete compacted.toolOutputStoredBytes;
-    delete compacted.toolOutputPreview;
-    delete compacted.toolOutputEncoding;
-    return compacted;
-  }
-
-  const blob = writeToolOutputBlob(sessionId, compacted, index, output);
-  compacted.content = output.slice(0, TOOL_OUTPUT_PREVIEW_CHARS);
-  compacted.toolOutputPreview = compacted.content;
-  compacted.toolOutputRef = blob.ref;
-  compacted.toolOutputBytes = blob.bytes;
-  compacted.toolOutputStoredBytes = blob.storedBytes;
-  compacted.toolOutputEncoding = "gzip";
-  delete compacted.toolOutput;
-  return compacted;
-}
-
-function hydrateHistoryEntry(entry: HistoryEntry): HistoryEntry {
-  const hydrated = cloneHistoryEntry(entry);
-  if (entry.inlineImageContent) hydrated.content = entry.inlineImageContent;
-  if (entry.role === "tool_result" && typeof entry.toolOutput !== "string" && entry.toolOutputRef) {
-    hydrated.toolOutput = readToolOutputBlob(entry) ?? entry.toolOutputPreview ?? entry.content ?? "";
-  }
-  return hydrated;
-}
-
 function hydrateHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
   return entries.map(hydrateHistoryEntry);
 }
@@ -782,26 +643,6 @@ const transcriptPositionStates = new Map<string, TranscriptPositionState>();
 function positiveInteger(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-function historyPositionKey(entry: HistoryEntry): string | null {
-  if (entry.streamId) {
-    const streamRole = entry.thinking ? `${entry.role}_thinking` : entry.role;
-    return `${streamRole}:stream:${entry.streamId}`;
-  }
-  if (entry.toolUseId && (entry.role === "tool_call" || entry.role === "tool_result" || entry.role === "tool_image")) {
-    return `${entry.role}:tool:${entry.toolUseId}`;
-  }
-  if (entry.questionId) return `${entry.role}:question:${entry.questionId}`;
-  if (entry.role === "user" && entry.uuid) return `user:uuid:${entry.uuid}`;
-  if (entry.role === "monitor" && entry.taskId) return `monitor:${entry.taskId}`;
-  if (entry.role === "task_state" && entry.taskId) {
-    return `task_state:${entry.taskKind || "background"}:${entry.taskId}`;
-  }
-  if (entry.role === "work_review" && entry.reviewId) {
-    return `work_review:${entry.reviewId}`;
-  }
-  return null;
 }
 
 function serverMessagePositionKey(message: PositionableMessage): string | null {
@@ -1434,6 +1275,29 @@ function updateSessionHistoryMetadata(sessionId: string, entries: HistoryEntry[]
   }
 
   writeStore(sessions);
+}
+
+/**
+ * Inserts one batch of entries already prepared for storage, with positions and
+ * spilled tool output, as session-transfer-worker hands them over. Writing in
+ * small batches lets other sessions' writes run in between.
+ */
+export function writePreparedHistoryBatch(sessionId: string, entries: HistoryEntry[]): void {
+  historyDatabase().upsertMany(
+    sessionId,
+    entries.map((entry) => ({ entry, positionKey: historyPositionKey(entry) })),
+  );
+}
+
+/**
+ * Picks up a transcript written outside the in-memory caches, such as a
+ * transfer import. Drops any cached state for the session and refreshes its
+ * counts and preview from the stored summary. Call after the session is saved.
+ */
+export function adoptWrittenHistory(sessionId: string): void {
+  historyCache.delete(sessionId);
+  transcriptPositionStates.delete(sessionId);
+  updateSessionHistoryMetadataFromDatabase(sessionId);
 }
 
 function updateSessionHistoryMetadataFromDatabase(sessionId: string): void {

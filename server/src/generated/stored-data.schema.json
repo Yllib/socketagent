@@ -1332,6 +1332,13 @@
             "handoff"
           ]
         },
+        "transcript": {
+          "type": "string",
+          "enum": [
+            "full",
+            "truncated"
+          ]
+        },
         "relayUrl": {
           "type": "string"
         },

@@ -1456,6 +1456,29 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "session_transfer_estimate"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "session_transfer_export"
             },
             "requestId": {
@@ -4226,6 +4249,13 @@
           "enum": [
             "exact",
             "handoff"
+          ]
+        },
+        "transcript": {
+          "type": "string",
+          "enum": [
+            "full",
+            "truncated"
           ]
         },
         "relayUrl": {

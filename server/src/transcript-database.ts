@@ -109,6 +109,7 @@ const tableColumnsSchema = z.array(z.object({ name: z.string() }));
 const sessionIdRowsSchema = z.array(z.object({ session_id: z.string() }));
 const optionalSummaryRowSchema = storedSummaryRowSchema.optional();
 const scalarRowSchema = z.object({ value: z.number() });
+const transferSizeRowSchema = z.object({ stored: z.number(), spilled: z.number() });
 const entryPositionRowSchema = z.object({ entry_id: z.string(), session_seq: z.number(), revision: z.number() });
 const optionalEntryRowSchema = storedTranscriptRowSchema.optional();
 const entryRowsSchema = z.array(storedTranscriptRowSchema);
@@ -491,6 +492,23 @@ export class TranscriptDatabase {
 
   count(sessionId: string): number {
     return this.summary(sessionId)?.entryCount ?? 0;
+  }
+
+  /** Stored entry JSON bytes, and bytes of tool output spilled to blobs, without reading any blob. */
+  transferSize(sessionId: string): { storedBytes: number; spilledBytes: number } {
+    const row = transferSizeRowSchema.parse(this.db.prepare(`
+      SELECT
+        COALESCE(SUM(length(CAST(entry_json AS BLOB))), 0) AS stored,
+        COALESCE(SUM(CASE
+          WHEN role = 'tool_result'
+            AND json_type(entry_json, '$.toolOutput') IS NULL
+            AND json_extract(entry_json, '$.toolOutputRef') IS NOT NULL
+          THEN COALESCE(json_extract(entry_json, '$.toolOutputBytes'), 0)
+          ELSE 0
+        END), 0) AS spilled
+      FROM transcript_entries WHERE session_id = ?
+    `).get(sessionId));
+    return { storedBytes: row.stored, spilledBytes: row.spilled };
   }
 
   countCompactionBoundaries(sessionId: string): number {

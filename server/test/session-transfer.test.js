@@ -17,6 +17,7 @@ const {
   getSdkEvents,
   getSession,
   getTodos,
+  listSessions,
   remapSession,
   replaceHistory,
   saveSession,
@@ -30,6 +31,7 @@ const {
   saveHtmlPlan,
 } = require("#server/html-plan-store");
 const {
+  estimateSessionTransfer,
   exportSessionTransfer,
   importSessionTransfer,
 } = require("#server/session-transfer");
@@ -280,4 +282,52 @@ test('durable imports retain their bundle and return the same session after retr
   remapSession(transferId, nativeId);
   const afterRemap = await importSessionTransfer(options);
   assert.equal(afterRemap.session.id, nativeId);
+});
+
+test("full transfers keep large tool output and truncated ones keep its preview", async () => {
+  const sourceId = crypto.randomUUID();
+  const cwd = path.join(testHome, "large-output");
+  fs.mkdirSync(cwd, { recursive: true });
+  saveSession(makeSession(sourceId, "codex", cwd));
+  const largeOutput = "build log line\n".repeat(4_000);
+  replaceHistory(sourceId, [
+    ...sampleHistory(),
+    {
+      role: "tool_result",
+      toolUseId: "tool-large",
+      content: largeOutput,
+      toolOutput: largeOutput,
+      timestamp: "2026-07-26T12:02:00.000Z",
+    },
+  ]);
+  const estimate = await estimateSessionTransfer(sourceId);
+  assert.ok(estimate.fullBytes - estimate.truncatedBytes >= largeOutput.length);
+
+  /** @param {"full" | "truncated"} transcript */
+  const clone = async (transcript) => {
+    const exported = await exportSessionTransfer(sourceId, { transcript, includeNative: false });
+    const imported = await importSessionTransfer({
+      bundlePath: exported.bundlePath,
+      expectedSha256: exported.sha256,
+      targetCwd: cwd,
+      targetBackend: "codex",
+      mode: "clone",
+      nativeMode: "handoff",
+    });
+    return getHistory(imported.session.id).at(-1);
+  };
+  const full = await clone("full");
+  const truncated = await clone("truncated");
+  try {
+    assert.equal(full.toolOutput, largeOutput);
+    assert.ok(truncated.toolOutput.startsWith("build log line"));
+    assert.ok(truncated.toolOutput.length < 2_000);
+    assert.match(truncated.toolOutput, /Truncated when transferred/);
+  } finally {
+    for (const id of [sourceId, ...listSessions()
+      .filter((session) => session.transferLineage?.sourceSessionId === sourceId)
+      .map((session) => session.id)]) {
+      deleteSessionArtifacts(id, getSession(id));
+    }
+  }
 });

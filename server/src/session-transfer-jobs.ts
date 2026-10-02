@@ -10,7 +10,8 @@ import type { SessionTransferExportResult, SessionTransferImportResult } from ".
 
 const CHUNK = 512 * 1024;
 const WINDOW = 4;
-const MAX_BUNDLE = 256 * 1024 * 1024;
+/** Bundles stream from disk in resumable chunks, so this only bounds disk use. */
+export const MAX_TRANSFER_BUNDLE_BYTES = 8 * 1024 ** 3;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 type Phase = "preparing" | "waiting" | "transferring" | "importing" | "finalizing" | "completed" | "failed";
@@ -27,7 +28,7 @@ export interface Job {
   settled?: boolean;
 }
 interface Hooks {
-  export(sessionId: string): Promise<SessionTransferExportResult>;
+  export(config: TransferJobConfig): Promise<SessionTransferExportResult>;
   import(config: TransferJobConfig, bundlePath: string, sha256: string): Promise<SessionTransferImportResult>;
   revision(sessionId: string): string;
   archive(sessionId: string, revision: string): Promise<string | undefined>;
@@ -87,7 +88,7 @@ export class SessionTransferJobs {
       phase: job.phase, bytes: job.bytes, totalBytes: job.manifest?.fileSize || 0,
       result: this.receipt(job), error: job.error, warning: job.warning,
       targetCwd: job.config.targetCwd, targetBackend: job.config.targetBackend,
-      mode: job.config.mode, peerPublicKey: job.config.peerPublicKey };
+      mode: job.config.mode, transcript: job.config.transcript ?? "full", peerPublicKey: job.config.peerPublicKey };
   }
   status(jobId: string) { const job = this.jobs.get(jobId); return job ? this.state(job) : undefined; }
   list() { return [...this.jobs.values()].map(job => this.state(job)); }
@@ -96,7 +97,8 @@ export class SessionTransferJobs {
       || typeof c.sessionId !== "string" || !c.sessionId || c.sessionId.length > 200
       || typeof c.targetCwd !== "string" || !c.targetCwd.trim()
       || !["claude", "codex"].includes(c.targetBackend) || !["move", "clone"].includes(c.mode)
-      || !["exact", "handoff"].includes(c.nativeMode)) throw new Error("Invalid transfer configuration");
+      || !["exact", "handoff"].includes(c.nativeMode)
+      || (c.transcript !== undefined && !["full", "truncated"].includes(c.transcript))) throw new Error("Invalid transfer configuration");
     if (c.role !== "local") {
       const url = new URL(c.relayUrl || "");
       if (!["ws:", "wss:"].includes(url.protocol) || url.username || url.password
@@ -154,7 +156,7 @@ export class SessionTransferJobs {
     void (async () => {
       if (job.config.role !== "destination" && !job.manifest) {
         const revision = this.hooks.revision(job.config.sessionId);
-        const exported = await this.hooks.export(job.config.sessionId);
+        const exported = await this.hooks.export(job.config);
         if (revision !== this.hooks.revision(job.config.sessionId)) {
           fs.rmSync(exported.bundlePath, { force: true });
           throw new Error("The source session changed while preparing. Wait until it is idle and retry.");
@@ -298,7 +300,7 @@ export class SessionTransferJobs {
     }
     if (header.type === "manifest") {
       if (job.result) { this.hello(job); return; }
-      if (!Number.isSafeInteger(header.fileSize) || header.fileSize! <= 0 || header.fileSize! > MAX_BUNDLE
+      if (!Number.isSafeInteger(header.fileSize) || header.fileSize! <= 0 || header.fileSize! > MAX_TRANSFER_BUNDLE_BYTES
         || !/^[a-f0-9]{64}$/.test(header.sha256 || "")) throw new Error("Invalid transfer manifest");
       const manifest = { fileSize: header.fileSize!, sha256: header.sha256! };
       if (job.manifest && JSON.stringify(job.manifest) !== JSON.stringify(manifest)) throw new Error("Source bundle changed during transfer");

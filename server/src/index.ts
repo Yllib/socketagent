@@ -119,6 +119,7 @@ import {
 } from "./browser-session-manager";
 import {
   discardSessionTransfer,
+  estimateSessionTransfer,
   exportSessionTransfer,
   importSessionTransfer,
   isSessionTransferPath,
@@ -685,7 +686,10 @@ const transferJobs = new SessionTransferJobs(socketAgentDataPath("transfer-jobs"
     if (live && sessionIsBusy(live)) throw new Error("Wait for the source session to finish before transferring");
     return JSON.stringify([getLastHistorySessionSeq(id), session?.lastActive, session?.turnCount]);
   },
-  export: exportSessionTransfer,
+  export: (config) => exportSessionTransfer(config.sessionId, {
+    transcript: config.transcript ?? "full",
+    includeNative: config.nativeMode === "exact",
+  }),
   import: async (config, bundlePath, expectedSha256) => {
     await waitForManagedBackendUpdate();
     if (config.targetBackend === "codex" && !getCodexAvailability().available) throw new Error("Codex is not available on the destination computer");
@@ -1437,7 +1441,7 @@ function serverCapabilitiesPayload(
       privateDrafts: true,
       atomicFinish: true,
     },
-    sessionTransfer: { version: 2 },
+    sessionTransfer: { version: 3 },
     codexGoals: { version: 1 },
     sessionMemory: { version: 1 },
     browserSessions: {
@@ -6167,6 +6171,17 @@ function createConnectionHandler(
         } catch (error) {
           sendJson({ type: "session_transfer_job_result", requestId: msg.requestId, ok: false,
             error: error instanceof Error ? errorMessage(error) : String(error) });
+        }
+        break;
+      }
+
+      case "session_transfer_estimate": {
+        try {
+          sendJson({ type: "session_transfer_estimate_result", requestId: msg.requestId, ok: true,
+            ...await estimateSessionTransfer(msg.sessionId) });
+        } catch (error) {
+          sendJson({ type: "session_transfer_estimate_result", requestId: msg.requestId, ok: false,
+            error: errorMessage(error) });
         }
         break;
       }

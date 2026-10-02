@@ -679,6 +679,8 @@ export interface TransferJobConfig {
   targetBackend: Backend;
   mode: "move" | "clone";
   nativeMode: "exact" | "handoff";
+  /** "truncated" keeps only the stored preview of large tool outputs. Defaults to "full". */
+  transcript?: "full" | "truncated";
   relayUrl?: string;
   ticket?: string;
   peerPublicKey?: string;
@@ -690,6 +692,13 @@ export interface SessionTransferJobMessage {
   action: "start" | "status" | "list";
   jobId?: string;
   config?: TransferJobConfig;
+}
+
+/** Asks the source for transcript sizes so the user can choose to truncate a very large one. */
+export interface SessionTransferEstimateMessage {
+  type: "session_transfer_estimate";
+  requestId: string;
+  sessionId: string;
 }
 
 export interface SessionTransferExportMessage {
@@ -1171,6 +1180,7 @@ export type ClientMessage = { commandId?: string } & (
   | CodexRollbackThreadMessage
   | ArchiveSessionMessage
   | SessionTransferJobMessage
+  | SessionTransferEstimateMessage
   | SessionTransferExportMessage
   | SessionTransferImportMessage
   | SessionTransferDiscardMessage

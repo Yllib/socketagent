@@ -690,10 +690,10 @@ const transferJobs = new SessionTransferJobs(socketAgentDataPath("transfer-jobs"
     transcript: config.transcript ?? "full",
     includeNative: config.nativeMode === "exact",
   }),
-  import: async (config, bundlePath, expectedSha256) => {
+  import: async (config, bundlePath, expectedSha256, onProgress) => {
     await waitForManagedBackendUpdate();
     if (config.targetBackend === "codex" && !getCodexAvailability().available) throw new Error("Codex is not available on the destination computer");
-    const result = await importSessionTransfer({ ...config, bundlePath, expectedSha256, transferId: config.jobId });
+    const result = await importSessionTransfer({ ...config, bundlePath, expectedSha256, transferId: config.jobId, onProgress });
     addRecentCwd(result.session.cwd);
     broadcastSessionList();
     return result;

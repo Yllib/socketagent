@@ -29,12 +29,21 @@ export interface Job {
 }
 interface Hooks {
   export(config: TransferJobConfig): Promise<SessionTransferExportResult>;
-  import(config: TransferJobConfig, bundlePath: string, sha256: string): Promise<SessionTransferImportResult>;
+  import(
+    config: TransferJobConfig,
+    bundlePath: string,
+    sha256: string,
+    onProgress: (restored: number, total: number) => void,
+  ): Promise<SessionTransferImportResult>;
   revision(sessionId: string): string;
   archive(sessionId: string, revision: string): Promise<string | undefined>;
   changed?(): void;
 }
-interface Runtime { ws?: WebSocket; timer?: NodeJS.Timeout; chain: Promise<void>; preparing: boolean; attempt: number }
+interface Runtime {
+  ws?: WebSocket; timer?: NodeJS.Timeout; chain: Promise<void>; preparing: boolean; attempt: number;
+  /** History entries written so far by a running import. In memory only, since a restarted import begins again. */
+  restore?: { restored: number; total: number };
+}
 export interface Header { jobId: string; type: string; offset?: number; fileSize?: number; sha256?: string; result?: SessionTransferImportResult; error?: string }
 
 function durableJson(file: string, value: unknown): void {
@@ -84,8 +93,10 @@ export class SessionTransferJobs {
     return { ...job.result, session: { id, title, cwd, createdAt, lastActive, messagePreview, backend, transferLineage } };
   }
   private state(job: Job) {
+    const restore = this.runtime.get(job.config.jobId)?.restore;
     return { jobId: job.config.jobId, role: job.config.role, sessionId: job.config.sessionId,
       phase: job.phase, bytes: job.bytes, totalBytes: job.manifest?.fileSize || 0,
+      ...(job.phase === "importing" && restore?.total ? { restoredEntries: restore.restored, totalEntries: restore.total } : {}),
       result: this.receipt(job), error: job.error, warning: job.warning,
       targetCwd: job.config.targetCwd, targetBackend: job.config.targetBackend,
       mode: job.config.mode, transcript: job.config.transcript ?? "full", peerPublicKey: job.config.peerPublicKey };
@@ -250,7 +261,14 @@ export class SessionTransferJobs {
   private async import(job: Job): Promise<void> {
     job.phase = "importing"; this.save(job);
     if (job.config.role === "destination") this.send(job, { type: "importing", offset: job.bytes });
-    job.result = await this.hooks.import(job.config, this.bundle(job), job.manifest!.sha256);
+    const rt = this.getRuntime(job);
+    try {
+      job.result = await this.hooks.import(job.config, this.bundle(job), job.manifest!.sha256, (restored, total) => {
+        rt.restore = { restored, total };
+      });
+    } finally {
+      rt.restore = undefined;
+    }
     job.phase = "completed"; this.save(job);
   }
   private async finishSource(job: Job): Promise<void> {

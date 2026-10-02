@@ -76,6 +76,8 @@ export interface SessionTransferImportOptions {
   nativeMode: "exact" | "handoff";
   /** Durable server jobs retain their bundle and reuse the same import identity. */
   transferId?: string;
+  /** Called after each batch of history entries is written, against the source's entry count. */
+  onProgress?: (restored: number, total: number) => void;
 }
 
 export interface SessionTransferImportResult {
@@ -332,13 +334,20 @@ async function importBundle(options: SessionTransferImportOptions): Promise<Sess
     // Start over from whatever an interrupted attempt wrote.
     if (recovering) deleteSessionArtifacts(sessionId, imported);
     if (nativePath) fs.mkdirSync(path.dirname(nativePath), { recursive: true, mode: 0o700 });
+    const total = header.session.historyCount || 0;
+    let written = 0;
+    options.onProgress?.(0, total);
     const restored = importResultSchema.parse(await runTransferWorker({
       op: "import",
       bundlePath: options.bundlePath,
       expectedSha256: options.expectedSha256,
       sessionId,
       ...(nativePath ? { nativePath } : {}),
-    }, (entries) => writePreparedHistoryBatch(sessionId, entries)));
+    }, (entries) => {
+      writePreparedHistoryBatch(sessionId, entries);
+      written += entries.length;
+      options.onProgress?.(Math.min(written, total), total);
+    }));
     saveTodos(sessionId, header.todos);
     replaceSdkEvents(sessionId, restored.sdkEvents);
     importHtmlPlansForSession(sessionId, header.htmlPlans);

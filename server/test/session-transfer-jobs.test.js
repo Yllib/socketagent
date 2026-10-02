@@ -178,3 +178,21 @@ test('same-computer transfer completes without opening a relay connection', asyn
   await until(() => f.source.status(f.jobId)?.phase === 'completed');
   f.verify();
 });
+
+test('restore progress shows while importing and clears once complete', async t => {
+  const f = await fixture(t);
+  /** @type {() => void} */
+  let release = () => {};
+  const finishImport = f.hooks.import;
+  f.hooks.import = async (config, bundlePath, sha256, onProgress) => {
+    onProgress(40, 100);
+    await new Promise(resolve => { release = () => resolve(undefined); });
+    return finishImport(config, bundlePath, sha256, onProgress);
+  };
+  f.source.start({ ...f.configs[0], role: 'local', relayUrl: undefined, ticket: undefined, peerPublicKey: undefined });
+  await until(() => f.source.status(f.jobId)?.restoredEntries === 40);
+  assert.equal(f.source.status(f.jobId)?.totalEntries, 100);
+  release();
+  await until(() => f.source.status(f.jobId)?.phase === 'completed');
+  assert.equal(f.source.status(f.jobId)?.restoredEntries, undefined);
+});

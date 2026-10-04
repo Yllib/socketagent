@@ -6146,7 +6146,7 @@ export class ClaudeSession {
     return Promise.resolve(this._authRequest.authUrl);
   }
 
-  /** Exchange the OAuth code for tokens and save to ~/.claude/.credentials.json */
+  /** Exchange the OAuth code for tokens and save them where the Claude CLI reads them. */
   submitAuthCode(code: string): void {
     console.log(`[Auth] submitAuthCode called — pending=${!!this._authRequest}`);
     if (!this._authRequest) {

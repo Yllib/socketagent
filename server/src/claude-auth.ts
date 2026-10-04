@@ -1,3 +1,4 @@
+import { execFileSync } from "child_process";
 import * as crypto from "crypto";
 import { z } from "zod";
 import * as fs from "fs";
@@ -73,7 +74,34 @@ const oauthTokensSchema = z.object({
   scope: z.string().optional(),
 });
 
-function saveOAuthTokens(tokens: z.infer<typeof oauthTokensSchema>): void {
+/** Account name the Claude CLI files its Keychain item under. */
+function keychainAccount(): string {
+  let user: string;
+  try {
+    user = process.env.USER || os.userInfo().username;
+  } catch {
+    user = "claude-code-user";
+  }
+  return /^[a-zA-Z0-9._-]+$/.test(user) ? user : "claude-code-user";
+}
+
+/**
+ * On macOS the Claude CLI reads its Keychain item before .credentials.json, so
+ * a stale or cleared item there hides a fresh sign-in. Write the same record
+ * the CLI would. The command goes over stdin so tokens stay out of `ps`.
+ */
+function saveToKeychain(json: string): void {
+  const hex = Buffer.from(json, "utf8").toString("hex");
+  const command = `add-generic-password -U -a "${keychainAccount()}" -s "Claude Code-credentials" -X "${hex}"\n`;
+  try {
+    execFileSync("security", ["-i"], { input: command, stdio: ["pipe", "ignore", "pipe"], timeout: 10_000 });
+  } catch (e) {
+    const stderr = e instanceof Error && "stderr" in e ? String(e.stderr).trim() : "";
+    console.warn(`[Auth] Could not update the Claude Keychain item: ${stderr || (e instanceof Error ? e.message : String(e))}`);
+  }
+}
+
+export function saveOAuthTokens(tokens: z.infer<typeof oauthTokensSchema>): void {
   const credPath = credentialsPath();
   const expiresAt = tokens.expires_in
     ? Date.now() + tokens.expires_in * 1000
@@ -90,8 +118,10 @@ function saveOAuthTokens(tokens: z.infer<typeof oauthTokensSchema>): void {
     },
   };
 
+  const json = JSON.stringify(credData);
   fs.mkdirSync(path.dirname(credPath), { recursive: true });
-  fs.writeFileSync(credPath, JSON.stringify(credData), { mode: 0o600 });
+  fs.writeFileSync(credPath, json, { mode: 0o600 });
+  if (process.platform === "darwin") saveToKeychain(json);
 }
 
 export async function exchangeClaudeAuthCode(

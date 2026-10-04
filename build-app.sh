@@ -88,6 +88,9 @@ else
   REMOTE_ARTIFACT_RELATIVE="build/app/outputs/flutter-apk/app-${FLAVOR}-release.apk"
 fi
 
+# Before any version bump, so a mismatch leaves nothing to undo.
+"$REPO_ROOT/check-flutter-version.sh" "$REMOTE_HOST" "$REMOTE_FLUTTER"
+
 git_signed() {
   if [[ "$SIGN_RELEASES" == "0" || "$SIGN_RELEASES" == "false" || "$SIGN_RELEASES" == "off" ]]; then
     git "$@"

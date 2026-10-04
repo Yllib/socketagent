@@ -8,6 +8,7 @@ if [[ $# -gt 0 ]]; then
   echo 'Usage: ./build-app.sh --windows (local test package; no publishing)' >&2
   exit 1
 fi
+"$ROOT/check-flutter-version.sh" "$HOST" 'C:/Users/billy/Downloads/flutter/flutter/bin/flutter.bat'
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force '$REMOTE_DIR' | Out-Null\""
 tar cf - -C "$APP_DIR" --exclude='.git' --exclude='build' --exclude='.dart_tool' --exclude='.flutter-plugins-dependencies' --exclude='windows/flutter/ephemeral' --exclude='android' --exclude='play-store' . |
   ssh "$HOST" "tar xf - -C $REMOTE_DIR"

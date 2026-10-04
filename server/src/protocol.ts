@@ -1942,6 +1942,12 @@ export interface ServerCapabilitiesMessage {
     pairingToken: string;
     serverPubkey: string;
   };
+  /** How to reach this server directly on its LAN, likeliest address first. */
+  directRoute?: {
+    hosts: string[];
+    port: number;
+    token: string;
+  };
   pushNotifications?: {
     version?: number;
     /** The server build supports direct Firebase delivery when configured. */

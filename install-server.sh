@@ -658,7 +658,8 @@ fi
 echo ""
 echo "  Claude and Codex are installed. Sign in later from the app or CLI if needed."
 echo ""
-echo -e "  ${CYAN}Open SocketAgent, choose Add Computer, and scan this pairing code:${NC}"
+echo -e "  ${CYAN}Open SocketAgent, choose Add Computer, and scan this pairing code.${NC}"
+echo "  On this computer's network the phone connects directly. Elsewhere it uses the relay."
 echo ""
 
 # Keep the pairing code as the installer's final primary output.

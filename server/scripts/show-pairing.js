@@ -8,6 +8,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
+const { localIpv4Addresses, pairingCode } = require("./pairing-code");
 
 const serverDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(serverDir, "..");
@@ -53,7 +54,13 @@ if (!isRecord(keys) || typeof keys.publicKey !== "string" || !keys.publicKey) {
   process.exit(1);
 }
 
-const payload = `SA|${pairingToken}|${keys.publicKey}`;
+const payload = pairingCode({
+  pairingToken,
+  publicKey: keys.publicKey,
+  port: env.PORT || "8085",
+  authToken: env.AUTH_TOKEN || "",
+  hosts: localIpv4Addresses(),
+});
 
 if (process.argv.includes("--raw")) {
   console.log(payload);
@@ -61,7 +68,8 @@ if (process.argv.includes("--raw")) {
 }
 
 console.log("");
-console.log("Scan this QR code with the SocketAgent app:");
+console.log("Open SocketAgent, choose Add Computer, and scan this code.");
+console.log("On this computer's network the phone connects directly. Elsewhere it uses the relay.");
 console.log("");
 qrcode.generate(payload, { small: true }, (qr) => {
   for (const line of qr.split("\n")) console.log(`  ${line}`);

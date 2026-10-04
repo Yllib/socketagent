@@ -27,8 +27,8 @@ usage() {
 SocketAgent command line
 
 Usage:
-  socketagent pair [--raw]        Show pairing QR or raw pairing payload
-  socketagent direct [--json]     Show direct/manual IP connection settings
+  socketagent pair [--raw]        Show the pairing QR (relay and same network)
+  socketagent direct [--json]     Show the pairing QR with direct connection values
   socketagent token               Show direct/manual auth token only
   socketagent install [args...]   Re-run the SocketAgent installer
   socketagent status              Show server service status

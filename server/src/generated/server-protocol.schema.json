@@ -3710,6 +3710,28 @@
             "serverPubkey"
           ]
         },
+        "directRoute": {
+          "type": "object",
+          "properties": {
+            "hosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "port": {
+              "type": "number"
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "hosts",
+            "port",
+            "token"
+          ]
+        },
         "pushNotifications": {
           "type": "object",
           "properties": {

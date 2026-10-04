@@ -923,6 +923,25 @@ try {
     Write-Warn "Could not add firewall rule (requires admin). You may need to allow port $Port manually."
 }
 
+# mDNS lets the phone find this computer again after its LAN address changes.
+# The server adds the same rule itself, but only when it runs elevated.
+$mdnsRuleName = "SocketAgent mDNS (UDP 5353)"
+try {
+    if (-not (Get-NetFirewallRule -DisplayName $mdnsRuleName -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule `
+            -DisplayName $mdnsRuleName `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol UDP `
+            -LocalPort 5353 `
+            -Profile Private,Domain `
+            -Description "Allow LAN discovery of the SocketAgent server" | Out-Null
+        Write-Ok "Firewall rule added for LAN discovery (UDP 5353)"
+    }
+} catch {
+    Write-Warn "Could not add the LAN discovery firewall rule. The phone still connects through the relay or the saved address."
+}
+
 # Start immediately
 try {
     Start-ScheduledTask -TaskName $TASK_NAME
@@ -971,7 +990,8 @@ Write-Host "  SocketAgent starts automatically when you log in."
 Write-Host ""
 Write-Host "  Claude and Codex are installed. Sign in later from the app or CLI if needed."
 Write-Host ""
-Write-Host "  Open SocketAgent, choose Add Computer, and scan this pairing code:" -ForegroundColor Cyan
+Write-Host "  Open SocketAgent, choose Add Computer, and scan this pairing code." -ForegroundColor Cyan
+Write-Host "  On this computer's network the phone connects directly. Elsewhere it uses the relay."
 Write-Host ""
 Show-QrCode $qrPayload
 Write-Host ""

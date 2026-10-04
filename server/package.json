@@ -24,6 +24,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@puppeteer/browsers": "3.2.1",
     "ajv": "8.20.0",
+    "bonjour-service": "^1.4.4",
     "dotenv": "^16.4.7",
     "google-auth-library": "^10.9.0",
     "node-pty": "^1.1.0",

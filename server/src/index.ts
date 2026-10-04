@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { WorkReviewAgentView, WorkReviewClientSnapshot, WorkReviewPublishedResult } from "./work-review-types";
 import { errorMessage, isRecord, parseJsonObject } from "./value-guards";
 import type { ClientTransport } from "./client-transport";
+import { isLocalNetworkAddress, localIpv4Addresses } from "./local-network";
+import { startLanAdvertiser } from "./lan-advertiser";
 import { CommandReceipts } from "./command-receipts";
 import { SessionTransferJobs } from "./session-transfer-jobs";
 import { modelDownloadArchive } from "./model-download-archive";
@@ -236,7 +238,6 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const PORT = parseInt(process.env.PORT || "8085", 10);
-const BIND_HOST = (process.env.BIND_HOST || process.env.SOCKETAGENT_BIND_HOST || "127.0.0.1").trim() || "127.0.0.1";
 type AppVersionInfo = { version: string; url: string };
 const WS_QUEUE_WARN_MS = Number(process.env.SOCKETAGENT_WS_QUEUE_WARN_MS || 250);
 const WS_HANDLER_WARN_MS = Number(process.env.SOCKETAGENT_WS_HANDLER_WARN_MS || 500);
@@ -422,6 +423,9 @@ function resolveAllowedDownloadFile(inputPath: string): { resolvedPath: string; 
   let content = fs.readFileSync(envPath, "utf-8");
   const migrations: [RegExp, string, string][] = [
     [/^RELAY_URL=ws:\/\/jarofdirt\.info:9988$/m, "RELAY_URL=wss://relay.jarofdirt.info", "relay URL to wss://relay.jarofdirt.info"],
+    // Setup used to write the old loopback-only default. The server now always
+    // listens on the local network, so drop it rather than keep phones out.
+    [/^BIND_HOST=127\.0\.0\.1\r?\n?/m, "", "local network connections now always on"],
   ];
   let changed = false;
   for (const [pattern, replacement, desc] of migrations) {
@@ -434,9 +438,20 @@ function resolveAllowedDownloadFile(inputPath: string): { resolvedPath: string; 
   if (changed) {
     fs.writeFileSync(envPath, content, { mode: 0o600 });
     secureSecretFileMode(envPath);
+    if (!/^BIND_HOST=/m.test(content)) delete process.env.BIND_HOST;
     dotenv.config({ path: envPath, override: true });
   }
 })();
+
+// Direct connections always work on the local network, alongside the relay.
+// Without a BIND_HOST the server listens everywhere but only answers local
+// network addresses. Setting BIND_HOST opts out of that filter.
+const CONFIGURED_BIND_HOST = (process.env.BIND_HOST || process.env.SOCKETAGENT_BIND_HOST || "").trim();
+const BIND_HOST = CONFIGURED_BIND_HOST || "0.0.0.0";
+const LOCAL_NETWORK_ONLY = !CONFIGURED_BIND_HOST;
+// Whether phones on this network can connect directly, so the server should
+// advertise itself and tell paired phones its LAN addresses.
+const ACCEPTS_LAN_CONNECTIONS = LOCAL_NETWORK_ONLY || !["127.0.0.1", "::1", "localhost"].includes(BIND_HOST);
 
 const RELAY_URL = process.env.RELAY_URL || "";
 
@@ -1400,6 +1415,16 @@ function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPub
   };
 }
 
+/**
+ * How to reach this server on its LAN. Only authenticated clients receive
+ * capabilities, and the token is the one they could already use directly.
+ */
+function directRouteInfo(): { hosts: string[]; port: number; token: string } | undefined {
+  if (!ACCEPTS_LAN_CONNECTIONS) return undefined;
+  const hosts = localIpv4Addresses();
+  return hosts.length > 0 ? { hosts, port: PORT, token: AUTH_TOKEN } : undefined;
+}
+
 function publicRelayUrl(relayUrl: string): string {
   try {
     const url = new URL(relayUrl);
@@ -1457,6 +1482,7 @@ function serverCapabilitiesPayload(
       serverPubkey: toBase64(loadServerKeyPair().publicKey),
     },
     relayPairing: relayPairingInfo(),
+    directRoute: directRouteInfo(),
     pushNotifications: {
       version: 3,
       directFcm: true,
@@ -9652,6 +9678,13 @@ const directUpgradeAuth = new WeakMap<http.IncomingMessage, {
   transportLane: TransportLane;
 }>();
 
+httpServer.on("connection", (socket) => {
+  if (LOCAL_NETWORK_ONLY && !isLocalNetworkAddress(socket.remoteAddress)) {
+    console.log(`Rejected connection from outside the local network: ${socket.remoteAddress ?? "unknown"}`);
+    socket.destroy();
+  }
+});
+
 // Handle WebSocket upgrade with auth
 httpServer.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", `ws://localhost:${PORT}`);
@@ -9736,10 +9769,19 @@ setTimeout(() => {
 }, 30_000).unref();
 
 async function initializeListeningServer(): Promise<void> {
-  console.log(`Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)`);
+  console.log(
+    `Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)${LOCAL_NETWORK_ONLY ? ", local network only" : ""}`,
+  );
   cancelWindowsRecoveryGuard();
-  if (!["127.0.0.1", "::1", "localhost"].includes(BIND_HOST)) {
-    console.warn(`[Security] Direct HTTP/WebSocket server is bound to ${BIND_HOST}. Use relay mode or TLS for untrusted networks.`);
+  if (!LOCAL_NETWORK_ONLY && !["127.0.0.1", "::1", "localhost"].includes(BIND_HOST)) {
+    console.warn(`[Security] Direct HTTP/WebSocket server is bound to ${BIND_HOST} for every network. Use relay mode or TLS for untrusted networks.`);
+  }
+  if (ACCEPTS_LAN_CONNECTIONS) {
+    startLanAdvertiser({
+      port: PORT,
+      serverPubkey: toBase64(loadServerKeyPair().publicKey),
+      onAddressesChanged: broadcastServerCapabilities,
+    });
   }
   console.log(`Default working directory: ${getDefaultCwd()}`);
   console.log(`Supported backends: ${detectAvailableBackends().join(", ")}`);

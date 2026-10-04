@@ -18,6 +18,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const nacl = require("tweetnacl");
+const { localIpv4Addresses, pairingCode } = require("./pairing-code");
 
 // Parse CLI arguments
 /** @type {Record<string, string>} */
@@ -58,7 +59,10 @@ const authToken =
   existingEnv.AUTH_TOKEN || crypto.randomBytes(32).toString("hex");
 const pairingToken = existingEnv.PAIRING_TOKEN || crypto.randomUUID();
 const envPort = existingEnv.PORT || port;
-const envBindHost = existingEnv.BIND_HOST || bindHost || "127.0.0.1";
+// The server listens on the local network unless BIND_HOST says otherwise.
+// 127.0.0.1 was the old written default, so it is dropped rather than kept.
+const existingBindHost = existingEnv.BIND_HOST === "127.0.0.1" ? "" : existingEnv.BIND_HOST || "";
+const envBindHost = bindHost || existingBindHost;
 const envRelay = existingEnv.RELAY_URL || relayUrl;
 const envCwd = existingEnv.DEFAULT_CWD || defaultCwd;
 
@@ -75,7 +79,7 @@ function secureSecretFileMode(filePath) {
 // --- Write .env ---
 const envContent = [
   `PORT=${envPort}`,
-  `BIND_HOST=${envBindHost}`,
+  ...(envBindHost ? [`BIND_HOST=${envBindHost}`] : []),
   `AUTH_TOKEN=${authToken}`,
   `DEFAULT_CWD=${envCwd}`,
   `RELAY_URL=${envRelay}`,
@@ -127,10 +131,14 @@ if (fs.existsSync(keysFile)) {
 }
 
 // --- Output QR payload on last line (parsed by installer) ---
-// Relay URL is hardcoded in the app — QR only needs token + pubkey.
-// Format: SC|<token>|<pubkey> — plain delimited, no JSON (avoids
-// PowerShell stripping quotes when passing to qrcode-terminal). The SC prefix
-// is kept as the wire-format marker so existing app builds can still re-pair.
-const qrPayload = `SC|${pairingToken}|${publicKeyB64}`;
+// Relay URL is hardcoded in the app. Plain delimited, no JSON, which avoids
+// PowerShell stripping quotes when passing it to qrcode-terminal.
+const qrPayload = pairingCode({
+  pairingToken,
+  publicKey: publicKeyB64,
+  port: envPort,
+  authToken,
+  hosts: localIpv4Addresses(),
+});
 
 console.log(qrPayload);

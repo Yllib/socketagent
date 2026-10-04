@@ -84,6 +84,11 @@ If you missed the QR code, run this on the server computer:
 socketagent pair
 ```
 
+The phone connects directly when it is on the computer's network and through
+the relay everywhere else, switching as you move. The server advertises itself
+over mDNS (`_socketagent._tcp`), so a changed LAN address is found again. To pin
+one route, edit the computer in the app and pick Relay or Direct.
+
 ## What Gets Installed
 
 The installer sets up:
@@ -101,6 +106,7 @@ Run these on the server computer:
 
 ```bash
 socketagent pair      # show a new pairing QR code
+socketagent direct    # same QR plus the address, port, token and key to enter by hand
 socketagent status    # check server status
 socketagent logs      # view server logs
 socketagent doctor    # run basic diagnostics

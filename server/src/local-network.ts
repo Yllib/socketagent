@@ -70,3 +70,35 @@ export function localIpv4Addresses(
 export function localRouteId(serverPubkey: string): string {
   return crypto.createHash("sha256").update(serverPubkey.trim()).digest("hex").slice(0, 16);
 }
+
+/**
+ * Listens on [host]. When [fallbackHost] is given and [host] collides with a
+ * listener that already holds the port on one address, such as Tailscale
+ * serve on a tailnet IP, retries on [fallbackHost] instead of failing. Resolves
+ * with the host actually bound; rejects on any other failure so the caller can
+ * exit rather than run without listening.
+ */
+export async function listenWithFallback(
+  server: net.Server,
+  port: number,
+  host: string,
+  fallbackHost?: string,
+): Promise<string> {
+  const attempt = (address: string) => new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(port, address, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+  try {
+    await attempt(host);
+    return host;
+  } catch (error) {
+    const inUse = error instanceof Error && "code" in error && error.code === "EADDRINUSE";
+    if (!fallbackHost || !inUse) throw error;
+    await attempt(fallbackHost);
+    return fallbackHost;
+  }
+}

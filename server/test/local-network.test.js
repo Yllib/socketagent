@@ -1,7 +1,9 @@
 const assert = require("node:assert/strict");
+const net = require("node:net");
+const { once } = require("node:events");
 const test = require("node:test");
 
-const { isLocalNetworkAddress } = require("#server/local-network");
+const { isLocalNetworkAddress, listenWithFallback } = require("#server/local-network");
 
 test("accepts private, loopback, link-local and Tailscale addresses", () => {
   for (const address of [
@@ -56,4 +58,47 @@ test("advertises a key-derived ID the app can match, and no secrets", () => {
     id: localRouteId("server-key"),
     hosts: "192.168.1.20,10.0.0.5",
   });
+});
+
+/**
+ * The address a listening TCP server is bound to.
+ * @param {import("node:net").Server} server
+ */
+function boundAddress(server) {
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return address;
+}
+
+// Tailscale serve holds the server port on the tailnet address only. Linux
+// routes all of 127/8 to loopback, so 127.0.0.2 stands in for that address.
+test("falls back to loopback when the port is held on one other address", async (t) => {
+  const holder = net.createServer();
+  holder.listen(0, "127.0.0.2");
+  try { await once(holder, "listening"); } catch { t.skip("127.0.0.2 is not routable here"); return; }
+  const { port } = boundAddress(holder);
+  const server = net.createServer();
+  t.after(() => { holder.close(); server.close(); });
+  let wildcardFree = true;
+  const probe = net.createServer();
+  probe.once("error", () => { wildcardFree = false; });
+  probe.listen(port, "0.0.0.0");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  probe.close();
+  if (wildcardFree) { t.skip("this OS allows a wildcard bind beside a specific one"); return; }
+
+  assert.equal(await listenWithFallback(server, port, "0.0.0.0", "127.0.0.1"), "127.0.0.1");
+  assert.equal(boundAddress(server).address, "127.0.0.1");
+});
+
+test("rejects instead of running without a listener", async (t) => {
+  const holder = net.createServer().listen(0, "127.0.0.1");
+  await once(holder, "listening");
+  const server = net.createServer();
+  t.after(() => { holder.close(); server.close(); });
+  await assert.rejects(
+    listenWithFallback(server, boundAddress(holder).port, "127.0.0.1", "127.0.0.1"),
+    { code: "EADDRINUSE" },
+  );
+  await assert.rejects(listenWithFallback(server, boundAddress(holder).port, "127.0.0.1"), { code: "EADDRINUSE" });
 });

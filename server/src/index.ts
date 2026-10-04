@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { WorkReviewAgentView, WorkReviewClientSnapshot, WorkReviewPublishedResult } from "./work-review-types";
 import { errorMessage, isRecord, parseJsonObject } from "./value-guards";
 import type { ClientTransport } from "./client-transport";
-import { isLocalNetworkAddress, localIpv4Addresses } from "./local-network";
+import { isLocalNetworkAddress, listenWithFallback, localIpv4Addresses } from "./local-network";
 import { startLanAdvertiser } from "./lan-advertiser";
 import { CommandReceipts } from "./command-receipts";
 import { SessionTransferJobs } from "./session-transfer-jobs";
@@ -447,11 +447,17 @@ function resolveAllowedDownloadFile(inputPath: string): { resolvedPath: string; 
 // Without a BIND_HOST the server listens everywhere but only answers local
 // network addresses. Setting BIND_HOST opts out of that filter.
 const CONFIGURED_BIND_HOST = (process.env.BIND_HOST || process.env.SOCKETAGENT_BIND_HOST || "").trim();
-const BIND_HOST = CONFIGURED_BIND_HOST || "0.0.0.0";
 const LOCAL_NETWORK_ONLY = !CONFIGURED_BIND_HOST;
+// The address actually bound. The default falls back to loopback when another
+// program already holds the port on one of this machine's addresses.
+let BIND_HOST = CONFIGURED_BIND_HOST || "0.0.0.0";
 // Whether phones on this network can connect directly, so the server should
 // advertise itself and tell paired phones its LAN addresses.
-const ACCEPTS_LAN_CONNECTIONS = LOCAL_NETWORK_ONLY || !["127.0.0.1", "::1", "localhost"].includes(BIND_HOST);
+let ACCEPTS_LAN_CONNECTIONS = !isLoopbackHost(BIND_HOST);
+
+function isLoopbackHost(host: string): boolean {
+  return ["127.0.0.1", "::1", "localhost"].includes(host);
+}
 
 const RELAY_URL = process.env.RELAY_URL || "";
 
@@ -9773,7 +9779,7 @@ async function initializeListeningServer(): Promise<void> {
     `Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)${LOCAL_NETWORK_ONLY ? ", local network only" : ""}`,
   );
   cancelWindowsRecoveryGuard();
-  if (!LOCAL_NETWORK_ONLY && !["127.0.0.1", "::1", "localhost"].includes(BIND_HOST)) {
+  if (!LOCAL_NETWORK_ONLY && !isLoopbackHost(BIND_HOST)) {
     console.warn(`[Security] Direct HTTP/WebSocket server is bound to ${BIND_HOST} for every network. Use relay mode or TLS for untrusted networks.`);
   }
   if (ACCEPTS_LAN_CONNECTIONS) {
@@ -11901,6 +11907,19 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
 // been initialized. On fast Windows hosts the relay can pair immediately after
 // listen; starting earlier let its first messages hit temporal-dead-zone values
 // such as SERVER_GIT_HASH, GIT_ROOT, and managedBackendUpdatePromise.
-httpServer.listen(PORT, BIND_HOST, () => {
-  void initializeListeningServer();
-});
+// A server that is running but not listening looks healthy to the service
+// manager, so any listen failure exits and lets it restart us.
+listenWithFallback(httpServer, PORT, BIND_HOST, LOCAL_NETWORK_ONLY ? "127.0.0.1" : undefined).then(
+  (bound) => {
+    if (bound !== BIND_HOST) {
+      console.warn(`[Listen] Port ${PORT} is already in use on one of this machine's addresses, so direct local network connections are off. The relay still works. Set BIND_HOST to choose an address.`);
+      BIND_HOST = bound;
+      ACCEPTS_LAN_CONNECTIONS = false;
+    }
+    void initializeListeningServer();
+  },
+  (error: unknown) => {
+    console.error(`[Listen] Could not listen on ${BIND_HOST}:${PORT}:`, error);
+    process.exit(1);
+  },
+);

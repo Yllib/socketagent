@@ -55,7 +55,9 @@ can_elevate() {
   fi
   command -v sudo >/dev/null 2>&1 || return 1
   if [[ "$MODE" == "interactive" ]]; then
-    sudo -v
+    # `sudo -v` asks for a password even under NOPASSWD rules, which fails
+    # headless installs, so try passwordless sudo first.
+    sudo -n true >/dev/null 2>&1 || sudo -v
   else
     sudo -n true >/dev/null 2>&1
   fi
@@ -78,8 +80,11 @@ fi
 
 install_bubblewrap() {
   if command -v apt-get >/dev/null 2>&1; then
-    run_as_root apt-get update
-    run_as_root apt-get install -y bubblewrap
+    # A package left half installed by something else fails every apt run, so
+    # the bwrap probe below decides success instead of apt's status.
+    run_as_root apt-get -o DPkg::Lock::Timeout=120 update || log "apt-get update reported an error. Using the existing package lists." >&2
+    run_as_root apt-get -o DPkg::Lock::Timeout=120 install -y bubblewrap \
+      || log "apt reported an error. If it names a package other than bubblewrap, fix it with: sudo dpkg --configure -a && sudo apt -f install" >&2
   elif command -v dnf >/dev/null 2>&1; then
     run_as_root dnf install -y bubblewrap
   elif command -v yum >/dev/null 2>&1; then
@@ -115,7 +120,7 @@ repair_apparmor_profile() {
   grep -qi '^Y' /sys/module/apparmor/parameters/enabled || return 1
 
   log "Bubblewrap is installed but blocked; installing the AppArmor profile..."
-  run_as_root apt-get install -y apparmor-profiles apparmor-utils
+  run_as_root apt-get -o DPkg::Lock::Timeout=120 install -y apparmor-profiles apparmor-utils
 
   local source_profile="/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
   local target_profile="/etc/apparmor.d/bwrap-userns-restrict"
@@ -131,5 +136,9 @@ if probe_bwrap; then
   exit 0
 fi
 
+if ! command -v bwrap >/dev/null 2>&1; then
+  log "Bubblewrap could not be installed. Run: sudo apt install bubblewrap (or your distribution's equivalent)." >&2
+  exit 4
+fi
 log "Bubblewrap is installed but the host still blocks its sandbox. WSL1 is unsupported; containers must allow user namespaces and the capabilities required by bwrap." >&2
 exit 4

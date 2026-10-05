@@ -13,6 +13,20 @@ REPO_URL="${SOCKETAGENT_REPO_URL:-https://github.com/Yllib/socketagent.git}"
 INSTALL_DIR="${SOCKETAGENT_INSTALL_DIR:-$HOME/socketagent}"
 BRANCH="${SOCKETAGENT_BRANCH:-master}"
 
+# Every failure without its own message ends here, so the install never stops
+# on a bare exit status. install-server.sh has its own, more detailed version.
+on_install_error() {
+  local status=$? command=$BASH_COMMAND
+  [[ $BASH_SUBSHELL -eq 0 ]] || return "$status"
+  echo "" >&2
+  echo "SocketAgent install stopped. This command failed with exit status $status:" >&2
+  echo "  $command" >&2
+  echo "Fix the problem above, then rerun the install command." >&2
+  exit "$status"
+}
+set -E
+trap on_install_error ERR
+
 SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR=""
 if [[ -n "$SCRIPT_PATH" && -f "$SCRIPT_PATH" ]]; then
@@ -54,8 +68,13 @@ install_git_if_missing() {
       waited=$((waited + 10))
     done
   elif command -v apt-get >/dev/null 2>&1; then
-    run_as_root apt-get update
-    run_as_root apt-get install -y git ca-certificates
+    # A package left half installed by something else fails every apt run, so
+    # judge success by whether git works afterward.
+    run_as_root apt-get -o DPkg::Lock::Timeout=120 update || echo "apt-get update reported an error. Using the existing package lists." >&2
+    if ! run_as_root apt-get -o DPkg::Lock::Timeout=120 install -y git ca-certificates; then
+      echo "apt reported an error. If it names a package other than git, fix it with:" >&2
+      echo "  sudo dpkg --configure -a && sudo apt -f install" >&2
+    fi
   elif command -v dnf >/dev/null 2>&1; then
     run_as_root dnf install -y git
   elif command -v yum >/dev/null 2>&1; then

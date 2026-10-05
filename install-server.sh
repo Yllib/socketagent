@@ -69,12 +69,47 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-phase() { echo -e "\n${CYAN}--- $1 ---${NC}"; }
+CURRENT_PHASE="Setup"
+phase() { CURRENT_PHASE="$1"; echo -e "\n${CYAN}--- $1 ---${NC}"; }
 ok()    { echo -e "  ${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}[!]${NC} $1"; }
 fail()  { echo -e "  ${RED}[X]${NC} $1"; }
 
+# Lists packages dpkg left half installed. apt tries to finish them on every
+# install, so one of them fails every apt run until the user fixes it.
+# Reads dpkg's status file because `dpkg --audit` needs root for the lock.
+report_broken_packages() {
+  [[ -r /var/lib/dpkg/status ]] || return 0
+  local broken
+  broken="$(awk '/^Package: /{p=$2} /^Status: /{if ($4 != "installed" && $4 != "not-installed" && $4 != "config-files") print p " (" $4 ")"}' /var/lib/dpkg/status)"
+  [[ -n "$broken" ]] || return 0
+  warn "These packages did not finish installing. They are not part of SocketAgent:"
+  printf '%s\n' "$broken" | sed 's/^/      /'
+  echo "  Fix them with: sudo dpkg --configure -a && sudo apt -f install"
+}
+
+# Every failure without its own message ends here, so the install never stops
+# on a bare exit status. Subshells skip it; their caller reports the failure.
+on_install_error() {
+  local status=$? command=$BASH_COMMAND
+  [[ $BASH_SUBSHELL -eq 0 ]] || return "$status"
+  [[ "${FUNCNAME[1]:-}" == run_as_root ]] && command="$ROOT_COMMAND"
+  echo ""
+  fail "Install stopped during \"$CURRENT_PHASE\"."
+  echo "  This command failed with exit status $status:"
+  echo "    $command"
+  case "$command" in
+    *apt-get*|*dpkg*) report_broken_packages ;;
+  esac
+  echo "  Fix the problem above, then rerun: bash $REPO_ROOT/install-server.sh"
+  exit "$status"
+}
+set -E
+trap on_install_error ERR
+
+ROOT_COMMAND=""
 run_as_root() {
+  ROOT_COMMAND="$*"
   if [[ "$(id -u)" -eq 0 ]]; then
     "$@"
   elif command -v sudo >/dev/null 2>&1; then
@@ -82,6 +117,16 @@ run_as_root() {
   else
     fail "Administrator access is required to install system dependencies."
     exit 1
+  fi
+}
+
+# Callers check for the tool they needed afterward instead of trusting apt's
+# status, because a broken package unrelated to SocketAgent fails every apt run.
+apt_install() {
+  run_as_root apt-get -o DPkg::Lock::Timeout=120 update || warn "apt-get update reported an error. Using the existing package lists."
+  if ! run_as_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y "$@"; then
+    warn "apt reported an error while installing $*."
+    report_broken_packages
   fi
 }
 
@@ -107,8 +152,7 @@ ensure_native_build_tools() {
       waited=$((waited + 10))
     done
   elif command -v apt-get >/dev/null 2>&1; then
-    run_as_root apt-get update
-    run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential python3
+    apt_install build-essential python3
   elif command -v dnf >/dev/null 2>&1; then
     run_as_root dnf install -y gcc-c++ make python3
   elif command -v yum >/dev/null 2>&1; then
@@ -137,8 +181,7 @@ ensure_virtual_browser_display() {
 
   echo "  Installing the virtual display used by protected browser sessions..."
   if command -v apt-get >/dev/null 2>&1; then
-    run_as_root apt-get update
-    run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb
+    apt_install xvfb
   elif command -v dnf >/dev/null 2>&1; then
     run_as_root dnf install -y xorg-x11-server-Xvfb
   elif command -v yum >/dev/null 2>&1; then

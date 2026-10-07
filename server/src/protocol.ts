@@ -1885,6 +1885,10 @@ export interface ErrorServerMessage {
   sessionId?: string;
   type: "error";
   message: string;
+  /** Set when the error belongs to a conversation and is saved in its history. */
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
 }
 
 export interface BackendAuthRequiredServerMessage {
@@ -2053,7 +2057,7 @@ export interface SessionArchiveFailedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "run_boundary";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "run_boundary" | "error";
   content: string;
   /** Display-only snapshot references; native conversation text stays unchanged. */
   inlineImageContent?: string;

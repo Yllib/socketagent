@@ -31,7 +31,7 @@ import {
   Backend,
   WorkflowStatePayload,
 } from "./protocol";
-import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, recordUserPrompt, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, cacheToolImage, positionSessionMessage, clearSessionPendingHandoffContext, removeHistoryEntriesByUuids } from "./session-store";
+import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, recordUserPrompt, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, cacheToolImage, positionSessionMessage, recordSessionError, clearSessionPendingHandoffContext, removeHistoryEntriesByUuids } from "./session-store";
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
   AppToolContext,
@@ -2871,6 +2871,13 @@ export class ClaudeSession {
   }
 
   public send(msg: ServerMessage): void {
+    if (msg.type === "error") {
+      try {
+        recordSessionError(msg.sessionId || this.sessionId || "", msg);
+      } catch (error: unknown) {
+        console.error("[History] Could not save session error:", error);
+      }
+    }
     positionSessionMessage(String(("sessionId" in msg ? msg.sessionId : undefined) || this.sessionId || ""), msg);
     maybeSendAgentAttentionPush(msg, path.basename(this.cwd) || "SocketAgent");
     const streamKey = this.coalescedStreamKey(msg);

@@ -3404,6 +3404,15 @@
         },
         "message": {
           "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
         }
       },
       "required": [
@@ -4137,7 +4146,8 @@
             "notification",
             "task_state",
             "permission_mode",
-            "run_boundary"
+            "run_boundary",
+            "error"
           ]
         },
         "content": {

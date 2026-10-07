@@ -60,6 +60,7 @@ export const historyEntrySchema = z.object({
     "secure_input", "browser_session", "html_plan", "work_review", "todos_update",
     "codex_plan", "user_uuid", "elicitation_url", "prompt_suggestion", "monitor",
     "notification", "task_state", "permission_mode", "run_boundary", "system",
+    "error",
   ]).transform(role => role === "system" ? "notification" : role),
   // Older tool cards can omit these display fields. Do not invent a timestamp.
   content: z.string().default(""), timestamp: z.string().default(""),

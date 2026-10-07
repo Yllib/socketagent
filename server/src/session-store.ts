@@ -15,6 +15,7 @@ import type {
   Backend,
   SessionInfo,
   HistoryEntry,
+  ErrorServerMessage,
   UserMessageUuidServerMessage,
 } from "./protocol";
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
@@ -1526,6 +1527,22 @@ export function repairStoredTranscriptIdentitiesOnce(): void {
   // Lazy SQLite migration runs the same collision repair before importing
   // each session. Avoid an eager startup walk across every retained history.
   console.log("[HistoryRepair] Enabled lazy transcript identity repair");
+}
+
+/**
+ * Saves an error a conversation showed, so it is still there when the
+ * conversation is reopened, and gives the live message the same position.
+ */
+export function recordSessionError(sessionId: string, message: ErrorServerMessage): void {
+  if (!sessionId || message.entryId) return;
+  const entry = appendHistory(sessionId, {
+    role: "error",
+    content: message.message,
+    timestamp: new Date().toISOString(),
+  });
+  message.entryId = entry.entryId;
+  message.sessionSeq = entry.sessionSeq;
+  message.revision = entry.revision;
 }
 
 export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[]): void {

@@ -50,8 +50,10 @@ import {
   cacheToolImage,
   markQuestionAnswered,
   positionSessionMessage,
+  recordSessionError,
   clearSessionPendingHandoffContext,
 } from "./session-store";
+import { describeMcpStartupFailure } from "./codex-mcp-errors";
 import { AppToolContext, stopAppMonitor, stopAppMonitorsForSession } from "./app-tool-handlers";
 import type {
   AgentSessionToolExecutor,
@@ -2280,6 +2282,13 @@ export class CodexSession {
   }
 
   public send(msg: ServerMessage): void {
+    if (msg.type === "error") {
+      try {
+        recordSessionError(msg.sessionId || this.sessionId || "", msg);
+      } catch (error: unknown) {
+        console.error("[History] Could not save session error:", error);
+      }
+    }
     positionSessionMessage(String(("sessionId" in msg ? msg.sessionId : undefined) || this.sessionId || ""), msg);
     maybeSendAgentAttentionPush(msg, path.basename(this.cwd) || "SocketAgent");
     const streamKey = this.coalescedStreamKey(msg);
@@ -4578,7 +4587,8 @@ export class CodexSession {
             mcpServerName: name,
           });
         } else if (error) {
-          this.send({ type: "error", message: `${name}: ${error}` });
+          console.warn(`[Codex] MCP server ${name} failed to start: ${error}`);
+          this.send({ type: "error", message: describeMcpStartupFailure(name, error) });
         }
         return;
       }

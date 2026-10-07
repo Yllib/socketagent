@@ -5,6 +5,7 @@ import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type El
 import { z } from "zod";
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ClaudeStreamIdentity } from "./claude-stream-identity";
+import { claudeMessageUuid } from "./claude-message-uuid";
 import { claudeTotalUsage } from "./claude-usage";
 import { readClaudeSupportedModels } from "./claude-model-discovery";
 import { handleClaudeResumeDialog } from "./claude-resume-dialog";
@@ -905,18 +906,6 @@ const CLAUDE_WARM_IDLE_TIMEOUT_MS = (() => {
  *  treating the stream as stuck. Real SDK-driven continuations arrive within
  *  a second or two; anything waiting this long is a hung stream, not slow work. */
 const CLAUDE_STALE_CONTINUATION_TIMEOUT_MS = 60 * 1000;
-
-/** Preserve UUIDs; map durable non-UUID delivery IDs to stable native UUIDs. */
-function claudeMessageUuid(value: string): NonNullable<import("@anthropic-ai/claude-agent-sdk").SDKUserMessage["uuid"]> {
-  const isUuid = (candidate: string): candidate is `${string}-${string}-${string}-${string}-${string}` =>
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate);
-  if (isUuid(value)) return value;
-  // Delegated reports use descriptive delivery IDs. UUIDv8 retains their
-  // deterministic identity without passing invalid UUIDs into the SDK.
-  const hash = crypto.createHash("sha256").update(`socketagent:claude-message:${value}`).digest("hex");
-  const variant = ((parseInt(hash[16], 16) & 3) | 8).toString(16);
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-${variant}${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
-}
 
 type ClaudeQueuedUserMessage = {
   type: "user";

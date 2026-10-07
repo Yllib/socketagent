@@ -22,6 +22,7 @@ import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./cod
 import { buildCodexSpawn } from "./codex-env";
 import { redactSecretsDeep } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
+import { claudeMessageUuid } from "./claude-message-uuid";
 import { mergeSessionTimestamps } from "./session-list-snapshot";
 import { isRestartContinuationPrompt } from "./restart-recovery";
 import { isUnusableSessionPreview, isBareSlashCommand, isLocalCommandOnlyEntry, isLocalCommandOnlySession, listedPreview } from "./native-transcript-filter";
@@ -1976,6 +1977,16 @@ export function hasPersistedUserMessage(sessionId: string, uuid: string): boolea
   ensureHistoryDatabaseSession(sessionId);
   backfillUserUuids(sessionId);
   return historyDatabase().hasUserUuid(sessionId, uuid);
+}
+
+/**
+ * Whether a prompt the app sent as [messageId] is in the session's history.
+ * Claude sessions store it under the UUID derived from that ID, and Codex
+ * sessions under the ID itself.
+ */
+export function hasPersistedPrompt(sessionId: string, messageId: string): boolean {
+  return hasPersistedUserMessage(sessionId, messageId)
+    || hasPersistedUserMessage(sessionId, claudeMessageUuid(messageId));
 }
 
 export function getHistoryEntryByToolUseId(

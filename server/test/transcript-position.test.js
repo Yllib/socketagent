@@ -15,10 +15,12 @@ const {
   getHistory,
   getHistoryPageToLastPrompt,
   getResumeHistoryPage,
+  hasPersistedPrompt,
   hasPersistedUserMessage,
   markQuestionAnswered,
   positionSessionMessage,
 } = require("#server/session-store");
+const { claudeMessageUuid } = require("#server/claude-message-uuid");
 
 test("uses indexed transcript lookups for prompt deduplication and completion targets", () => {
   const sessionId = `test-transcript-targets-${randomUUID()}`;
@@ -60,6 +62,23 @@ test("uses indexed transcript lookups for prompt deduplication and completion ta
       page.entries.map((entry) => entry.content),
       ["first prompt", "old answer", "new answer"],
     );
+  } finally {
+    deleteSessionArtifacts(sessionId);
+  }
+});
+
+test("an app prompt counts as saved under the uuid Claude stores it as", () => {
+  const sessionId = `test-persisted-prompt-${randomUUID()}`;
+  try {
+    // The app's prompt IDs are microsecond timestamps, not UUIDs.
+    appendHistory(sessionId, {
+      role: "user",
+      content: "saved by Claude",
+      uuid: claudeMessageUuid("1791327025470897"),
+      timestamp: "2026-10-06T22:50:25.684Z",
+    });
+    assert.equal(hasPersistedPrompt(sessionId, "1791327025470897"), true);
+    assert.equal(hasPersistedPrompt(sessionId, "1791327025470898"), false);
   } finally {
     deleteSessionArtifacts(sessionId);
   }

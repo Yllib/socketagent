@@ -104,6 +104,9 @@
           "$ref": "#/definitions/BrowserSessionErrorServerMessage"
         },
         {
+          "$ref": "#/definitions/BrowserFocusServerMessage"
+        },
+        {
           "$ref": "#/definitions/SecretInventoryServerMessage"
         },
         {
@@ -2096,6 +2099,38 @@
         "type",
         "profile",
         "message"
+      ]
+    },
+    "BrowserFocusServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_focus"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "editable": {
+          "type": "boolean"
+        },
+        "inputKind": {
+          "type": "string",
+          "enum": [
+            "text",
+            "password",
+            "email",
+            "number",
+            "tel",
+            "url",
+            "multiline"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "editable"
       ]
     },
     "SecretInventoryServerMessage": {

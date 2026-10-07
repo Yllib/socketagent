@@ -218,7 +218,9 @@
                 "back",
                 "forward",
                 "clipboard_read",
-                "clipboard_write"
+                "clipboard_write",
+                "pointer",
+                "keyboard"
               ]
             },
             "x": {
@@ -241,6 +243,38 @@
             },
             "url": {
               "type": "string"
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "down",
+                "move",
+                "up"
+              ]
+            },
+            "button": {
+              "type": "string",
+              "enum": [
+                "left",
+                "middle",
+                "right",
+                "none"
+              ]
+            },
+            "buttons": {
+              "type": "number"
+            },
+            "clickCount": {
+              "type": "number"
+            },
+            "modifiers": {
+              "type": "number"
+            },
+            "code": {
+              "type": "string"
+            },
+            "repeat": {
+              "type": "boolean"
             },
             "commandId": {
               "type": "string"

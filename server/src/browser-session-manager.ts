@@ -63,15 +63,47 @@ export interface BrowserSnapshot {
   frames: Array<{ frame: number; url: string }>;
 }
 
+export type BrowserMouseButton = "left" | "middle" | "right" | "none";
+
 export type BrowserPhoneInput =
   | { action: "tap"; x: number; y: number }
   | { action: "text"; text: string }
   | { action: "key"; key: string }
-  | { action: "scroll"; deltaX?: number; deltaY: number }
+  | { action: "scroll"; deltaX?: number; deltaY: number; x?: number; y?: number }
   | { action: "navigate"; url: string }
   | { action: "reload" }
   | { action: "back" }
-  | { action: "forward" };
+  | { action: "forward" }
+  | {
+    action: "pointer";
+    phase: "down" | "move" | "up";
+    x: number;
+    y: number;
+    button: BrowserMouseButton;
+    /** Buttons held: 1 left, 2 right, 4 middle. */
+    buttons: number;
+    clickCount: number;
+    /** 1 Alt, 2 Ctrl, 4 Meta, 8 Shift. */
+    modifiers: number;
+  }
+  | {
+    action: "keyboard";
+    phase: "down" | "up";
+    /** DOM `KeyboardEvent.code`, or empty when the viewer only knows the character. */
+    code: string;
+    /** DOM `KeyboardEvent.key`. */
+    key: string;
+    /** The character the key types, if any. */
+    text?: string;
+    modifiers: number;
+    repeat: boolean;
+  };
+
+/** What the focused element expects typed into it. */
+export interface BrowserFocusState {
+  editable: boolean;
+  inputKind?: "text" | "password" | "email" | "number" | "tel" | "url" | "multiline";
+}
 
 interface CdpResponse {
   id?: number;
@@ -127,6 +159,10 @@ interface RunningBrowserSession {
   refFrames: Map<string, PageFrame>;
   /** The isolated world agent scripts use in each embedded frame, by frame ID. */
   frameContexts: Map<string, number>;
+  /** Viewer input runs one event at a time, in arrival order. */
+  inputQueue: Promise<void>;
+  /** When a viewer last sent input, so frames speed up while someone interacts. */
+  lastInputAt: number;
 }
 
 /** One frame of the page, as the agent's scripts reach it. */
@@ -157,6 +193,104 @@ const IDLE_CLOSE_MS = 2 * 60 * 60_000;
 const WATCH_TTL_MS = 20_000;
 /** Floor on the gap between pushed frames, so a busy page cannot flood a phone. */
 const FRAME_INTERVAL_MS = 200;
+/** The faster floor while a viewer is typing, dragging, or scrolling. */
+const INTERACTIVE_FRAME_INTERVAL_MS = 66;
+/** How long after the last input frames stay at the interactive rate. */
+const INTERACTIVE_WINDOW_MS = 2_000;
+
+/** Windows virtual key codes, which Chrome needs to run keys like Backspace and arrows. */
+const VIRTUAL_KEY_CODES: Record<string, number> = {
+  Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 16, ShiftRight: 16,
+  ControlLeft: 17, ControlRight: 17, AltLeft: 18, AltRight: 18, Pause: 19, CapsLock: 20,
+  Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36,
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46,
+  MetaLeft: 91, MetaRight: 92, ContextMenu: 93,
+  NumpadMultiply: 106, NumpadAdd: 107, NumpadSubtract: 109, NumpadDecimal: 110, NumpadDivide: 111,
+  NumLock: 144, ScrollLock: 145,
+  Semicolon: 186, Equal: 187, Comma: 188, Minus: 189, Period: 190, Slash: 191, Backquote: 192,
+  BracketLeft: 219, Backslash: 220, BracketRight: 221, Quote: 222,
+};
+
+/** Key names for keys that type nothing, by their DOM code. */
+const NAMED_KEYS: Record<string, string> = {
+  ShiftLeft: "Shift", ShiftRight: "Shift", ControlLeft: "Control", ControlRight: "Control",
+  AltLeft: "Alt", AltRight: "Alt", MetaLeft: "Meta", MetaRight: "Meta", NumpadEnter: "Enter",
+};
+
+function virtualKeyCode(code: string, key: string): number {
+  const known = VIRTUAL_KEY_CODES[code];
+  if (known !== undefined) return known;
+  const letter = /^Key([A-Z])$/.exec(code);
+  if (letter) return letter[1].charCodeAt(0);
+  const digit = /^Digit([0-9])$/.exec(code);
+  if (digit) return digit[1].charCodeAt(0);
+  const numpad = /^Numpad([0-9])$/.exec(code);
+  if (numpad) return 96 + Number(numpad[1]);
+  const fn = /^F([0-9]{1,2})$/.exec(code);
+  if (fn) return 111 + Number(fn[1]);
+  if (key.length === 1 && /[a-z0-9]/i.test(key)) return key.toUpperCase().charCodeAt(0);
+  return 0;
+}
+
+/** 1 for the left key of a pair, 2 for the right, 3 for the numeric keypad. */
+function keyLocation(code: string): number {
+  if (code.startsWith("Numpad")) return 3;
+  if (/(Shift|Control|Alt|Meta)Right$/.test(code)) return 2;
+  if (/(Shift|Control|Alt|Meta)Left$/.test(code)) return 1;
+  return 0;
+}
+
+/**
+ * Editing shortcuts Chrome on macOS only runs when named, since its key
+ * bindings live in the window that CDP input bypasses. Linux and Windows
+ * builds handle them from the key event alone.
+ */
+function macEditingCommand(key: string, modifiers: number): string | undefined {
+  if (process.platform !== "darwin" || (modifiers & 4) === 0) return undefined;
+  const shift = (modifiers & 8) !== 0;
+  switch (key.toLowerCase()) {
+    case "a": return "selectAll";
+    case "c": return "copy";
+    case "v": return "paste";
+    case "x": return "cut";
+    case "z": return shift ? "redo" : "undo";
+    default: return undefined;
+  }
+}
+
+/**
+ * Finds the element with focus, following open shadow roots and same-origin
+ * frames, and reports whether it takes typing. Returns "frame" when focus is
+ * inside a cross-origin frame this document cannot see into.
+ */
+const FOCUS_EXPRESSION = `(() => {
+  let el = document.activeElement;
+  for (let depth = 0; el && depth < 20; depth++) {
+    if (el.shadowRoot && el.shadowRoot.activeElement) { el = el.shadowRoot.activeElement; continue; }
+    if (el.tagName === "IFRAME" || el.tagName === "FRAME") {
+      let inner = null;
+      try { inner = el.contentDocument && el.contentDocument.activeElement; } catch (e) { return "frame"; }
+      if (!inner) return "frame";
+      el = inner;
+      continue;
+    }
+    break;
+  }
+  if (!el || el.disabled || el.readOnly) return "none";
+  if (el.isContentEditable || el.tagName === "TEXTAREA") return "multiline";
+  if (el.tagName !== "INPUT") return "none";
+  const type = (el.type || "text").toLowerCase();
+  if (["button", "checkbox", "radio", "submit", "reset", "file", "image", "color", "range", "hidden"].includes(type)) return "none";
+  if (type === "password") return "password";
+  if (type === "email") return "email";
+  if (type === "number") return "number";
+  if (type === "tel") return "tel";
+  if (type === "url") return "url";
+  return "text";
+})()`;
+
+/** The same check for an out-of-process frame, which answers only while it holds focus. */
+const FRAME_FOCUS_EXPRESSION = `(document.hasFocus() ? ${FOCUS_EXPRESSION} : "unfocused")`;
 /** Element refs a snapshot hands out per frame and in total. */
 const SNAPSHOT_FRAME_ELEMENTS = 300;
 const SNAPSHOT_TOTAL_ELEMENTS = 600;
@@ -808,7 +942,10 @@ export class BrowserSessionManager {
       title: session.title,
     };
     if (watch.sendTimer) return;
-    const wait = Math.max(0, watch.lastSentAt + FRAME_INTERVAL_MS - Date.now());
+    const interval = Date.now() - session.lastInputAt < INTERACTIVE_WINDOW_MS
+      ? INTERACTIVE_FRAME_INTERVAL_MS
+      : FRAME_INTERVAL_MS;
+    const wait = Math.max(0, watch.lastSentAt + interval - Date.now());
     watch.sendTimer = setTimeout(() => {
       watch.sendTimer = undefined;
       const frame = watch.pending;
@@ -914,6 +1051,8 @@ export class BrowserSessionManager {
         frameTargets,
         refFrames: new Map<string, PageFrame>(),
         frameContexts: new Map<string, number>(),
+        inputQueue: Promise.resolve(),
+        lastInputAt: 0,
       };
       processHandle.once("exit", () => {
         const current = this.sessions.get(profile);
@@ -1007,15 +1146,68 @@ export class BrowserSessionManager {
     };
   }
 
+  /**
+   * Apply one viewer input. Inputs for a profile run strictly in arrival
+   * order, so a fast typist's keys and a drag's moves never overtake each
+   * other.
+   */
   async phoneInput(profileValue: string, input: BrowserPhoneInput): Promise<void> {
     const session = this.require(normalizeBrowserProfile(profileValue));
     this.touch(session);
+    session.lastInputAt = Date.now();
+    await this.enqueue(session, () => this.applyInput(session, input));
+  }
+
+  private enqueue<T>(session: RunningBrowserSession, work: () => Promise<T>): Promise<T> {
+    const run = session.inputQueue.then(work);
+    session.inputQueue = run.then(() => {}, () => {});
+    return run;
+  }
+
+  private async applyInput(session: RunningBrowserSession, input: BrowserPhoneInput): Promise<void> {
+    const clampX = (value: number) => Math.max(0, Math.min(session.width, Number(value)));
+    const clampY = (value: number) => Math.max(0, Math.min(session.height, Number(value)));
     switch (input.action) {
       case "tap": {
-        const x = Math.max(0, Math.min(session.width, Number(input.x)));
-        const y = Math.max(0, Math.min(session.height, Number(input.y)));
+        const x = clampX(input.x);
+        const y = clampY(input.y);
         await session.cdp.command("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
         await session.cdp.command("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+        break;
+      }
+      case "pointer": {
+        const type = input.phase === "down" ? "mousePressed" : input.phase === "up" ? "mouseReleased" : "mouseMoved";
+        await session.cdp.command("Input.dispatchMouseEvent", {
+          type,
+          x: clampX(input.x),
+          y: clampY(input.y),
+          button: input.button,
+          buttons: input.buttons,
+          clickCount: input.clickCount,
+          modifiers: input.modifiers,
+        });
+        break;
+      }
+      case "keyboard": {
+        const modifiers = input.modifiers;
+        // A key typed with Ctrl or Meta is a shortcut, not text.
+        const shortcut = (modifiers & 6) !== 0;
+        const key = input.key || NAMED_KEYS[input.code] || input.text || "";
+        // Enter types "\r" on a real keyboard, and forms submit on that keypress.
+        const typed = input.text ?? (key === "Enter" ? "\r" : undefined);
+        const text = shortcut ? undefined : typed;
+        const command = input.phase === "down" ? macEditingCommand(key, modifiers) : undefined;
+        await session.cdp.command("Input.dispatchKeyEvent", {
+          type: input.phase === "up" ? "keyUp" : text ? "keyDown" : "rawKeyDown",
+          key,
+          code: input.code,
+          windowsVirtualKeyCode: virtualKeyCode(input.code, key),
+          modifiers,
+          location: keyLocation(input.code),
+          autoRepeat: input.repeat,
+          ...(text && input.phase === "down" ? { text, unmodifiedText: text } : {}),
+          ...(command ? { commands: [command] } : {}),
+        });
         break;
       }
       case "text":
@@ -1028,8 +1220,8 @@ export class BrowserSessionManager {
       case "scroll":
         await session.cdp.command("Input.dispatchMouseEvent", {
           type: "mouseWheel",
-          x: session.width / 2,
-          y: session.height / 2,
+          x: input.x === undefined ? session.width / 2 : clampX(input.x),
+          y: input.y === undefined ? session.height / 2 : clampY(input.y),
           deltaX: Math.max(-5000, Math.min(5000, Number(input.deltaX || 0))),
           deltaY: Math.max(-5000, Math.min(5000, Number(input.deltaY))),
         });
@@ -1046,6 +1238,46 @@ export class BrowserSessionManager {
       case "forward":
         await this.historyStep(session, 1);
         break;
+    }
+  }
+
+  /**
+   * Whether the focused element takes typing, so a phone viewer can open
+   * its keyboard when a page field gets focus and close it otherwise.
+   */
+  async focusState(profileValue: string): Promise<BrowserFocusState> {
+    const session = this.require(normalizeBrowserProfile(profileValue));
+    // Read focus only after the input that may have moved it has run.
+    await session.inputQueue;
+    let kind = readStringResult(await session.cdp.command("Runtime.evaluate", {
+      expression: FOCUS_EXPRESSION,
+      returnByValue: true,
+    }));
+    if (kind === "frame") {
+      kind = "none";
+      for (const target of session.frameTargets) {
+        const result = await session.cdp.command("Runtime.evaluate", {
+          expression: FRAME_FOCUS_EXPRESSION,
+          returnByValue: true,
+        }, target).catch(() => ({}));
+        const frameKind = readStringResult(result);
+        if (frameKind && frameKind !== "unfocused") {
+          kind = frameKind;
+          break;
+        }
+      }
+    }
+    switch (kind) {
+      case "text":
+      case "password":
+      case "email":
+      case "number":
+      case "tel":
+      case "url":
+      case "multiline":
+        return { editable: true, inputKind: kind };
+      default:
+        return { editable: false };
     }
   }
 
@@ -1357,9 +1589,17 @@ export class BrowserSessionManager {
     return text;
   }
 
+  /**
+   * Runs in the input queue, so a viewer's paste shortcut sent right after
+   * this lands on the new clipboard contents.
+   */
   async writeClipboard(profileValue: string, text: string): Promise<void> {
     const session = this.require(normalizeBrowserProfile(profileValue));
     if (text.length > 65_536) throw new Error("Browser clipboard text is too large.");
+    await this.enqueue(session, () => this.writeClipboardNow(session, text));
+  }
+
+  private async writeClipboardNow(session: RunningBrowserSession, text: string): Promise<void> {
     await this.grantClipboardAccess(session);
     const result = await session.cdp.command("Runtime.evaluate", {
       expression: `navigator.clipboard.writeText(${JSON.stringify(text)})`,

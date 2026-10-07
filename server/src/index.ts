@@ -1476,9 +1476,10 @@ function serverCapabilitiesPayload(
     codexGoals: { version: 1 },
     sessionMemory: { version: 1 },
     browserSessions: {
-      version: 2,
+      version: 3,
       activeHeader: true,
       clipboardToSecret: true,
+      nativeInput: true,
     },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
@@ -5406,8 +5407,44 @@ function createConnectionHandler(
                 input = { action: "key", key: String(msg.key || "") };
                 break;
               case "scroll":
-                input = { action: "scroll", deltaX: Number(msg.deltaX || 0), deltaY: Number(msg.deltaY || 0) };
+                input = {
+                  action: "scroll",
+                  deltaX: Number(msg.deltaX || 0),
+                  deltaY: Number(msg.deltaY || 0),
+                  ...(msg.x !== undefined && msg.y !== undefined ? { x: Number(msg.x), y: Number(msg.y) } : {}),
+                };
                 break;
+              case "pointer": {
+                const pointer: BrowserPhoneInput = {
+                  action: "pointer",
+                  phase: msg.phase === "down" || msg.phase === "up" ? msg.phase : "move",
+                  x: Number(msg.x),
+                  y: Number(msg.y),
+                  button: msg.button ?? "none",
+                  buttons: Number(msg.buttons || 0),
+                  clickCount: Number(msg.clickCount || 0),
+                  modifiers: Number(msg.modifiers || 0),
+                };
+                await browserSessionManager.phoneInput(msg.profile, pointer);
+                // Streamed input relies on the live screencast for frames.
+                // A release can focus or blur a field, so report which.
+                if (pointer.phase === "up") {
+                  const focus = await browserSessionManager.focusState(msg.profile);
+                  sendJson({ type: "browser_focus", profile: msg.profile, ...focus });
+                }
+                return;
+              }
+              case "keyboard":
+                await browserSessionManager.phoneInput(msg.profile, {
+                  action: "keyboard",
+                  phase: msg.phase === "up" ? "up" : "down",
+                  code: String(msg.code || ""),
+                  key: String(msg.key || ""),
+                  ...(msg.text ? { text: String(msg.text) } : {}),
+                  modifiers: Number(msg.modifiers || 0),
+                  repeat: msg.repeat === true,
+                });
+                return;
               case "navigate":
                 input = { action: "navigate", url: String(msg.url || "") };
                 break;

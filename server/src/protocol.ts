@@ -149,10 +149,16 @@ export interface BrowserViewportMessage {
   height: number;
 }
 
+/**
+ * Input from a viewer. `pointer` and `keyboard` forward the viewer's own
+ * mouse, touch, and key events one at a time, in order, so the page receives
+ * them as it would from a local device. Servers advertise them with
+ * `browserSessions.nativeInput`.
+ */
 export interface BrowserSessionInputMessage {
   type: "browser_session_input";
   profile: string;
-  action: "tap" | "text" | "key" | "scroll" | "navigate" | "reload" | "back" | "forward" | "clipboard_read" | "clipboard_write";
+  action: "tap" | "text" | "key" | "scroll" | "navigate" | "reload" | "back" | "forward" | "clipboard_read" | "clipboard_write" | "pointer" | "keyboard";
   x?: number;
   y?: number;
   text?: string;
@@ -160,6 +166,17 @@ export interface BrowserSessionInputMessage {
   deltaX?: number;
   deltaY?: number;
   url?: string;
+  /** Pointer: down, move, or up. Keyboard: down or up. */
+  phase?: "down" | "move" | "up";
+  button?: "left" | "middle" | "right" | "none";
+  /** Buttons held during the event: 1 left, 2 right, 4 middle. */
+  buttons?: number;
+  clickCount?: number;
+  /** Modifier keys held: 1 Alt, 2 Ctrl, 4 Meta, 8 Shift. */
+  modifiers?: number;
+  /** DOM `KeyboardEvent.code` of the physical key, such as KeyA or ArrowLeft. */
+  code?: string;
+  repeat?: boolean;
 }
 
 export interface BrowserRuntimeInstallMessage {
@@ -2997,6 +3014,18 @@ export interface BrowserSessionErrorServerMessage {
   message: string;
 }
 
+/**
+ * Whether the page's focused element takes typing, sent after a viewer's
+ * pointer input so a phone can open or close its keyboard to match.
+ */
+export interface BrowserFocusServerMessage {
+  type: "browser_focus";
+  profile: string;
+  editable: boolean;
+  /** The keyboard that suits the field. */
+  inputKind?: "text" | "password" | "email" | "number" | "tel" | "url" | "multiline";
+}
+
 /** Acceptance means dispatched, not that the backend finished the work. */
 export interface CommandReceiptServerMessage {
   type: "command_receipt";
@@ -3040,6 +3069,7 @@ export type ServerMessage =
   | BrowserFrameServerMessage
   | BrowserClipboardServerMessage
   | BrowserSessionErrorServerMessage
+  | BrowserFocusServerMessage
   | SecretInventoryServerMessage
   | SecretOperationResultServerMessage
   | HtmlPlanServerMessage

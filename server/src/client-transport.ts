@@ -17,4 +17,9 @@ export interface ClientTransport {
     bytes: Buffer,
     peerId?: string,
   ): boolean;
+  /**
+   * Send an encoded binary browser frame. Returns false, sending nothing,
+   * when the app has not said it reads them.
+   */
+  sendBinaryBrowserFrame?(encoded: Buffer, peerId?: string): boolean;
 }

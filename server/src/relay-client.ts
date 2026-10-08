@@ -9,6 +9,7 @@ import {
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
 import { BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
+import { supportsBinaryBrowserFrames } from "./browser-frame-wire";
 
 // Binary envelope plaintext markers — first byte of the decrypted payload.
 const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
@@ -27,6 +28,7 @@ interface RelayPeer {
   supportsSessionEventAck: boolean;
   supportsMonitorOutputAck: boolean;
   supportsBinaryFileDownload: boolean;
+  supportsBinaryBrowserFrames: boolean;
 }
 
 export interface RelayOutboxDrain {
@@ -301,6 +303,7 @@ export class RelayClient {
         supportsSessionEventAck: false,
         supportsMonitorOutputAck: false,
         supportsBinaryFileDownload: false,
+        supportsBinaryBrowserFrames: false,
       };
       this.peers.set(peerId, peer);
     }
@@ -371,6 +374,15 @@ export class RelayClient {
       const envelope = encryptBinary(plaintext, peer.publicKey!, this.opts.keyPair.secretKey);
       this.sendRawFrameToPeer(targetPeerId, envelope, true);
     }
+    return true;
+  }
+
+  /** Send an encoded browser frame to one phone, if it reads binary frames. */
+  sendBinaryBrowserFrame(encoded: Buffer, peerId: string): boolean {
+    const peer = this.peers.get(peerId);
+    if (!peer?.publicKey || !peer.binaryEnabled || !peer.supportsBinaryBrowserFrames) return false;
+    if (this.ws?.readyState !== WebSocket.OPEN) return true;
+    this.sendRawFrameToPeer(peerId, encryptBinary(encoded, peer.publicKey, this.opts.keyPair.secretKey), true);
     return true;
   }
 
@@ -553,6 +565,7 @@ export class RelayClient {
       peer.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       peer.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       peer.supportsBinaryFileDownload = supportsBinaryFileDownload(msg);
+      peer.supportsBinaryBrowserFrames = supportsBinaryBrowserFrames(msg);
       this.virtualWs.supportsSessionEventAck = Array.from(this.peers.values())
         .some((connectedPeer) => connectedPeer.supportsSessionEventAck);
       this.virtualWs.supportsMonitorOutputAck = this.peers.size > 0
@@ -676,6 +689,10 @@ export class VirtualRelaySocket {
     peerId?: string,
   ): boolean {
     return this.relay.sendFileDownloadChunk(metadata, bytes, peerId);
+  }
+
+  sendBinaryBrowserFrame(encoded: Buffer, peerId?: string): boolean {
+    return peerId ? this.relay.sendBinaryBrowserFrame(encoded, peerId) : false;
   }
 
   send(data: string): void {

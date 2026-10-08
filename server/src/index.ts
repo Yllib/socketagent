@@ -63,6 +63,7 @@ import {
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
+import { encodeBinaryBrowserFrame, supportsBinaryBrowserFrames } from "./browser-frame-wire";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { onInlineImagesSaved } from "./session-store";
 import { inlineImageStore } from "./inline-image-store";
@@ -118,6 +119,7 @@ import {
   BrowserPhoneInput,
   normalizeBrowserProfile,
   normalizeBrowserUrl,
+  WATCH_TTL_MS as BROWSER_WATCH_TTL_MS,
 } from "./browser-session-manager";
 import {
   discardSessionTransfer,
@@ -520,6 +522,7 @@ class DirectClientTransport implements ClientTransport {
   private binaryEnabled = false;
   private authenticated: boolean;
   private binaryFileDownloadEnabled = false;
+  private binaryBrowserFramesEnabled = false;
   private authTimer: ReturnType<typeof setTimeout> | null = null;
   supportsRawSdkEvents = false;
   supportsSessionEventAck = false;
@@ -612,6 +615,17 @@ class DirectClientTransport implements ClientTransport {
 
   setClientCapabilities(message: unknown): void {
     this.binaryFileDownloadEnabled = supportsBinaryFileDownload(message);
+    this.binaryBrowserFramesEnabled = supportsBinaryBrowserFrames(message);
+  }
+
+  sendBinaryBrowserFrame(encoded: Buffer): boolean {
+    if (!this.binaryBrowserFramesEnabled) return false;
+    if (this.ws.readyState !== WebSocket.OPEN) return true;
+    this.ws.send(
+      this.peerPublicKey ? encryptBinary(encoded, this.peerPublicKey, this.keyPair.secretKey) : encoded,
+      { binary: true },
+    );
+    return true;
   }
 
   supportsBinaryFileDownload(): boolean {
@@ -2201,12 +2215,65 @@ const interruptedDelegationIdsAtStartup = new Set(
     .map((record) => record.delegationId),
 );
 
-function broadcastBrowserFrame(frame: BrowserFrame): void {
-  const raw = JSON.stringify({ type: "browser_frame", ...frame });
-  for (const client of connectedClients) {
-    if (client.readyState === WebSocket.OPEN) client.send(raw);
+/** A connection, or one phone on the relay, with a browser profile open. */
+interface BrowserViewer {
+  transport: ClientTransport;
+  peerId?: string;
+  expiresAt: number;
+}
+
+/** Who is watching each profile, so frames go only to them. Watches lapse unless renewed. */
+const browserViewers = new Map<string, BrowserViewer[]>();
+
+/**
+ * Record a viewer opening, renewing, or closing [profile]. Reports whether
+ * anyone still watches it and whether this viewer just arrived.
+ */
+function setBrowserViewer(
+  profile: string,
+  transport: ClientTransport,
+  peerId: string | undefined,
+  watching: boolean,
+): { watched: boolean; arrived: boolean } {
+  const key = normalizeBrowserProfile(profile);
+  const now = Date.now();
+  const live = (browserViewers.get(key) ?? []).filter((viewer) => viewer.expiresAt > now);
+  const viewers = live.filter((viewer) => !(viewer.transport === transport && viewer.peerId === peerId));
+  if (watching) viewers.push({ transport, peerId, expiresAt: now + BROWSER_WATCH_TTL_MS });
+  if (viewers.length > 0) browserViewers.set(key, viewers);
+  else browserViewers.delete(key);
+  return { watched: viewers.length > 0, arrived: watching && viewers.length > live.length };
+}
+
+/** Send a message for a profile to its current viewers. */
+function sendToBrowserViewers(profile: string, json: string): void {
+  const now = Date.now();
+  for (const { transport, peerId, expiresAt } of browserViewers.get(profile) ?? []) {
+    if (expiresAt <= now || transport.readyState !== WebSocket.OPEN) continue;
+    if (peerId && transport.sendReply) transport.sendReply(peerId, json);
+    else transport.send(json);
   }
-  if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
+}
+
+/**
+ * Send a streamed frame to the profile's viewers, as raw bytes to apps that
+ * read them and as a JSON message to older ones.
+ */
+function sendBrowserFrame(frame: BrowserFrame): void {
+  const now = Date.now();
+  const viewers = (browserViewers.get(frame.profile) ?? []).filter((viewer) => viewer.expiresAt > now);
+  let encoded: Buffer | undefined;
+  let json: string | undefined;
+  for (const { transport, peerId } of viewers) {
+    if (transport.readyState !== WebSocket.OPEN) continue;
+    if (transport.sendBinaryBrowserFrame) {
+      encoded ??= encodeBinaryBrowserFrame(frame);
+      if (transport.sendBinaryBrowserFrame(encoded, peerId)) continue;
+    }
+    json ??= JSON.stringify({ type: "browser_frame", ...frame });
+    if (peerId && transport.sendReply) transport.sendReply(peerId, json);
+    else transport.send(json);
+  }
 }
 
 function broadcastBrowserViewport(session: BrowserViewportState): void {
@@ -2226,7 +2293,15 @@ function broadcastBrowserViewport(session: BrowserViewportState): void {
   if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
 }
 
-browserSessionManager.onFrame(broadcastBrowserFrame);
+browserSessionManager.onFrame(sendBrowserFrame);
+browserSessionManager.onEvent((event) => sendToBrowserViewers(event.profile, JSON.stringify(event)));
+
+/** Queued bytes past which a connection holds new browser frames, about two frames. */
+const BROWSER_FRAME_BUFFER_LIMIT = 160 * 1024;
+
+browserSessionManager.setFrameCongestionCheck(() =>
+  (relayClient?.bufferedAmount ?? 0) > BROWSER_FRAME_BUFFER_LIMIT
+  || [...connectedClients].some((client) => (client.bufferedAmount ?? 0) > BROWSER_FRAME_BUFFER_LIMIT));
 
 function broadcastHeadlessSessionMessage(data: string, fallbackSessionId = ""): void {
   try {
@@ -5380,16 +5455,37 @@ function createConnectionHandler(
         break;
       }
 
+      case "browser_frame_ack":
+        browserSessionManager.ackFrame(msg.profile, msg.seq);
+        break;
+
       case "browser_watch": {
+        const { watched, arrived } = setBrowserViewer(msg.profile, transport, peerId, msg.watching);
         if (!msg.watching) {
-          browserSessionManager.unwatch(msg.profile);
+          if (!watched) browserSessionManager.unwatch(msg.profile);
           break;
         }
         // A phone that has gone away simply stops renewing, so a failure here
         // is not worth interrupting its viewer over.
-        void browserSessionManager.watch(msg.profile).catch(() => {});
+        void browserSessionManager.watch(msg.profile)
+          .then(() => { if (arrived) browserSessionManager.replayState(msg.profile); })
+          .catch(() => {});
         break;
       }
+
+      case "browser_prompt_response":
+        void browserSessionManager.answerPrompt(msg.profile, msg.id, {
+          accept: msg.accept,
+          ...(msg.value !== undefined ? { value: msg.value } : {}),
+          ...(msg.files ? { files: msg.files } : {}),
+          ...(msg.username !== undefined ? { username: msg.username } : {}),
+          ...(msg.password !== undefined ? { password: msg.password } : {}),
+        }).catch((error: unknown) => sendJson({
+          type: "browser_session_error",
+          profile: msg.profile,
+          message: error instanceof Error ? errorMessage(error) : "The page did not take that answer.",
+        }));
+        break;
 
       case "browser_session_input": {
         void (async () => {
@@ -5460,6 +5556,12 @@ function createConnectionHandler(
               }
               case "clipboard_write":
                 await browserSessionManager.writeClipboard(msg.profile, String(msg.text || ""));
+                return;
+              case "switch_tab":
+                await browserSessionManager.switchTab(msg.profile, String(msg.tabId || ""));
+                return;
+              case "close_tab":
+                await browserSessionManager.closeTab(msg.profile, String(msg.tabId || ""));
                 return;
               default: {
                 const action = String(requestedAction || "unknown");

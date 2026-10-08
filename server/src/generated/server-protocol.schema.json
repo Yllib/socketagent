@@ -107,6 +107,15 @@
           "$ref": "#/definitions/BrowserFocusServerMessage"
         },
         {
+          "$ref": "#/definitions/BrowserPromptServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BrowserPromptClosedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BrowserTabsServerMessage"
+        },
+        {
           "$ref": "#/definitions/SecretInventoryServerMessage"
         },
         {
@@ -2048,6 +2057,9 @@
         },
         "title": {
           "type": "string"
+        },
+        "seq": {
+          "type": "number"
         }
       },
       "required": [
@@ -2131,6 +2143,249 @@
         "type",
         "profile",
         "editable"
+      ]
+    },
+    "BrowserPromptServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_prompt"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "prompt": {
+          "$ref": "#/definitions/BrowserPrompt"
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "id",
+        "prompt"
+      ]
+    },
+    "BrowserPrompt": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "select"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  },
+                  "selected": {
+                    "type": "boolean"
+                  },
+                  "disabled": {
+                    "type": "boolean"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "label",
+                  "value",
+                  "selected",
+                  "disabled"
+                ]
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "picker"
+            },
+            "inputType": {
+              "type": "string",
+              "enum": [
+                "date",
+                "time",
+                "datetime-local",
+                "month",
+                "week",
+                "color"
+              ]
+            },
+            "value": {
+              "type": "string"
+            },
+            "min": {
+              "type": "string"
+            },
+            "max": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "inputType",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "dialog"
+            },
+            "dialogType": {
+              "type": "string",
+              "enum": [
+                "alert",
+                "confirm",
+                "prompt",
+                "beforeunload"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "defaultText": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "dialogType",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file"
+            },
+            "multiple": {
+              "type": "boolean"
+            },
+            "uploadDir": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "multiple",
+            "uploadDir"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "auth"
+            },
+            "origin": {
+              "type": "string"
+            },
+            "scheme": {
+              "type": "string"
+            },
+            "realm": {
+              "type": "string"
+            },
+            "proxy": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "origin",
+            "scheme",
+            "proxy"
+          ]
+        }
+      ]
+    },
+    "BrowserPromptClosedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_prompt_closed"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "id"
+      ]
+    },
+    "BrowserTabsServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_tabs"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "tabs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "active": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "url",
+              "title",
+              "active"
+            ]
+          }
+        }
+      },
+      "required": [
+        "type",
+        "profile",
+        "tabs"
       ]
     },
     "SecretInventoryServerMessage": {

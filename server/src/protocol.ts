@@ -136,6 +136,13 @@ export interface BrowserWatchMessage {
   watching: boolean;
 }
 
+/** A streamed frame is on screen. The server keeps only a couple of frames in transit. */
+export interface BrowserFrameAckMessage {
+  type: "browser_frame_ack";
+  profile: string;
+  seq: number;
+}
+
 /**
  * Switch the profile between a mobile and a desktop layout.
  *
@@ -158,7 +165,9 @@ export interface BrowserViewportMessage {
 export interface BrowserSessionInputMessage {
   type: "browser_session_input";
   profile: string;
-  action: "tap" | "text" | "key" | "scroll" | "navigate" | "reload" | "back" | "forward" | "clipboard_read" | "clipboard_write" | "pointer" | "keyboard";
+  action: "tap" | "text" | "key" | "scroll" | "navigate" | "reload" | "back" | "forward" | "clipboard_read" | "clipboard_write" | "pointer" | "keyboard" | "switch_tab" | "close_tab";
+  /** The tab switch_tab shows or close_tab closes. */
+  tabId?: string;
   x?: number;
   y?: number;
   text?: string;
@@ -177,6 +186,24 @@ export interface BrowserSessionInputMessage {
   /** DOM `KeyboardEvent.code` of the physical key, such as KeyA or ArrowLeft. */
   code?: string;
   repeat?: boolean;
+}
+
+/**
+ * The viewer's answer to a browser_prompt. A response whose id no longer
+ * matches the open prompt is ignored.
+ */
+export interface BrowserPromptResponseMessage {
+  type: "browser_prompt_response";
+  profile: string;
+  id: string;
+  /** False cancels: dismisses a dialog, leaves a picker unchanged, or declines sign-in. */
+  accept: boolean;
+  /** The chosen option, picker value, or prompt() text. */
+  value?: string;
+  /** Server paths of uploaded files, inside the prompt's uploadDir. */
+  files?: string[];
+  username?: string;
+  password?: string;
 }
 
 export interface BrowserRuntimeInstallMessage {
@@ -1151,6 +1178,8 @@ export type ClientMessage = { commandId?: string } & (
   | PrivateIntegrationAuthRequestMessage
   | BrowserFrameRequestMessage
   | BrowserWatchMessage
+  | BrowserFrameAckMessage
+  | BrowserPromptResponseMessage
   | BrowserViewportMessage
   | BrowserSessionInputMessage
   | BrowserRuntimeInstallMessage
@@ -3004,6 +3033,8 @@ export interface BrowserFrameServerMessage {
   height: number;
   url: string;
   title: string;
+  /** Set on streamed frames. Viewers acknowledge it with browser_frame_ack once shown. */
+  seq?: number;
 }
 
 export interface BrowserClipboardServerMessage {
@@ -3028,6 +3059,64 @@ export interface BrowserFocusServerMessage {
   editable: boolean;
   /** The keyboard that suits the field. */
   inputKind?: "text" | "password" | "email" | "number" | "tel" | "url" | "multiline";
+}
+
+/**
+ * Something a page asked for that Chrome draws outside the page, so the live
+ * view cannot show it. The viewer answers natively with browser_prompt_response.
+ */
+export type BrowserPrompt =
+  | {
+    kind: "select";
+    options: Array<{ label: string; value: string; selected: boolean; disabled: boolean; group?: string }>;
+  }
+  | {
+    kind: "picker";
+    inputType: "date" | "time" | "datetime-local" | "month" | "week" | "color";
+    /** In the input's own format, such as 2026-10-07, 13:45, or #ff0000. */
+    value: string;
+    min?: string;
+    max?: string;
+  }
+  | {
+    kind: "dialog";
+    dialogType: "alert" | "confirm" | "prompt" | "beforeunload";
+    message: string;
+    defaultText?: string;
+  }
+  | {
+    kind: "file";
+    multiple: boolean;
+    /** Where the viewer uploads the chosen files before answering. */
+    uploadDir: string;
+  }
+  | {
+    kind: "auth";
+    origin: string;
+    scheme: string;
+    realm?: string;
+    /** Set when the challenge comes from a proxy rather than the site. */
+    proxy: boolean;
+  };
+
+export interface BrowserPromptServerMessage {
+  type: "browser_prompt";
+  profile: string;
+  id: string;
+  prompt: BrowserPrompt;
+}
+
+/** The prompt was answered, here or on another device, or the page moved on. */
+export interface BrowserPromptClosedServerMessage {
+  type: "browser_prompt_closed";
+  profile: string;
+  id: string;
+}
+
+export interface BrowserTabsServerMessage {
+  type: "browser_tabs";
+  profile: string;
+  tabs: Array<{ id: string; url: string; title: string; active: boolean }>;
 }
 
 /** Acceptance means dispatched, not that the backend finished the work. */
@@ -3074,6 +3163,9 @@ export type ServerMessage =
   | BrowserClipboardServerMessage
   | BrowserSessionErrorServerMessage
   | BrowserFocusServerMessage
+  | BrowserPromptServerMessage
+  | BrowserPromptClosedServerMessage
+  | BrowserTabsServerMessage
   | SecretInventoryServerMessage
   | SecretOperationResultServerMessage
   | HtmlPlanServerMessage

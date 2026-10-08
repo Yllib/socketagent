@@ -6,6 +6,15 @@ import * as path from "node:path";
 import { ChildProcess, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import WebSocket from "ws";
+import { randomUUID } from "node:crypto";
+import type {
+  BrowserPrompt,
+  BrowserPromptClosedServerMessage,
+  BrowserPromptResponseMessage,
+  BrowserPromptServerMessage,
+  BrowserTabsServerMessage,
+} from "./protocol";
+import { PICKER_BINDING, PICKER_SCRIPT, PICKER_WORLD, applyPickerExpression, parsePickerReport } from "./browser-page-pickers";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -37,6 +46,8 @@ export interface BrowserFrame {
   height: number;
   url: string;
   title: string;
+  /** Set on streamed frames. A viewer acknowledges it once the frame is on screen. */
+  seq?: number;
 }
 
 export interface BrowserSnapshotElement {
@@ -99,6 +110,15 @@ export type BrowserPhoneInput =
     repeat: boolean;
   };
 
+/** What a viewer said to a prompt. */
+export type BrowserPromptAnswer = Omit<BrowserPromptResponseMessage, "type" | "profile" | "id">;
+
+/** Messages for a profile's viewers that are not frames. */
+export type BrowserSessionEvent =
+  | BrowserPromptServerMessage
+  | BrowserPromptClosedServerMessage
+  | BrowserTabsServerMessage;
+
 /** What the focused element expects typed into it. */
 export interface BrowserFocusState {
   editable: boolean;
@@ -116,9 +136,25 @@ interface CdpResponse {
 }
 
 interface CdpTarget {
+  id?: string;
   type?: string;
   url?: string;
   webSocketDebuggerUrl?: string;
+}
+
+interface BrowserTab {
+  id: string;
+  url: string;
+  title: string;
+  /** The tab that opened this one, which a closing pop-up hands the view back to. */
+  openerId?: string;
+}
+
+/** A prompt the page is waiting on, and how to give the page the viewer's answer. */
+interface OpenPrompt {
+  id: string;
+  prompt: BrowserPrompt;
+  answer: (answer: BrowserPromptAnswer) => Promise<void>;
 }
 
 /**
@@ -132,10 +168,19 @@ interface BrowserWatch {
   expiresAt: number;
   expiryTimer: NodeJS.Timeout;
   stop: () => void;
-  /** The newest frame not yet sent, held back by the send interval. */
+  /** The newest frame not yet sent, held back by pacing. */
   pending?: BrowserFrame;
   sendTimer?: NodeJS.Timeout;
   lastSentAt: number;
+  /** Numbers each sent frame so an acknowledgement names the one shown. */
+  seq: number;
+  /** When each sent frame that no viewer has acknowledged went out, by seq. */
+  unacked: Map<number, number>;
+  /**
+   * Set once a viewer acknowledges a frame. Until then the stream is paced by
+   * the connection's send buffer alone, which is all older apps allow.
+   */
+  acked: boolean;
 }
 
 interface RunningBrowserSession {
@@ -147,7 +192,19 @@ interface RunningBrowserSession {
   profileDir: string;
   process: ChildProcess;
   displayProcess?: ChildProcess;
+  /** Chrome's debugging port, for connecting to tabs as they open. */
+  port: number;
+  /** Connection to the active tab. Everything that acts on the page uses it. */
   cdp: CdpClient;
+  /** Browser-wide connection that sees tabs open, change, and close. */
+  browserCdp: CdpClient;
+  /** Open tabs in the order they opened, by target ID. */
+  tabs: Map<string, BrowserTab>;
+  activeTab: string;
+  /** What the page is waiting on a viewer for, if anything. */
+  prompt?: OpenPrompt;
+  /** Inputs and navigations waiting on Chrome, released when the page stops to ask the viewer something. */
+  blockedWaiters: Set<() => void>;
   width: number;
   height: number;
   lastUsedAt: string;
@@ -190,13 +247,22 @@ const DISPLAY_WIDTH = 1920;
 const DISPLAY_HEIGHT = 1200;
 const IDLE_CLOSE_MS = 2 * 60 * 60_000;
 /** How long one watch request keeps the screencast alive without a renewal. */
-const WATCH_TTL_MS = 20_000;
+export const WATCH_TTL_MS = 20_000;
 /** Floor on the gap between pushed frames, so a busy page cannot flood a phone. */
 const FRAME_INTERVAL_MS = 200;
 /** The faster floor while a viewer is typing, dragging, or scrolling. */
 const INTERACTIVE_FRAME_INTERVAL_MS = 66;
 /** How long after the last input frames stay at the interactive rate. */
 const INTERACTIVE_WINDOW_MS = 2_000;
+/**
+ * Frames a viewer may have in transit at once. More keeps a slow link busy
+ * but queues stale frames, which is what makes the picture lag behind input.
+ */
+const MAX_UNACKED_FRAMES = 2;
+/** An unacknowledged frame this old counts as lost, so a dropped ack cannot stall the stream. */
+const FRAME_ACK_TIMEOUT_MS = 1_000;
+/** How soon a frame held for a backed-up connection checks again. */
+const CONGESTION_RETRY_MS = 40;
 
 /** Windows virtual key codes, which Chrome needs to run keys like Backspace and arrows. */
 const VIRTUAL_KEY_CODES: Record<string, number> = {
@@ -663,12 +729,42 @@ async function trackFrameTargets(cdp: CdpClient, targets: Set<string>): Promise<
     // A cross-site frame's own cross-site frames attach through it.
     void cdp.command("Target.setAutoAttach", FRAME_AUTO_ATTACH, sessionId).catch(() => {});
     void cdp.command("DOM.enable", {}, sessionId).catch(() => {});
+    void cdp.command("Runtime.enable", {}, sessionId).catch(() => {});
+    void installPickers(cdp, sessionId).catch(() => {});
   });
   cdp.on("Target.detachedFromTarget", (params) => {
     if (typeof params.sessionId === "string") targets.delete(params.sessionId);
   });
   await cdp.command("Target.setAutoAttach", FRAME_AUTO_ATTACH);
 }
+
+/** Runs the picker script in every frame of a page or out-of-process frame, now and after each navigation. */
+async function installPickers(cdp: CdpClient, sessionId?: string): Promise<void> {
+  await cdp.command("Runtime.addBinding", { name: PICKER_BINDING, executionContextName: PICKER_WORLD }, sessionId);
+  await cdp.command("Page.addScriptToEvaluateOnNewDocument", {
+    source: PICKER_SCRIPT,
+    worldName: PICKER_WORLD,
+    runImmediately: true,
+  }, sessionId);
+}
+
+const targetInfoSchema = z.object({
+  targetId: z.string(),
+  type: z.string(),
+  url: z.string(),
+  title: z.string(),
+  openerId: z.string().optional(),
+});
+
+/** The tab a Target event describes, or undefined for workers, frames, and other targets. */
+function tabFromTargetInfo(value: unknown): BrowserTab | undefined {
+  const parsed = targetInfoSchema.safeParse(value);
+  if (!parsed.success || parsed.data.type !== "page") return undefined;
+  const { targetId, url, title, openerId } = parsed.data;
+  return { id: targetId, url, title, ...(openerId ? { openerId } : {}) };
+}
+
+const dialogTypeSchema = z.enum(["alert", "confirm", "prompt", "beforeunload"]);
 
 const snapshotFrameSchema = z.object({
   url: z.string(), title: z.string(), text: z.string(),
@@ -788,6 +884,14 @@ function boundedLabel(value: string | undefined, profile: string): string {
 export class BrowserSessionManager {
   private sessions = new Map<string, RunningBrowserSession>();
   private frameListeners = new Set<(frame: BrowserFrame) => void>();
+  private eventListeners = new Set<(event: BrowserSessionEvent) => void>();
+  /** Whether the connections frames go out on are still sending earlier data. */
+  private framesBackedUp: () => boolean = () => false;
+
+  /** Hold streamed frames while [check] reports the outgoing connections backed up. */
+  setFrameCongestionCheck(check: () => boolean): void {
+    this.framesBackedUp = check;
+  }
 
   /**
    * Subscribe to frames pushed by watched profiles. Returns the unsubscribe
@@ -796,6 +900,325 @@ export class BrowserSessionManager {
   onFrame(listener: (frame: BrowserFrame) => void): () => void {
     this.frameListeners.add(listener);
     return () => this.frameListeners.delete(listener);
+  }
+
+  /** Subscribe to prompts and tab changes for viewers. Returns the unsubscribe function. */
+  onEvent(listener: (event: BrowserSessionEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
+  private emit(event: BrowserSessionEvent): void {
+    for (const listener of this.eventListeners) {
+      try { listener(event); } catch {}
+    }
+  }
+
+  /** Resend the tabs and any open prompt, for a viewer that just arrived. */
+  replayState(profileValue: string): void {
+    const session = this.sessions.get(normalizeBrowserProfile(profileValue));
+    if (!session) return;
+    this.emitTabs(session);
+    const open = session.prompt;
+    if (open) this.emit({ type: "browser_prompt", profile: session.profile, id: open.id, prompt: open.prompt });
+  }
+
+  private emitTabs(session: RunningBrowserSession): void {
+    this.emit({
+      type: "browser_tabs",
+      profile: session.profile,
+      tabs: [...session.tabs.values()].map((tab) => ({
+        id: tab.id,
+        url: tab.url,
+        title: tab.title,
+        active: tab.id === session.activeTab,
+      })),
+    });
+  }
+
+  /**
+   * Answer prompt [id]. Ignored when it is no longer the open one, because
+   * another device answered it or the page moved on.
+   */
+  async answerPrompt(profileValue: string, id: string, answer: BrowserPromptAnswer): Promise<void> {
+    const session = this.require(normalizeBrowserProfile(profileValue));
+    const open = session.prompt;
+    if (!open || open.id !== id) return;
+    this.touch(session);
+    this.closePrompt(session);
+    await open.answer(answer);
+  }
+
+  /** Show a new prompt. One the page was still waiting on is cancelled, so nothing stays blocked. */
+  private openPrompt(
+    session: RunningBrowserSession,
+    prompt: BrowserPrompt,
+    answer: (answer: BrowserPromptAnswer) => Promise<void>,
+  ): void {
+    this.cancelPrompt(session);
+    const id = randomUUID();
+    session.prompt = { id, prompt, answer };
+    if (prompt.kind === "dialog" || prompt.kind === "auth") {
+      for (const release of session.blockedWaiters) release();
+      session.blockedWaiters.clear();
+    }
+    this.emit({ type: "browser_prompt", profile: session.profile, id, prompt });
+  }
+
+  private cancelPrompt(session: RunningBrowserSession): void {
+    const open = session.prompt;
+    if (!open) return;
+    this.closePrompt(session);
+    void open.answer({ accept: false }).catch(() => {});
+  }
+
+  private closePrompt(session: RunningBrowserSession): void {
+    const open = session.prompt;
+    if (!open) return;
+    session.prompt = undefined;
+    this.emit({ type: "browser_prompt_closed", profile: session.profile, id: open.id });
+  }
+
+  /** A JavaScript dialog blocks the page's scripts, so anything that evaluates in it would hang. */
+  private openDialog(session: RunningBrowserSession): Extract<BrowserPrompt, { kind: "dialog" }> | undefined {
+    const prompt = session.prompt?.prompt;
+    return prompt?.kind === "dialog" ? prompt : undefined;
+  }
+
+  private assertNoDialog(session: RunningBrowserSession): void {
+    const dialog = this.openDialog(session);
+    if (dialog) {
+      throw new Error(`The page is showing a ${dialog.dialogType} dialog ("${dialog.message.slice(0, 200)}"). `
+        + "Ask the user to answer it in the phone browser.");
+    }
+  }
+
+  /**
+   * Send input or a navigation to the page. Chrome does not finish one that
+   * opens a JavaScript dialog or meets a sign-in challenge until it is
+   * answered, so stop waiting once the page asks. Otherwise the viewer's
+   * answer would queue behind it.
+   */
+  private async dispatchInput(session: RunningBrowserSession, method: string, params: JsonRecord): Promise<void> {
+    const waitingOn = session.prompt?.prompt.kind;
+    if (waitingOn === "dialog" || waitingOn === "auth") return;
+    const sent = session.cdp.command(method, params);
+    let release = () => {};
+    const dialogOpened = new Promise<void>((resolve) => {
+      release = resolve;
+      session.blockedWaiters.add(resolve);
+    });
+    try {
+      await Promise.race([sent, dialogOpened]);
+    } finally {
+      session.blockedWaiters.delete(release);
+      sent.catch(() => {});
+    }
+  }
+
+  /** Where viewers upload files for the page's file chooser. */
+  private uploadDir(session: RunningBrowserSession): string {
+    const dir = path.join(session.profileDir, "SocketAgent Uploads");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return dir;
+  }
+
+  /**
+   * Prepare a tab's connection: the viewport, and the handlers that turn
+   * dialogs, file choosers, sign-in challenges, and native pickers into
+   * prompts. Handlers ignore a tab once it is no longer the active one.
+   */
+  private async setupPage(session: RunningBrowserSession, cdp: CdpClient, frameTargets: Set<string>): Promise<void> {
+    const active = () => session.cdp === cdp;
+    cdp.on("Page.javascriptDialogOpening", (params) => {
+      if (!active()) return;
+      const dialogType = dialogTypeSchema.catch("alert").parse(params.type);
+      const defaultText = dialogType === "prompt" && typeof params.defaultPrompt === "string" ? params.defaultPrompt : undefined;
+      this.openPrompt(session, {
+        kind: "dialog",
+        dialogType,
+        message: typeof params.message === "string" ? params.message : "",
+        ...(defaultText !== undefined ? { defaultText } : {}),
+      }, async (answer) => {
+        await cdp.command("Page.handleJavaScriptDialog", {
+          accept: answer.accept,
+          ...(answer.value !== undefined ? { promptText: answer.value } : {}),
+        });
+      });
+    });
+    cdp.on("Page.javascriptDialogClosed", () => {
+      if (active() && this.openDialog(session)) this.closePrompt(session);
+    });
+    cdp.on("Page.fileChooserOpened", (params) => {
+      if (!active() || typeof params.backendNodeId !== "number") return;
+      const backendNodeId = params.backendNodeId;
+      const uploadDir = this.uploadDir(session);
+      this.openPrompt(session, { kind: "file", multiple: params.mode === "selectMultiple", uploadDir }, async (answer) => {
+        if (!answer.accept || !answer.files?.length) return;
+        const files = answer.files.map((file) => {
+          const resolved = path.resolve(file);
+          if (path.dirname(resolved) !== uploadDir || !fs.statSync(resolved).isFile()) {
+            throw new Error("Browser uploads must come from the profile's upload folder.");
+          }
+          return resolved;
+        });
+        await cdp.command("DOM.setFileInputFiles", { files, backendNodeId });
+      });
+    });
+    // Navigations pause so sign-in challenges can be answered. Everything else goes straight on.
+    cdp.on("Fetch.requestPaused", (params) => {
+      if (typeof params.requestId !== "string") return;
+      void cdp.command("Fetch.continueRequest", { requestId: params.requestId }).catch(() => {});
+    });
+    cdp.on("Fetch.authRequired", (params) => {
+      if (typeof params.requestId !== "string") return;
+      const requestId = params.requestId;
+      const respond = (authChallengeResponse: JsonRecord) =>
+        cdp.command("Fetch.continueWithAuth", { requestId, authChallengeResponse });
+      if (!active()) {
+        void respond({ response: "CancelAuth" }).catch(() => {});
+        return;
+      }
+      const challenge = isRecord(params.authChallenge) ? params.authChallenge : {};
+      const realm = typeof challenge.realm === "string" ? challenge.realm : "";
+      this.openPrompt(session, {
+        kind: "auth",
+        origin: typeof challenge.origin === "string" ? challenge.origin : "",
+        scheme: typeof challenge.scheme === "string" ? challenge.scheme : "basic",
+        ...(realm ? { realm } : {}),
+        proxy: challenge.source === "Proxy",
+      }, async (answer) => {
+        await respond(answer.accept
+          ? { response: "ProvideCredentials", username: answer.username ?? "", password: answer.password ?? "" }
+          : { response: "CancelAuth" });
+      });
+    });
+    cdp.on("Runtime.bindingCalled", (params, sessionId) => {
+      if (!active() || params.name !== PICKER_BINDING || typeof params.payload !== "string") return;
+      const report = parsePickerReport(params.payload);
+      const contextId = params.executionContextId;
+      if (!report || typeof contextId !== "number") return;
+      this.openPrompt(session, report.prompt, async (answer) => {
+        if (!answer.accept || answer.value === undefined) return;
+        await cdp.command("Runtime.evaluate", {
+          expression: applyPickerExpression(report.id, answer.value),
+          contextId,
+        }, sessionId);
+      });
+    });
+    cdp.on("Page.frameNavigated", (params) => {
+      // A picker belongs to the document that reported it.
+      if (!active() || !isRecord(params.frame) || params.frame.parentId) return;
+      const kind = session.prompt?.prompt.kind;
+      if (kind === "select" || kind === "picker") this.closePrompt(session);
+    });
+    await Promise.all([
+      trackFrameTargets(cdp, frameTargets),
+      cdp.command("Page.enable"),
+      cdp.command("Runtime.enable"),
+      cdp.command("DOM.enable"),
+      cdp.command("Emulation.setDeviceMetricsOverride", {
+        width: session.width,
+        height: session.height,
+        deviceScaleFactor: 1,
+        mobile: false,
+      }),
+      cdp.command("Page.setInterceptFileChooserDialog", { enabled: true }),
+      cdp.command("Fetch.enable", {
+        handleAuthRequests: true,
+        patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }],
+      }),
+      installPickers(cdp),
+    ]);
+  }
+
+  /** Follow tabs as they open, change, and close. A tab the page opens becomes the one shown. */
+  private async trackTabs(session: RunningBrowserSession): Promise<void> {
+    const browser = session.browserCdp;
+    browser.on("Target.targetCreated", (params) => {
+      const tab = tabFromTargetInfo(params.targetInfo);
+      if (!tab || session.tabs.has(tab.id)) return;
+      session.tabs.set(tab.id, tab);
+      this.emitTabs(session);
+      void this.enqueue(session, () => this.activateTab(session, tab.id)).catch(() => {});
+    });
+    browser.on("Target.targetInfoChanged", (params) => {
+      const info = tabFromTargetInfo(params.targetInfo);
+      const tab = info && session.tabs.get(info.id);
+      if (!info || !tab || (tab.url === info.url && tab.title === info.title)) return;
+      tab.url = info.url;
+      tab.title = info.title;
+      this.emitTabs(session);
+    });
+    browser.on("Target.targetDestroyed", (params) => {
+      const closed = typeof params.targetId === "string" ? session.tabs.get(params.targetId) : undefined;
+      if (!closed) return;
+      session.tabs.delete(closed.id);
+      this.emitTabs(session);
+      if (closed.id !== session.activeTab) return;
+      const next = this.tabAfter(session, closed);
+      void this.enqueue(session, async () => {
+        if (next) await this.activateTab(session, next);
+        // The new tab arrives through targetCreated, which shows it.
+        else await browser.command("Target.createTarget", { url: "about:blank" });
+      }).catch(() => {});
+    });
+    await browser.command("Target.setDiscoverTargets", { discover: true });
+  }
+
+  /** Show tab [id]: connect to it, move the live view over, and bring it forward. */
+  private async activateTab(session: RunningBrowserSession, id: string): Promise<void> {
+    if (session.activeTab === id || !session.tabs.has(id) || this.sessions.get(session.profile) !== session) return;
+    const cdp = await CdpClient.connect(`ws://127.0.0.1:${session.port}/devtools/page/${id}`);
+    // The old tab's connection is about to close, so nothing could answer its prompt.
+    this.cancelPrompt(session);
+    session.watch?.stop();
+    const previous = session.cdp;
+    const frameTargets = new Set<string>();
+    session.cdp = cdp;
+    session.activeTab = id;
+    session.frameTargets = frameTargets;
+    session.refFrames.clear();
+    session.frameContexts.clear();
+    previous.close();
+    await this.setupPage(session, cdp, frameTargets);
+    await session.browserCdp.command("Target.activateTarget", { targetId: id }).catch(() => {});
+    const tab = session.tabs.get(id);
+    if (tab) {
+      session.url = tab.url;
+      session.title = tab.title;
+    }
+    this.emitTabs(session);
+    if (session.watch) await this.startScreencast(session, session.watch);
+  }
+
+  /** Show another open tab. */
+  async switchTab(profileValue: string, id: string): Promise<void> {
+    const session = this.require(normalizeBrowserProfile(profileValue));
+    this.touch(session);
+    await this.enqueue(session, () => this.activateTab(session, id));
+  }
+
+  /** The tab to show once [closed] goes: the one that opened it, else the newest other tab. */
+  private tabAfter(session: RunningBrowserSession, closed: BrowserTab): string | undefined {
+    if (closed.openerId && session.tabs.has(closed.openerId)) return closed.openerId;
+    return [...session.tabs.keys()].filter((id) => id !== closed.id).at(-1);
+  }
+
+  /**
+   * Close a tab, moving the view off it first so nothing acts on a closed
+   * page. The last tab stays open, since closing it would quit the browser.
+   */
+  async closeTab(profileValue: string, id: string): Promise<void> {
+    const session = this.require(normalizeBrowserProfile(profileValue));
+    this.touch(session);
+    await this.enqueue(session, async () => {
+      const tab = session.tabs.get(id);
+      if (!tab || session.tabs.size < 2) return;
+      const next = this.tabAfter(session, tab);
+      if (id === session.activeTab && next) await this.activateTab(session, next);
+      await session.browserCdp.command("Target.closeTarget", { targetId: id });
+    });
   }
 
   /**
@@ -820,41 +1243,49 @@ export class BrowserSessionManager {
       }, 5_000),
       stop: () => {},
       lastSentAt: 0,
+      seq: 0,
+      unacked: new Map<number, number>(),
+      acked: false,
     };
     watch.expiryTimer.unref?.();
     session.watch = watch;
 
-    const unsubscribeFrame = session.cdp.on("Page.screencastFrame", (params) => {
-      // Chrome pauses the cast until each frame is acknowledged.
-      if (typeof params.sessionId === "number") {
-        void session.cdp.command("Page.screencastFrameAck", { sessionId: params.sessionId })
-          .catch(() => {});
-      }
-      if (typeof params.data !== "string" || !params.data) return;
-      this.queueFrame(session, params.data);
-    });
-    const unsubscribeNavigation = session.cdp.on("Page.frameNavigated", () => {
-      void this.refreshLocation(session).catch(() => {});
-    });
-    watch.stop = () => {
-      unsubscribeFrame();
-      unsubscribeNavigation();
-      void session.cdp.command("Page.stopScreencast").catch(() => {});
-    };
-
     try {
-      await session.cdp.command("Page.startScreencast", {
-        format: "jpeg",
-        quality: 60,
-        maxWidth: session.width,
-        maxHeight: session.height,
-        everyNthFrame: 1,
-      });
+      await this.startScreencast(session, watch);
     } catch (error) {
       this.unwatch(session.profile);
       throw error;
     }
     await this.refreshLocation(session).catch(() => {});
+  }
+
+  /** Stream the active tab to [watch]. A tab switch stops it and starts it again on the new tab. */
+  private async startScreencast(session: RunningBrowserSession, watch: BrowserWatch): Promise<void> {
+    const cdp = session.cdp;
+    const unsubscribeFrame = cdp.on("Page.screencastFrame", (params) => {
+      // Chrome pauses the cast until each frame is acknowledged.
+      if (typeof params.sessionId === "number") {
+        void cdp.command("Page.screencastFrameAck", { sessionId: params.sessionId })
+          .catch(() => {});
+      }
+      if (typeof params.data !== "string" || !params.data) return;
+      this.queueFrame(session, params.data);
+    });
+    const unsubscribeNavigation = cdp.on("Page.frameNavigated", () => {
+      void this.refreshLocation(session).catch(() => {});
+    });
+    watch.stop = () => {
+      unsubscribeFrame();
+      unsubscribeNavigation();
+      void cdp.command("Page.stopScreencast").catch(() => {});
+    };
+    await cdp.command("Page.startScreencast", {
+      format: "jpeg",
+      quality: 60,
+      maxWidth: session.width,
+      maxHeight: session.height,
+      everyNthFrame: 1,
+    });
   }
 
   /**
@@ -926,8 +1357,25 @@ export class BrowserSessionManager {
   }
 
   /**
-   * Hold a frame back to at most one per [FRAME_INTERVAL_MS], always sending
-   * the newest one so the phone lands on the page's settled state.
+   * A viewer has shown frame [seq], so every frame sent before it has arrived
+   * too. Frees room for the next frame and sends it if one is waiting.
+   */
+  ackFrame(profileValue: string, seq: number): void {
+    const session = this.sessions.get(normalizeBrowserProfile(profileValue));
+    const watch = session?.watch;
+    if (!session || !watch) return;
+    watch.acked = true;
+    for (const sent of watch.unacked.keys()) {
+      if (sent <= seq) watch.unacked.delete(sent);
+    }
+    if (watch.sendTimer) clearTimeout(watch.sendTimer);
+    watch.sendTimer = undefined;
+    this.scheduleFrameSend(session, watch, 0);
+  }
+
+  /**
+   * Hold the newest frame until it can go out. Frames that arrive meanwhile
+   * replace it, so a slow link shows fewer frames rather than older ones.
    */
   private queueFrame(session: RunningBrowserSession, imageBase64: string): void {
     const watch = session.watch;
@@ -941,25 +1389,59 @@ export class BrowserSessionManager {
       url: session.url,
       title: session.title,
     };
-    if (watch.sendTimer) return;
-    const interval = Date.now() - session.lastInputAt < INTERACTIVE_WINDOW_MS
-      ? INTERACTIVE_FRAME_INTERVAL_MS
-      : FRAME_INTERVAL_MS;
-    const wait = Math.max(0, watch.lastSentAt + interval - Date.now());
+    this.scheduleFrameSend(session, watch, 0);
+  }
+
+  private scheduleFrameSend(session: RunningBrowserSession, watch: BrowserWatch, delayMs: number): void {
+    if (watch.sendTimer || !watch.pending) return;
     watch.sendTimer = setTimeout(() => {
       watch.sendTimer = undefined;
-      const frame = watch.pending;
-      watch.pending = undefined;
-      if (!frame || session.watch !== watch) return;
-      watch.lastSentAt = Date.now();
-      for (const listener of this.frameListeners) {
-        try { listener(frame); } catch {}
-      }
-    }, wait);
+      if (session.watch === watch) this.sendPendingFrame(session, watch);
+    }, Math.max(0, delayMs));
     watch.sendTimer.unref?.();
   }
 
+  /**
+   * Send the held frame once the rate floor has passed, viewers have room for
+   * it, and the connection has drained. Otherwise wait for whichever is due.
+   */
+  private sendPendingFrame(session: RunningBrowserSession, watch: BrowserWatch): void {
+    const frame = watch.pending;
+    if (!frame) return;
+    const now = Date.now();
+    for (const [seq, sentAt] of watch.unacked) {
+      if (now - sentAt >= FRAME_ACK_TIMEOUT_MS) watch.unacked.delete(seq);
+    }
+    const interval = now - session.lastInputAt < INTERACTIVE_WINDOW_MS
+      ? INTERACTIVE_FRAME_INTERVAL_MS
+      : FRAME_INTERVAL_MS;
+    const paceWait = watch.lastSentAt + interval - now;
+    if (paceWait > 0) {
+      this.scheduleFrameSend(session, watch, paceWait);
+      return;
+    }
+    if (watch.acked && watch.unacked.size >= MAX_UNACKED_FRAMES) {
+      // An ack normally sends the frame first. This covers one that never comes.
+      const oldest = Math.min(...watch.unacked.values());
+      this.scheduleFrameSend(session, watch, oldest + FRAME_ACK_TIMEOUT_MS - now);
+      return;
+    }
+    if (this.framesBackedUp()) {
+      this.scheduleFrameSend(session, watch, CONGESTION_RETRY_MS);
+      return;
+    }
+    watch.pending = undefined;
+    watch.lastSentAt = now;
+    watch.seq += 1;
+    watch.unacked.set(watch.seq, now);
+    const sent = { ...frame, seq: watch.seq };
+    for (const listener of this.frameListeners) {
+      try { listener(sent); } catch {}
+    }
+  }
+
   private async refreshLocation(session: RunningBrowserSession): Promise<void> {
+    if (this.openDialog(session)) return;
     const [location, title] = await Promise.all([
       session.cdp.command("Runtime.evaluate", { expression: "location.href", returnByValue: true }),
       session.cdp.command("Runtime.evaluate", { expression: "document.title", returnByValue: true }),
@@ -981,7 +1463,7 @@ export class BrowserSessionManager {
       existing.label = boundedLabel(labelValue, profile);
       existing.sessionId = sessionId || existing.sessionId;
       existing.url = url;
-      await existing.cdp.command("Page.navigate", { url });
+      await this.dispatchInput(existing, "Page.navigate", { url });
       this.touch(existing);
       await wait(300);
       return await this.summary(existing);
@@ -1019,22 +1501,13 @@ export class BrowserSessionManager {
 
     try {
       const targets = await this.waitForPageTarget(debuggingPort, processHandle);
-      const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
-      if (!page?.webSocketDebuggerUrl) throw new Error("Browser did not create an interactive page.");
+      const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl && target.id);
+      if (!page?.webSocketDebuggerUrl || !page.id) throw new Error("Browser did not create an interactive page.");
+      const version = z.object({ webSocketDebuggerUrl: z.string() })
+        .parse(await (await fetch(`http://127.0.0.1:${debuggingPort}/json/version`)).json());
+      const browserCdp = await CdpClient.connect(version.webSocketDebuggerUrl);
       const cdp = await CdpClient.connect(page.webSocketDebuggerUrl);
       const frameTargets = new Set<string>();
-      await Promise.all([
-        trackFrameTargets(cdp, frameTargets),
-        cdp.command("Page.enable"),
-        cdp.command("Runtime.enable"),
-        cdp.command("DOM.enable"),
-        cdp.command("Emulation.setDeviceMetricsOverride", {
-          width: DEFAULT_WIDTH,
-          height: DEFAULT_HEIGHT,
-          deviceScaleFactor: 1,
-          mobile: false,
-        }),
-      ]);
       const session: RunningBrowserSession = {
         profile,
         label: boundedLabel(labelValue, profile),
@@ -1044,7 +1517,12 @@ export class BrowserSessionManager {
         profileDir,
         process: processHandle,
         ...(display.process ? { displayProcess: display.process } : {}),
+        port: debuggingPort,
         cdp,
+        browserCdp,
+        tabs: new Map([[page.id, { id: page.id, url: "about:blank", title: "" }]]),
+        activeTab: page.id,
+        blockedWaiters: new Set<() => void>(),
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         lastUsedAt: new Date().toISOString(),
@@ -1060,12 +1538,15 @@ export class BrowserSessionManager {
           if (current.idleTimer) clearTimeout(current.idleTimer);
           this.stopWatch(current);
           current.cdp.close();
+          current.browserCdp.close();
           current.displayProcess?.kill("SIGTERM");
           this.sessions.delete(profile);
         }
       });
+      await this.setupPage(session, cdp, frameTargets);
+      await this.trackTabs(session);
       this.sessions.set(profile, session);
-      await cdp.command("Page.navigate", { url });
+      await this.dispatchInput(session, "Page.navigate", { url });
       this.touch(session);
       await wait(500);
       return await this.summary(session);
@@ -1171,13 +1652,13 @@ export class BrowserSessionManager {
       case "tap": {
         const x = clampX(input.x);
         const y = clampY(input.y);
-        await session.cdp.command("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-        await session.cdp.command("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+        await this.dispatchInput(session, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+        await this.dispatchInput(session, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
         break;
       }
       case "pointer": {
         const type = input.phase === "down" ? "mousePressed" : input.phase === "up" ? "mouseReleased" : "mouseMoved";
-        await session.cdp.command("Input.dispatchMouseEvent", {
+        await this.dispatchInput(session, "Input.dispatchMouseEvent", {
           type,
           x: clampX(input.x),
           y: clampY(input.y),
@@ -1197,7 +1678,7 @@ export class BrowserSessionManager {
         const typed = input.text ?? (key === "Enter" ? "\r" : undefined);
         const text = shortcut ? undefined : typed;
         const command = input.phase === "down" ? macEditingCommand(key, modifiers) : undefined;
-        await session.cdp.command("Input.dispatchKeyEvent", {
+        await this.dispatchInput(session, "Input.dispatchKeyEvent", {
           type: input.phase === "up" ? "keyUp" : text ? "keyDown" : "rawKeyDown",
           key,
           code: input.code,
@@ -1218,7 +1699,7 @@ export class BrowserSessionManager {
         await this.pressKey(session, input.key);
         break;
       case "scroll":
-        await session.cdp.command("Input.dispatchMouseEvent", {
+        await this.dispatchInput(session, "Input.dispatchMouseEvent", {
           type: "mouseWheel",
           x: input.x === undefined ? session.width / 2 : clampX(input.x),
           y: input.y === undefined ? session.height / 2 : clampY(input.y),
@@ -1227,10 +1708,10 @@ export class BrowserSessionManager {
         });
         break;
       case "navigate":
-        await session.cdp.command("Page.navigate", { url: normalizeBrowserUrl(input.url) });
+        await this.dispatchInput(session, "Page.navigate", { url: normalizeBrowserUrl(input.url) });
         break;
       case "reload":
-        await session.cdp.command("Page.reload", { ignoreCache: false });
+        await this.dispatchInput(session, "Page.reload", { ignoreCache: false });
         break;
       case "back":
         await this.historyStep(session, -1);
@@ -1288,6 +1769,18 @@ export class BrowserSessionManager {
   async snapshot(profileValue: string): Promise<BrowserSnapshot> {
     const session = this.require(normalizeBrowserProfile(profileValue));
     this.touch(session);
+    const dialog = this.openDialog(session);
+    if (dialog) {
+      return {
+        profile: session.profile,
+        url: session.url,
+        title: session.title,
+        text: `The page is showing a ${dialog.dialogType} dialog and is paused until it is answered: "${dialog.message}". `
+          + "The user answers it in the phone browser.",
+        elements: [],
+        frames: [],
+      };
+    }
     const frames = await this.listFrames(session);
     const boxes = new Map<string, FrameBox | undefined>();
     session.refFrames.clear();
@@ -1335,6 +1828,7 @@ export class BrowserSessionManager {
 
   async click(profileValue: string, ref: string): Promise<void> {
     const session = this.require(normalizeBrowserProfile(profileValue));
+    this.assertNoDialog(session);
     const point = await this.elementPoint(session, ref, false);
     await this.phoneInput(session.profile, { action: "tap", x: point.x, y: point.y });
   }
@@ -1342,6 +1836,7 @@ export class BrowserSessionManager {
   async type(profileValue: string, ref: string, text: string): Promise<void> {
     const session = this.require(normalizeBrowserProfile(profileValue));
     if (text.length > 16_384) throw new Error("Browser text input is too large.");
+    this.assertNoDialog(session);
     const point = await this.elementPoint(session, ref, true);
     // Script focus inside a cross-origin frame does not move keyboard focus to that
     // frame, so a real tap does it. The page's own fields only need the script focus.
@@ -1359,6 +1854,7 @@ export class BrowserSessionManager {
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > session.width || y > session.height) {
       throw new Error(`Tap coordinates must be inside the ${session.width}x${session.height} viewport.`);
     }
+    this.assertNoDialog(session);
     await this.phoneInput(session.profile, { action: "tap", x, y });
   }
 
@@ -1621,8 +2117,10 @@ export class BrowserSessionManager {
     if (session.idleTimer) clearTimeout(session.idleTimer);
     this.stopWatch(session);
     session.cdp.close();
+    session.browserCdp.close();
     await stopChildProcess(session.process);
     await stopChildProcess(session.displayProcess);
+    fs.rmSync(path.join(session.profileDir, "SocketAgent Uploads"), { recursive: true, force: true });
   }
 
   async clear(profileValue: string): Promise<void> {
@@ -1657,20 +2155,15 @@ export class BrowserSessionManager {
   }
 
   private async summary(session: RunningBrowserSession): Promise<BrowserSessionSummary> {
-    const [location, title] = await Promise.all([
-      session.cdp.command("Runtime.evaluate", { expression: "location.href", returnByValue: true }),
-      session.cdp.command("Runtime.evaluate", { expression: "document.title", returnByValue: true }),
-    ]);
-    const url = readStringResult(location) || session.url;
-    session.url = url;
-    session.title = readStringResult(title) || session.title;
+    await this.refreshLocation(session);
+    const url = session.url;
     return {
       profile: session.profile,
       label: session.label,
       running: true,
       sessionId: session.sessionId,
       url,
-      title: readStringResult(title),
+      title: session.title,
       lastUsedAt: session.lastUsedAt,
     };
   }
@@ -1686,8 +2179,8 @@ export class BrowserSessionManager {
     };
     const definition = definitions[key];
     if (!definition) throw new Error("Supported browser keys are Enter, Tab, Backspace, Escape, and Ctrl+A.");
-    await session.cdp.command("Input.dispatchKeyEvent", { type: "keyDown", ...definition });
-    await session.cdp.command("Input.dispatchKeyEvent", { type: "keyUp", ...definition });
+    await this.dispatchInput(session, "Input.dispatchKeyEvent", { type: "keyDown", ...definition });
+    await this.dispatchInput(session, "Input.dispatchKeyEvent", { type: "keyUp", ...definition });
     this.touch(session);
   }
 
@@ -1725,7 +2218,8 @@ export class BrowserSessionManager {
       try {
         const response = await fetch(`http://127.0.0.1:${port}/json/list`);
         const targets = z.array(z.object({
-          type: z.string().optional(), url: z.string().optional(), webSocketDebuggerUrl: z.string().optional(),
+          id: z.string().optional(), type: z.string().optional(), url: z.string().optional(),
+          webSocketDebuggerUrl: z.string().optional(),
         })).parse(await response.json());
         if (targets.some((target) => target.type === "page" && target.webSocketDebuggerUrl)) return targets;
       } catch {}

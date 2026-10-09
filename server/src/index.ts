@@ -5133,6 +5133,13 @@ function createConnectionHandler(
               promptMessageId || undefined,
             );
         acknowledgePrompt(resumeId || sessionForRun.getSessionId() || undefined);
+        // A priority means the app showed this prompt as queued behind a
+        // running turn, which happens while delegated children keep an idle
+        // supervisor listed as running. It started its own turn instead, so
+        // clear the app's queued marker the way a delivered injection would.
+        if (msg.priority && promptMessageId) {
+          sendJson({ type: "injection_ack", messageId: promptMessageId });
+        }
         bindClientConversation(sessionForRun);
         if (unlockedByUserPrompt) retryDeferredAutomationAfterUserPrompt();
         let sessionStartedPushSent = false;
@@ -10153,6 +10160,9 @@ function sendStatusSyncTo(transport: ClientTransport): void {
 function buildStatusSyncMessage(): string {
   let anyRunning = false;
   const runningSessions: string[] = [];
+  // Supervisors whose own agent is idle while delegated agents work. Also
+  // listed in runningSessions so older apps keep showing them as active.
+  const waitingSessions: string[] = [];
   const notificationSuppressedSessions: string[] = [];
   const compactingSessions: string[] = [];
   const sessionActiveStartedAt: Record<string, string> = {};
@@ -10207,6 +10217,7 @@ function buildStatusSyncMessage(): string {
     }
     anyRunning = true;
     if (!runningSessions.includes(sid)) runningSessions.push(sid);
+    if (!liveHarness) waitingSessions.push(sid);
     sessionActiveStartedAt[sid] = current.startedAt;
     if (!sessionTitles[sid]) {
       const title = storedSessionNotificationTitle(sid);
@@ -10247,6 +10258,7 @@ function buildStatusSyncMessage(): string {
     type: "status_sync",
     running: anyRunning || compactingSessions.length > 0,
     runningSessions,
+    waitingSessions,
     notificationSuppressedSessions,
     compactingSessions,
     serverStartedAt: SERVER_STARTED_AT,

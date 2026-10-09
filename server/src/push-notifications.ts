@@ -287,10 +287,14 @@ function relayPushEndpoint(): string | null {
   }
 }
 
+// appServerId is the phone's own ID for this computer. Without it the relay
+// stamps whichever ID it stored first for the pairing, which can be stale, and
+// the phone then fails to match a push to the session it is showing.
 async function sendPushViaRelay(
   endpoint: string,
   pairingToken: string,
   payload: PushNotificationPayload,
+  appServerId?: string,
 ): Promise<{ sent: number; attempted: number }> {
   const response = await fetch(endpoint, {
     method: "POST",
@@ -300,6 +304,7 @@ async function sendPushViaRelay(
       title: payload.title,
       body: payload.body || "",
       sessionId: payload.sessionId || "",
+      ...(appServerId ? { serverId: appServerId } : {}),
       status: payload.status || "manual",
       kind: payload.kind || "",
       showNotification: payload.showNotification !== false,
@@ -473,7 +478,12 @@ export async function sendPushNotification(
     (entries.length === 0 || relayEntries.length > 0)
   ) {
     try {
-      relayResult = await sendPushViaRelay(endpoint, pairingToken, payload);
+      relayResult = await sendPushViaRelay(
+        endpoint,
+        pairingToken,
+        payload,
+        relayEntries.find((entry) => entry.appServerId)?.appServerId,
+      );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(

@@ -203,7 +203,7 @@ fi
 BUILD_LOG="$(mktemp)"
 trap - ERR
 set +e
-ssh "$REMOTE_HOST" "powershell -Command \"${REMOTE_APP_ID_ASSIGNMENT}\$env:ANDROID_HOME='$REMOTE_ANDROID_HOME'; Set-Location '$REMOTE_DIR'; \$artifact='$REMOTE_ARTIFACT_RELATIVE'; Remove-Item \$artifact -Force -ErrorAction SilentlyContinue; & '$REMOTE_FLUTTER' build '$BUILD_KIND' --release --flavor '$FLAVOR' --dart-define 'SOCKETAGENT_DISTRIBUTION=$FLAVOR' 2>&1; exit \$LASTEXITCODE\"" 2>&1 | tee "$BUILD_LOG" | while read -r line; do
+ssh "$REMOTE_HOST" "powershell -ExecutionPolicy Bypass -Command \"${REMOTE_APP_ID_ASSIGNMENT}\$env:ANDROID_HOME='$REMOTE_ANDROID_HOME'; Set-Location '$REMOTE_DIR'; & ./scripts/android-build-env.ps1; \$artifact='$REMOTE_ARTIFACT_RELATIVE'; Remove-Item \$artifact -Force -ErrorAction SilentlyContinue; & '$REMOTE_FLUTTER' build '$BUILD_KIND' --release --flavor '$FLAVOR' --dart-define 'SOCKETAGENT_DISTRIBUTION=$FLAVOR' 2>&1; exit \$LASTEXITCODE\"" 2>&1 | tee "$BUILD_LOG" | while read -r line; do
   echo "  [remote] $line"
 done
 REMOTE_BUILD_EXIT=${PIPESTATUS[0]}

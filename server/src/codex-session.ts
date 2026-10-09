@@ -5,6 +5,7 @@ import type { CollaborationMode } from "./generated/codex/types/CollaborationMod
 import type { ModeKind } from "./generated/codex/types/ModeKind";
 import { isRecord as isCodexRecord, unknownArray } from "./value-guards";
 import { deliverCodexInstructions, invalidateCodexInstructions } from "./codex-instruction-delivery";
+import { CodexRealtimeBridge, parseRealtimeVoices, type CodexRealtimeVoices } from "./codex-realtime";
 import { requestTranscriptAccess } from "./transcript-access-approval";
 /**
  * Codex backend mirroring claude-session.ts. Drives the OpenAI Codex app-server
@@ -587,6 +588,7 @@ export class CodexSession {
   private appServerStopExpected = false;
   private appServerAuthenticationInvalidated = false;
   private appServerMcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
+  private realtime: CodexRealtimeBridge | null = null;
   private activeAppServerTurnId: string | null = null;
   private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private pendingAppServerTurnCompletion: ReturnType<typeof setTimeout> | null = null;
@@ -1545,6 +1547,91 @@ export class CodexSession {
     await this.appServer!.clearGoal(threadId);
   }
 
+  /** True while a realtime voice call is attached to this session's thread. */
+  get realtimeActive(): boolean {
+    return this.realtime?.isActive === true;
+  }
+
+  async listRealtimeVoices(): Promise<CodexRealtimeVoices> {
+    await this.ensureAppServer();
+    try {
+      return parseRealtimeVoices(await this.appServer!.request("thread/realtime/listVoices", {}));
+    } finally {
+      this.scheduleAppServerIdleStop();
+    }
+  }
+
+  /**
+   * Join this session's thread to a realtime voice call. The phone's SDP
+   * offer goes to Codex, which answers through a `codex_realtime_event`.
+   * A session that has no thread yet gets one, exactly like a first prompt.
+   */
+  async startRealtime(options: { sdp: string; voice?: string; requestId?: string }): Promise<void> {
+    if (this.realtime?.isActive) throw new Error("A realtime voice call is already running");
+    if (this.isBusy) throw new Error("Wait for the current Codex turn to finish before starting a voice call");
+    const threadId = await this.ensureRealtimeThread();
+    const sessionId = this.sessionId || threadId;
+    const bridge = new CodexRealtimeBridge({
+      client: this.appServer!,
+      threadId,
+      sessionId,
+      send: (message) => this.send(message),
+      recordTranscript: (role, text) => {
+        appendHistory(sessionId, { role, content: text, timestamp: now() });
+        updateSessionActivity(sessionId, text.slice(0, 100));
+      },
+      onClosed: () => {
+        if (this.realtime === bridge) this.realtime = null;
+        this.scheduleAppServerIdleStop();
+      },
+    });
+    this.realtime = bridge;
+    try {
+      await bridge.start(options);
+    } catch (error) {
+      if (this.realtime === bridge) this.realtime = null;
+      throw error;
+    }
+  }
+
+  async stopRealtime(): Promise<void> {
+    const bridge = this.realtime;
+    if (!bridge) return;
+    await bridge.stop();
+  }
+
+  async appendRealtimeText(text: string): Promise<void> {
+    if (!this.realtime?.isActive) throw new Error("No realtime voice call is running");
+    await this.realtime.appendText(text);
+  }
+
+  private async ensureRealtimeThread(): Promise<string> {
+    await this.resetInvalidatedAppServerAuthentication();
+    await this.ensureAppServer();
+    if (!this.codexModel()) await this.refreshSupportedModels();
+    const resumeTarget = this.threadId || this.sessionId || this._resumeSessionId || null;
+    const threadConfig = this.buildAppServerThreadParams();
+    let startedNewThread = false;
+    if (resumeTarget) {
+      if (!this.sessionId) {
+        this.sessionId = resumeTarget;
+        this.threadId = resumeTarget;
+        this._sessionInfoSaved = true;
+      }
+      const resumed = await this.appServer!.resumeThread({ ...threadConfig, threadId: resumeTarget });
+      this.adoptAppServerThread(this.extractThreadId(resumed) || resumeTarget, resumed);
+    } else {
+      this._currentPrompt = "Voice conversation";
+      const started = await this.appServer!.startThread(threadConfig);
+      startedNewThread = true;
+      this.adoptAppServerThread(this.extractThreadId(started), started);
+    }
+    if (!this.threadId) throw new Error("codex app-server did not return a thread id");
+    await deliverCodexInstructions(this.appServer!, this.threadId,
+      threadConfig.developerInstructions, startedNewThread);
+    return this.threadId;
+  }
+
   async executeCodexSlashCommand(name: string, args = ""): Promise<void> {
     const command = name.trim().replace(/^\//, "").toLowerCase();
     const commandArgs = args.trim();
@@ -1746,11 +1833,12 @@ export class CodexSession {
     let usage: unknown;
 
     await this.ensureAppServer();
-    const [configResult, threadResult, limitsResult, usageResult] = await Promise.allSettled([
+    const [configResult, threadResult, limitsResult, usageResult, accountResult] = await Promise.allSettled([
       this.appServer!.readConfig(this.cwd),
       threadId ? this.appServer!.readThread({ threadId, includeTurns: false }) : Promise.resolve(null),
       this.appServer!.readAccountRateLimits(),
       this.appServer!.readAccountUsage(),
+      this.appServer!.readAccount(),
     ]);
     if (configResult.status === "fulfilled" && isCodexRecord(configResult.value) && isCodexRecord(configResult.value.config)) {
       config = configResult.value.config;
@@ -1819,7 +1907,20 @@ export class CodexSession {
         limits: limitPayload,
         usage: usagePayload,
         resetCredits: isCodexRecord(rateLimits) ? rateLimits.rateLimitResetCredits ?? null : null,
+        account: accountResult.status === "fulfilled" ? this.buildAccountPayload(accountResult.value) : null,
       },
+    };
+  }
+
+  /** Who Codex is signed in as: `{type, email, planType}`, where type is
+   * chatgpt, apiKey or amazonBedrock. Null when signed out. */
+  private buildAccountPayload(value: unknown): Record<string, string | null> | null {
+    if (!isCodexRecord(value) || !isCodexRecord(value.account)) return null;
+    const account = value.account;
+    return {
+      type: typeof account.type === "string" ? account.type : "unknown",
+      email: typeof account.email === "string" ? account.email : null,
+      planType: typeof account.planType === "string" ? account.planType : null,
     };
   }
 
@@ -2988,7 +3089,8 @@ export class CodexSession {
   }
 
   private scheduleAppServerIdleStop(delayMs = CODEX_APP_SERVER_WARM_IDLE_TIMEOUT_MS): void {
-    if (!this.appServer || this.isBusy) return;
+    // A live voice call keeps the process regardless of turn activity.
+    if (!this.appServer || this.isBusy || this.realtime?.isActive) return;
     if (delayMs <= 0) {
       void this.stopAppServerClient();
       return;
@@ -3036,6 +3138,9 @@ export class CodexSession {
     this.appServer = null;
     this.appServerInitialized = false;
     this.appServerInitializePromise = null;
+    // The call cannot outlive its process; tell the phone before the exit lands.
+    this.realtime?.dispose();
+    this.realtime = null;
     if (this.appServerMcpRegistration) {
       this.appServerMcpRegistration.unregister();
       this.appServerMcpRegistration = null;

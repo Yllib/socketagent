@@ -292,6 +292,12 @@
           "$ref": "#/definitions/CodexGoalStateServerMessage"
         },
         {
+          "$ref": "#/definitions/CodexRealtimeEventServerMessage"
+        },
+        {
+          "$ref": "#/definitions/CodexRealtimeVoicesServerMessage"
+        },
+        {
           "$ref": "#/definitions/ToolSummaryServerMessage"
         },
         {
@@ -1198,6 +1204,9 @@
             "sessionId": {
               "type": "string"
             },
+            "account": {
+              "$ref": "#/definitions/AccountInfo"
+            },
             "categories": {
               "type": "array",
               "items": {
@@ -1614,6 +1623,9 @@
             "sessionId": {
               "type": "string"
             },
+            "account": {
+              "$ref": "#/definitions/AccountInfo"
+            },
             "totalTokens": {
               "type": "number"
             },
@@ -1660,6 +1672,39 @@
           ]
         }
       ]
+    },
+    "AccountInfo": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "organization": {
+          "type": "string"
+        },
+        "subscriptionType": {
+          "type": "string"
+        },
+        "tokenSource": {
+          "type": "string"
+        },
+        "apiKeySource": {
+          "type": "string"
+        },
+        "apiProvider": {
+          "type": "string",
+          "enum": [
+            "firstParty",
+            "bedrock",
+            "vertex",
+            "foundry",
+            "anthropicAws",
+            "anthropicGoogleCloud",
+            "mantle",
+            "gateway"
+          ]
+        }
+      }
     },
     "UserMessageUuidServerMessage": {
       "type": "object",
@@ -3514,6 +3559,12 @@
         },
         "systemPrompt": {
           "type": "string"
+        },
+        "additionalDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "connectedAppApprovals": {
           "type": "array",
@@ -5886,6 +5937,198 @@
         "usageLimited",
         "budgetLimited",
         "complete"
+      ]
+    },
+    "CodexRealtimeEventServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "codex_realtime_event"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "event": {
+          "$ref": "#/definitions/CodexRealtimeEvent"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "event"
+      ]
+    },
+    "CodexRealtimeEvent": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "started"
+            },
+            "realtimeSessionId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "realtimeSessionId",
+            "version"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "answer"
+            },
+            "sdp": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "sdp"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "transcript_delta"
+            },
+            "role": {
+              "$ref": "#/definitions/CodexRealtimeTranscriptRole"
+            },
+            "delta": {
+              "type": "string"
+            },
+            "itemId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "role",
+            "delta"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "transcript_done"
+            },
+            "role": {
+              "$ref": "#/definitions/CodexRealtimeTranscriptRole"
+            },
+            "text": {
+              "type": "string"
+            },
+            "itemId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "role",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "error"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "closed"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "CodexRealtimeTranscriptRole": {
+      "type": "string",
+      "enum": [
+        "user",
+        "assistant"
+      ]
+    },
+    "CodexRealtimeVoicesServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "codex_realtime_voices"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "voices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "defaultVoice": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "sessionId",
+        "ok",
+        "voices",
+        "defaultVoice"
       ]
     },
     "ToolSummaryServerMessage": {

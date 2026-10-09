@@ -169,5 +169,9 @@ export function sessionListSummary(session: SessionInfo): SessionInfo {
     delegatedBySessionId: session.delegatedBySessionId,
     delegationId: session.delegationId,
     runStats,
+    // Lets the session list edit a Claude session's extra folders before it loads.
+    ...(session.agentSettings?.additionalDirectories?.length
+      ? { agentSettings: { additionalDirectories: session.agentSettings.additionalDirectories } }
+      : {}),
   };
 }

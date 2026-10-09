@@ -8,7 +8,11 @@ import * as path from "path";
 import * as crypto from "crypto";
 import * as zlib from "zlib";
 import { execFileSync } from "child_process";
-import { listSessions as sdkListSessions, type SDKSessionInfo } from "@anthropic-ai/claude-agent-sdk";
+import {
+  listSessions as sdkListSessions,
+  renameSession as sdkRenameSession,
+  type SDKSessionInfo,
+} from "@anthropic-ai/claude-agent-sdk";
 import type {
   AgentSessionSettings,
   ContextUsage,
@@ -4155,6 +4159,14 @@ export async function restoreCodexNativeArchive(sessionId: string, cwd = getDefa
   } catch (err: unknown) {
     return { ok: false, reason: errorMessage(err) };
   }
+}
+
+/**
+ * Writes a title into Claude Code's own session file, so `claude --resume`
+ * and other Claude Code clients list the session under the same name.
+ */
+export async function renameClaudeNativeSession(sessionId: string, cwd: string, title: string): Promise<void> {
+  await sdkRenameSession(sessionId, title, cwd ? { dir: cwd } : undefined);
 }
 
 export async function renameCodexNativeThread(sessionId: string, cwd: string, title: string): Promise<void> {

@@ -1048,6 +1048,7 @@ export class ClaudeSession {
   private _effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' = 'high';
   private _thinking: { type: 'adaptive' } | { type: 'enabled'; budgetTokens: number } | { type: 'disabled' } = { type: 'adaptive' };
   private _disallowedTools: string[] = [];
+  private _additionalDirectories: string[] = [];
   private _appendSystemPrompt: string = '';
   private _systemPromptOverride: string | undefined;
   private _pendingTransferContext: string | null = null;
@@ -1176,6 +1177,12 @@ export class ClaudeSession {
     console.log(`Disallowed tools set to [${tools.join(', ')}] for session ${this.sessionId || '(pending)'}`);
   }
 
+  setAdditionalDirectories(directories: string[]): void {
+    if (JSON.stringify(this._additionalDirectories) !== JSON.stringify(directories)) this._deferQuerySettings();
+    this._additionalDirectories = [...directories];
+    this.persistAgentSettings({ additionalDirectories: this._additionalDirectories });
+  }
+
   setAppendSystemPrompt(text: string, options: { inherited?: boolean; clearOverride?: boolean } = {}): void {
     if (this._appendSystemPrompt !== text) this._deferQuerySettings();
     this._appendSystemPrompt = text;
@@ -1264,6 +1271,17 @@ export class ClaudeSession {
   }
 
   private _stoppedTasks: Set<string> = new Set();  // prevent duplicate stop notifications
+
+  /**
+   * Moves the foreground Bash command or subagent that [toolUseId] started to
+   * the background. Its tool call returns at once and the turn continues; the
+   * task reports through a task notification when it settles. False when no
+   * foreground task matches, usually because it already finished.
+   */
+  async backgroundTask(toolUseId: string): Promise<boolean> {
+    if (!this.activeQuery) return false;
+    return this.activeQuery.backgroundTasks(toolUseId);
+  }
 
   async stopTask(taskId: string): Promise<void> {
     // Deduplicate — only process the first stop request per task
@@ -1639,8 +1657,15 @@ export class ClaudeSession {
     return this._authRequest !== null;
   }
 
+  /** Context usage plus the signed-in account, for the app's usage dialog. */
   async getContextUsage() {
-    return this.activeQuery?.getContextUsage();
+    const query = this.activeQuery;
+    if (!query) return undefined;
+    const [usage, account] = await Promise.all([
+      query.getContextUsage(),
+      query.accountInfo().catch(() => undefined),
+    ]);
+    return account ? { ...usage, account } : usage;
   }
 
   private _hasClaudeBackgroundWork(): boolean {
@@ -3134,6 +3159,7 @@ export class ClaudeSession {
         ? { claudeAutoCompactWindow: this._autoCompactWindowOverride }
         : {}),
       disallowedTools: [...this._disallowedTools],
+      additionalDirectories: [...this._additionalDirectories],
       ...(this._systemPromptOverride !== undefined ? { systemPrompt: this._systemPromptOverride } : {}),
     };
   }
@@ -3934,6 +3960,7 @@ export class ClaudeSession {
         prompt: promptStream,
         options: {
           cwd: this.cwd,
+          ...(this._additionalDirectories.length ? { additionalDirectories: this._additionalDirectories } : {}),
           ...claudeExecutableQueryOptions(),
           permissionMode: initialPermissionMode,
           allowDangerouslySkipPermissions: initialPermissionMode === "bypassPermissions",

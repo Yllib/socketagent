@@ -153,6 +153,12 @@
         "systemPrompt": {
           "type": "string"
         },
+        "additionalDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "connectedAppApprovals": {
           "type": "array",
           "items": {

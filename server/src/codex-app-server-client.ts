@@ -10,11 +10,12 @@ import type { ApprovalsReviewer } from "./generated/codex/types/v2/ApprovalsRevi
 import type { UserInput } from "./generated/codex/types/v2/UserInput";
 import type { InitializeCapabilities } from "./generated/codex/types/InitializeCapabilities";
 import type { ReviewTarget } from "./generated/codex/types/v2/ReviewTarget";
+import type { CodexRealtimeMethods } from "./codex-realtime";
 
 type CodexRequestParams = { [M in keyof CodexMethods]: CodexMethods[M]["params"] } & {
   // Retained only for older CLIs. Current versions use the verified revert fallback.
   "thread/rollback": { threadId: string; numTurns: number };
-};
+} & { [M in keyof CodexRealtimeMethods]: CodexRealtimeMethods[M]["params"] };
 import { isCodexRecord, parseRewindResponse } from "./codex-rewind-contract";
 import { parseCodexResponse } from "./codex-contracts";
 

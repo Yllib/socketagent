@@ -1,4 +1,4 @@
-import type { AgentInfo, SDKControlGetContextUsageResponse, SDKFilesPersistedEvent, SDKSessionStateChangedMessage, SDKSystemMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { AccountInfo, AgentInfo, SDKControlGetContextUsageResponse, SDKFilesPersistedEvent, SDKSessionStateChangedMessage, SDKSystemMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { CodexSubagentStatus } from "./codex-subagent-state";
 import type { TurnPlanStep } from "./generated/codex/types/v2/TurnPlanStep";
 import type { ScheduledTask } from "./scheduled-task-store";
@@ -99,6 +99,38 @@ export interface CodexGoalClearMessage {
   type: "codex_goal_clear";
   requestId: string;
   sessionId: string;
+}
+
+/**
+ * Realtime voice for a Codex session. The phone owns the WebRTC peer
+ * connection and sends its SDP offer; the server starts `thread/realtime`
+ * with it and relays the answer plus transcripts as `codex_realtime_event`.
+ * Without `sessionId` the server uses the client's active session.
+ */
+export interface CodexRealtimeStartMessage {
+  type: "codex_realtime_start";
+  requestId: string;
+  sessionId?: string;
+  sdp: string;
+  voice?: string;
+}
+
+export interface CodexRealtimeStopMessage {
+  type: "codex_realtime_stop";
+  sessionId?: string;
+}
+
+/** Typed input into a running realtime session, spoken by the realtime model. */
+export interface CodexRealtimeTextMessage {
+  type: "codex_realtime_text";
+  sessionId?: string;
+  text: string;
+}
+
+export interface CodexRealtimeListVoicesMessage {
+  type: "codex_realtime_list_voices";
+  requestId: string;
+  sessionId?: string;
 }
 
 export interface RetractQueuedPromptMessage {
@@ -966,6 +998,13 @@ export interface SetDisallowedToolsMessage {
   sessionId?: string;
 }
 
+/** Replaces a Claude session's extra folders. Applies from the next prompt. */
+export interface SetAdditionalDirectoriesMessage {
+  type: "set_additional_directories";
+  directories: string[];
+  sessionId?: string;
+}
+
 export interface SetSystemPromptMessage {
   type: "set_system_prompt";
   prompt: string;
@@ -996,6 +1035,9 @@ export interface AgentSessionSettings {
   claudeAutoCompactWindow?: number;
   disallowedTools?: string[];
   systemPrompt?: string;
+  /** Claude only. Absolute folders the session may use besides its working
+   * directory, like `claude --add-dir`. */
+  additionalDirectories?: string[];
   /** Connected apps the user approved for the lifetime of this session. */
   connectedAppApprovals?: string[];
 }
@@ -1007,6 +1049,13 @@ export interface InitialSessionSettings extends AgentSessionSettings {
 export interface StopTaskMessage {
   type: "stop_task";
   taskId: string;
+}
+
+/** Moves a running Claude Bash command or subagent to the background, like
+ *  Ctrl+B in Claude Code, so the turn carries on without waiting for it. */
+export interface BackgroundTaskMessage {
+  type: "background_task";
+  toolUseId: string;
 }
 
 export interface StopMonitorMessage {
@@ -1241,8 +1290,10 @@ export type ClientMessage = { commandId?: string } & (
   | SetClaudeAutoCompactWindowMessage
   | SetThinkingMessage
   | SetDisallowedToolsMessage
+  | SetAdditionalDirectoriesMessage
   | SetSystemPromptMessage
   | StopTaskMessage
+  | BackgroundTaskMessage
   | StopMonitorMessage
   | ForkSessionMessage
   | SetModelMessage
@@ -1317,6 +1368,10 @@ export type ClientMessage = { commandId?: string } & (
   | CodexGoalGetMessage
   | CodexGoalSetMessage
   | CodexGoalClearMessage
+  | CodexRealtimeStartMessage
+  | CodexRealtimeStopMessage
+  | CodexRealtimeTextMessage
+  | CodexRealtimeListVoicesMessage
   | { type: "skills_save"; name: string; scope: "user" | "project"; format: "command" | "skill"; agent?: "claude" | "codex"; frontmatter: Record<string, string>; body: string; filePath?: string }
   | { type: "skills_delete"; filePath: string }
   | { type: "protected_files_list"; requestId?: string }
@@ -1533,6 +1588,8 @@ export type ContextUsage =
 export type ContextUsageServerMessage = ContextUsage & {
   type: "context_usage";
   sessionId: string;
+  /** The Claude account the session runs under. Claude sessions only. */
+  account?: AccountInfo;
 };
 
 /** Announces that a user prompt is now part of the session transcript.
@@ -2557,6 +2614,39 @@ export interface CodexCommandResultServerMessage {
   parentToolUseId?: string | null;
 }
 
+export type CodexRealtimeTranscriptRole = "user" | "assistant";
+
+/**
+ * One realtime notification normalised for the phone. Transcript deltas carry
+ * an `itemId` when Codex streams them per timeline item; the flat stream has
+ * none. `closed` is always the last event of a session.
+ */
+export type CodexRealtimeEvent =
+  | { kind: "started"; realtimeSessionId: string | null; version: string }
+  | { kind: "answer"; sdp: string }
+  | { kind: "transcript_delta"; role: CodexRealtimeTranscriptRole; delta: string; itemId?: string }
+  | { kind: "transcript_done"; role: CodexRealtimeTranscriptRole; text: string; itemId?: string }
+  | { kind: "error"; message: string }
+  | { kind: "closed"; reason: string | null };
+
+export interface CodexRealtimeEventServerMessage {
+  type: "codex_realtime_event";
+  sessionId: string;
+  /** Echoed from `codex_realtime_start` on the first event of that request. */
+  requestId?: string;
+  event: CodexRealtimeEvent;
+}
+
+export interface CodexRealtimeVoicesServerMessage {
+  type: "codex_realtime_voices";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  voices: string[];
+  defaultVoice: string;
+  error?: string;
+}
+
 export interface CodexGoalStateServerMessage {
   type: "codex_goal_state";
   sessionId: string;
@@ -3218,6 +3308,8 @@ export type ServerMessage =
   | TaskNotificationServerMessage
   | CodexCommandResultServerMessage
   | CodexGoalStateServerMessage
+  | CodexRealtimeEventServerMessage
+  | CodexRealtimeVoicesServerMessage
   | ToolSummaryServerMessage
   | SessionForkedServerMessage
   | RewindConversationResultServerMessage

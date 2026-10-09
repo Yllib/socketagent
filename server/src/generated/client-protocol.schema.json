@@ -1962,6 +1962,31 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "set_additional_directories"
+            },
+            "directories": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "directories",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "set_system_prompt"
             },
             "prompt": {
@@ -2001,6 +2026,25 @@
           },
           "required": [
             "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "background_task"
+            },
+            "toolUseId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "toolUseId",
             "type"
           ]
         },
@@ -3855,6 +3899,97 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "codex_realtime_start"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "sdp": {
+              "type": "string"
+            },
+            "voice": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "sdp",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_realtime_stop"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_realtime_text"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "codex_realtime_list_voices"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "skills_save"
             },
             "name": {
@@ -4194,6 +4329,12 @@
         },
         "systemPrompt": {
           "type": "string"
+        },
+        "additionalDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "connectedAppApprovals": {
           "type": "array",

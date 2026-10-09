@@ -22,6 +22,7 @@ export const agentSessionSettingsSchema = z.object({
   codexFastMode: optionalBoolean, codexCollaborationMode: optionalText,
   claudeAutoCompact: optionalBoolean, claudeAutoCompactWindow: optionalNumber,
   disallowedTools: z.array(z.string()).optional(), systemPrompt: optionalText,
+  additionalDirectories: z.array(z.string()).optional(),
   connectedAppApprovals: z.array(z.string()).optional(),
 } satisfies Shape<AgentSessionSettings>).passthrough();
 

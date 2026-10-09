@@ -43,7 +43,7 @@ import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getMissedMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummary } from "./session-list-snapshot";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
@@ -1489,6 +1489,8 @@ function serverCapabilitiesPayload(
     sessionTransfer: { version: 3 },
     codexGoals: { version: 1 },
     sessionMemory: { version: 1 },
+    claudeBackgroundTasks: { version: 1 },
+    claudeAdditionalDirectories: { version: 1 },
     browserSessions: {
       version: 3,
       activeHeader: true,
@@ -3366,6 +3368,9 @@ async function restorePersistedAgentSettings(session: Session, sessionInfo?: Ses
   }
   if (settings.thinking) session.setThinking(settings.thinking);
   if (settings.disallowedTools) session.setDisallowedTools(settings.disallowedTools);
+  if (session instanceof ClaudeSession && settings.additionalDirectories) {
+    session.setAdditionalDirectories(settings.additionalDirectories);
+  }
   if (settings.systemPrompt !== undefined) {
     session.setAppendSystemPrompt(settings.systemPrompt);
   } else {
@@ -5752,6 +5757,11 @@ function createConnectionHandler(
             renameCodexNativeThread(msg.sessionId, session.cwd, msg.title).catch((err: unknown) => {
               console.warn(`[Rename] Codex native thread/name/set failed for ${msg.sessionId}: ${errorMessage(err) || err}`);
             });
+          } else if (session.backend !== "codex") {
+            // A session that has not run a turn yet has no Claude Code file to title.
+            renameClaudeNativeSession(msg.sessionId, session.cwd, msg.title).catch((err: unknown) => {
+              console.warn(`[Rename] Claude renameSession failed for ${msg.sessionId}: ${errorMessage(err) || err}`);
+            });
           }
           console.log(`Renamed session ${msg.sessionId} to "${msg.title}"`);
           broadcastSessionList();
@@ -7467,6 +7477,27 @@ function createConnectionHandler(
         break;
       }
 
+      case "set_additional_directories": {
+        const directories = [...new Set(msg.directories.map((dir) => dir.trim()).filter(Boolean))];
+        const relative = directories.find((dir) => !path.isAbsolute(dir));
+        if (relative) {
+          sendJson({ type: "error", message: `Extra folders need a full path: ${relative}` });
+          break;
+        }
+        const targetSessionId = msg.sessionId || "";
+        const targetSession = targetSessionId
+          ? (targetSessionId === activeSessionId ? activeSession : activeSessions.get(targetSessionId))
+          : activeSession;
+        if (targetSession instanceof ClaudeSession) {
+          targetSession.setAdditionalDirectories(directories);
+          const sid = targetSession.getSessionId();
+          if (sid) sendJson(sessionSettingsPayload(targetSession, sid));
+        } else if (targetSessionId && !targetSession) {
+          updateSessionAgentSettings(targetSessionId, { additionalDirectories: directories });
+        }
+        break;
+      }
+
       case "set_system_prompt": {
         const prompt = msg.prompt;
         if (typeof prompt === 'string') {
@@ -7497,6 +7528,20 @@ function createConnectionHandler(
         if (activeSession && taskId) {
           activeSession.stopTask(taskId).catch((e: unknown) => console.error(`[stop_task] error: ${e}`));
         }
+        break;
+      }
+
+      case "background_task": {
+        const toolUseId = msg.toolUseId;
+        if (!(activeSession instanceof ClaudeSession) || !toolUseId) {
+          sendJson({ type: "error", message: "Only a running Claude command can move to the background" });
+          break;
+        }
+        activeSession.backgroundTask(toolUseId).then((moved) => {
+          if (!moved) sendJson({ type: "error", message: "That command already finished" });
+        }).catch((e: unknown) => {
+          sendJson({ type: "error", message: `Could not move it to the background: ${errorMessage(e)}` });
+        });
         break;
       }
 
@@ -7718,6 +7763,67 @@ function createConnectionHandler(
             parentToolUseId: `codex_slash_${name || "command"}`,
           });
           sendJson({ type: "codex_slash_command_result", sessionId, name, success: false, error: message });
+        });
+        break;
+      }
+
+      case "codex_realtime_start":
+      case "codex_realtime_stop":
+      case "codex_realtime_text":
+      case "codex_realtime_list_voices": {
+        // Realtime voice rides on the live Codex runner for the session. A chat
+        // that has no session yet uses the runner created by new_session.
+        const targetSid = String(msg.sessionId || activeSession?.getSessionId?.() || activeSessionId || "");
+        const activeMatchesTarget = !!activeSession && (
+          !targetSid
+          || activeSession.getSessionId?.() === targetSid
+          || activeSessionId === targetSid
+          || activeSession._resumeSessionId === targetSid
+        );
+        const target = (targetSid ? activeSessions.get(targetSid) : undefined)
+          || (activeMatchesTarget ? activeSession : null);
+        const liveCodex = target instanceof CodexSession ? target : null;
+        const eventSessionId = () => liveCodex?.getSessionId?.() || targetSid;
+        if (msg.type === "codex_realtime_list_voices") {
+          const requestId = msg.requestId;
+          const reply = (voices: string[], defaultVoice: string, error?: string) => sendJson({
+            type: "codex_realtime_voices", requestId, sessionId: eventSessionId(),
+            ok: !error, voices, defaultVoice, ...(error ? { error } : {}),
+          });
+          if (!liveCodex) { reply([], "", "Open a Codex session to start a voice call"); break; }
+          liveCodex.listRealtimeVoices()
+            .then((list) => reply(list.voices, list.defaultVoice))
+            .catch((e: unknown) => reply([], "", errorMessage(e) || String(e)));
+          break;
+        }
+        if (msg.type === "codex_realtime_start") {
+          const requestId = msg.requestId;
+          const fail = (message: string) => {
+            sendJson({ type: "codex_realtime_event", sessionId: eventSessionId(), requestId, event: { kind: "error", message } });
+            sendJson({ type: "codex_realtime_event", sessionId: eventSessionId(), requestId, event: { kind: "closed", reason: "failed" } });
+          };
+          if (!liveCodex) { fail("Open a Codex session to start a voice call"); break; }
+          liveCodex.startRealtime({ sdp: msg.sdp, voice: msg.voice, requestId }).then(() => {
+            syncLiveSessionInstance(liveCodex);
+            broadcastSessionList();
+          }).catch((e: unknown) => {
+            const message = errorMessage(e) || String(e);
+            console.error(`[codex_realtime] start failed: ${message}`);
+            fail(message);
+          });
+          break;
+        }
+        if (!liveCodex) {
+          sendJson({ type: "error", message: "No Codex voice call is running", sessionId: targetSid || undefined });
+          break;
+        }
+        const action = msg.type === "codex_realtime_stop"
+          ? liveCodex.stopRealtime()
+          : liveCodex.appendRealtimeText(msg.text);
+        action.catch((e: unknown) => {
+          const message = errorMessage(e) || String(e);
+          console.error(`[codex_realtime] ${msg.type} failed: ${message}`);
+          sendJson({ type: "codex_realtime_event", sessionId: eventSessionId(), event: { kind: "error", message } });
         });
         break;
       }

@@ -11,6 +11,7 @@ test('account payload preserves real quota windows, reset credits, and unknown u
     readConfig: async () => ({config:{}}), readThread: async () => ({thread:{}}),
     readAccountRateLimits: async () => ({rateLimitsByLimitId:{codex:{limitId:'codex', primary:{usedPercent:35,windowDurationMins:10080},secondary:null}}, rateLimitResetCredits:{availableCount:2,credits:null}}),
     readAccountUsage: async () => ({summary:{lifetimeTokens:null, peakDailyTokens:123, currentStreakDays:null},dailyUsageBuckets:null}),
+    readAccount: async () => ({account:{type:'chatgpt', email:'me@example.com', planType:'plus'}, requiresOpenaiAuth:true, workspaceRouting:null}),
   };
   const {payload} = await session.buildStatusResult('thread');
   const limit = z.object({primary:z.object({windowDurationMins:z.number()}), secondary:z.unknown()}).parse(payload.limits[0]);
@@ -20,6 +21,7 @@ test('account payload preserves real quota windows, reset credits, and unknown u
   assert.equal(payload.usage.todayTokens,null);
   assert.equal(payload.usage.lifetimeTokens,null);
   assert.equal(payload.usage.currentStreakDays,null);
+  assert.deepEqual(payload.account,{type:'chatgpt', email:'me@example.com', planType:'plus'});
 });
 
 test('reset RPC validates and preserves the same idempotency key on retry', async () => {

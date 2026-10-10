@@ -2011,6 +2011,11 @@ export interface ServerCapabilitiesMessage {
   serverReleaseVersion?: string;
   /** Exact running git commit when the server was started from a checkout. */
   serverCommit?: string;
+  /**
+   * Windows only. False when setup was declined administrator rights, so
+   * agents cannot change system settings and firewall rules may be missing.
+   */
+  windowsElevated?: boolean;
   binaryEnvelope?: boolean;
   binaryFileDownloadVersion?: number;
   transportLane?: TransportLane;

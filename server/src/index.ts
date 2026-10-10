@@ -1469,6 +1469,7 @@ function serverCapabilitiesPayload(
       hostname: os.hostname(),
       platform: process.platform,
     },
+    windowsElevated: windowsElevated(),
     binaryEnvelope,
     binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
     transportLane,
@@ -10031,6 +10032,9 @@ async function initializeListeningServer(): Promise<void> {
     `Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)${LOCAL_NETWORK_ONLY ? ", local network only" : ""}`,
   );
   cancelWindowsRecoveryGuard();
+  if (windowsElevated() === false) {
+    console.warn("[Startup] Running without administrator rights (limited install). Rerun setup from PowerShell opened with Run as administrator for full functionality.");
+  }
   if (!LOCAL_NETWORK_ONLY && !isLoopbackHost(BIND_HOST)) {
     console.warn(`[Security] Direct HTTP/WebSocket server is bound to ${BIND_HOST} for every network. Use relay mode or TLS for untrusted networks.`);
   }
@@ -11968,6 +11972,30 @@ function armWindowsRecoveryGuard(reason: string, delaySeconds = 300): string | n
   });
   console.log(`[Recovery] Armed Windows ${reason} guard via ${recoveryFile}`);
   return "SocketAgentRecovery";
+}
+
+let cachedWindowsElevation: boolean | undefined;
+
+/**
+ * Whether this Windows server holds an elevated token. Limited installs run
+ * without one, so agents cannot change system settings and setup could not
+ * add firewall rules. Undefined off Windows, or when Windows will not say.
+ */
+function windowsElevated(): boolean | undefined {
+  if (process.platform !== "win32") return undefined;
+  if (cachedWindowsElevation !== undefined) return cachedWindowsElevation;
+  try {
+    const groups = execFileSync("whoami", ["/groups", "/fo", "csv", "/nh"], {
+      encoding: "utf8",
+      timeout: 10000,
+      windowsHide: true,
+    });
+    // High (12288) or System (16384) mandatory integrity means elevated.
+    cachedWindowsElevation = /S-1-16-(12288|16384)\b/.test(groups);
+  } catch {
+    return undefined;
+  }
+  return cachedWindowsElevation;
 }
 
 function cancelWindowsRecoveryGuard(): void {

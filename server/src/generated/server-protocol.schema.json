@@ -3917,6 +3917,9 @@
         "serverCommit": {
           "type": "string"
         },
+        "windowsElevated": {
+          "type": "boolean"
+        },
         "binaryEnvelope": {
           "type": "boolean"
         },

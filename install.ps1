@@ -205,34 +205,15 @@ function Test-SocketAgentElevated {
 }
 
 function Test-SocketAgentAdminAccount {
-    # A filtered admin token still lists the Administrators group, so this is
-    # true for an administrator who simply has not elevated yet.
-    $administrators = "S-1-5-32-544"
-    foreach ($group in [Security.Principal.WindowsIdentity]::GetCurrent().Groups) {
-        if ($group.Value -eq $administrators) { return $true }
-    }
-    return $false
+    # A filtered admin token holds the Administrators group as deny-only.
+    # WindowsIdentity.Groups leaves deny-only groups out, but whoami lists
+    # them, so this is true for an administrator who has not elevated yet.
+    return [bool]((whoami /groups /fo csv /nh) -match '"S-1-5-32-544"')
 }
 
-# SocketAgent's scheduled task runs elevated, and Windows only lets an elevated
-# caller register a task that does. Elevation is a hard requirement here rather
-# than a nicety: unelevated, registration fails outright, and the alternative
-# would be installing a server that cannot do what it is asked to do.
-function Assert-SocketAgentElevated {
-    if (Test-SocketAgentElevated) { return }
-
-    # Elevating a standard account hands UAC a different user, and the install
-    # would then land in that administrator's profile instead of this one.
-    if (-not (Test-SocketAgentAdminAccount)) {
-        Write-Fail "SocketAgent installs as an administrator and this account is not one."
-        throw "Sign in with an administrator account and run the installer again"
-    }
-    # Nothing on disk to relaunch, so the caller has to elevate for us.
-    if (-not $PSCommandPath) {
-        Write-Fail "This installer needs administrator rights."
-        throw "Reopen PowerShell with Run as administrator and run the installer again"
-    }
-
+# Relaunches setup through UAC. Elevating a standard account hands UAC a
+# different user, so callers only use this for administrator accounts.
+function Start-SocketAgentElevatedSetup {
     Write-Host "  Re-launching with administrator rights (SocketAgent runs elevated)..."
     # ArgumentList entries are joined with spaces and not quoted, so the script
     # path has to carry its own quotes or any profile with a space breaks this.
@@ -245,11 +226,78 @@ function Assert-SocketAgentElevated {
     try {
         Start-Process -FilePath (Get-CurrentPowerShellExecutable) -Verb RunAs -ArgumentList $arguments
     } catch {
-        Write-Fail "Elevation was declined. SocketAgent cannot be installed without it."
-        throw "Approve the administrator prompt and run the installer again"
+        Write-Fail "Elevation was declined."
+        throw "Approve the administrator prompt, or rerun setup and type LIMITED to install without administrator rights"
     }
     Write-Host "  Setup continues in the new administrator window; this one is done."
     exit 0
+}
+
+function Show-LimitedInstallWarning {
+    $width = 80
+    try { $width = [Math]::Max(72, [Math]::Min([Console]::WindowWidth - 1, 120)) } catch {}
+    $lines = @(
+        '',
+        '  #     #     #     ######   #     #  ###  #     #   #####',
+        '  #  #  #    # #    #     #  ##    #   #   ##    #  #     #',
+        '  #  #  #   #   #   #     #  # #   #   #   # #   #  #',
+        '  #  #  #  #     #  ######   #  #  #   #   #  #  #  #  ####',
+        '  #  #  #  #######  #   #    #   # #   #   #   # #  #     #',
+        '  #  #  #  #     #  #    #   #    ##   #   #    ##  #     #',
+        '   ## ##   #     #  #     #  #     #  ###  #     #   #####',
+        '',
+        '  SETUP IS NOT RUNNING AS ADMINISTRATOR',
+        '',
+        '  SocketAgent is built to run with administrator rights. Without them:',
+        '',
+        '   * Agents cannot install software, change system settings or edit',
+        '     protected folders such as Program Files.',
+        '   * Setup cannot add Windows Firewall rules, so phones on this network',
+        '     may not connect directly. The relay still works.',
+        '   * The app marks this computer as a limited install.',
+        '',
+        '  Rerun setup from PowerShell opened with "Run as administrator" at any',
+        '  time to get full functionality. Your pairing is kept.',
+        ''
+    )
+    try { Clear-Host } catch {}
+    foreach ($line in $lines) {
+        Write-Host $line.PadRight($width) -ForegroundColor White -BackgroundColor DarkRed
+    }
+    Write-Host ""
+}
+
+# SocketAgent's scheduled task runs elevated, and Windows only lets an elevated
+# caller register a task that does. Setup can still install without elevation,
+# but only when the person at the console types LIMITED after the warning, or
+# a script sets SOCKETAGENT_ALLOW_LIMITED=1. Returns $true for a limited install.
+function Resolve-SocketAgentLimitedInstall {
+    if (Test-SocketAgentElevated) { return $false }
+
+    $canElevate = (Test-SocketAgentAdminAccount) -and $PSCommandPath
+    if ($env:SOCKETAGENT_ALLOW_LIMITED -eq '1') {
+        Show-LimitedInstallWarning
+        Write-Warn "SOCKETAGENT_ALLOW_LIMITED=1 is set, so setup continues without administrator rights."
+        return $true
+    }
+
+    $interactive = $env:SOCKETAGENT_UNATTENDED -ne '1' -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+    if (-not $interactive) {
+        if ($canElevate) { Start-SocketAgentElevatedSetup }
+        Write-Fail "This installer needs administrator rights."
+        throw "Rerun setup from PowerShell opened with Run as administrator, or set SOCKETAGENT_ALLOW_LIMITED=1 to install with limited functionality"
+    }
+
+    Show-LimitedInstallWarning
+    if ($canElevate) {
+        $answer = Read-Host "  Press Enter to restart setup as administrator (recommended), or type LIMITED to continue without it"
+        if ($answer.Trim() -ieq 'LIMITED') { return $true }
+        Start-SocketAgentElevatedSetup
+    }
+    Write-Host "  This account is not an administrator, so setup cannot elevate it." -ForegroundColor Yellow
+    $answer = Read-Host "  Type LIMITED to install anyway, or press Enter to cancel"
+    if ($answer.Trim() -ieq 'LIMITED') { return $true }
+    throw "Setup cancelled. Sign in with an administrator account, or rerun setup and type LIMITED"
 }
 
 function Set-NpmWindowsScriptShell {
@@ -397,7 +445,7 @@ if (-not (Test-Path (Join-Path $SERVER_DIR "package.json"))) {
 
 try {
 
-Assert-SocketAgentElevated
+$LIMITED_INSTALL = Resolve-SocketAgentLimitedInstall
 
 # ── Pre-flight: check if port is available ──
 $existingTask = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
@@ -714,11 +762,17 @@ if (-not (Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue) 
 # Stop and remove existing task
 $existing = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
 if ($existing) {
-    if ($existing.State -eq "Running") {
-        Stop-ScheduledTask -TaskName $TASK_NAME
-        Start-Sleep -Seconds 2
+    try {
+        if ($existing.State -eq "Running") {
+            Stop-ScheduledTask -TaskName $TASK_NAME
+            Start-Sleep -Seconds 2
+        }
+        Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false
+    } catch {
+        if (-not $LIMITED_INSTALL) { throw }
+        # Only an elevated session may stop or replace a task that runs elevated.
+        throw "The existing '$TASK_NAME' task was set up by an administrator install. Rerun setup from PowerShell opened with Run as administrator"
     }
-    Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false
     Write-Host "  Removed existing task"
 }
 
@@ -882,13 +936,14 @@ $settings = New-ScheduledTaskSettingsSet `
 $logonUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $logonUser
 #
-# SocketAgent always runs with full administrator rights. Assert-SocketAgentElevated
-# guarantees this registration is made from an elevated session, which is what
-# Windows requires before it will accept a Highest principal.
+# SocketAgent runs with full administrator rights unless the user chose a
+# limited install. Windows only accepts a Highest principal from an elevated
+# session, which Resolve-SocketAgentLimitedInstall has confirmed otherwise.
+$runLevel = if ($LIMITED_INSTALL) { 'Limited' } else { 'Highest' }
 $logonPrincipal = New-ScheduledTaskPrincipal `
     -UserId $logonUser `
     -LogonType Interactive `
-    -RunLevel Highest
+    -RunLevel $runLevel
 
 Register-ScheduledTask `
     -TaskName $TASK_NAME `
@@ -900,9 +955,10 @@ Register-ScheduledTask `
 
 Grant-SocketAgentTaskOwnerAccess $TASK_NAME
 
-Write-Ok "Registered as scheduled task '$TASK_NAME' (interactive logon, administrator)"
+$runLabel = if ($LIMITED_INSTALL) { 'limited, no administrator rights' } else { 'administrator' }
+Write-Ok "Registered as scheduled task '$TASK_NAME' (interactive logon, $runLabel)"
 
-# Add Windows Firewall rule (the installer is elevated, so this should not fail)
+# Add Windows Firewall rule. A limited install cannot, and the catch says so.
 $fwRuleName = "SocketAgent Server (TCP $Port)"
 try {
     $existingRule = Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
@@ -995,6 +1051,11 @@ Write-Host "  On this computer's network the phone connects directly. Elsewhere 
 Write-Host ""
 Show-QrCode $qrPayload
 Write-Host ""
+if ($LIMITED_INSTALL) {
+    Write-Host "  LIMITED INSTALL: SocketAgent is running without administrator rights." -ForegroundColor White -BackgroundColor DarkRed
+    Write-Host "  Rerun setup from PowerShell opened with Run as administrator for full functionality." -ForegroundColor Red
+    Write-Host ""
+}
 
 }
 

@@ -287,9 +287,8 @@ function relayPushEndpoint(): string | null {
   }
 }
 
-// appServerId is the phone's own ID for this computer. Without it the relay
-// stamps whichever ID it stored first for the pairing, which can be stale, and
-// the phone then fails to match a push to the session it is showing.
+// The relay stamps each phone's push with the ID that phone registered for
+// this computer. appServerId only fills in for phones registered without one.
 async function sendPushViaRelay(
   endpoint: string,
   pairingToken: string,
@@ -482,7 +481,9 @@ export async function sendPushNotification(
         endpoint,
         pairingToken,
         payload,
-        relayEntries.find((entry) => entry.appServerId)?.appServerId,
+        // Registrations are appended, so the last one is the newest. A phone
+        // that re-added this computer leaves its old ID behind earlier on.
+        [...relayEntries].reverse().find((entry) => entry.appServerId)?.appServerId,
       );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

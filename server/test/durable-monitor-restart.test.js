@@ -9,7 +9,7 @@ const test = require("node:test");
  * @param {() => T | false | null | undefined} predicate
  * @param {number} timeoutMs
  * @returns {Promise<T>} */
-function waitFor(predicate, timeoutMs = 5000) {
+function waitFor(predicate, timeoutMs = 15_000) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const poll = () => {
@@ -28,6 +28,9 @@ test("Monitor worker survives its server parent and restores exact pending outpu
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-monitor-restart-"));
   const sessionId = `restart-session-${Date.now()}`;
   const fixture = path.join(__dirname, "fixtures", "start-monitor-and-exit.js");
+  // The monitor prints "after" only once the test creates this file, so the
+  // check that the old server never saw it cannot race a slow machine.
+  const gate = path.join(dataDir, "release-after");
   const started = spawnSync(process.execPath, [fixture], {
     cwd: path.join(__dirname, ".."),
     env: {
@@ -35,11 +38,11 @@ test("Monitor worker survives its server parent and restores exact pending outpu
       SOCKETAGENT_DATA_DIR: dataDir,
       SOCKETAGENT_MONITOR_LAUNCH_MODE: "direct",
       TEST_SESSION_ID: sessionId,
-      TEST_MONITOR_COMMAND: "printf 'before\\n'; sleep 1.2; printf 'after\\n'; sleep 0.2",
-      TEST_PARENT_EXIT_DELAY_MS: "700",
+      TEST_MONITOR_COMMAND: `printf 'before\\n'; while [ ! -e '${gate}' ]; do sleep 0.05; done; printf 'after\\n'; sleep 0.2`,
+      TEST_EXIT_AFTER_CHECKPOINT: "1",
     },
     encoding: "utf8",
-    timeout: 5000,
+    timeout: 20_000,
   });
   assert.equal(started.status, 0, started.stderr);
   const taskId = started.stdout.trim();
@@ -58,6 +61,7 @@ test("Monitor worker survives its server parent and restores exact pending outpu
   assert.ok(firstRecord.phoneOffset > 0, "the old server should checkpoint its live delivery");
   assert.match(readDurableMonitorSlice(firstRecord, 0).content, /before/);
   assert.doesNotMatch(readDurableMonitorSlice(firstRecord, 0).content, /after/);
+  fs.writeFileSync(gate, "");
   await waitFor(() => {
     const record = getDurableMonitorRecord(taskId);
     if (!record) return false;

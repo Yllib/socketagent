@@ -248,3 +248,21 @@ test("deletes only secrets available in the supplied context", () => {
     false,
   );
 });
+
+test("a retried save with the same request ID returns the first secret", () => {
+  const args = {
+    label: "RETRY_TOKEN",
+    value: "retry-value",
+    scope: "session",
+    sessionId: "retry-session",
+    clientRequestId: "secret_create_retry",
+  };
+  const first = saveSecureInput(args);
+  const second = saveSecureInput(args);
+  assert.equal(second.secretId, first.secretId);
+  assert.equal(
+    listAvailableSecureInputs("retry-session").filter((s) => s.label === "RETRY_TOKEN").length,
+    1,
+  );
+  assert.notEqual(saveSecureInput({ ...args, clientRequestId: "other" }).secretId, first.secretId);
+});

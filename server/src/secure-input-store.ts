@@ -22,6 +22,8 @@ export interface SecureInputSaveArgs extends SecureInputRequestArgs {
   value: string;
   sessionId?: string;
   cwd?: string;
+  /** The app's ID for this save. A retry with the same ID returns the first save. */
+  clientRequestId?: string;
 }
 
 export interface SavedSecureInput {
@@ -35,6 +37,7 @@ export interface SavedSecureInput {
   cwd?: string;
   createdAt: string;
   updatedAt?: string;
+  clientRequestId?: string;
 }
 
 const savedSecureInputSchema = z.object({
@@ -42,6 +45,7 @@ const savedSecureInputSchema = z.object({
   filePath: z.string(), metadataPath: z.string(), envHint: z.string(),
   sessionId: z.string().optional(), cwd: z.string().optional(),
   createdAt: z.string(), updatedAt: z.string().optional(),
+  clientRequestId: z.string().optional(),
 });
 
 export type AvailableSecureInput = Pick<
@@ -336,6 +340,27 @@ export function redactSecretsDeep(value: unknown): unknown {
   return value;
 }
 
+/**
+ * The secret an earlier attempt saved for this request in this context. The
+ * app retries until it hears back, so a reply lost in transit must not leave
+ * a second copy.
+ */
+function savedForRequest(scopeDir: string, clientRequestId: string): SavedSecureInput | undefined {
+  const metadataFiles: string[] = [];
+  walkMetadataFiles(scopeDir, metadataFiles);
+  for (const metadataPath of metadataFiles) {
+    try {
+      const metadata = savedSecureInputSchema.parse(JSON.parse(fs.readFileSync(metadataPath, "utf8")));
+      if (metadata.clientRequestId === clientRequestId && fs.existsSync(metadata.filePath)) {
+        return metadata;
+      }
+    } catch {
+      // Ignore malformed or concurrently-written metadata records.
+    }
+  }
+  return undefined;
+}
+
 export function saveSecureInput(args: SecureInputSaveArgs): SavedSecureInput {
   const label = args.label?.trim() || "Secret";
   const scope = normalizeScope(args.scope);
@@ -344,6 +369,8 @@ export function saveSecureInput(args: SecureInputSaveArgs): SavedSecureInput {
   ensureDir(STORE_DIR);
   ensureDir(path.join(STORE_DIR, scope));
   ensureDir(scopeDir);
+  const earlier = args.clientRequestId ? savedForRequest(scopeDir, args.clientRequestId) : undefined;
+  if (earlier) return earlier;
 
   const fileBase = `${sanitizeSegment(label, "secret")}_${secretId}`;
   const filePath = path.join(scopeDir, fileBase);
@@ -364,6 +391,7 @@ export function saveSecureInput(args: SecureInputSaveArgs): SavedSecureInput {
     createdAt,
     ...(args.sessionId ? { sessionId: args.sessionId } : {}),
     ...(args.cwd ? { cwd: args.cwd } : {}),
+    ...(args.clientRequestId ? { clientRequestId: args.clientRequestId } : {}),
   };
   fs.writeFileSync(metadataPath, JSON.stringify({ ...saved, valueRedacted: true }, null, 2), { encoding: "utf8", mode: 0o600 });
   try { fs.chmodSync(metadataPath, 0o600); } catch {}

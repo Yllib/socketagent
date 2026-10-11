@@ -6837,6 +6837,7 @@ function createConnectionHandler(
             scope: msg.scope,
             sessionId,
             cwd,
+            clientRequestId,
           });
           const secret = {
             secretId: saved.secretId,

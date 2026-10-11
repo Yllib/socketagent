@@ -42,6 +42,18 @@ test('link is opt-in and targets the actual creating session, independently of d
   assert.equal(listScheduledTasks().length,3);
 });
 
+test('a scheduled run links its follow-up to the session that started the chain', async () => {
+  saveScheduledTask({...fixture(), runs:[{...fixture().runs[0], sessionId:'run-session'}]});
+  /** @type {import('#server/app-tool-handlers').AppToolContext} */
+  const ctx = {getSessionId:()=>'run-session', getDelegationSupervisorSessionId:()=>'root',
+    getBackend:()=>'codex', send:()=>{}, getTtsEngine:()=>'system', getKokoroVoice:()=>'', getKokoroSpeed:()=>1};
+  const result = await handleScheduleTaskTool(ctx,{prompt:'Check again', cwd:root,
+    scheduledTime:new Date(Date.now()+60000).toISOString(), linkToSession:true});
+  const followUp = listScheduledTasks().find(t=>t.prompt==='Check again');
+  assert.equal(followUp?.linkedSessionId,'root');
+  assert.match(result.content[0].text,/session root/);
+});
+
 test('failed delivery survives restart; acknowledgement keeps intervening schedule edits', async () => {
   saveScheduledTask(fixture());
   await dispatcher(async()=>{throw new Error('Parent not ready');}).flush();

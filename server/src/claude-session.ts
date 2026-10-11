@@ -3,6 +3,7 @@ import { isRecord, unknownArray } from "./value-guards";
 import { requestTranscriptAccess } from "./transcript-access-approval";
 import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type ElicitationRequest, type ElicitationResult, type Settings, type PermissionMode, type SDKTaskStartedMessage, type SDKTaskProgressMessage, type SDKTaskUpdatedMessage, type McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { rememberClaudePlanUsage } from "./claude-plan-usage-cache";
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ClaudeStreamIdentity } from "./claude-stream-identity";
 import { claudeMessageUuid } from "./claude-message-uuid";
@@ -72,6 +73,7 @@ import {
 import { recordRateLimitEvent } from "./rate-limit-cache";
 
 import { isRestartContinuationPrompt } from "./restart-recovery";
+import { promptTitle } from "./prompt-title";
 export type ClaudeExecutableSource = "explicit" | "sdk" | "managed" | "legacy" | "system" | "unresolved";
 
 export interface ClaudeExecutableInfo {
@@ -1703,11 +1705,14 @@ export class ClaudeSession {
    * `rate_limits_available` is false for API-key, Bedrock and Vertex sessions,
    * where plan limits do not apply.
    */
+  /** Plan usage from the running query, or null when no query is running. */
   async getPlanUsage() {
     const activeQuery = this.activeQuery;
     const getUsage = activeQuery?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (typeof getUsage !== "function") return null;
-    return await getUsage.call(activeQuery, { skipBehaviors: true });
+    const usage = await getUsage.call(activeQuery, { skipBehaviors: true });
+    rememberClaudePlanUsage(usage);
+    return usage;
   }
 
   private _refreshPlanRateLimits(): void {
@@ -1720,6 +1725,7 @@ export class ClaudeSession {
     // two percentages. That scan is 4,000 files and ~100 MB on a busy machine.
     Promise.resolve(getUsage.call(activeQuery, { skipBehaviors: true }))
       .then((usage) => {
+        rememberClaudePlanUsage(usage);
         for (const event of buildClaudeUsageRateLimitEvents(
           usage,
           this.sessionId || "",
@@ -1877,7 +1883,7 @@ export class ClaudeSession {
     const now = new Date().toISOString();
     saveSession({
       id: sessionId,
-      title: firstPrompt.slice(0, 50) + (firstPrompt.length > 50 ? "..." : ""),
+      title: promptTitle(firstPrompt),
       cwd: this.cwd,
       createdAt: now,
       lastActive: now,

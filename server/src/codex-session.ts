@@ -4,6 +4,7 @@ import type { JsonValue } from "./generated/codex/types/serde_json/JsonValue";
 import type { CollaborationMode } from "./generated/codex/types/CollaborationMode";
 import type { ModeKind } from "./generated/codex/types/ModeKind";
 import { isRecord as isCodexRecord, unknownArray } from "./value-guards";
+import { promptTitle } from "./prompt-title";
 import { deliverCodexInstructions, invalidateCodexInstructions } from "./codex-instruction-delivery";
 import { CodexRealtimeBridge, parseRealtimeVoices, type CodexRealtimeVoices } from "./codex-realtime";
 import { requestTranscriptAccess } from "./transcript-access-approval";
@@ -3348,9 +3349,7 @@ export class CodexSession {
     }
 
     if (!this._sessionInfoSaved) {
-      const title =
-        this._currentPrompt.slice(0, 50) +
-        (this._currentPrompt.length > 50 ? "..." : "");
+      const title = promptTitle(this._currentPrompt);
       const info: SessionInfo = {
         id: this.sessionId,
         title,

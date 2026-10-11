@@ -1491,7 +1491,17 @@ export async function handleScheduleTaskTool(
     return { content: [{ type: "text", text: "Scheduled time is in the past. Please provide a future time." }] };
   }
 
-  const linkedSessionId = args.linkToSession ? ctx.getSessionId() : undefined;
+  // A scheduled run's session ends with the run, so a follow-up it links
+  // reports to the session that started the chain. Other sessions, including
+  // delegated agents, link to themselves.
+  const currentSessionId = ctx.getSessionId();
+  const linksToSupervisor = Boolean(currentSessionId) &&
+    getScheduledTaskSessionIds().has(currentSessionId);
+  const linkedSessionId = !args.linkToSession
+    ? undefined
+    : linksToSupervisor
+      ? ctx.getDelegationSupervisorSessionId?.() || currentSessionId
+      : currentSessionId;
   if (args.linkToSession && !linkedSessionId) {
     return { isError: true, content: [{ type: "text", text: "This task cannot be linked until the current session has an ID." }] };
   }
@@ -1539,7 +1549,11 @@ export async function handleScheduleTaskTool(
   const when = scheduledDate.toLocaleString();
   const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
   const notificationLabel = (task.notificationMode === "quiet" ? " Quiet mode is on." : "")
-    + (linkedSessionId ? " Results will return to this session and continue its agent." : "");
+    + (!linkedSessionId
+      ? ""
+      : linkedSessionId === currentSessionId
+        ? " Results will return to this session and continue its agent."
+        : ` Results will return to session ${linkedSessionId}, which started this scheduled chain, and continue its agent.`);
   const label = task.name ? `"${task.name}"` : "Task";
   return { content: [{ type: "text", text: `${label} scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
 }

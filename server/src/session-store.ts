@@ -1,6 +1,7 @@
 import * as os from "os";
 import { parseStoredSessions } from "./session-schema";
 import { isRecord, unknownArray, errorMessage, parseJsonObject } from "./value-guards";
+import { promptTitle } from "./prompt-title";
 import { parseHistoryEntry, parseHistoryEntries } from "./history-schema";
 import { hasInlineImages, snapshotInlineImages } from "./inline-image-markdown";
 import * as fs from "fs";
@@ -3675,10 +3676,7 @@ function unixSecondsToIso(value: unknown, fallback = nowIso()): string {
 }
 
 function codexThreadTitle(thread: Record<string, unknown>): string {
-  const raw = String(thread?.name || thread?.preview || "").trim();
-  const firstLine = raw.split(/\r?\n/)[0].trim();
-  const title = firstLine || "Codex session";
-  return title.length > 80 ? title.slice(0, 80) + "…" : title;
+  return promptTitle(String(thread?.name || thread?.preview || ""), 80) || "Codex session";
 }
 
 function codexThreadPreview(thread: Record<string, unknown>): string {
@@ -4684,10 +4682,10 @@ export function getCodexThreadSessionInfo(sessionId: string): SessionInfo | null
     const createdAt = epochToIso(row.created_at_ms ?? row.created_at, nowIso());
     const lastActive = epochToIso(row.updated_at_ms ?? row.updated_at, createdAt);
     const preview = String(row.preview || row.first_user_message || "");
-    const title = String(row.title || preview.split(/\r?\n/)[0] || "Codex session");
+    const title = promptTitle(String(row.title || preview), 80) || "Codex session";
     return {
       id: String(row.id),
-      title: title.length > 80 ? title.slice(0, 80) + "…" : title,
+      title,
       cwd: String(row.cwd),
       createdAt,
       lastActive,
@@ -4739,11 +4737,11 @@ function listCodexNativeArchives(limit = 200): ArchiveEntry[] {
       const createdAt = epochToIso(row.created_at_ms ?? row.created_at, nowIso());
       const clearedAt = epochToIso(row.archived_at ?? row.updated_at_ms ?? row.updated_at, createdAt);
       const preview = String(row.preview || row.first_user_message || "");
-      const title = String(row.title || preview.split(/\r?\n/)[0] || "Codex session");
+      const title = promptTitle(String(row.title || preview), 80) || "Codex session";
       return [{
         sid: sessionId,
         ts: `${CODEX_NATIVE_ARCHIVE_TS_PREFIX}${row.archived_at ?? row.updated_at ?? Date.now()}`,
-        title: title.length > 80 ? title.slice(0, 80) + "…" : title,
+        title,
         cwd: String(row.cwd || ""),
         backend: "codex",
         createdAt,

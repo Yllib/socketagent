@@ -104,6 +104,7 @@ import {
 } from "./managed-backend-update";
 import { invalidateCachedModelCatalog } from "./model-catalog-store";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
+import { lastClaudePlanUsage } from "./claude-plan-usage-cache";
 import { activeAppMonitorRecords, AppToolContext, publishWorkReviewCard, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings, isClaudeEffort } from "./initial-session-settings";
@@ -8202,14 +8203,24 @@ function createConnectionHandler(
 
       case "get_claude_usage": {
         const sid = activeSession?.getSessionId?.() || activeSessionId || "";
+        let live: unknown = null;
+        let error: string | undefined;
         if (activeSession instanceof ClaudeSession) {
           try {
-            sendJson({ type: "claude_usage", sessionId: sid, usage: await activeSession.getPlanUsage() });
+            live = await activeSession.getPlanUsage();
           } catch (e: unknown) {
-            sendJson({ type: "claude_usage", sessionId: sid, error: errorMessage(e) || String(e) });
+            error = errorMessage(e) || String(e);
           }
+        }
+        // Without a running Claude process there is nothing to ask, so send
+        // the last reading with its time rather than nothing.
+        const cached = live ? null : lastClaudePlanUsage();
+        if (cached) {
+          sendJson({ type: "claude_usage", sessionId: sid, usage: cached.usage, fetchedAt: cached.fetchedAt });
+        } else if (error) {
+          sendJson({ type: "claude_usage", sessionId: sid, error });
         } else {
-          sendJson({ type: "claude_usage", sessionId: sid, usage: null });
+          sendJson({ type: "claude_usage", sessionId: sid, usage: live });
         }
         break;
       }
@@ -10323,6 +10334,22 @@ function scheduledTaskPrompt(task: ScheduledTask): string {
   return sections.join("\n\n");
 }
 
+/**
+ * Titles a scheduled run's session with its task name and records the task,
+ * so lists and notifications show the name instead of the agent-facing
+ * prompt. A title the user changed is kept.
+ */
+function labelScheduledRunSession(task: ScheduledTask, sessionId: string): void {
+  const info = getSession(sessionId);
+  if (!info) return;
+  const title = info.title?.trim() || "";
+  const stem = title.replace(/(\.\.\.|…)$/, "");
+  const autoTitled = !stem || title.startsWith("<socketagent_") || task.prompt.startsWith(stem);
+  const name = scheduledTaskDisplayName(task);
+  if (info.scheduledTaskId === task.id && (!autoTitled || title === name)) return;
+  saveSession({ ...info, scheduledTaskId: task.id, ...(autoTitled ? { title: name } : {}) });
+}
+
 function applyLatestScheduledTaskEditableFields(task: ScheduledTask): void {
   const latest = getScheduledTask(task.id);
   if (!latest || latest.status !== "running") return;
@@ -10474,6 +10501,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         task.sessionId = sid;
         currentRun.sessionId = sid;
         persistDelegationSupervisorLineage(session, sid);
+        labelScheduledRunSession(task, sid);
         saveScheduledTask(task);
         maybeSendScheduledStartPush();
         broadcastSessionList();
@@ -10491,6 +10519,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       currentRun.sessionId = realSessionId || "";
       if (realSessionId) {
         persistDelegationSupervisorLineage(session, realSessionId);
+        labelScheduledRunSession(task, realSessionId);
       }
       currentRun.completedAt = new Date().toISOString();
       currentRun.status = "completed";
@@ -10694,6 +10723,12 @@ for (const task of recoveredScheduledTasks) {
     `[Scheduler] Recovered interrupted task ${task.id}; ` +
     `status=${task.status} next=${task.scheduledTime}`,
   );
+}
+// Older scheduled runs were titled from the agent-facing prompt.
+for (const task of listScheduledTasks()) {
+  for (const sessionId of new Set([task.sessionId, ...(task.runs || []).map((run) => run.sessionId)])) {
+    if (sessionId) labelScheduledRunSession(task, sessionId);
+  }
 }
 
 setInterval(checkScheduledTasks, SCHEDULER_INTERVAL);

@@ -35,7 +35,7 @@ import * as fs from "fs";
 import * as http from "http";
 import * as os from "os";
 import * as path from "path";
-import { RestartRecoveryStore, RestartRecoveryWorker, boundedRecoverySetup, RESTART_CONTINUATION_PROMPT } from "./restart-recovery";
+import { RestartRecoveryStore, RestartRecoveryWorker, boundedRecoverySetup, buildFailureNote, RESTART_CONTINUATION_PROMPT } from "./restart-recovery";
 import { finishRecoveredScheduledTask } from "./scheduled-task-store";
 import { ScheduledTaskCallbacks, scheduledTaskReportMarker, scheduledTaskReportPrompt } from "./scheduled-task-callbacks";
 import { flushSessionStore, flushSdkEventQueue } from "./session-store";
@@ -116,6 +116,7 @@ import { startPrivateIntegrationAuthorization } from "./private-integration-auth
 import {
   browserSessionManager,
   type BrowserFrame,
+  type BrowserSessionSummary,
   type BrowserViewportState,
   BrowserPhoneInput,
   normalizeBrowserProfile,
@@ -1498,6 +1499,8 @@ function serverCapabilitiesPayload(
       activeHeader: true,
       clipboardToSecret: true,
       nativeInput: true,
+      close: true,
+      start: true,
     },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
@@ -2278,6 +2281,25 @@ function sendBrowserFrame(frame: BrowserFrame): void {
     if (peerId && transport.sendReply) transport.sendReply(peerId, json);
     else transport.send(json);
   }
+}
+
+/** Tells every viewer whether the profile's browser is running, so cards, strips, and viewers follow. */
+function broadcastBrowserState(session: BrowserSessionSummary, active: boolean, runtimeRequired = false): void {
+  const raw = JSON.stringify({
+    type: "browser_session_state",
+    profile: session.profile,
+    label: session.label,
+    url: session.url || "about:blank",
+    width: 430,
+    height: 860,
+    sessionId: session.sessionId || "",
+    active,
+    ...(runtimeRequired ? { runtimeRequired: true } : {}),
+  });
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN) client.send(raw);
+  }
+  if (relayConnectionHandler) relayConnectionHandler.sendRaw(raw);
 }
 
 function broadcastBrowserViewport(session: BrowserViewportState): void {
@@ -5486,6 +5508,59 @@ function createConnectionHandler(
           .catch(() => {});
         break;
       }
+
+      case "browser_session_close":
+        void (async () => {
+          let session: BrowserSessionSummary = { profile: msg.profile, label: msg.profile, running: false };
+          try {
+            session = await browserSessionManager.status(msg.profile);
+          } catch {}
+          await browserSessionManager.close(msg.profile);
+          broadcastBrowserState(session, false);
+        })().catch((error: unknown) => sendJson({
+          type: "browser_session_error",
+          profile: msg.profile,
+          message: error instanceof Error ? errorMessage(error) : "The browser did not close.",
+        }));
+        break;
+
+      case "browser_profiles_request":
+        sendJson({
+          type: "browser_profiles",
+          profiles: browserSessionManager.list().map(({ profile, label, running, sessionId }) => ({
+            profile, label, running, ...(sessionId ? { sessionId } : {}),
+          })),
+        });
+        break;
+
+      case "browser_session_start":
+        void (async () => {
+          try {
+            const elsewhere = browserSessionManager.active().find((browser) =>
+              browser.profile === normalizeBrowserProfile(msg.profile) && browser.sessionId !== msg.sessionId);
+            if (elsewhere) throw new Error(`${elsewhere.label} is open in another session.`);
+            broadcastBrowserState(
+              await browserSessionManager.open(msg.profile, msg.url, msg.profile, msg.sessionId),
+              true,
+            );
+          } catch (error) {
+            const message = error instanceof Error ? errorMessage(error) : "The browser did not open.";
+            // Without Chrome, the viewer offers to install it, as it does for the agent.
+            if (/No supported Chrome, Chromium, or Edge installation was found/.test(message)) {
+              const profile = normalizeBrowserProfile(msg.profile);
+              broadcastBrowserState({
+                profile,
+                label: profile,
+                running: false,
+                sessionId: msg.sessionId,
+                url: normalizeBrowserUrl(msg.url),
+              }, true, true);
+              return;
+            }
+            sendJson({ type: "browser_session_error", profile: msg.profile, message });
+          }
+        })();
+        break;
 
       case "browser_prompt_response":
         void browserSessionManager.answerPrompt(msg.profile, msg.id, {
@@ -9459,12 +9534,20 @@ async function continueSession(sessionId: string, prompt: string, recoveryId?: s
   } finally { continuationStarting.delete(sessionId); }
 }
 
+// Set when this process is the previous build because the newest one did not compile.
+const startupBuildFailure = buildFailureNote(path.join(__dirname, ".build-failure.json"));
+if (startupBuildFailure) console.error(`[Startup] ${startupBuildFailure}`);
+
 const restartRecoveryWorker = new RestartRecoveryWorker(restartRecovery, {
   ready: () => serverReady && !restartPreparing && !shuttingDown,
   exists: sessionId => !!getSession(sessionId),
   stopped: sessionId => sessionAutomationLocks.isLocked(sessionId),
   busy: sessionId => continuationStarting.has(sessionId) || hasBusyLiveSession(sessionId),
-  launch: run => continueSession(run.sessionId, RESTART_CONTINUATION_PROMPT, run.id),
+  launch: run => {
+    if (!startupBuildFailure) return continueSession(run.sessionId, RESTART_CONTINUATION_PROMPT, run.id);
+    appendRecoveryNotice(run.sessionId, "The newest server code failed to compile, so the previous build is running.");
+    return continueSession(run.sessionId, `${RESTART_CONTINUATION_PROMPT}\n\n${startupBuildFailure}`, run.id);
+  },
   skipped: sessionId => settleRecoveredSchedule(sessionId, "failed", "Recovery cancelled because the session was stopped or removed"),
   notice: (sessionId, message) => {
     appendRecoveryNotice(sessionId, message);
@@ -11214,7 +11297,6 @@ const NODE_RUNTIME_VERSION = process.env.SOCKETAGENT_NODE_VERSION || "22.22.1";
 interface UpdateRuntimeTools {
   env: NodeJS.ProcessEnv;
   npm: string;
-  npx: string;
 }
 
 function nodeCommandName(base: string): string {
@@ -11311,11 +11393,10 @@ function resolveUpdateRuntimeTools(): UpdateRuntimeTools {
 
   if (!nodePath) {
     const currentMajor = nodeMajorVersion(process.execPath);
-    console.warn(`[UpdateRuntime] Node.js ${currentMajor || "unknown"} is older than v${NODE_MIN_VERSION}; falling back to PATH npm/npx`);
+    console.warn(`[UpdateRuntime] Node.js ${currentMajor || "unknown"} is older than v${NODE_MIN_VERSION}; falling back to PATH npm`);
     return {
       env: { ...process.env },
       npm: nodeCommandName("npm"),
-      npx: nodeCommandName("npx"),
     };
   }
 
@@ -11339,7 +11420,6 @@ function resolveUpdateRuntimeTools(): UpdateRuntimeTools {
   return {
     env,
     npm: env.SOCKETAGENT_NPM,
-    npx: env.SOCKETAGENT_NPX,
   };
 }
 
@@ -11398,15 +11478,21 @@ function runPackageUpdateSync(cwd: string): void {
     windowsHide: true,
     windowsVerbatimArguments: npm.windowsVerbatimArguments,
   });
-  const npx = updateToolCommand(runtime.npx, ["tsc"]);
-  execUpdateToolSync(npx.command, npx.args, {
+  execFileSync(process.execPath, [path.join(cwd, "scripts", "build-server.js")], {
     cwd,
     env: runtime.env,
     stdio: "pipe",
-    timeout: 120000,
+    timeout: 300000,
     windowsHide: true,
-    windowsVerbatimArguments: npx.windowsVerbatimArguments,
   });
+  throwOnBuildFailure(cwd);
+}
+
+// build-server.js keeps the running build when the new code fails to compile.
+// Updates stop here instead of restarting into the same old build.
+function throwOnBuildFailure(cwd: string): void {
+  const failure = buildFailureNote(path.join(cwd, "dist", ".build-failure.json"));
+  if (failure) throw new Error(failure);
 }
 
 function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: string[], cwd: string, timeout = 120000): Promise<string> {
@@ -11433,7 +11519,19 @@ function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: 
 async function runPackageUpdate(cwd: string): Promise<void> {
   const runtime = resolveUpdateRuntimeTools();
   await runUpdateToolAsync(runtime, runtime.npm, ["ci", "--include=optional"], cwd);
-  await runUpdateToolAsync(runtime, runtime.npx, ["tsc"], cwd);
+  await new Promise<void>((resolve, reject) => {
+    execFile(process.execPath, [path.join(cwd, "scripts", "build-server.js")], {
+      cwd,
+      env: runtime.env,
+      timeout: 300000,
+      windowsHide: true,
+    }, (err, stdout, stderr) => {
+      if (!err) return resolve();
+      err.message = `${err.message}\n${stdout}${stderr}`.trim();
+      reject(err);
+    });
+  });
+  throwOnBuildFailure(cwd);
 }
 
 function managedBackendAutoUpdateEnabled(): boolean {
@@ -11781,7 +11879,16 @@ function windowsRunServiceBatContent(): string {
     '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%SERVER_DIR%\\scripts\\register-windows-recovery.ps1" >nul 2>&1',
     "exit /b 0",
     "",
+    // The loop above must stay byte-identical: cmd resumes a running batch
+    // file by offset after this server rewrites it.
     ":preflight",
+    "call :update",
+    'set "UPDATE_RESULT=%ERRORLEVEL%"',
+    '"%NODE_EXE%" "%SERVER_DIR%\\scripts\\build-server.js"',
+    "if errorlevel 1 exit /b 1",
+    "exit /b %UPDATE_RESULT%",
+    "",
+    ":update",
     'cd /d "%REPO_ROOT%"',
     'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="0" exit /b 0',
     'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="false" exit /b 0',
@@ -11805,8 +11912,6 @@ function windowsRunServiceBatContent(): string {
     "if errorlevel 1 exit /b 1",
     'cd /d "%SERVER_DIR%"',
     'call "%NPM_CMD%" ci --include=optional',
-    "if errorlevel 1 exit /b 1",
-    'call "%NPX_CMD%" tsc',
     "if errorlevel 1 exit /b 1",
     '> "%REPO_ROOT%\\.last-auto-update-hash" echo %REMOTE_HASH%',
     "exit /b 0",

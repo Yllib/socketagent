@@ -208,7 +208,6 @@ interface RunningBrowserSession {
   width: number;
   height: number;
   lastUsedAt: string;
-  idleTimer?: NodeJS.Timeout;
   watch?: BrowserWatch;
   /** CDP sessions of attached out-of-process frames. */
   frameTargets: Set<string>;
@@ -245,7 +244,6 @@ const DEFAULT_HEIGHT = 860;
  */
 const DISPLAY_WIDTH = 1920;
 const DISPLAY_HEIGHT = 1200;
-const IDLE_CLOSE_MS = 2 * 60 * 60_000;
 /** How long one watch request keeps the screencast alive without a renewal. */
 export const WATCH_TTL_MS = 20_000;
 /** Floor on the gap between pushed frames, so a busy page cannot flood a phone. */
@@ -1535,7 +1533,6 @@ export class BrowserSessionManager {
       processHandle.once("exit", () => {
         const current = this.sessions.get(profile);
         if (current === session) {
-          if (current.idleTimer) clearTimeout(current.idleTimer);
           this.stopWatch(current);
           current.cdp.close();
           current.browserCdp.close();
@@ -2109,12 +2106,12 @@ export class BrowserSessionManager {
     this.touch(session);
   }
 
+  /** Browsers stay open until the agent or a viewer closes them, or the server stops. */
   async close(profileValue: string): Promise<void> {
     const profile = normalizeBrowserProfile(profileValue);
     const session = this.sessions.get(profile);
     if (!session) return;
     this.sessions.delete(profile);
-    if (session.idleTimer) clearTimeout(session.idleTimer);
     this.stopWatch(session);
     session.cdp.close();
     session.browserCdp.close();
@@ -2149,9 +2146,6 @@ export class BrowserSessionManager {
 
   private touch(session: RunningBrowserSession): void {
     session.lastUsedAt = new Date().toISOString();
-    if (session.idleTimer) clearTimeout(session.idleTimer);
-    session.idleTimer = setTimeout(() => void this.close(session.profile), IDLE_CLOSE_MS);
-    session.idleTimer.unref?.();
   }
 
   private async summary(session: RunningBrowserSession): Promise<BrowserSessionSummary> {

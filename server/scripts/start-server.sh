@@ -24,7 +24,6 @@ NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"
 USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
 NODE_BIN=""
 NPM_BIN=""
-NPX_BIN=""
 RETRY_WINDOW_SECONDS="${SOCKETAGENT_STARTUP_REPAIR_RETRY_SECONDS:-300}"
 LOCK_DIR="$SERVER_DIR/.startup-repair.lock"
 LOCK_PID_FILE="$LOCK_DIR/pid"
@@ -182,18 +181,11 @@ set_node_runtime() {
   export PATH="$node_dir:$PATH"
 
   NPM_BIN="$node_dir/npm"
-  NPX_BIN="$node_dir/npx"
 
   if [[ -n "${SOCKETAGENT_NPM:-}" && -x "${SOCKETAGENT_NPM:-}" ]]; then
     NPM_BIN="$SOCKETAGENT_NPM"
   elif [[ ! -x "$NPM_BIN" ]]; then
     NPM_BIN="$(command -v npm 2>/dev/null || true)"
-  fi
-
-  if [[ -n "${SOCKETAGENT_NPX:-}" && -x "${SOCKETAGENT_NPX:-}" ]]; then
-    NPX_BIN="$SOCKETAGENT_NPX"
-  elif [[ ! -x "$NPX_BIN" ]]; then
-    NPX_BIN="$(command -v npx 2>/dev/null || true)"
   fi
 
   log "Using Node.js $("$NODE_BIN" --version) at $NODE_BIN"
@@ -360,7 +352,8 @@ if build_needs_compile; then
   acquire_lock
   arm_startup_recovery
   if build_needs_compile; then
-    run_repair "tsc" "$NPX_BIN" tsc
+    # Keeps the previous build when the new one fails to compile.
+    run_repair "tsc" "$NODE_BIN" "$SERVER_DIR/scripts/build-server.js"
   fi
 fi
 

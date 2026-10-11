@@ -168,6 +168,29 @@ export interface BrowserWatchMessage {
   watching: boolean;
 }
 
+/** Close the profile's browser. Its sign-ins stay saved. Servers advertise this with `browserSessions.close`. */
+export interface BrowserSessionCloseMessage {
+  type: "browser_session_close";
+  profile: string;
+}
+
+/**
+ * Open a browser for a chat session without the agent. Reusing a saved profile
+ * keeps its sign-ins; a new name creates one. Servers advertise this with
+ * `browserSessions.start` and answer with `browser_session_state`.
+ */
+export interface BrowserSessionStartMessage {
+  type: "browser_session_start";
+  sessionId: string;
+  profile: string;
+  url: string;
+}
+
+/** List saved browser profiles. Answered with `browser_profiles`. */
+export interface BrowserProfilesRequestMessage {
+  type: "browser_profiles_request";
+}
+
 /** A streamed frame is on screen. The server keeps only a couple of frames in transit. */
 export interface BrowserFrameAckMessage {
   type: "browser_frame_ack";
@@ -1227,6 +1250,9 @@ export type ClientMessage = { commandId?: string } & (
   | PrivateIntegrationAuthRequestMessage
   | BrowserFrameRequestMessage
   | BrowserWatchMessage
+  | BrowserSessionCloseMessage
+  | BrowserSessionStartMessage
+  | BrowserProfilesRequestMessage
   | BrowserFrameAckMessage
   | BrowserPromptResponseMessage
   | BrowserViewportMessage
@@ -3112,6 +3138,12 @@ export interface BrowserSessionStateServerMessage {
   runtimeRequired?: boolean;
 }
 
+/** Saved browser profiles. A running one names the chat session it belongs to. */
+export interface BrowserProfilesServerMessage {
+  type: "browser_profiles";
+  profiles: { profile: string; label: string; running: boolean; sessionId?: string }[];
+}
+
 export interface BrowserRuntimeInstallProgressServerMessage {
   type: "browser_runtime_install_progress";
   profile: string;
@@ -3253,6 +3285,7 @@ export type ServerMessage =
   | SecureInputSavedServerMessage
   | BrowserSessionOpenServerMessage
   | BrowserSessionStateServerMessage
+  | BrowserProfilesServerMessage
   | BrowserRuntimeInstallProgressServerMessage
   | BrowserFrameServerMessage
   | BrowserClipboardServerMessage

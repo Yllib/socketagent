@@ -25,7 +25,28 @@ export const RESTART_CONTINUATION_PROMPT = "[System: SocketAgent restarted while
  * tells them the session resumed.
  */
 export function isRestartContinuationPrompt(prompt: string): boolean {
-  return prompt.trim() === RESTART_CONTINUATION_PROMPT;
+  return prompt.trim().startsWith(RESTART_CONTINUATION_PROMPT);
+}
+
+/**
+ * The compile error scripts/build-server.js recorded when it kept the previous
+ * build, phrased for the agents resumed after that restart. Undefined when the
+ * running build is current.
+ */
+export function buildFailureNote(file: string): string | undefined {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return undefined;
+  }
+  const parsed = z.object({ failedAt: z.string(), output: z.string() }).safeParse(raw);
+  if (!parsed.success) return undefined;
+  return [
+    `The newest server code failed to compile at ${parsed.data.failedAt}, so the previous build is running.`,
+    "Fix these errors, then restart the server again:",
+    parsed.data.output.slice(-3000),
+  ].join("\n");
 }
 
 export class RestartRecoveryStore {

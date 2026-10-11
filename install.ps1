@@ -835,6 +835,13 @@ if not exist "%RECOVERY_BAT%" exit /b 0
 exit /b 0
 
 :preflight
+call :update
+set "UPDATE_RESULT=%ERRORLEVEL%"
+"%NODE_EXE%" "%SERVER_DIR%\scripts\build-server.js"
+if errorlevel 1 exit /b 1
+exit /b %UPDATE_RESULT%
+
+:update
 cd /d "%REPO_ROOT%"
 if /I "%SOCKETAGENT_AUTO_UPDATE%"=="0" exit /b 0
 if /I "%SOCKETAGENT_AUTO_UPDATE%"=="false" exit /b 0
@@ -858,8 +865,6 @@ git reset --hard origin/%BRANCH%
 if errorlevel 1 exit /b 1
 cd /d "%SERVER_DIR%"
 call "%NPM_CMD%" ci --include=optional
-if errorlevel 1 exit /b 1
-call "%NPX_CMD%" tsc
 if errorlevel 1 exit /b 1
 > "%REPO_ROOT%\.last-auto-update-hash" echo %REMOTE_HASH%
 exit /b 0

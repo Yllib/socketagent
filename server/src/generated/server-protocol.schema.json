@@ -92,6 +92,9 @@
           "$ref": "#/definitions/BrowserSessionStateServerMessage"
         },
         {
+          "$ref": "#/definitions/BrowserProfilesServerMessage"
+        },
+        {
           "$ref": "#/definitions/BrowserRuntimeInstallProgressServerMessage"
         },
         {
@@ -2043,6 +2046,44 @@
         "height",
         "sessionId",
         "active"
+      ]
+    },
+    "BrowserProfilesServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "browser_profiles"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "profile": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "running": {
+                "type": "boolean"
+              },
+              "sessionId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "profile",
+              "label",
+              "running"
+            ]
+          }
+        }
+      },
+      "required": [
+        "type",
+        "profiles"
       ]
     },
     "BrowserRuntimeInstallProgressServerMessage": {

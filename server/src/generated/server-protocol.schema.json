@@ -280,6 +280,51 @@
           "$ref": "#/definitions/FileManagerTextResultServerMessage"
         },
         {
+          "$ref": "#/definitions/BackendConfigListResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BackendConfigTextResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/BackendConfigWriteResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/DeviceAuthResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/DevicePendingServerMessage"
+        },
+        {
+          "$ref": "#/definitions/DevicePendingClearedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/DeviceListResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/DeviceApproveResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/DeviceDenyResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/DeviceRemoveResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/LinkRoomInfoResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ComputerLinkListResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ComputerLinkOperationResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ComputerAccessRequestServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ComputerAccessResolvedServerMessage"
+        },
+        {
           "$ref": "#/definitions/ReminderServerMessage"
         },
         {
@@ -4089,6 +4134,49 @@
             "$ref": "#/definitions/BackendHealthInfo"
           }
         },
+        "issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ComputerIssue"
+          }
+        },
+        "backendConfig": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        },
+        "deviceAuth": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            },
+            "mode": {
+              "$ref": "#/definitions/DeviceRegistryMode"
+            }
+          },
+          "required": [
+            "version",
+            "mode"
+          ]
+        },
+        "computerLinks": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        },
         "directE2e": {
           "type": "object",
           "properties": {
@@ -4249,6 +4337,42 @@
         "severity"
       ]
     },
+    "ComputerIssue": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "warning",
+            "error"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "configFile": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "severity",
+        "message"
+      ]
+    },
+    "DeviceRegistryMode": {
+      "type": "string",
+      "enum": [
+        "learning",
+        "enforced"
+      ]
+    },
     "ServerSettingsMessage": {
       "type": "object",
       "properties": {
@@ -4284,6 +4408,12 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/BackendHealthInfo"
+          }
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ComputerIssue"
           }
         }
       },
@@ -4512,7 +4642,8 @@
             "task_state",
             "permission_mode",
             "run_boundary",
-            "error"
+            "error",
+            "computer_access"
           ]
         },
         "content": {
@@ -4594,6 +4725,9 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "computerAccess": {
+          "$ref": "#/definitions/ComputerAccessRequestCard"
         },
         "authRequest": {
           "type": "object",
@@ -4801,6 +4935,97 @@
         "role",
         "content",
         "timestamp"
+      ]
+    },
+    "ComputerAccessRequestCard": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "approval",
+            "link"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "publicKey"
+          ]
+        },
+        "expiresAt": {
+          "type": "number"
+        },
+        "action": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "challengeId": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "allowChat": {
+          "type": "boolean"
+        },
+        "access": {
+          "$ref": "#/definitions/ComputerAccess"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "kind",
+        "source",
+        "target",
+        "expiresAt"
+      ]
+    },
+    "ComputerAccess": {
+      "type": "object",
+      "properties": {
+        "read": {
+          "type": "boolean"
+        },
+        "agents": {
+          "type": "boolean"
+        },
+        "commands": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "read",
+        "agents",
+        "commands"
       ]
     },
     "WorkflowStatePayload": {
@@ -5732,6 +5957,678 @@
         "type",
         "ok",
         "path"
+      ]
+    },
+    "BackendConfigListResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "backend_config_list_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BackendConfigFile"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok"
+      ]
+    },
+    "BackendConfigFile": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "name": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/definitions/BackendConfigFormat"
+        },
+        "path": {
+          "type": "string"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "size": {
+          "type": "number"
+        },
+        "modifiedAt": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "backend",
+        "name",
+        "label",
+        "format",
+        "path",
+        "exists"
+      ]
+    },
+    "BackendConfigFormat": {
+      "type": "string",
+      "enum": [
+        "toml",
+        "json",
+        "markdown"
+      ]
+    },
+    "BackendConfigTextResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "backend_config_text_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "file": {
+          "$ref": "#/definitions/BackendConfigFile"
+        },
+        "content": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "id"
+      ]
+    },
+    "BackendConfigWriteResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "backend_config_write_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "file": {
+          "$ref": "#/definitions/BackendConfigFile"
+        },
+        "conflict": {
+          "type": "boolean"
+        },
+        "content": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "id"
+      ]
+    },
+    "DeviceAuthResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "device_auth_result"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "approval_required",
+            "not_approved",
+            "wrong_lane",
+            "too_many_attempts",
+            "too_many_pending",
+            "removed"
+          ]
+        },
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok"
+      ]
+    },
+    "DevicePendingServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "device_pending"
+        },
+        "publicKey": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platform": {
+          "$ref": "#/definitions/DevicePlatform"
+        },
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "publicKey",
+        "name",
+        "platform",
+        "code"
+      ]
+    },
+    "DevicePlatform": {
+      "type": "string",
+      "enum": [
+        "android",
+        "windows",
+        "linux",
+        "macos",
+        "ios",
+        "computer"
+      ]
+    },
+    "DevicePendingClearedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "device_pending_cleared"
+        },
+        "publicKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "publicKey"
+      ]
+    },
+    "DeviceListResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "device_list_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/definitions/DeviceRegistryMode"
+        },
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DeviceListEntry"
+          }
+        },
+        "self": {
+          "type": "string"
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "publicKey": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "platform": {
+                "$ref": "#/definitions/DevicePlatform"
+              },
+              "code": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "publicKey",
+              "name",
+              "platform",
+              "code"
+            ]
+          }
+        }
+      },
+      "required": [
+        "type",
+        "mode",
+        "devices",
+        "pending"
+      ]
+    },
+    "DeviceListEntry": {
+      "type": "object",
+      "properties": {
+        "publicKey": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/DeviceKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platform": {
+          "$ref": "#/definitions/DevicePlatform"
+        },
+        "addedAt": {
+          "type": "string"
+        },
+        "lastSeenAt": {
+          "type": "string"
+        },
+        "via": {
+          "type": "string",
+          "enum": [
+            "migration",
+            "token",
+            "approval",
+            "link"
+          ]
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "access": {
+          "$ref": "#/definitions/ComputerAccess"
+        },
+        "confirm": {
+          "$ref": "#/definitions/ComputerConfirm"
+        }
+      },
+      "required": [
+        "publicKey",
+        "kind",
+        "name",
+        "platform",
+        "addedAt",
+        "lastSeenAt",
+        "via",
+        "online"
+      ]
+    },
+    "DeviceKind": {
+      "type": "string",
+      "enum": [
+        "device",
+        "computer"
+      ]
+    },
+    "ComputerConfirm": {
+      "type": "string",
+      "enum": [
+        "every_time",
+        "per_chat",
+        "never"
+      ]
+    },
+    "DeviceApproveResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "publicKey": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "device_approve_result"
+        }
+      },
+      "required": [
+        "ok",
+        "publicKey",
+        "type"
+      ]
+    },
+    "DeviceDenyResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "publicKey": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "device_deny_result"
+        }
+      },
+      "required": [
+        "ok",
+        "publicKey",
+        "type"
+      ]
+    },
+    "DeviceRemoveResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "publicKey": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "device_remove_result"
+        }
+      },
+      "required": [
+        "ok",
+        "publicKey",
+        "type"
+      ]
+    },
+    "LinkRoomInfoResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "link_room_info_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "relayUrl": {
+          "type": "string"
+        },
+        "linkRoom": {
+          "type": "string"
+        },
+        "serverPubkey": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok"
+      ]
+    },
+    "ComputerLinkListResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "computer_link_list_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ComputerLinkSummary"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "links"
+      ]
+    },
+    "ComputerLinkSummary": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "targetPubkey": {
+          "type": "string"
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "offlineReason": {
+          "type": "string"
+        },
+        "access": {
+          "$ref": "#/definitions/ComputerAccess"
+        },
+        "confirm": {
+          "$ref": "#/definitions/ComputerConfirm"
+        },
+        "ticketExpiresAt": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "targetPubkey",
+        "online",
+        "access",
+        "confirm",
+        "ticketExpiresAt"
+      ]
+    },
+    "ComputerLinkOperationResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "computer_link_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "targetPubkey": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "targetPubkey"
+      ]
+    },
+    "ComputerAccessRequestServerMessage": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "approval",
+            "link"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "publicKey"
+          ]
+        },
+        "expiresAt": {
+          "type": "number"
+        },
+        "action": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "challengeId": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "allowChat": {
+          "type": "boolean"
+        },
+        "access": {
+          "$ref": "#/definitions/ComputerAccess"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "computer_access_request"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "timestamp": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expiresAt",
+        "kind",
+        "requestId",
+        "sessionId",
+        "source",
+        "target",
+        "type"
+      ]
+    },
+    "ComputerAccessResolvedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "computer_access_resolved"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "once",
+            "chat",
+            "deny",
+            "linked",
+            "expired"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "sessionId",
+        "decision"
       ]
     },
     "ReminderServerMessage": {

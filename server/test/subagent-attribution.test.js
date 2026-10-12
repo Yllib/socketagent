@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 require("./test-data-dir");
-const { currentCodexConfigWarnings } = require("#server/server-settings");
+const { getComputerIssues } = require("#server/server-settings");
 
 const {
   CodexSession,
@@ -1248,9 +1248,9 @@ test("preserves Codex reroutes, reasoning sections, and structured warnings", ()
       entry.role === "tool_call"
       && entry.toolUseId === "codex-reroute:turn-1"));
 
-    // Config problems go to the computer's Codex status, not the chat.
+    // Config problems go to the computer's errors and warnings, not the chat.
     assert.ok(!sent.some((message) => message.type === "error" && message.message.includes("Invalid config option")));
-    assert.ok(currentCodexConfigWarnings().includes("Invalid config option Remove the obsolete setting."));
+    assert.ok(getComputerIssues().some((issue) => issue.message === "Invalid config option Remove the obsolete setting."));
   } finally {
     fs.rmSync(
       path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),

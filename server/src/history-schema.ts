@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type {
-  EmailPreview, HistoryEntry, QuestionItem, SessionRunOutcome,
+  ComputerAccessRequestCard, EmailPreview, HistoryEntry, QuestionItem, SessionRunOutcome,
   WorkflowPhaseState, WorkflowProgressState, WorkflowStatePayload,
 } from "./protocol";
 
@@ -60,7 +60,7 @@ export const historyEntrySchema = z.object({
     "secure_input", "browser_session", "html_plan", "work_review", "todos_update",
     "codex_plan", "user_uuid", "elicitation_url", "prompt_suggestion", "monitor",
     "notification", "task_state", "permission_mode", "run_boundary", "system",
-    "error",
+    "error", "computer_access",
   ]).transform(role => role === "system" ? "notification" : role),
   // Older tool cards can omit these display fields. Do not invent a timestamp.
   content: z.string().default(""), timestamp: z.string().default(""),
@@ -74,6 +74,15 @@ export const historyEntrySchema = z.object({
   questionId: optionalText, questions: z.array(questionSchema).optional(),
   asyncQuestion: optionalBoolean, emailPreview: emailPreviewSchema.optional(),
   answered: optionalBoolean, answers: z.record(z.string(), z.string()).optional(),
+  computerAccess: z.object({
+    requestId: z.string(), kind: z.enum(["approval", "link"]),
+    source: z.object({ name: z.string() }).passthrough(),
+    target: z.object({ name: z.string(), publicKey: z.string() }).passthrough(),
+    expiresAt: z.number(), action: optionalText, summary: optionalText,
+    challengeId: optionalText, digest: optionalText, allowChat: optionalBoolean,
+    access: z.object({ read: z.boolean(), agents: z.boolean(), commands: z.boolean() }).passthrough().optional(),
+    reason: optionalText,
+  } satisfies Shape<ComputerAccessRequestCard>).passthrough().optional(),
   authRequest: z.object({
     kind: z.string(), requestId: z.string(), startUrl: z.string(),
     captureOrigins: z.array(z.string()),

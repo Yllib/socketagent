@@ -54,6 +54,14 @@ import {
 } from "./app-tool-handlers";
 import type {
   AgentSessionToolExecutor,
+} from "./delegated-agent-types";
+import {
+  COMPUTERS_TOOL_DESCRIPTION,
+  COMPUTERS_TOOL_INPUT,
+  handleComputersTool,
+  type ComputersToolExecutor,
+} from "./computers-tool";
+import type {
   DelegatedAgentLiveActivity,
 } from "./delegated-agent-types";
 import { AGENT_SESSION_TOOL_DESCRIPTION, buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, REMEMBER_TOOL_DESCRIPTION, WORK_REVIEW_TOOL_DESCRIPTION } from "./socketagent-instructions";
@@ -1111,6 +1119,7 @@ export class ClaudeSession {
   /** Fires when the harness starts or ends a turn nobody prompted for. */
   public onHarnessRunStateChanged?: (running: boolean) => void;
   public onAgentSessionRequest?: AgentSessionToolExecutor;
+  public onComputersRequest?: ComputersToolExecutor;
   // When set, this fresh session replaces an old cleared session — remap the ID in the store
   public replacesSessionId?: string;
   public _resumeSessionId?: string;
@@ -3455,6 +3464,13 @@ export class ClaudeSession {
           }
           return this.onAgentSessionRequest(args);
         },
+        manageComputers: (args, signal) => {
+          if (!this.onComputersRequest) {
+            throw new Error("Computers runtime is not attached");
+          }
+          return this.onComputersRequest(args, signal);
+        },
+        getAbortSignal: () => this.abortController?.signal,
       };
 
       // Build the MCP server with app-facing tools.
@@ -3633,8 +3649,15 @@ export class ClaudeSession {
               model: z.string().optional().describe("Optional provider model ID for start"),
               effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Optional reasoning effort for start"),
               permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
+              computer: z.string().optional().describe("Run this action on a linked computer, by name or public key. See the Computers tool."),
             },
             async (args) => handleAgentSessionTool(appToolContext, args)
+          ),
+          tool(
+            "Computers",
+            COMPUTERS_TOOL_DESCRIPTION,
+            COMPUTERS_TOOL_INPUT,
+            async (args) => handleComputersTool(appToolContext, args)
           ),
           tool(
             "Remember",
@@ -3904,6 +3927,7 @@ export class ClaudeSession {
           "ScheduleTask",
           "TaskBatch",
           "AgentSession",
+          "Computers",
           "Remember",
           "Monitor",
           "SearchSkills",

@@ -52,7 +52,7 @@ export async function runCodexBrowserAuth(options: BrowserAuthOptions): Promise<
     if (options.signal?.aborted) throw new Error("Operation cancelled");
     const parsed = loginResultSchema.safeParse(await client.request("account/login/start", { type: "chatgpt" }));
     if (!parsed.success) {
-      throw new Error("This Codex version did not return a browser sign-in. Use a device code or repair Codex.");
+      throw new Error("This Codex version did not return a browser sign-in. Use a device code or reinstall Codex.");
     }
     const result = parsed.data;
     loginId = result.loginId;

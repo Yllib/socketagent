@@ -1967,6 +1967,29 @@ export function markSecureInputRequestResolved(
   }
 }
 
+/** Records the user's decision on a computer access card so a reopened chat shows it answered. */
+export function markComputerAccessResolved(
+  sessionId: string,
+  requestId: string,
+  decision: "once" | "chat" | "deny" | "linked" | "expired",
+): void {
+  try {
+    const entries = readHistoryEntries(sessionId);
+    const changedEntries: HistoryEntry[] = [];
+    for (const entry of entries) {
+      if (entry.role !== "computer_access" || entry.questionId !== requestId) continue;
+      if (entry.answered && entry.status === decision) continue;
+      entry.answered = true;
+      entry.status = decision;
+      entry.revision = (positiveInteger(entry.revision) || 1) + 1;
+      changedEntries.push(entry);
+    }
+    if (changedEntries.length > 0) appendHistoryBulk(sessionId, changedEntries);
+  } catch (error) {
+    console.error(`[History] Error resolving computer access ${requestId}: ${error}`);
+  }
+}
+
 export function getHistory(sessionId: string): HistoryEntry[] {
   // Recover UUIDs on user prompts saved before self-assigned UUIDs (Apr 22 →
   // Apr 27). Once-per-process and a no-op when nothing's missing.

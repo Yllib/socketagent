@@ -3,10 +3,11 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
-import type { Backend, BackendHealthInfo, CodexDriver } from "./protocol";
+import type { Backend, BackendHealthInfo, CodexDriver, ComputerIssue } from "./protocol";
 import { buildCodexSpawn } from "./codex-env";
 import { getCodexLinuxSandboxHealth } from "./codex-linux-sandbox";
 import { resolveClientPath } from "./path-utils";
+import { backendConfigFileIdForPath } from "./backend-config-files";
 import { getClaudeAvailability, getClaudeExecutableInfo } from "./claude-session";
 import { readClaudeAuthState, readCodexAuthState } from "./backend-auth";
 import {
@@ -102,7 +103,7 @@ export function markBackendAuthRequired(backend: Backend, detail?: string): void
     available: false,
     severity: "error",
     kind: "auth",
-    reason: `${label} authentication is invalid or expired. Repair the backend to sign in again.`,
+    reason: `${label} authentication is invalid or expired. Sign in again.`,
     detail,
   });
   invalidateBackendHealthCache();
@@ -133,9 +134,9 @@ export function onBackendHealthChange(listener: () => void): () => void {
 }
 
 /**
- * Records a config problem Codex reported as it started. It shows on the
- * computer's Codex status, not in chat, until the config file changes. Codex
- * reports it again on its next start if the change did not fix it.
+ * Records a config problem Codex reported as it started. It shows in the
+ * computer's errors and warnings, not in chat, until the config file changes.
+ * Codex reports it again on its next start if the change did not fix it.
  */
 export function recordCodexConfigWarning(message: string, configPath?: string): void {
   if (codexConfigWarnings.has(message)) return;
@@ -146,12 +147,23 @@ export function recordCodexConfigWarning(message: string, configPath?: string): 
   for (const listener of backendHealthListeners) listener();
 }
 
-/** The recorded Codex config problems whose file has not changed since. */
-export function currentCodexConfigWarnings(): string[] {
+/** The computer's problems: recorded Codex config problems whose file has not changed since. */
+export function getComputerIssues(): ComputerIssue[] {
+  const issues: ComputerIssue[] = [];
   for (const [message, seen] of codexConfigWarnings) {
     if (modifiedAt(seen.file) !== seen.mtimeMs) codexConfigWarnings.delete(message);
+    else {
+      const configFile = backendConfigFileIdForPath(seen.file);
+      issues.push({
+        backend: "codex",
+        severity: "warning",
+        message,
+        path: seen.file,
+        ...(configFile ? { configFile } : {}),
+      });
+    }
   }
-  return [...codexConfigWarnings.keys()];
+  return issues;
 }
 
 function ensureStoreDir(): void {
@@ -280,11 +292,8 @@ function codexHealth(): BackendHealthInfo {
 
   const warning = managedSourceWarning("codex", source);
   const sandboxHealth = getCodexLinuxSandboxHealth();
-  const warnings = [
-    warning,
-    sandboxHealth?.available === false ? sandboxHealth.reason : undefined,
-    ...currentCodexConfigWarnings(),
-  ].filter((value): value is string => !!value);
+  const warnings = [warning, sandboxHealth?.available === false ? sandboxHealth.reason : undefined]
+    .filter((value): value is string => !!value);
   return {
     ...base,
     available: true,
@@ -523,6 +532,7 @@ export function getBackendHealth(): BackendHealthInfo[] {
 export function getAdvertisedServerSettings(): ServerSettings & {
   codexDriversAvailable: CodexDriver[];
   backendHealth: BackendHealthInfo[];
+  issues: ComputerIssue[];
 } {
   const settings = loadServerSettings();
   const codexDriversAvailable = getCodexDriversAvailable();
@@ -534,5 +544,6 @@ export function getAdvertisedServerSettings(): ServerSettings & {
     claudeAutoCompactWindow: settings.claudeAutoCompactWindow,
     codexDriversAvailable,
     backendHealth: getBackendHealth(),
+    issues: getComputerIssues(),
   };
 }

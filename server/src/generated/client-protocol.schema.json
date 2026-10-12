@@ -2837,6 +2837,424 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "backend_config_list"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "backend_config_read"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "backend_config_write"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "expectedVersion": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content",
+            "expectedVersion",
+            "id",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "device_auth"
+            },
+            "token": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "platform": {
+              "$ref": "#/definitions/DevicePlatform"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "device_list"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "device_approve"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "publicKey",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "device_deny"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "publicKey",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "device_remove"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "publicKey",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "device_lock"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "device_authorize"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "computer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/definitions/ComputerAccess"
+            },
+            "confirm": {
+              "$ref": "#/definitions/ComputerConfirm"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "access",
+            "confirm",
+            "kind",
+            "name",
+            "publicKey",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "link_room_info"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "computer_link_set"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "targetPubkey": {
+              "type": "string"
+            },
+            "relayUrl": {
+              "type": "string"
+            },
+            "linkRoom": {
+              "type": "string"
+            },
+            "ticket": {
+              "type": "string"
+            },
+            "ticketExpiresAt": {
+              "type": "number"
+            },
+            "access": {
+              "$ref": "#/definitions/ComputerAccess"
+            },
+            "confirm": {
+              "$ref": "#/definitions/ComputerConfirm"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "access",
+            "confirm",
+            "linkRoom",
+            "name",
+            "relayUrl",
+            "targetPubkey",
+            "ticket",
+            "ticketExpiresAt",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "computer_link_remove"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "targetPubkey": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "targetPubkey",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "computer_link_list"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "known_computers"
+            },
+            "computers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "serverPubkey": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "serverPubkey"
+                ]
+              }
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "computers",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "computer_access_answer"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "decision": {
+              "type": "string",
+              "enum": [
+                "once",
+                "chat",
+                "deny",
+                "linked"
+              ]
+            },
+            "approval": {
+              "$ref": "#/definitions/ComputerApprovalToken"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "decision",
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "file_manager_mkdir"
             },
             "requestId": {
@@ -4656,6 +5074,63 @@
         "targetBackend",
         "mode",
         "nativeMode"
+      ]
+    },
+    "DevicePlatform": {
+      "type": "string",
+      "enum": [
+        "android",
+        "windows",
+        "linux",
+        "macos",
+        "ios",
+        "computer"
+      ]
+    },
+    "ComputerAccess": {
+      "type": "object",
+      "properties": {
+        "read": {
+          "type": "boolean"
+        },
+        "agents": {
+          "type": "boolean"
+        },
+        "commands": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "read",
+        "agents",
+        "commands"
+      ]
+    },
+    "ComputerConfirm": {
+      "type": "string",
+      "enum": [
+        "every_time",
+        "per_chat",
+        "never"
+      ]
+    },
+    "ComputerApprovalToken": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "n": {
+          "type": "string"
+        },
+        "c": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "n",
+        "c"
       ]
     },
     "TransportLane": {

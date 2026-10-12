@@ -56,6 +56,7 @@ import type {
   AgentSessionToolExecutor,
   DelegatedAgentRecord,
 } from "./delegated-agent-types";
+import type { ComputersToolExecutor } from "./computers-tool";
 import {
   deleteSessionMemoryEntry,
   getSessionMemoryState,
@@ -84,6 +85,9 @@ export interface AppToolContext {
   injectMessage?(text: string, priority?: "now" | "next" | "later"): Promise<void>;
   onMonitorOutput?(text: string): void;
   manageAgentSession?: AgentSessionToolExecutor;
+  /** Acts on linked computers. Attached by index.ts like manageAgentSession. */
+  manageComputers?: ComputersToolExecutor;
+  getAbortSignal?(): AbortSignal | undefined;
   reportSubagentAssignment?(agentPath: string, prompt: string): boolean;
   requestTranscriptAccess?(detail: string): Promise<boolean>;
   requestPluginAuthorization?(pluginName: string): Promise<boolean>;

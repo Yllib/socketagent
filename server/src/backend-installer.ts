@@ -467,7 +467,7 @@ async function runCodexDeviceAuth(options: {
       options.onProgress({
         phase: "auth",
         status: "completed",
-        message: "Codex authorization detected. Finishing repair...",
+        message: "Codex authorization detected. Finishing sign-in...",
         authUrl: CODEX_DEVICE_URL,
       });
       finish(undefined, true);
@@ -578,12 +578,12 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
       options.onProgress({
         phase: "auth",
         status: "completed",
-        message: "Claude repair does not run interactive browser login. If Claude needs sign-in, start a Claude session and use the Claude Login card.",
+        message: "Claude sign-in does not run here. If Claude needs sign-in, start a Claude session and use the Claude Login card.",
       });
     } else {
       const managedCodex = resolveManagedCodexCommand(env);
       if (!managedCodex) {
-        throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}. Run Install / Repair Codex again.`);
+        throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}. Reinstall Codex.`);
       }
       const codexShell = process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex);
       if (!options.forceAuthenticate && isCodexLoginValid(managedCodex, env, codexShell)) {

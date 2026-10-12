@@ -25,6 +25,8 @@ export interface AgentSessionToolArgs {
   after_session_seq?: number;
   /** Maximum durable activity entries returned by action=tail. */
   limit?: number;
+  /** A linked computer's name or public key. With it, the action runs there. */
+  computer?: string;
 }
 
 export interface DelegatedAgentTailEntry {
@@ -103,6 +105,10 @@ export interface DelegatedAgentRecord {
   permissionMode?: string;
   agentSettings?: AgentSessionSettings;
   runs: DelegatedAgentRun[];
+  /** Source side: the child runs on this linked computer; runs mirror its reports. */
+  remoteComputer?: { publicKey: string; name: string };
+  /** Target side: the supervisor is a chat on another computer, reached over the link lane. */
+  remoteSupervisor?: { publicKey: string; name: string; sourceSessionId: string };
 }
 
 export interface AgentSessionToolResponse {

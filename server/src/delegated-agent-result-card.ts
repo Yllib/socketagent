@@ -29,6 +29,7 @@ export function delegatedAgentResultHistoryEntries(
     delegation_run_id: run.runId,
     run_number: run.runNumber,
     child_session_id: record.childSessionId || "",
+    ...(record.remoteComputer ? { computer: record.remoteComputer.name } : {}),
   };
 
   return {

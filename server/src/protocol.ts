@@ -710,6 +710,28 @@ export interface FileManagerWriteTextMessage {
   content: string;
 }
 
+/** Asks for every Codex and Claude config file the computer lets the app edit. */
+export interface BackendConfigListMessage {
+  type: "backend_config_list";
+  requestId?: string;
+}
+
+export interface BackendConfigReadMessage {
+  type: "backend_config_read";
+  requestId?: string;
+  /** A BackendConfigFile id. The server resolves the path; the app never sends one. */
+  id: string;
+}
+
+export interface BackendConfigWriteMessage {
+  type: "backend_config_write";
+  requestId?: string;
+  id: string;
+  content: string;
+  /** The version the editor loaded, or null when the file did not exist. The save is refused when the file has changed since. */
+  expectedVersion: string | null;
+}
+
 export interface FileManagerMkdirMessage {
   type: "file_manager_mkdir";
   requestId?: string;
@@ -1284,6 +1306,125 @@ export interface RestoreScheduledTaskMessage {
   taskId: string;
 }
 
+// ── Device keys and computer links ──
+
+export type DeviceKind = "device" | "computer";
+export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "computer";
+export type DeviceRegistryMode = "learning" | "enforced";
+export type ComputerConfirm = "every_time" | "per_chat" | "never";
+
+/** What a linked computer may do here. The target enforces it. */
+export interface ComputerAccess {
+  read: boolean;
+  agents: boolean;
+  commands: boolean;
+}
+
+/**
+ * Sent inside the encrypted box by a peer the relay handshake held as
+ * pending. A correct token enrolls the key; otherwise an enrolled device has
+ * to approve it. Enrolled devices send it without a token to update their name.
+ */
+export interface DeviceAuthMessage {
+  type: "device_auth";
+  token?: string;
+  name?: string;
+  platform?: DevicePlatform;
+}
+
+export interface DeviceListMessage {
+  type: "device_list";
+  requestId?: string;
+}
+
+export interface DeviceApproveMessage {
+  type: "device_approve";
+  requestId?: string;
+  publicKey: string;
+  name?: string;
+}
+
+export interface DeviceDenyMessage {
+  type: "device_deny";
+  requestId?: string;
+  publicKey: string;
+}
+
+/** Revokes the key on every lane. For device keys this also rotates AUTH_TOKEN. */
+export interface DeviceRemoveMessage {
+  type: "device_remove";
+  requestId?: string;
+  publicKey: string;
+}
+
+/** Learning mode becomes enforced. Replies with device_list_result. */
+export interface DeviceLockMessage {
+  type: "device_lock";
+  requestId?: string;
+}
+
+/** Grants another computer's server key access here (target side of a link). */
+export interface DeviceAuthorizeMessage {
+  type: "device_authorize";
+  requestId?: string;
+  publicKey: string;
+  kind: "computer";
+  name: string;
+  access: ComputerAccess;
+  confirm: ComputerConfirm;
+}
+
+export interface LinkRoomInfoMessage {
+  type: "link_room_info";
+  requestId?: string;
+}
+
+/** Source side of a link: store the target and connect to its link room. */
+export interface ComputerLinkSetMessage {
+  type: "computer_link_set";
+  requestId?: string;
+  name: string;
+  targetPubkey: string;
+  relayUrl: string;
+  linkRoom: string;
+  ticket: string;
+  ticketExpiresAt: number;
+  access: ComputerAccess;
+  confirm: ComputerConfirm;
+}
+
+export interface ComputerLinkRemoveMessage {
+  type: "computer_link_remove";
+  requestId?: string;
+  targetPubkey: string;
+}
+
+export interface ComputerLinkListMessage {
+  type: "computer_link_list";
+  requestId?: string;
+}
+
+/** The app's computer names and keys, so agents can ask for access by name. */
+export interface KnownComputersMessage {
+  type: "known_computers";
+  computers: Array<{ name: string; serverPubkey: string }>;
+}
+
+/** NaCl box from the app's device key to the target's key over the approval claims. */
+export interface ComputerApprovalToken {
+  from: string;
+  n: string;
+  c: string;
+}
+
+export interface ComputerAccessAnswerMessage {
+  type: "computer_access_answer";
+  requestId: string;
+  sessionId?: string;
+  decision: "once" | "chat" | "deny" | "linked";
+  approval?: ComputerApprovalToken;
+}
+
 /** JSON messages exclude the upload frames decoded directly from binary buffers. */
 export type JsonClientMessage = Exclude<ClientMessage, UploadChunkBinMessage>;
 
@@ -1394,6 +1535,22 @@ export type ClientMessage = { commandId?: string } & (
   | FileManagerDownloadMessage
   | FileManagerReadTextMessage
   | FileManagerWriteTextMessage
+  | BackendConfigListMessage
+  | BackendConfigReadMessage
+  | BackendConfigWriteMessage
+  | DeviceAuthMessage
+  | DeviceListMessage
+  | DeviceApproveMessage
+  | DeviceDenyMessage
+  | DeviceRemoveMessage
+  | DeviceLockMessage
+  | DeviceAuthorizeMessage
+  | LinkRoomInfoMessage
+  | ComputerLinkSetMessage
+  | ComputerLinkRemoveMessage
+  | ComputerLinkListMessage
+  | KnownComputersMessage
+  | ComputerAccessAnswerMessage
   | FileManagerMkdirMessage
   | FileManagerRenameMessage
   | FileManagerDeleteMessage
@@ -2119,6 +2276,21 @@ export interface ServerCapabilitiesMessage {
   codexDriver?: CodexDriver;
   codexDriversAvailable?: CodexDriver[];
   backendHealth?: BackendHealthInfo[];
+  /** Problems on the computer that a backend reinstall does not fix, such as a bad Codex config. */
+  issues?: ComputerIssue[];
+  /** The app can list, read and save the backend config files in BackendConfigFile. */
+  backendConfig?: {
+    version: number;
+  };
+  /** Relay peers authenticate with device keys. mode is the registry mode. */
+  deviceAuth?: {
+    version: number;
+    mode: DeviceRegistryMode;
+  };
+  /** Agents here can act on linked computers, and other computers can link here. */
+  computerLinks?: {
+    version: number;
+  };
   directE2e?: {
     serverPubkey: string;
   };
@@ -2176,6 +2348,17 @@ export interface BackendHealthInfo {
   installRoot?: string;
 }
 
+/** A problem the computer's owner has to fix, shown in the computer's errors and warnings. */
+export interface ComputerIssue {
+  backend: Backend;
+  severity: "warning" | "error";
+  message: string;
+  /** The file to fix, when there is one. */
+  path?: string;
+  /** The BackendConfigFile id of that file when the app can edit it. */
+  configFile?: string;
+}
+
 export interface ServerSettingsMessage {
   type: "server_settings";
   codexDriver: CodexDriver;
@@ -2186,6 +2369,8 @@ export interface ServerSettingsMessage {
   claudeAutoCompactWindow: number | null;
   codexDriversAvailable: CodexDriver[];
   backendHealth?: BackendHealthInfo[];
+  /** Problems on the computer that a backend reinstall does not fix, such as a bad Codex config. */
+  issues?: ComputerIssue[];
 }
 
 export interface BackendInstallProgressServerMessage {
@@ -2221,7 +2406,7 @@ export interface SessionArchiveFailedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "run_boundary" | "error";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "run_boundary" | "error" | "computer_access";
   content: string;
   /** Display-only snapshot references; native conversation text stays unchanged. */
   inlineImageContent?: string;
@@ -2258,6 +2443,11 @@ export interface HistoryEntry {
    * Safe routing metadata for a resumable private-integration authorization
    * card. Credential values are never stored here.
    */
+  /**
+   * A computer access card (role === "computer_access"). questionId holds
+   * the requestId; status holds the decision once answered.
+   */
+  computerAccess?: ComputerAccessRequestCard;
   authRequest?: {
     kind: string;
     requestId: string;
@@ -2644,6 +2834,193 @@ export interface FileManagerTextResultServerMessage {
   truncated?: boolean;
   bytesRead?: number;
   error?: string;
+}
+
+export type BackendConfigFormat = "toml" | "json" | "markdown";
+
+/** One Codex or Claude config file the app may edit. Paths are resolved on the server from a fixed allowlist. */
+export interface BackendConfigFile {
+  id: string;
+  backend: Backend;
+  /** File name, for example config.toml. */
+  name: string;
+  /** What the file does, for example Settings or Instructions. */
+  label: string;
+  format: BackendConfigFormat;
+  path: string;
+  exists: boolean;
+  size?: number;
+  modifiedAt?: string;
+  /** Content fingerprint. Send it back as expectedVersion to save. Absent when the file does not exist. */
+  version?: string;
+}
+
+export interface BackendConfigListResultServerMessage {
+  type: "backend_config_list_result";
+  requestId?: string;
+  ok: boolean;
+  files?: BackendConfigFile[];
+  error?: string;
+}
+
+export interface BackendConfigTextResultServerMessage {
+  type: "backend_config_text_result";
+  requestId?: string;
+  ok: boolean;
+  id: string;
+  file?: BackendConfigFile;
+  /** Empty when the file does not exist yet. */
+  content?: string;
+  /** The file is over the editor limit; content is a prefix and saving is refused. */
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface BackendConfigWriteResultServerMessage {
+  type: "backend_config_write_result";
+  requestId?: string;
+  ok: boolean;
+  id: string;
+  /** The saved file, or on a conflict the file as it is now. */
+  file?: BackendConfigFile;
+  /** The file changed on the computer after the editor loaded it. Nothing was written; content is the current text. */
+  conflict?: boolean;
+  content?: string;
+  error?: string;
+}
+
+export interface DeviceAuthResultServerMessage {
+  type: "device_auth_result";
+  ok: boolean;
+  reason?: "approval_required" | "not_approved" | "wrong_lane" | "too_many_attempts" | "too_many_pending" | "removed";
+  /** Six-digit fingerprint shown while approval is pending. */
+  code?: string;
+}
+
+/** Sent to enrolled devices when an unknown key is waiting for approval. */
+export interface DevicePendingServerMessage {
+  type: "device_pending";
+  publicKey: string;
+  name: string;
+  platform: DevicePlatform;
+  code: string;
+}
+
+export interface DevicePendingClearedServerMessage {
+  type: "device_pending_cleared";
+  publicKey: string;
+}
+
+export interface DeviceListEntry {
+  publicKey: string;
+  kind: DeviceKind;
+  name: string;
+  platform: DevicePlatform;
+  addedAt: string;
+  lastSeenAt: string;
+  via: "migration" | "token" | "approval" | "link";
+  online: boolean;
+  access?: ComputerAccess;
+  confirm?: ComputerConfirm;
+}
+
+export interface DeviceListResultServerMessage {
+  type: "device_list_result";
+  requestId?: string;
+  mode: DeviceRegistryMode;
+  devices: DeviceListEntry[];
+  /** The caller's own key when it arrived through the relay. */
+  self?: string;
+  pending: Array<{ publicKey: string; name: string; platform: DevicePlatform; code: string }>;
+}
+
+interface DeviceOperationOutcome {
+  requestId?: string;
+  ok: boolean;
+  publicKey: string;
+  error?: string;
+}
+
+export interface DeviceApproveResultServerMessage extends DeviceOperationOutcome {
+  type: "device_approve_result";
+}
+
+export interface DeviceDenyResultServerMessage extends DeviceOperationOutcome {
+  type: "device_deny_result";
+}
+
+export interface DeviceRemoveResultServerMessage extends DeviceOperationOutcome {
+  type: "device_remove_result";
+}
+
+export interface LinkRoomInfoResultServerMessage {
+  type: "link_room_info_result";
+  requestId?: string;
+  ok: boolean;
+  relayUrl?: string;
+  linkRoom?: string;
+  serverPubkey?: string;
+  error?: string;
+}
+
+export interface ComputerLinkSummary {
+  name: string;
+  targetPubkey: string;
+  online: boolean;
+  /** Why the link is offline, when known. */
+  offlineReason?: string;
+  access: ComputerAccess;
+  confirm: ComputerConfirm;
+  ticketExpiresAt: number;
+}
+
+export interface ComputerLinkListResultServerMessage {
+  type: "computer_link_list_result";
+  requestId?: string;
+  links: ComputerLinkSummary[];
+}
+
+export interface ComputerLinkOperationResultServerMessage {
+  type: "computer_link_result";
+  requestId?: string;
+  ok: boolean;
+  targetPubkey: string;
+  error?: string;
+}
+
+/** The card an agent raises when a linked computer needs the user's decision. */
+export interface ComputerAccessRequestCard {
+  requestId: string;
+  kind: "approval" | "link";
+  source: { name: string };
+  target: { name: string; publicKey: string };
+  expiresAt: number;
+  // kind "approval"
+  action?: string;
+  summary?: string;
+  challengeId?: string;
+  digest?: string;
+  /** Allow for this chat is offered only when the target confirms per chat. */
+  allowChat?: boolean;
+  // kind "link"
+  access?: ComputerAccess;
+  reason?: string;
+}
+
+export interface ComputerAccessRequestServerMessage extends ComputerAccessRequestCard {
+  type: "computer_access_request";
+  sessionId: string;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
+  timestamp?: string;
+}
+
+export interface ComputerAccessResolvedServerMessage {
+  type: "computer_access_resolved";
+  requestId: string;
+  sessionId: string;
+  decision: "once" | "chat" | "deny" | "linked" | "expired";
 }
 
 export interface ReminderServerMessage {
@@ -3400,6 +3777,21 @@ export type ServerMessage =
   | FileManagerProtectedResultServerMessage
   | FileManagerOperationResultServerMessage
   | FileManagerTextResultServerMessage
+  | BackendConfigListResultServerMessage
+  | BackendConfigTextResultServerMessage
+  | BackendConfigWriteResultServerMessage
+  | DeviceAuthResultServerMessage
+  | DevicePendingServerMessage
+  | DevicePendingClearedServerMessage
+  | DeviceListResultServerMessage
+  | DeviceApproveResultServerMessage
+  | DeviceDenyResultServerMessage
+  | DeviceRemoveResultServerMessage
+  | LinkRoomInfoResultServerMessage
+  | ComputerLinkListResultServerMessage
+  | ComputerLinkOperationResultServerMessage
+  | ComputerAccessRequestServerMessage
+  | ComputerAccessResolvedServerMessage
   | ReminderServerMessage
   | CompactBoundaryServerMessage
   | TaskNotificationServerMessage

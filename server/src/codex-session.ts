@@ -1,3 +1,4 @@
+import type { ComputersToolExecutor } from "./computers-tool";
 import type { ClientTransport } from "./client-transport";
 import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
 import { recordCodexConfigWarning } from "./server-settings";
@@ -676,6 +677,7 @@ export class CodexSession {
   public onSessionIdChanged?: (previousSessionId: string, nextSessionId: string) => void;
   public onMonitorOutput?: (text: string) => void;
   public onAgentSessionRequest?: AgentSessionToolExecutor;
+  public onComputersRequest?: ComputersToolExecutor;
   public replacesSessionId?: string;
   // Mirrors the cast-accessed private on ClaudeSession; used by index.ts to
   // tell us "this is a resume of session X" before runQuery is called.
@@ -3458,6 +3460,12 @@ export class CodexSession {
           throw new Error("AgentSession runtime is not attached");
         }
         return this.onAgentSessionRequest(args);
+      },
+      manageComputers: (args, signal) => {
+        if (!this.onComputersRequest) {
+          throw new Error("Computers runtime is not attached");
+        }
+        return this.onComputersRequest(args, signal);
       },
       reportSubagentAssignment: (agentPath, prompt) =>
         this.reportCodexSubagentAssignment(agentPath, prompt),

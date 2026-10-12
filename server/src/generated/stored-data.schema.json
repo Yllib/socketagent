@@ -89,6 +89,40 @@
           "items": {
             "$ref": "#/definitions/DelegatedAgentRun"
           }
+        },
+        "remoteComputer": {
+          "type": "object",
+          "properties": {
+            "publicKey": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "publicKey",
+            "name"
+          ]
+        },
+        "remoteSupervisor": {
+          "type": "object",
+          "properties": {
+            "publicKey": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "sourceSessionId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "publicKey",
+            "name",
+            "sourceSessionId"
+          ]
         }
       },
       "required": [

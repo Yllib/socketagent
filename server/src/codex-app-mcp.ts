@@ -26,6 +26,7 @@ import {
   handleTaskBatchTool,
   handleWorkReviewTool,
 } from "./app-tool-handlers";
+import { COMPUTERS_TOOL_DESCRIPTION, COMPUTERS_TOOL_INPUT, handleComputersTool } from "./computers-tool";
 import {
   AGENT_SESSION_TOOL_DESCRIPTION,
   HTML_PLAN_TOOL_DESCRIPTION,
@@ -95,6 +96,10 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "AgentSession",
     description: AGENT_SESSION_TOOL_DESCRIPTION,
+  },
+  {
+    name: "Computers",
+    description: COMPUTERS_TOOL_DESCRIPTION,
   },
   {
     name: "Remember",
@@ -419,9 +424,20 @@ function createServer(context: AppToolContext): McpServer {
         model: z.string().optional().describe("Optional provider model ID for start"),
         effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Optional reasoning effort for start"),
         permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
+        computer: z.string().optional().describe("Run this action on a linked computer, by name or public key. See the Computers tool."),
       },
     },
     async (args) => handleAgentSessionTool(context, args),
+  );
+
+  server.registerTool(
+    "Computers",
+    {
+      title: "Computers",
+      description: COMPUTERS_TOOL_DESCRIPTION,
+      inputSchema: COMPUTERS_TOOL_INPUT,
+    },
+    async (args) => handleComputersTool(context, args),
   );
 
   server.registerTool(

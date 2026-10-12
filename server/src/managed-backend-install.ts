@@ -8,7 +8,7 @@ async function requireSpace(directory: string, minimum: number): Promise<void> {
   const stat = await fs.promises.statfs(directory);
   const available = stat.bavail * stat.bsize;
   if (available < minimum) {
-    throw new Error(`Not enough free space to repair agent software: ${(available / 1024 ** 3).toFixed(1)} GiB available, ${(minimum / 1024 ** 3).toFixed(0)} GiB required. The installed software was not changed.`);
+    throw new Error(`Not enough free space to reinstall agent software: ${(available / 1024 ** 3).toFixed(1)} GiB available, ${(minimum / 1024 ** 3).toFixed(0)} GiB required. The installed software was not changed.`);
   }
 }
 

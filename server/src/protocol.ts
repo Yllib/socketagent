@@ -1311,7 +1311,8 @@ export interface RestoreScheduledTaskMessage {
 export type DeviceKind = "device" | "computer";
 export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "computer";
 export type DeviceRegistryMode = "learning" | "enforced";
-export type ComputerConfirm = "every_time" | "per_chat" | "never";
+/** "ask" puts an approval card in the source chat; the user may allow the rest of that chat. */
+export type ComputerConfirm = "ask" | "never";
 
 /** What a linked computer may do here. The target enforces it. */
 export interface ComputerAccess {
@@ -1395,6 +1396,13 @@ export interface ComputerLinkSetMessage {
 
 export interface ComputerLinkRemoveMessage {
   type: "computer_link_remove";
+  requestId?: string;
+  targetPubkey: string;
+}
+
+/** Source side: ask the target for its current access and confirm settings, then reply with the link list. */
+export interface ComputerLinkRefreshMessage {
+  type: "computer_link_refresh";
   requestId?: string;
   targetPubkey: string;
 }
@@ -1548,6 +1556,7 @@ export type ClientMessage = { commandId?: string } & (
   | LinkRoomInfoMessage
   | ComputerLinkSetMessage
   | ComputerLinkRemoveMessage
+  | ComputerLinkRefreshMessage
   | ComputerLinkListMessage
   | KnownComputersMessage
   | ComputerAccessAnswerMessage
@@ -2972,6 +2981,9 @@ export interface ComputerLinkSummary {
   access: ComputerAccess;
   confirm: ComputerConfirm;
   ticketExpiresAt: number;
+  /** The target's Node platform and run_command shell, learned from its hello. */
+  platform?: string;
+  shell?: string;
 }
 
 export interface ComputerLinkListResultServerMessage {
@@ -2992,7 +3004,8 @@ export interface ComputerLinkOperationResultServerMessage {
 export interface ComputerAccessRequestCard {
   requestId: string;
   kind: "approval" | "link";
-  source: { name: string };
+  /** publicKey is the source server's key; the app seals approvals to it. */
+  source: { name: string; publicKey?: string };
   target: { name: string; publicKey: string };
   expiresAt: number;
   // kind "approval"
@@ -3000,8 +3013,6 @@ export interface ComputerAccessRequestCard {
   summary?: string;
   challengeId?: string;
   digest?: string;
-  /** Allow for this chat is offered only when the target confirms per chat. */
-  allowChat?: boolean;
   // kind "link"
   access?: ComputerAccess;
   reason?: string;

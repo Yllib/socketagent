@@ -76,10 +76,10 @@ export const historyEntrySchema = z.object({
   answered: optionalBoolean, answers: z.record(z.string(), z.string()).optional(),
   computerAccess: z.object({
     requestId: z.string(), kind: z.enum(["approval", "link"]),
-    source: z.object({ name: z.string() }).passthrough(),
+    source: z.object({ name: z.string(), publicKey: optionalText }).passthrough(),
     target: z.object({ name: z.string(), publicKey: z.string() }).passthrough(),
     expiresAt: z.number(), action: optionalText, summary: optionalText,
-    challengeId: optionalText, digest: optionalText, allowChat: optionalBoolean,
+    challengeId: optionalText, digest: optionalText,
     access: z.object({ read: z.boolean(), agents: z.boolean(), commands: z.boolean() }).passthrough().optional(),
     reason: optionalText,
   } satisfies Shape<ComputerAccessRequestCard>).passthrough().optional(),

@@ -4955,6 +4955,9 @@
           "properties": {
             "name": {
               "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
             }
           },
           "required": [
@@ -4990,9 +4993,6 @@
         },
         "digest": {
           "type": "string"
-        },
-        "allowChat": {
-          "type": "boolean"
         },
         "access": {
           "$ref": "#/definitions/ComputerAccess"
@@ -6311,8 +6311,7 @@
     "ComputerConfirm": {
       "type": "string",
       "enum": [
-        "every_time",
-        "per_chat",
+        "ask",
         "never"
       ]
     },
@@ -6470,6 +6469,12 @@
         },
         "ticketExpiresAt": {
           "type": "number"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "shell": {
+          "type": "string"
         }
       },
       "required": [
@@ -6525,6 +6530,9 @@
           "properties": {
             "name": {
               "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
             }
           },
           "required": [
@@ -6560,9 +6568,6 @@
         },
         "digest": {
           "type": "string"
-        },
-        "allowChat": {
-          "type": "boolean"
         },
         "access": {
           "$ref": "#/definitions/ComputerAccess"

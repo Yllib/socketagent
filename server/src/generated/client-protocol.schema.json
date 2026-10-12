@@ -3168,6 +3168,28 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "computer_link_refresh"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "targetPubkey": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "targetPubkey",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "computer_link_list"
             },
             "requestId": {
@@ -5109,8 +5131,7 @@
     "ComputerConfirm": {
       "type": "string",
       "enum": [
-        "every_time",
-        "per_chat",
+        "ask",
         "never"
       ]
     },

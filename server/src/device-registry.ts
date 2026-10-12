@@ -13,7 +13,7 @@ export type DeviceKind = "device" | "computer";
 export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "computer";
 export type DeviceVia = "migration" | "token" | "approval" | "link";
 export type RegistryMode = "learning" | "enforced";
-export type ComputerConfirm = "every_time" | "per_chat" | "never";
+export type ComputerConfirm = "ask" | "never";
 
 export interface ComputerAccess {
   read: boolean;
@@ -45,7 +45,11 @@ export const computerAccessSchema = z.object({
   agents: z.boolean(),
   commands: z.boolean(),
 });
-export const computerConfirmSchema = z.enum(["every_time", "per_chat", "never"]);
+/** Files written before "ask" replaced "every_time" and "per_chat" still load. */
+export const computerConfirmSchema = z.preprocess(
+  (value) => (value === "every_time" || value === "per_chat" ? "ask" : value),
+  z.enum(["ask", "never"]),
+);
 export const devicePlatformSchema = z.enum(["android", "windows", "linux", "macos", "ios", "computer"]);
 
 const deviceEntrySchema = z.object({

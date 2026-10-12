@@ -45,7 +45,7 @@ device's identity.
     "via": "migration" | "token" | "approval" | "link",
     // kind "computer" only, see section 3
     "access"?: { "read": boolean, "agents": boolean, "commands": boolean },
-    "confirm"?: "every_time" | "per_chat" | "never"
+    "confirm"?: "ask" | "never"
   }],
   "revoked": ["<base64 X25519>"]
 }
@@ -371,8 +371,11 @@ Remote agents:
 
 B enforces `confirm` for every action except `hello`:
 - `never`: allowed within `access`.
-- `per_chat`: needs one approval for this `sourceSessionId`. It lasts 12 hours.
-- `every_time`: needs an approval for this exact request.
+- `ask`: needs an approval. A `once` approval covers this exact request. A
+  `chat` approval covers every request from this `sourceSessionId` for 12 hours.
+
+Registries and link files written before `ask` existed stored `every_time` or
+`per_chat`. Both load as `ask`.
 
 When an approval is missing, B replies
 `{ok:false, approvalRequired:{challengeId, action, summary, digest, expiresAt}}`.
@@ -383,8 +386,11 @@ When an approval is missing, B replies
 A then asks the user in the source chat with a `computer_access_request`
 card of kind `approval`. The card includes the target's name and public key, the
 action, the summary, the digest and the expiry. The options are Allow once,
-Allow for this chat, and Deny. Allow for this chat only appears if B's
-`confirm` is `per_chat`.
+Allow for this chat, and Deny.
+
+The card's `source.publicKey` is A's server key. The app puts it in the token
+as `sourceKey`, so the approval names the computer that asked even when the
+user answers from another computer's screen.
 
 The app answers with an approval token: a NaCl box from the app's device key
 to B's public key over
@@ -398,7 +404,7 @@ B accepts the approval only when all of these hold:
 - the digest matches the retried request
 - it hasn't expired
 - a `once` token hasn't been used before
-- the scope fits `confirm`
+- a `chat` token names a chat
 
 A compromised A can't approve its own requests, because only the user's
 devices hold keys B accepts.
@@ -410,12 +416,11 @@ Wire shapes for the card. These are new message types, not `question`:
 // shows again when the chat is reopened, and resent on reconnect while pending
 { "type": "computer_access_request", "requestId": "...", "sessionId": "...",
   "kind": "approval" | "link",
-  "source": { "name": "Dev VM" },
+  "source": { "name": "Dev VM", "publicKey": "<b64>" },
   "target": { "name": "Desktop", "publicKey": "<b64>" },
   // kind "approval"
   "action": "run_command", "summary": "cd ~/proj && npm test",
   "challengeId": "...", "digest": "<hex>", "expiresAt": 1760300000000,
-  "allowChat": true,
   // kind "link"
   "access": { "read": true, "agents": true, "commands": false }, "reason": "..." }
 
@@ -464,8 +469,13 @@ other computers"):
 3. A: `computer_link_set`.
 
 Defaults: `access {read:true, agents:true, commands:true}` with
-`confirm:"every_time"`. Removing a link sends `device_remove` to B and
+`confirm:"ask"`. Removing a link sends `device_remove` to B and
 `computer_link_remove` to A. Both computers must use the same relay.
+
+Editing a link sends `device_authorize` to B again with the new access and
+confirm, then `computer_link_refresh` to A. A runs `hello` against B and
+stores what B reports, along with B's platform and `run_command` shell. The
+Computers list shows both, so agents know a Windows target runs PowerShell.
 
 ## Order and ownership
 

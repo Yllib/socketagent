@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const dataDir = require("./test-data-dir");
@@ -6,10 +7,11 @@ const dataDir = require("./test-data-dir");
 const { DeviceRegistry } = require("#server/device-registry");
 const { ComputerLinkPeerApi, requestDigest, canonicalJson, CHALLENGE_TTL_MS } = require("#server/computer-link-peer");
 const { generateKeyPair, encrypt, toBase64 } = require("#server/relay-crypto");
+const { peerShellName } = require("#server/peer-command");
 
 let counter = 0;
 
-/** @param {{ confirm?: "every_time" | "per_chat" | "never", commands?: boolean }} options */
+/** @param {{ confirm?: "ask" | "never", commands?: boolean }} options */
 function setup(options = {}) {
   const registry = new DeviceRegistry(path.join(dataDir, `peer-registry-${++counter}.json`), true);
   const target = generateKeyPair();
@@ -17,7 +19,7 @@ function setup(options = {}) {
   const device = generateKeyPair();
   const sourceKey = toBase64(source.publicKey);
   registry.enroll({ publicKey: sourceKey, kind: "computer", name: "Dev VM", platform: "computer", via: "link",
-    access: { read: true, agents: true, commands: options.commands ?? true }, confirm: options.confirm ?? "every_time" });
+    access: { read: true, agents: true, commands: options.commands ?? true }, confirm: options.confirm ?? "ask" });
   registry.enroll({ publicKey: toBase64(device.publicKey), kind: "device", name: "Pixel", platform: "android", via: "token" });
   /** @type {string[]} */
   const ran = [];
@@ -147,28 +149,37 @@ test("expired tokens and expired challenges are refused", async () => {
   assert.deepEqual(env.ran, []);
 });
 
-test("scope must fit the target's confirm setting", async () => {
-  const everyTime = setup({ confirm: "every_time" });
-  const pending = await challenge(everyTime);
-  const chatScoped = await everyTime.api.handle({ ...request, approval: everyTime.token(claims(everyTime, pending, { scope: "chat" })) }, everyTime.sourceKey);
-  assert.equal(chatScoped?.ok, false);
-  assert.match(String(chatScoped?.error), /every time/);
-
-  // Once is always fine, and under every_time the next request needs a new approval.
-  const once = await everyTime.api.handle({ ...request, approval: everyTime.token(claims(everyTime, pending)) }, everyTime.sourceKey);
+test("a once approval covers one request and a chat approval covers that chat", async () => {
+  const onceEnv = setup();
+  const pending = await challenge(onceEnv);
+  const once = await onceEnv.api.handle({ ...request, approval: onceEnv.token(claims(onceEnv, pending)) }, onceEnv.sourceKey);
   assert.equal(once?.ok, true);
-  const again = await everyTime.api.handle({ ...request, id: "r2" }, everyTime.sourceKey);
+  const again = await onceEnv.api.handle({ ...request, id: "r2" }, onceEnv.sourceKey);
   assert.ok(again?.approvalRequired);
 
-  const perChat = setup({ confirm: "per_chat" });
-  const pending2 = await challenge(perChat);
-  const chat = await perChat.api.handle({ ...request, approval: perChat.token(claims(perChat, pending2, { scope: "chat" })) }, perChat.sourceKey);
+  const chatEnv = setup();
+  const pending2 = await challenge(chatEnv);
+  const chat = await chatEnv.api.handle({ ...request, approval: chatEnv.token(claims(chatEnv, pending2, { scope: "chat" })) }, chatEnv.sourceKey);
   assert.equal(chat?.ok, true);
-  const second = await perChat.api.handle({ ...request, id: "r2", args: { command: "echo two" } }, perChat.sourceKey);
+  const second = await chatEnv.api.handle({ ...request, id: "r2", args: { command: "echo two" } }, chatEnv.sourceKey);
   assert.equal(second?.ok, true);
-  const otherChat = await perChat.api.handle({ ...request, id: "r3", sourceSessionId: "chat-9" }, perChat.sourceKey);
+  const otherChat = await chatEnv.api.handle({ ...request, id: "r3", sourceSessionId: "chat-9" }, chatEnv.sourceKey);
   assert.ok(otherChat?.approvalRequired);
-  assert.deepEqual(perChat.ran, ["echo hi", "echo two"]);
+  assert.deepEqual(chatEnv.ran, ["echo hi", "echo two"]);
+});
+
+test("links stored with the old confirm values load as ask", () => {
+  const file = path.join(dataDir, `peer-registry-legacy-${++counter}.json`);
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1, mode: "enforced", revoked: [],
+    devices: ["every_time", "per_chat"].map((confirm, index) => ({
+      publicKey: `key-${index}`, kind: "computer", name: "Dev VM", platform: "computer",
+      addedAt: "2026-10-01", lastSeenAt: "2026-10-01", via: "link",
+      access: { read: true, agents: true, commands: true }, confirm,
+    })),
+  }));
+  const registry = new DeviceRegistry(file, false);
+  assert.deepEqual([registry.get("key-0")?.confirm, registry.get("key-1")?.confirm], ["ask", "ask"]);
 });
 
 test("access is enforced before any approval and unknown keys get nothing", async () => {
@@ -180,7 +191,7 @@ test("access is enforced before any approval and unknown keys get nothing", asyn
   assert.equal(hello?.ok, true);
   assert.deepEqual(hello?.result, {
     name: "Desktop", access: { read: true, agents: true, commands: false }, confirm: "never",
-    platform: process.platform, backends: ["claude"],
+    platform: process.platform, shell: peerShellName(), backends: ["claude"],
   });
   const stranger = await env.api.handle(request, toBase64(generateKeyPair().publicKey));
   assert.equal(stranger?.code, "access_denied");

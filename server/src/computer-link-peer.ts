@@ -4,7 +4,7 @@ import type { Backend, ComputerApprovalToken } from "./protocol";
 import type { DeviceEntry, DeviceRegistry, ComputerAccess, ComputerConfirm } from "./device-registry";
 import { decrypt, fromBase64, type KeyPair } from "./relay-crypto";
 import type { AgentSessionToolArgs, AgentSessionToolResponse, DelegatedAgentTail } from "./delegated-agent-types";
-import { clampPeerCommandTimeout, resolvePeerCommandCwd, type PeerCommandRequest, type PeerCommandResult } from "./peer-command";
+import { clampPeerCommandTimeout, peerShellName, resolvePeerCommandCwd, type PeerCommandRequest, type PeerCommandResult } from "./peer-command";
 import { errorMessage, isRecord } from "./value-guards";
 
 /** Actions a source computer may ask for over the link lane. */
@@ -265,13 +265,13 @@ export class ComputerLinkPeerApi {
 
   private async dispatch(request: PeerRequest, entry: DeviceEntry, publicKey: string): Promise<PeerResponse> {
     const access: ComputerAccess = entry.access ?? { read: false, agents: false, commands: false };
-    const confirm: ComputerConfirm = entry.confirm ?? "every_time";
+    const confirm: ComputerConfirm = entry.confirm ?? "ask";
     const needed = accessFor(request.action);
     if (needed && !access[needed]) {
       return this.fail(request, "access_denied", `${needed} access is not allowed`);
     }
     if (needsConfirm(request.action) && confirm !== "never") {
-      const verdict = this.checkApproval(request, publicKey, confirm);
+      const verdict = this.checkApproval(request, publicKey);
       if (verdict !== "approved") return verdict;
     }
     this.registry.touch(publicKey);
@@ -283,6 +283,7 @@ export class ComputerLinkPeerApi {
           access,
           confirm,
           platform: process.platform,
+          shell: peerShellName(),
           backends: this.host.backends(),
         });
       }
@@ -328,14 +329,14 @@ export class ComputerLinkPeerApi {
   }
 
   /** Returns "approved" or the response that asks the source for an approval. */
-  private checkApproval(request: PeerRequest, publicKey: string, confirm: ComputerConfirm): "approved" | PeerResponse {
+  private checkApproval(request: PeerRequest, publicKey: string): "approved" | PeerResponse {
     this.expire();
     const grantKey = `${publicKey}\n${request.sourceSessionId}`;
-    if (confirm === "per_chat" && request.sourceSessionId && (this.chatGrants.get(grantKey) ?? 0) > this.now()) {
+    if (request.sourceSessionId && (this.chatGrants.get(grantKey) ?? 0) > this.now()) {
       return "approved";
     }
     if (request.approval) {
-      const outcome = this.verifyApproval(request, publicKey, confirm);
+      const outcome = this.verifyApproval(request, publicKey);
       if (outcome.ok) {
         if (outcome.scope === "chat") this.chatGrants.set(grantKey, this.now() + CHAT_GRANT_TTL_MS);
         return "approved";
@@ -361,12 +362,11 @@ export class ComputerLinkPeerApi {
   /**
    * Every check the spec lists: the box opens with `from`, `from` is an
    * enrolled device, the digest matches the retried request, the token is
-   * unexpired and unused, and the scope fits this computer's confirm setting.
+   * unexpired and unused, and a chat scope names a chat.
    */
   verifyApproval(
     request: Pick<PeerRequest, "action" | "args" | "sourceSessionId" | "approval">,
     publicKey: string,
-    confirm: ComputerConfirm,
   ): { ok: true; scope: "once" | "chat" } | { ok: false; error: string } {
     const token: ComputerApprovalToken | undefined = request.approval;
     if (!token) return { ok: false, error: "Missing approval" };
@@ -384,8 +384,8 @@ export class ComputerLinkPeerApi {
     if (claims.sourceKey !== publicKey || claims.sourceSessionId !== request.sourceSessionId) {
       return { ok: false, error: "The approval was issued for a different computer or chat" };
     }
-    if (claims.scope === "chat" && confirm !== "per_chat") {
-      return { ok: false, error: "This computer asks for approval every time" };
+    if (claims.scope === "chat" && !request.sourceSessionId) {
+      return { ok: false, error: "A chat approval needs a chat" };
     }
     const challenge = this.challenges.get(claims.challengeId);
     if (!challenge || challenge.expiresAt <= this.now()) return { ok: false, error: "The approval does not match an open request" };

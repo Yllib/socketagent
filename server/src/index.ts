@@ -73,7 +73,7 @@ import { SocketAgentPlugin, PluginContext, SessionContext } from "./plugin-api";
 import { parseSocketAgentPlugin } from "./plugin-contract";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
 import { RelayClient, RelayStatus, relayPeerForMessage, relayPeerKeyForMessage } from "./relay-client";
-import { DeviceRegistry, isValidPublicKey, normalizePublicKey, type DevicePlatform } from "./device-registry";
+import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type DevicePlatform } from "./device-registry";
 import { DeviceAuthGate } from "./device-auth";
 import { ComputerLinkPeerApi, type PeerEvent, type PeerResponse, type RemoteSupervisor } from "./computer-link-peer";
 import { runPeerCommand } from "./peer-command";
@@ -3294,29 +3294,35 @@ const computerLinks = new ComputerLinkManager(
   loadServerKeyPair(),
   {
     onEvent: (event, link) => handleRemoteAgentReport(event, link),
+    // hello also lets the target flush reports that finished while this computer was away.
     onOnline: (link) => {
-      // hello refreshes the display copy of access and confirm and lets the
-      // target flush reports that finished while this computer was away.
-      const connection = computerLinks.get(link.targetPubkey);
-      void connection?.request("hello", {}, "").then((response) => {
-        if (!response.ok) return;
-        const hello = z.object({
-          name: z.string(),
-          access: z.object({ read: z.boolean(), agents: z.boolean(), commands: z.boolean() }),
-          confirm: z.enum(["every_time", "per_chat", "never"]),
-        }).safeParse(response.result);
-        if (!hello.success) return;
-        const current = computerLinks.get(link.targetPubkey)?.record;
-        if (!current) return;
-        if (JSON.stringify(current.access) !== JSON.stringify(hello.data.access) || current.confirm !== hello.data.confirm) {
-          computerLinks.set({ ...current, access: hello.data.access, confirm: hello.data.confirm });
-        }
-      }).catch((err: unknown) => {
+      void syncComputerLink(link.targetPubkey).catch((err: unknown) => {
         console.warn(`[ComputerLinks] hello to ${link.name} failed: ${errorMessage(err)}`);
       });
     },
   },
 );
+
+const linkHelloSchema = z.object({
+  access: computerAccessSchema,
+  confirm: computerConfirmSchema,
+  platform: z.string().optional(),
+  shell: z.string().optional(),
+});
+
+/** Copies the target's current access, confirm, platform and shell into the stored link. */
+async function syncComputerLink(targetPubkey: string): Promise<void> {
+  const connection = computerLinks.get(targetPubkey);
+  if (!connection) throw new Error("No link to that computer");
+  if (!connection.online) throw new Error(connection.offlineReason || `${connection.record.name} is offline`);
+  const response = await connection.request("hello", {}, "");
+  if (!response.ok) throw new Error(response.error || `${connection.record.name} refused hello`);
+  const hello = linkHelloSchema.parse(response.result);
+  const current = computerLinks.get(targetPubkey)?.record;
+  if (!current) return;
+  const next = { ...current, ...hello };
+  if (JSON.stringify(next) !== JSON.stringify(current)) computerLinks.set(next);
+}
 
 /** Sends one control-lane message to every connected device. */
 function broadcastControlMessage(message: Record<string, unknown>): void {
@@ -3409,14 +3415,13 @@ async function requestOnComputer(
       const challenge = response.approvalRequired;
       const answer = await computerAccessRequests.ask(sessionId, {
         kind: "approval",
-        source: { name: os.hostname() },
+        source: { name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey) },
         target: { name: target.name, publicKey: target.targetPubkey },
         action: challenge.action,
         summary: challenge.summary,
         challengeId: challenge.challengeId,
         digest: challenge.digest,
         expiresAt: challenge.expiresAt,
-        allowChat: target.confirm === "per_chat",
       }, signal);
       if (answer.decision === "deny") throw new Error(`The user denied this ${describePeerAction(action)}.`);
       if (answer.decision === "expired") throw new Error(`The user did not answer the approval request for ${target.name} in time.`);
@@ -3524,6 +3529,7 @@ async function manageRemoteDelegation(
 function listComputersForAgent(): ComputersToolListEntry[] {
   const links = computerLinks.list();
   const linked = new Set(links.map((link) => link.targetPubkey));
+  const self = toBase64(loadServerKeyPair().publicKey);
   return [
     ...links.map((link) => ({
       name: link.name,
@@ -3533,9 +3539,11 @@ function listComputersForAgent(): ComputersToolListEntry[] {
       ...(link.offlineReason ? { offlineReason: link.offlineReason } : {}),
       access: link.access,
       confirm: link.confirm,
+      ...(link.platform ? { platform: link.platform } : {}),
+      ...(link.shell ? { shell: link.shell } : {}),
     })),
     ...Array.from(knownComputers.values())
-      .filter((entry) => !linked.has(entry.serverPubkey))
+      .filter((entry) => !linked.has(entry.serverPubkey) && entry.serverPubkey !== self)
       .map((entry) => ({ name: entry.name, publicKey: entry.serverPubkey, linked: false })),
   ];
 }
@@ -3589,7 +3597,7 @@ async function manageComputers(session: Session, args: ComputersToolArgs, signal
       const access = args.access || { read: true, agents: true, commands: true };
       const answer = await computerAccessRequests.ask(sessionId, {
         kind: "link",
-        source: { name: os.hostname() },
+        source: { name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey) },
         target: { name: known.name, publicKey: known.serverPubkey },
         access,
         reason: args.reason?.trim() || "The agent needs access to this computer.",
@@ -9918,6 +9926,17 @@ function createConnectionHandler(
         const removed = computerLinks.remove(msg.targetPubkey);
         sendJson({ type: "computer_link_result", requestId: msg.requestId, ok: removed, targetPubkey: msg.targetPubkey,
           ...(removed ? {} : { error: "No link to that computer" }) });
+        sendJson({ type: "computer_link_list_result", links: computerLinks.list() });
+        break;
+      }
+
+      case "computer_link_refresh": {
+        try {
+          await syncComputerLink(msg.targetPubkey);
+          sendJson({ type: "computer_link_result", requestId: msg.requestId, ok: true, targetPubkey: msg.targetPubkey });
+        } catch (e: unknown) {
+          sendJson({ type: "computer_link_result", requestId: msg.requestId, ok: false, targetPubkey: msg.targetPubkey, error: errorMessage(e) });
+        }
         sendJson({ type: "computer_link_list_result", links: computerLinks.list() });
         break;
       }

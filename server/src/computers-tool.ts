@@ -42,6 +42,8 @@ export interface ComputersToolListEntry {
   offlineReason?: string;
   access?: ComputerAccess;
   confirm?: ComputerConfirm;
+  platform?: string;
+  shell?: string;
 }
 
 /** Index.ts supplies this; it owns the links, the cards and the session. */

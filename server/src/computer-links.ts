@@ -17,12 +17,17 @@ const linkRecordSchema = z.object({
   ticketExpiresAt: z.number(),
   access: computerAccessSchema,
   confirm: computerConfirmSchema,
+  platform: z.string().optional(),
+  shell: z.string().optional(),
 });
 export type ComputerLinkRecord = z.infer<typeof linkRecordSchema>;
 
 const linksFileSchema = z.object({ version: z.literal(1), links: z.array(linkRecordSchema) });
 
-/** Outgoing links this computer holds. access and confirm are a display copy; the target enforces. */
+/**
+ * Outgoing links this computer holds. access, confirm, platform and shell are
+ * a copy from the target's hello; the target enforces access and confirm.
+ */
 export class ComputerLinkStore {
   private links: ComputerLinkRecord[] = [];
 
@@ -421,6 +426,8 @@ export class ComputerLinkManager {
         access: record.access,
         confirm: record.confirm,
         ticketExpiresAt: record.ticketExpiresAt,
+        ...(record.platform ? { platform: record.platform } : {}),
+        ...(record.shell ? { shell: record.shell } : {}),
       };
     });
   }

@@ -41,10 +41,23 @@ export function clampPeerCommandTimeout(seconds: number | undefined): number {
 
 function shellInvocation(command: string): { file: string; args: string[] } {
   if (process.platform === "win32") {
-    const shell = process.env.SOCKETAGENT_POWERSHELL || "powershell.exe";
-    return { file: shell, args: ["-NoProfile", "-NonInteractive", "-Command", command] };
+    return { file: windowsShell(), args: ["-NoProfile", "-NonInteractive", "-Command", command] };
   }
   return { file: "bash", args: ["-lc", command] };
+}
+
+function windowsShell(): string {
+  return process.env.SOCKETAGENT_POWERSHELL || "powershell.exe";
+}
+
+/**
+ * The shell run_command uses here, for the source's Computers list. Windows
+ * PowerShell 5.1 has no `&&`, so agents need to know which one they get.
+ */
+export function peerShellName(): string {
+  if (process.platform !== "win32") return "bash";
+  const file = windowsShell().toLowerCase();
+  return file.includes("pwsh") ? "PowerShell 7 (pwsh)" : "Windows PowerShell 5.1 (no && or ||, use ;)";
 }
 
 class CappedOutput {

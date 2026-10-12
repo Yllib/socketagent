@@ -191,6 +191,16 @@ export interface BrowserProfilesRequestMessage {
   type: "browser_profiles_request";
 }
 
+/**
+ * Delete a saved profile and its sign-ins. Servers advertise this with
+ * `browserSessions.deleteProfile`, refuse a running profile, and answer with
+ * `browser_profiles`, carrying `error` when nothing was deleted.
+ */
+export interface BrowserProfileDeleteMessage {
+  type: "browser_profile_delete";
+  profile: string;
+}
+
 /** A streamed frame is on screen. The server keeps only a couple of frames in transit. */
 export interface BrowserFrameAckMessage {
   type: "browser_frame_ack";
@@ -1253,6 +1263,7 @@ export type ClientMessage = { commandId?: string } & (
   | BrowserSessionCloseMessage
   | BrowserSessionStartMessage
   | BrowserProfilesRequestMessage
+  | BrowserProfileDeleteMessage
   | BrowserFrameAckMessage
   | BrowserPromptResponseMessage
   | BrowserViewportMessage
@@ -3142,6 +3153,8 @@ export interface BrowserSessionStateServerMessage {
 export interface BrowserProfilesServerMessage {
   type: "browser_profiles";
   profiles: { profile: string; label: string; running: boolean; sessionId?: string }[];
+  /** Why a `browser_profile_delete` did not delete anything. */
+  error?: string;
 }
 
 export interface BrowserRuntimeInstallProgressServerMessage {

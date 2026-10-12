@@ -235,6 +235,25 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "browser_profile_delete"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "browser_frame_ack"
             },
             "profile": {

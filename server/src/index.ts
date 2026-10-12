@@ -1501,6 +1501,7 @@ function serverCapabilitiesPayload(
       nativeInput: true,
       close: true,
       start: true,
+      deleteProfile: true,
     },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
@@ -2281,6 +2282,16 @@ function sendBrowserFrame(frame: BrowserFrame): void {
     if (peerId && transport.sendReply) transport.sendReply(peerId, json);
     else transport.send(json);
   }
+}
+
+/** The saved browser profiles, as the app's profile picker lists them. */
+function browserProfilesMessage() {
+  return {
+    type: "browser_profiles",
+    profiles: browserSessionManager.list().map(({ profile, label, running, sessionId }) => ({
+      profile, label, running, ...(sessionId ? { sessionId } : {}),
+    })),
+  } satisfies Extract<ServerMessage, { type: "browser_profiles" }>;
 }
 
 /** Tells every viewer whether the profile's browser is running, so cards, strips, and viewers follow. */
@@ -5525,12 +5536,21 @@ function createConnectionHandler(
         break;
 
       case "browser_profiles_request":
-        sendJson({
-          type: "browser_profiles",
-          profiles: browserSessionManager.list().map(({ profile, label, running, sessionId }) => ({
-            profile, label, running, ...(sessionId ? { sessionId } : {}),
-          })),
-        });
+        sendJson(browserProfilesMessage());
+        break;
+
+      case "browser_profile_delete":
+        void (async () => {
+          const profile = normalizeBrowserProfile(msg.profile);
+          const open = browserSessionManager.active().find((browser) => browser.profile === profile);
+          // Deleting would close a browser someone may be using. Close it first.
+          if (open) throw new Error(`Close ${open.label} before deleting it.`);
+          await browserSessionManager.clear(profile);
+          sendJson(browserProfilesMessage());
+        })().catch((error: unknown) => sendJson({
+          ...browserProfilesMessage(),
+          error: error instanceof Error ? errorMessage(error) : "The profile was not deleted.",
+        }));
         break;
 
       case "browser_session_start":

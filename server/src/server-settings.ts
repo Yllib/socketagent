@@ -114,6 +114,46 @@ export function clearBackendHealthOverride(backend: Backend): void {
   }
 }
 
+/** Config problems Codex reported, with the config file's modified time when seen. */
+const codexConfigWarnings = new Map<string, { file: string; mtimeMs: number }>();
+const backendHealthListeners = new Set<() => void>();
+
+function modifiedAt(file: string): number {
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/** Calls [listener] when backend health changes outside a probe. Returns an unsubscribe. */
+export function onBackendHealthChange(listener: () => void): () => void {
+  backendHealthListeners.add(listener);
+  return () => backendHealthListeners.delete(listener);
+}
+
+/**
+ * Records a config problem Codex reported as it started. It shows on the
+ * computer's Codex status, not in chat, until the config file changes. Codex
+ * reports it again on its next start if the change did not fix it.
+ */
+export function recordCodexConfigWarning(message: string, configPath?: string): void {
+  if (codexConfigWarnings.has(message)) return;
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const file = configPath || path.join(codexHome, "config.toml");
+  codexConfigWarnings.set(message, { file, mtimeMs: modifiedAt(file) });
+  invalidateBackendHealthCache();
+  for (const listener of backendHealthListeners) listener();
+}
+
+/** The recorded Codex config problems whose file has not changed since. */
+export function currentCodexConfigWarnings(): string[] {
+  for (const [message, seen] of codexConfigWarnings) {
+    if (modifiedAt(seen.file) !== seen.mtimeMs) codexConfigWarnings.delete(message);
+  }
+  return [...codexConfigWarnings.keys()];
+}
+
 function ensureStoreDir(): void {
   if (!fs.existsSync(STORE_DIR)) fs.mkdirSync(STORE_DIR, { recursive: true });
 }
@@ -240,8 +280,11 @@ function codexHealth(): BackendHealthInfo {
 
   const warning = managedSourceWarning("codex", source);
   const sandboxHealth = getCodexLinuxSandboxHealth();
-  const warnings = [warning, sandboxHealth?.available === false ? sandboxHealth.reason : undefined]
-    .filter((value): value is string => !!value);
+  const warnings = [
+    warning,
+    sandboxHealth?.available === false ? sandboxHealth.reason : undefined,
+    ...currentCodexConfigWarnings(),
+  ].filter((value): value is string => !!value);
   return {
     ...base,
     available: true,

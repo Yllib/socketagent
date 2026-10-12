@@ -1,5 +1,6 @@
 import type { ClientTransport } from "./client-transport";
 import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
+import { recordCodexConfigWarning } from "./server-settings";
 import type { JsonValue } from "./generated/codex/types/serde_json/JsonValue";
 import type { CollaborationMode } from "./generated/codex/types/CollaborationMode";
 import type { ModeKind } from "./generated/codex/types/ModeKind";
@@ -4843,14 +4844,12 @@ export class CodexSession {
         return;
 
       case "configWarning": {
+        // Codex repeats these every time it starts, so they belong on the
+        // computer's Codex status rather than in each chat.
         const summary = String(p?.summary || "Codex configuration warning");
         const details = String(p?.details || "").trim();
         const path = String(p?.path || "").trim();
-        this.send({
-          type: "error",
-          message: `${summary}${details ? `\n${details}` : ""}${path ? `\nConfig: ${path}` : ""}`,
-          sessionId: this.sessionId || undefined,
-        });
+        recordCodexConfigWarning(details ? `${summary} ${details}` : summary, path || undefined);
         return;
       }
     }

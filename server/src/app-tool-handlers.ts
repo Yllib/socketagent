@@ -141,6 +141,7 @@ function publishBrowserSessionState(
   ctx.send({
     type: "browser_session_state",
     profile: session.profile,
+    browserProfile: session.browserProfile ?? session.profile,
     label: session.label,
     url: session.url || fallbackUrl,
     width: 430,
@@ -160,6 +161,7 @@ export function publishBrowserSessionCard(
   const url = session.url || fallbackUrl;
   const toolInput = {
     profile: session.profile,
+    browserProfile: session.browserProfile ?? session.profile,
     label: session.label,
     url,
     width: 430,
@@ -191,26 +193,32 @@ export async function handleBrowserSessionTool(
 ): Promise<McpMediaResult> {
   try {
     if (args.action === "list") {
-      return { content: [{ type: "text", text: JSON.stringify(browserSessionManager.list(), null, 2) }] };
+      const listing = { profiles: browserSessionManager.list(), browsers: browserSessionManager.active() };
+      return { content: [{ type: "text", text: JSON.stringify(listing, null, 2) }] };
     }
 
-    const profile = String(args.profile || "").trim();
-    if (!profile) throw new Error("BrowserSession requires a profile for this action.");
+    const named = String(args.profile || "").trim();
+    if (!named) throw new Error("BrowserSession requires a profile for this action.");
+    // Open and clear take a profile name. Everything else acts on a browser:
+    // this chat's own one on that profile, or the browser with that ID.
+    const profile = args.action === "open" || args.action === "clear"
+      ? named
+      : browserSessionManager.resolve(named, ctx.getSessionId());
 
     switch (args.action) {
       case "open": {
         if (!args.url) throw new Error("BrowserSession open requires a URL.");
-        const session = await browserSessionManager.open(
-          profile,
-          args.url,
-          args.label,
-          ctx.getSessionId(),
-        );
+        const sessionId = ctx.getSessionId();
+        const session = await browserSessionManager.open(profile, args.url, {
+          ...(args.label ? { label: args.label } : {}),
+          ...(sessionId ? { sessionId } : {}),
+          reuse: true,
+        });
         publishBrowserSessionState(ctx, session, args.url, true);
         return {
           content: [{
             type: "text",
-            text: `Browser profile ${session.profile} is open at ${session.url || args.url}. The active browser button is available in the phone session header. Use the show action only when a transcript card is useful. The user must enter passwords and MFA in the protected phone browser.`,
+            text: `Browser ${session.profile} (profile ${session.browserProfile}) is open at ${session.url || args.url}. The active browser button is available in the phone session header. Use the show action only when a transcript card is useful. The user must enter passwords and MFA in the protected phone browser.`,
           }],
         };
       }
@@ -339,19 +347,18 @@ export async function handleBrowserSessionTool(
         } catch {}
         await browserSessionManager.close(profile);
         publishBrowserSessionState(ctx, session, session.url || args.url || "https://localhost/", false);
-        return { content: [{ type: "text", text: `Browser profile ${profile} was closed. Its signed-in state remains saved.` }] };
+        return { content: [{ type: "text", text: `Browser ${profile} was closed. Its profile and sign-ins stay saved.` }] };
       }
       case "clear": {
-        let session: BrowserSessionSummary = {
-          profile,
-          label: args.label || profile,
-          running: false,
-        };
-        try {
-          session = await browserSessionManager.status(profile);
-        } catch {}
+        const windows = browserSessionManager.active()
+          .filter((browser) => browser.browserProfile === normalizeBrowserProfile(profile));
+        if (windows.some((browser) => browser.sessionId && browser.sessionId !== ctx.getSessionId())) {
+          throw new Error(`Browser profile ${profile} is open in another chat. Close it there first.`);
+        }
         await browserSessionManager.clear(profile);
-        publishBrowserSessionState(ctx, session, session.url || args.url || "https://localhost/", false);
+        for (const browser of windows) {
+          publishBrowserSessionState(ctx, browser, browser.url || "https://localhost/", false);
+        }
         return { content: [{ type: "text", text: `Browser profile ${profile} and its saved browsing state were deleted.` }] };
       }
     }

@@ -1502,6 +1502,7 @@ function serverCapabilitiesPayload(
       close: true,
       start: true,
       deleteProfile: true,
+      profiles: true,
     },
     backends: detectAvailableBackends(),
     codexDriver: settings.codexDriver,
@@ -2237,16 +2238,15 @@ interface BrowserViewer {
 const browserViewers = new Map<string, BrowserViewer[]>();
 
 /**
- * Record a viewer opening, renewing, or closing [profile]. Reports whether
+ * Record a viewer opening, renewing, or closing browser [key]. Reports whether
  * anyone still watches it and whether this viewer just arrived.
  */
 function setBrowserViewer(
-  profile: string,
+  key: string,
   transport: ClientTransport,
   peerId: string | undefined,
   watching: boolean,
 ): { watched: boolean; arrived: boolean } {
-  const key = normalizeBrowserProfile(profile);
   const now = Date.now();
   const live = (browserViewers.get(key) ?? []).filter((viewer) => viewer.expiresAt > now);
   const viewers = live.filter((viewer) => !(viewer.transport === transport && viewer.peerId === peerId));
@@ -2291,17 +2291,22 @@ function sendBrowserFrame(frame: BrowserFrame): void {
 function browserProfilesMessage() {
   return {
     type: "browser_profiles",
-    profiles: browserSessionManager.list().map(({ profile, label, running, sessionId }) => ({
-      profile, label, running, ...(sessionId ? { sessionId } : {}),
-    })),
+    profiles: browserSessionManager.list().map(({ profile, label, running }) => ({ profile, label, running })),
   } satisfies Extract<ServerMessage, { type: "browser_profiles" }>;
 }
 
-/** Tells every viewer whether the profile's browser is running, so cards, strips, and viewers follow. */
-function broadcastBrowserState(session: BrowserSessionSummary, active: boolean, runtimeRequired = false): void {
+/** Tells every viewer whether a browser is running, so cards, strips, and viewers follow. */
+function broadcastBrowserState(
+  session: BrowserSessionSummary,
+  active: boolean,
+  runtimeRequired = false,
+  requestId?: string,
+): void {
   const raw = JSON.stringify({
     type: "browser_session_state",
     profile: session.profile,
+    ...(session.browserProfile ? { browserProfile: session.browserProfile } : {}),
+    ...(requestId ? { requestId } : {}),
     label: session.label,
     url: session.url || "about:blank",
     width: 430,
@@ -2320,6 +2325,7 @@ function broadcastBrowserViewport(session: BrowserViewportState): void {
   const raw = JSON.stringify({
     type: "browser_session_state",
     profile: session.profile,
+    browserProfile: session.browserProfile,
     label: session.label,
     url: session.url,
     width: session.width,
@@ -5455,12 +5461,11 @@ function createConnectionHandler(
               message: "Installing browser component...",
             });
             await ensureBrowserRuntimeInstalled();
-            await browserSessionManager.open(
-              profile,
-              url,
+            await browserSessionManager.open(profile, url, {
               label,
-              activeSessionId || undefined,
-            );
+              ...(activeSessionId ? { sessionId: activeSessionId } : {}),
+              reuse: true,
+            });
             sendJson({
               type: "browser_runtime_install_progress",
               profile,
@@ -5545,7 +5550,7 @@ function createConnectionHandler(
       case "browser_profile_delete":
         void (async () => {
           const profile = normalizeBrowserProfile(msg.profile);
-          const open = browserSessionManager.active().find((browser) => browser.profile === profile);
+          const open = browserSessionManager.active().find((browser) => browser.browserProfile === profile);
           // Deleting would close a browser someone may be using. Close it first.
           if (open) throw new Error(`Close ${open.label} before deleting it.`);
           await browserSessionManager.clear(profile);
@@ -5559,12 +5564,11 @@ function createConnectionHandler(
       case "browser_session_start":
         void (async () => {
           try {
-            const elsewhere = browserSessionManager.active().find((browser) =>
-              browser.profile === normalizeBrowserProfile(msg.profile) && browser.sessionId !== msg.sessionId);
-            if (elsewhere) throw new Error(`${elsewhere.label} is open in another session.`);
             broadcastBrowserState(
-              await browserSessionManager.open(msg.profile, msg.url, msg.profile, msg.sessionId),
+              await browserSessionManager.open(msg.profile, msg.url, { sessionId: msg.sessionId }),
               true,
+              false,
+              msg.requestId,
             );
           } catch (error) {
             const message = error instanceof Error ? errorMessage(error) : "The browser did not open.";
@@ -5577,13 +5581,37 @@ function createConnectionHandler(
                 running: false,
                 sessionId: msg.sessionId,
                 url: normalizeBrowserUrl(msg.url),
-              }, true, true);
+              }, true, true, msg.requestId);
               return;
             }
-            sendJson({ type: "browser_session_error", profile: msg.profile, message });
+            sendJson({
+              type: "browser_session_error",
+              profile: msg.profile,
+              message,
+              ...(msg.requestId ? { requestId: msg.requestId } : {}),
+            });
           }
         })();
         break;
+
+      case "browser_profile_switch":
+      case "browser_profile_save": {
+        const request = msg;
+        void (async () => {
+          const moved = request.type === "browser_profile_switch"
+            ? await browserSessionManager.switchProfile(request.profile, request.to)
+            : await browserSessionManager.saveProfileAs(request.profile, request.name);
+          broadcastBrowserState(moved, true, false, request.requestId);
+        })().catch((error: unknown) => sendJson({
+          type: "browser_session_error",
+          profile: request.profile,
+          message: error instanceof Error
+            ? errorMessage(error)
+            : request.type === "browser_profile_switch" ? "The browser did not switch profiles." : "The profile was not saved.",
+          ...(request.requestId ? { requestId: request.requestId } : {}),
+        }));
+        break;
+      }
 
       case "browser_prompt_response":
         void browserSessionManager.answerPrompt(msg.profile, msg.id, {
@@ -10369,6 +10397,7 @@ function buildStatusSyncMessage(): string {
     .filter((session) => session.sessionId && session.url)
     .map((session) => ({
       profile: session.profile,
+      ...(session.browserProfile ? { browserProfile: session.browserProfile } : {}),
       label: session.label,
       url: session.url,
       sessionId: session.sessionId,

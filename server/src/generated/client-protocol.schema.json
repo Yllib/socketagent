@@ -204,6 +204,9 @@
             "url": {
               "type": "string"
             },
+            "requestId": {
+              "type": "string"
+            },
             "commandId": {
               "type": "string"
             }
@@ -245,6 +248,58 @@
             }
           },
           "required": [
+            "profile",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "browser_profile_switch"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "to",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "browser_profile_save"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
             "profile",
             "type"
           ]

@@ -1977,6 +1977,9 @@
         "profile": {
           "type": "string"
         },
+        "browserProfile": {
+          "type": "string"
+        },
         "label": {
           "type": "string"
         },
@@ -2013,6 +2016,12 @@
           "const": "browser_session_state"
         },
         "profile": {
+          "type": "string"
+        },
+        "browserProfile": {
+          "type": "string"
+        },
+        "requestId": {
           "type": "string"
         },
         "label": {
@@ -2193,6 +2202,9 @@
           "type": "string"
         },
         "message": {
+          "type": "string"
+        },
+        "requestId": {
           "type": "string"
         }
       },

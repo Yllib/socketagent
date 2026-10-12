@@ -18,8 +18,16 @@ import { PICKER_BINDING, PICKER_SCRIPT, PICKER_WORLD, applyPickerExpression, par
 
 type JsonRecord = Record<string, unknown>;
 
+/**
+ * A browser window, or a saved profile when listing profiles.
+ *
+ * For a browser, `profile` is its ID, which viewers and the agent address it
+ * by, and `browserProfile` is the Chrome profile it runs in. Older apps only
+ * know `profile` and treat it as an opaque key.
+ */
 export interface BrowserSessionSummary {
   profile: string;
+  browserProfile?: string;
   label: string;
   running: boolean;
   sessionId?: string;
@@ -31,6 +39,7 @@ export interface BrowserSessionSummary {
 /** A session's identity plus the viewport its viewers must map taps through. */
 export interface BrowserViewportState {
   profile: string;
+  browserProfile: string;
   label: string;
   sessionId?: string;
   url: string;
@@ -183,21 +192,53 @@ interface BrowserWatch {
   acked: boolean;
 }
 
-interface RunningBrowserSession {
+/** One Chrome process for a profile. Its windows are the browsers viewers see. */
+interface ChromeInstance {
   profile: string;
-  label: string;
-  sessionId?: string;
-  url: string;
-  title: string;
   profileDir: string;
   process: ChildProcess;
   displayProcess?: ChildProcess;
   /** Chrome's debugging port, for connecting to tabs as they open. */
   port: number;
-  /** Connection to the active tab. Everything that acts on the page uses it. */
-  cdp: CdpClient;
   /** Browser-wide connection that sees tabs open, change, and close. */
   browserCdp: CdpClient;
+  browsers: Set<RunningBrowserSession>;
+  /** Tabs this server opened, which their opener assigns to a window itself. */
+  claimed: Set<string>;
+  /** Windows being opened. Their tabs can appear before Chrome says which window they are. */
+  creating: number;
+}
+
+/** A window's first tab, as Chrome opened it. */
+interface WindowTab {
+  id: string;
+  windowId: number;
+}
+
+/** What a browser keeps when its window is replaced by one in another Chrome. */
+interface WindowSpec {
+  id: string;
+  label: string;
+  sessionId?: string;
+  width: number;
+  height: number;
+  url: string;
+  /** When a viewer's live view would lapse, if one is watching. */
+  watchUntil?: number;
+}
+
+/** One Chrome window, with its own tabs, viewport, live view, and owning chat session. */
+interface RunningBrowserSession {
+  /** How viewers and the agent address this window. Survives a profile switch. */
+  id: string;
+  chrome: ChromeInstance;
+  windowId: number;
+  label: string;
+  sessionId?: string;
+  url: string;
+  title: string;
+  /** Connection to the active tab. Everything that acts on the page uses it. */
+  cdp: CdpClient;
   /** Open tabs in the order they opened, by target ID. */
   tabs: Map<string, BrowserTab>;
   activeTab: string;
@@ -874,13 +915,52 @@ const FRAME_BOX_FUNCTION = `function () {
 
 const frameBoxSchema = z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }).nullable();
 
+/** Files that only matter to the Chrome that made them, and caches it rebuilds. */
+const UNCOPIED_PROFILE_FILES = new Set([
+  "SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort", "lockfile",
+  "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
+  "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Crashpad", "SocketAgent Uploads",
+]);
+
+/**
+ * Copy a stopped profile. Windows can hold Chrome's files for a moment after
+ * it exits, so a locked copy is retried before it fails.
+ */
+async function copyProfile(from: string, to: string): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      fs.cpSync(from, to, {
+        recursive: true,
+        errorOnExist: true,
+        filter: (source) => !UNCOPIED_PROFILE_FILES.has(path.basename(source)),
+      });
+      restrictDirectory(to);
+      return;
+    } catch (error) {
+      fs.rmSync(to, { recursive: true, force: true });
+      const code = isRecord(error) ? error.code : undefined;
+      if (attempt >= 10 || (code !== "EBUSY" && code !== "EPERM")) throw error;
+      await wait(300 * attempt);
+    }
+  }
+}
+
+function latestBrowser(browsers: RunningBrowserSession[]): RunningBrowserSession | undefined {
+  return [...browsers].sort((a, b) => a.lastUsedAt.localeCompare(b.lastUsedAt)).at(-1);
+}
+
 function boundedLabel(value: string | undefined, profile: string): string {
   const label = String(value || "").trim().replace(/[\r\n\t]+/g, " ").slice(0, 80);
   return label || profile;
 }
 
 export class BrowserSessionManager {
+  /** Browser windows by ID. */
   private sessions = new Map<string, RunningBrowserSession>();
+  /** Running Chrome by profile. */
+  private chromes = new Map<string, ChromeInstance>();
+  /** Chrome starting for a profile, so windows opened meanwhile share it. */
+  private launching = new Map<string, Promise<ChromeInstance>>();
   private frameListeners = new Set<(frame: BrowserFrame) => void>();
   private eventListeners = new Set<(event: BrowserSessionEvent) => void>();
   /** Whether the connections frames go out on are still sending earlier data. */
@@ -913,18 +993,18 @@ export class BrowserSessionManager {
   }
 
   /** Resend the tabs and any open prompt, for a viewer that just arrived. */
-  replayState(profileValue: string): void {
-    const session = this.sessions.get(normalizeBrowserProfile(profileValue));
+  replayState(browserId: string): void {
+    const session = this.sessions.get(browserId);
     if (!session) return;
     this.emitTabs(session);
     const open = session.prompt;
-    if (open) this.emit({ type: "browser_prompt", profile: session.profile, id: open.id, prompt: open.prompt });
+    if (open) this.emit({ type: "browser_prompt", profile: session.id, id: open.id, prompt: open.prompt });
   }
 
   private emitTabs(session: RunningBrowserSession): void {
     this.emit({
       type: "browser_tabs",
-      profile: session.profile,
+      profile: session.id,
       tabs: [...session.tabs.values()].map((tab) => ({
         id: tab.id,
         url: tab.url,
@@ -938,8 +1018,8 @@ export class BrowserSessionManager {
    * Answer prompt [id]. Ignored when it is no longer the open one, because
    * another device answered it or the page moved on.
    */
-  async answerPrompt(profileValue: string, id: string, answer: BrowserPromptAnswer): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async answerPrompt(browserId: string, id: string, answer: BrowserPromptAnswer): Promise<void> {
+    const session = this.require(browserId);
     const open = session.prompt;
     if (!open || open.id !== id) return;
     this.touch(session);
@@ -960,7 +1040,7 @@ export class BrowserSessionManager {
       for (const release of session.blockedWaiters) release();
       session.blockedWaiters.clear();
     }
-    this.emit({ type: "browser_prompt", profile: session.profile, id, prompt });
+    this.emit({ type: "browser_prompt", profile: session.id, id, prompt });
   }
 
   private cancelPrompt(session: RunningBrowserSession): void {
@@ -974,7 +1054,7 @@ export class BrowserSessionManager {
     const open = session.prompt;
     if (!open) return;
     session.prompt = undefined;
-    this.emit({ type: "browser_prompt_closed", profile: session.profile, id: open.id });
+    this.emit({ type: "browser_prompt_closed", profile: session.id, id: open.id });
   }
 
   /** A JavaScript dialog blocks the page's scripts, so anything that evaluates in it would hang. */
@@ -1016,7 +1096,7 @@ export class BrowserSessionManager {
 
   /** Where viewers upload files for the page's file chooser. */
   private uploadDir(session: RunningBrowserSession): string {
-    const dir = path.join(session.profileDir, "SocketAgent Uploads");
+    const dir = path.join(session.chrome.profileDir, "SocketAgent Uploads");
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     return dir;
   }
@@ -1130,44 +1210,101 @@ export class BrowserSessionManager {
     ]);
   }
 
-  /** Follow tabs as they open, change, and close. A tab the page opens becomes the one shown. */
-  private async trackTabs(session: RunningBrowserSession): Promise<void> {
-    const browser = session.browserCdp;
+  /**
+   * Follow tabs as they open, change, and close in every window of [chrome].
+   * A tab the page opens becomes the one its window shows.
+   */
+  private async trackTargets(chrome: ChromeInstance): Promise<void> {
+    const browser = chrome.browserCdp;
     browser.on("Target.targetCreated", (params) => {
       const tab = tabFromTargetInfo(params.targetInfo);
-      if (!tab || session.tabs.has(tab.id)) return;
-      session.tabs.set(tab.id, tab);
-      this.emitTabs(session);
-      void this.enqueue(session, () => this.activateTab(session, tab.id)).catch(() => {});
+      if (!tab || chrome.claimed.has(tab.id) || this.tabOwner(chrome, tab.id)) return;
+      void this.adoptTab(chrome, tab).catch(() => {});
     });
     browser.on("Target.targetInfoChanged", (params) => {
       const info = tabFromTargetInfo(params.targetInfo);
-      const tab = info && session.tabs.get(info.id);
-      if (!info || !tab || (tab.url === info.url && tab.title === info.title)) return;
+      const session = info && this.tabOwner(chrome, info.id);
+      const tab = info && session?.tabs.get(info.id);
+      if (!info || !session || !tab || (tab.url === info.url && tab.title === info.title)) return;
       tab.url = info.url;
       tab.title = info.title;
       this.emitTabs(session);
     });
     browser.on("Target.targetDestroyed", (params) => {
-      const closed = typeof params.targetId === "string" ? session.tabs.get(params.targetId) : undefined;
-      if (!closed) return;
-      session.tabs.delete(closed.id);
+      const id = typeof params.targetId === "string" ? params.targetId : "";
+      chrome.claimed.delete(id);
+      const session = this.tabOwner(chrome, id);
+      const closed = session?.tabs.get(id);
+      if (!session || !closed) return;
+      session.tabs.delete(id);
       this.emitTabs(session);
-      if (closed.id !== session.activeTab) return;
+      if (id !== session.activeTab) return;
       const next = this.tabAfter(session, closed);
       void this.enqueue(session, async () => {
         if (next) await this.activateTab(session, next);
-        // The new tab arrives through targetCreated, which shows it.
-        else await browser.command("Target.createTarget", { url: "about:blank" });
+        // The page closed its window's last tab. Keep the browser in a fresh window.
+        else await this.replaceWindow(session);
       }).catch(() => {});
     });
     await browser.command("Target.setDiscoverTargets", { discover: true });
   }
 
+  private tabOwner(chrome: ChromeInstance, tabId: string): RunningBrowserSession | undefined {
+    for (const session of chrome.browsers) {
+      if (session.tabs.has(tabId)) return session;
+    }
+    return undefined;
+  }
+
+  /**
+   * Give a tab Chrome opened on its own to a window: the one Chrome put it in,
+   * else the one that opened it. While this server is opening a window, an
+   * unmatched tab is that window's, which its opener takes itself.
+   */
+  private async adoptTab(chrome: ChromeInstance, tab: BrowserTab): Promise<void> {
+    const windowId = await this.windowOf(chrome, tab.id).catch(() => undefined);
+    if (chrome.claimed.has(tab.id) || this.tabOwner(chrome, tab.id)) return;
+    const browsers = [...chrome.browsers];
+    const owner = browsers.find((session) => session.windowId === windowId)
+      ?? (tab.openerId ? this.tabOwner(chrome, tab.openerId) : undefined)
+      ?? (chrome.creating === 0 ? latestBrowser(browsers) : undefined);
+    if (!owner) return;
+    owner.tabs.set(tab.id, tab);
+    this.emitTabs(owner);
+    await this.enqueue(owner, () => this.activateTab(owner, tab.id));
+  }
+
+  private async windowOf(chrome: ChromeInstance, targetId: string): Promise<number> {
+    const result = await chrome.browserCdp.command("Browser.getWindowForTarget", { targetId });
+    if (typeof result.windowId !== "number") throw new Error("Chrome did not report the tab's window.");
+    return result.windowId;
+  }
+
+  /** Open a new Chrome window and claim its tab, so tab tracking leaves it to the caller. */
+  private async createWindowTab(chrome: ChromeInstance): Promise<WindowTab> {
+    chrome.creating += 1;
+    try {
+      const created = await chrome.browserCdp.command("Target.createTarget", { url: "about:blank", newWindow: true });
+      const id = typeof created.targetId === "string" ? created.targetId : "";
+      if (!id) throw new Error("Chrome did not open a window.");
+      chrome.claimed.add(id);
+      return { id, windowId: await this.windowOf(chrome, id) };
+    } finally {
+      chrome.creating -= 1;
+    }
+  }
+
+  private async replaceWindow(session: RunningBrowserSession): Promise<void> {
+    const tab = await this.createWindowTab(session.chrome);
+    session.windowId = tab.windowId;
+    session.tabs.set(tab.id, { id: tab.id, url: "about:blank", title: "" });
+    await this.activateTab(session, tab.id);
+  }
+
   /** Show tab [id]: connect to it, move the live view over, and bring it forward. */
   private async activateTab(session: RunningBrowserSession, id: string): Promise<void> {
-    if (session.activeTab === id || !session.tabs.has(id) || this.sessions.get(session.profile) !== session) return;
-    const cdp = await CdpClient.connect(`ws://127.0.0.1:${session.port}/devtools/page/${id}`);
+    if (session.activeTab === id || !session.tabs.has(id) || this.sessions.get(session.id) !== session) return;
+    const cdp = await CdpClient.connect(`ws://127.0.0.1:${session.chrome.port}/devtools/page/${id}`);
     // The old tab's connection is about to close, so nothing could answer its prompt.
     this.cancelPrompt(session);
     session.watch?.stop();
@@ -1180,7 +1317,7 @@ export class BrowserSessionManager {
     session.frameContexts.clear();
     previous.close();
     await this.setupPage(session, cdp, frameTargets);
-    await session.browserCdp.command("Target.activateTarget", { targetId: id }).catch(() => {});
+    await session.chrome.browserCdp.command("Target.activateTarget", { targetId: id }).catch(() => {});
     const tab = session.tabs.get(id);
     if (tab) {
       session.url = tab.url;
@@ -1191,8 +1328,8 @@ export class BrowserSessionManager {
   }
 
   /** Show another open tab. */
-  async switchTab(profileValue: string, id: string): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async switchTab(browserId: string, id: string): Promise<void> {
+    const session = this.require(browserId);
     this.touch(session);
     await this.enqueue(session, () => this.activateTab(session, id));
   }
@@ -1205,17 +1342,17 @@ export class BrowserSessionManager {
 
   /**
    * Close a tab, moving the view off it first so nothing acts on a closed
-   * page. The last tab stays open, since closing it would quit the browser.
+   * page. The last tab stays open, since closing it would close the window.
    */
-  async closeTab(profileValue: string, id: string): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async closeTab(browserId: string, id: string): Promise<void> {
+    const session = this.require(browserId);
     this.touch(session);
     await this.enqueue(session, async () => {
       const tab = session.tabs.get(id);
       if (!tab || session.tabs.size < 2) return;
       const next = this.tabAfter(session, tab);
       if (id === session.activeTab && next) await this.activateTab(session, next);
-      await session.browserCdp.command("Target.closeTarget", { targetId: id });
+      await session.chrome.browserCdp.command("Target.closeTarget", { targetId: id });
     });
   }
 
@@ -1226,8 +1363,8 @@ export class BrowserSessionManager {
    * phone only sees the page as it was when it last asked for a frame, so it
    * misses everything the agent does and everything the page does on its own.
    */
-  async watch(profileValue: string, ttlMs = WATCH_TTL_MS): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async watch(browserId: string, ttlMs = WATCH_TTL_MS): Promise<void> {
+    const session = this.require(browserId);
     const expiresAt = Date.now() + Math.max(1_000, ttlMs);
     if (session.watch) {
       session.watch.expiresAt = expiresAt;
@@ -1237,7 +1374,7 @@ export class BrowserSessionManager {
     const watch: BrowserWatch = {
       expiresAt,
       expiryTimer: setInterval(() => {
-        if (Date.now() >= (session.watch?.expiresAt ?? 0)) this.unwatch(session.profile);
+        if (Date.now() >= (session.watch?.expiresAt ?? 0)) this.unwatch(session.id);
       }, 5_000),
       stop: () => {},
       lastSentAt: 0,
@@ -1251,7 +1388,7 @@ export class BrowserSessionManager {
     try {
       await this.startScreencast(session, watch);
     } catch (error) {
-      this.unwatch(session.profile);
+      this.unwatch(session.id);
       throw error;
     }
     await this.refreshLocation(session).catch(() => {});
@@ -1293,8 +1430,8 @@ export class BrowserSessionManager {
    * until something asks for a different one. Viewers share one browser, so
    * there is one viewport, and the last request wins.
    */
-  async setViewport(profileValue: string, width: number, height: number): Promise<BrowserViewportState> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async setViewport(browserId: string, width: number, height: number): Promise<BrowserViewportState> {
+    const session = this.require(browserId);
     const next = {
       width: Math.round(Math.max(320, Math.min(DISPLAY_WIDTH, width))),
       height: Math.round(Math.max(480, Math.min(DISPLAY_HEIGHT, height))),
@@ -1330,7 +1467,8 @@ export class BrowserSessionManager {
 
   private viewportState(session: RunningBrowserSession): BrowserViewportState {
     return {
-      profile: session.profile,
+      profile: session.id,
+      browserProfile: session.chrome.profile,
       label: session.label,
       ...(session.sessionId ? { sessionId: session.sessionId } : {}),
       url: session.url,
@@ -1340,8 +1478,8 @@ export class BrowserSessionManager {
   }
 
   /** Stop streaming the profile. Safe to call when it was never watched. */
-  unwatch(profileValue: string): void {
-    const session = this.sessions.get(normalizeBrowserProfile(profileValue));
+  unwatch(browserId: string): void {
+    const session = this.sessions.get(browserId);
     if (session) this.stopWatch(session);
   }
 
@@ -1358,8 +1496,8 @@ export class BrowserSessionManager {
    * A viewer has shown frame [seq], so every frame sent before it has arrived
    * too. Frees room for the next frame and sends it if one is waiting.
    */
-  ackFrame(profileValue: string, seq: number): void {
-    const session = this.sessions.get(normalizeBrowserProfile(profileValue));
+  ackFrame(browserId: string, seq: number): void {
+    const session = this.sessions.get(browserId);
     const watch = session?.watch;
     if (!session || !watch) return;
     watch.acked = true;
@@ -1379,7 +1517,7 @@ export class BrowserSessionManager {
     const watch = session.watch;
     if (!watch) return;
     watch.pending = {
-      profile: session.profile,
+      profile: session.id,
       imageBase64,
       mimeType: "image/jpeg",
       width: session.width,
@@ -1448,25 +1586,121 @@ export class BrowserSessionManager {
     session.title = readStringResult(title) || session.title;
   }
 
+  /**
+   * Open [rawUrl] in a browser on [profileValue] for chat [sessionId]. With
+   * [reuse], a window this chat already has on the profile navigates instead,
+   * which is what the agent wants. Otherwise a new window opens, in the
+   * profile's running Chrome when there is one.
+   */
   async open(
     profileValue: string,
     rawUrl: string,
-    labelValue?: string,
-    sessionId?: string,
+    options: { label?: string; sessionId?: string; reuse?: boolean } = {},
   ): Promise<BrowserSessionSummary> {
     const profile = normalizeBrowserProfile(profileValue);
     const url = normalizeBrowserUrl(rawUrl);
-    const existing = this.sessions.get(profile);
-    if (existing) {
-      existing.label = boundedLabel(labelValue, profile);
-      existing.sessionId = sessionId || existing.sessionId;
-      existing.url = url;
-      await this.dispatchInput(existing, "Page.navigate", { url });
-      this.touch(existing);
-      await wait(300);
-      return await this.summary(existing);
-    }
+    const label = boundedLabel(options.label, profile);
+    const existing = options.reuse
+      ? latestBrowser([...this.sessions.values()].filter((session) =>
+        session.chrome.profile === profile && session.sessionId === options.sessionId))
+      : undefined;
+    const session = existing ?? await this.openWindow(profile, {
+      id: this.newBrowserId(profile),
+      label,
+      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      width: DEFAULT_WIDTH,
+      height: DEFAULT_HEIGHT,
+      url,
+    });
+    session.label = label;
+    session.url = url;
+    await this.dispatchInput(session, "Page.navigate", { url });
+    this.touch(session);
+    await wait(existing ? 300 : 500);
+    return await this.summary(session);
+  }
 
+  /** The profile's name for its first window, so the agent can keep using it. */
+  private newBrowserId(profile: string): string {
+    if (!this.sessions.has(profile)) return profile;
+    for (let n = 2; ; n++) {
+      if (!this.sessions.has(`${profile}~${n}`)) return `${profile}~${n}`;
+    }
+  }
+
+  /** A blank window on [profile] described by [spec], starting the profile's Chrome if needed. */
+  private async openWindow(profile: string, spec: WindowSpec): Promise<RunningBrowserSession> {
+    let chrome = this.chromes.get(profile);
+    let tab: WindowTab | undefined;
+    if (!chrome) {
+      const pending = this.launching.get(profile);
+      if (pending) {
+        chrome = await pending;
+      } else {
+        const launch = this.launchChrome(profile);
+        const launched = launch.then((result) => result.chrome);
+        launched.catch(() => {});
+        this.launching.set(profile, launched);
+        try {
+          ({ chrome, tab } = await launch);
+        } finally {
+          this.launching.delete(profile);
+        }
+      }
+    }
+    tab ??= await this.createWindowTab(chrome);
+    try {
+      return await this.attachWindow(chrome, tab, spec);
+    } catch (error) {
+      if (chrome.browsers.size === 0) await this.stopChrome(chrome);
+      else await chrome.browserCdp.command("Target.closeTarget", { targetId: tab.id }).catch(() => {});
+      throw error;
+    }
+  }
+
+  private async attachWindow(chrome: ChromeInstance, tab: WindowTab, spec: WindowSpec): Promise<RunningBrowserSession> {
+    const cdp = await CdpClient.connect(`ws://127.0.0.1:${chrome.port}/devtools/page/${tab.id}`);
+    const frameTargets = new Set<string>();
+    const session: RunningBrowserSession = {
+      id: spec.id,
+      chrome,
+      windowId: tab.windowId,
+      label: spec.label,
+      ...(spec.sessionId ? { sessionId: spec.sessionId } : {}),
+      url: "about:blank",
+      title: "",
+      cdp,
+      tabs: new Map([[tab.id, { id: tab.id, url: "about:blank", title: "" }]]),
+      activeTab: tab.id,
+      blockedWaiters: new Set<() => void>(),
+      width: spec.width,
+      height: spec.height,
+      lastUsedAt: new Date().toISOString(),
+      frameTargets,
+      refFrames: new Map<string, PageFrame>(),
+      frameContexts: new Map<string, number>(),
+      inputQueue: Promise.resolve(),
+      lastInputAt: 0,
+    };
+    try {
+      await this.setupPage(session, cdp, frameTargets);
+    } catch (error) {
+      cdp.close();
+      throw error;
+    }
+    // A window Chrome opens for us starts small; the viewport is emulated, but keep it whole.
+    await chrome.browserCdp.command("Browser.setWindowBounds", {
+      windowId: tab.windowId,
+      bounds: { width: DISPLAY_WIDTH, height: DISPLAY_HEIGHT },
+    }).catch(() => {});
+    chrome.browsers.add(session);
+    this.sessions.set(session.id, session);
+    this.emitTabs(session);
+    return session;
+  }
+
+  /** Start Chrome on [profile]. Its first window is returned for the caller to take. */
+  private async launchChrome(profile: string): Promise<{ chrome: ChromeInstance; tab: WindowTab }> {
     const browserExecutable = resolveBrowserBinary();
     const root = browserDataDir(browserExecutable);
     const profileDir = path.join(root, profile);
@@ -1488,6 +1722,10 @@ export class BrowserSessionManager {
       "--disable-background-networking",
       "--disable-background-mode",
       "--disable-component-update",
+      // Windows cover each other, and every one may be streaming to a viewer.
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-background-timer-throttling",
       "--disable-features=Translate,OptimizationHints,msEdgeFirstRunExperience",
       "--password-store=basic",
       "about:blank",
@@ -1497,63 +1735,39 @@ export class BrowserSessionManager {
       env: display.env,
     });
 
+    let browserCdp: CdpClient | undefined;
     try {
       const targets = await this.waitForPageTarget(debuggingPort, processHandle);
       const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl && target.id);
-      if (!page?.webSocketDebuggerUrl || !page.id) throw new Error("Browser did not create an interactive page.");
+      if (!page?.id) throw new Error("Browser did not create an interactive page.");
       const version = z.object({ webSocketDebuggerUrl: z.string() })
         .parse(await (await fetch(`http://127.0.0.1:${debuggingPort}/json/version`)).json());
-      const browserCdp = await CdpClient.connect(version.webSocketDebuggerUrl);
-      const cdp = await CdpClient.connect(page.webSocketDebuggerUrl);
-      const frameTargets = new Set<string>();
-      const session: RunningBrowserSession = {
+      browserCdp = await CdpClient.connect(version.webSocketDebuggerUrl);
+      const chrome: ChromeInstance = {
         profile,
-        label: boundedLabel(labelValue, profile),
-        ...(sessionId ? { sessionId } : {}),
-        url,
-        title: "",
         profileDir,
         process: processHandle,
         ...(display.process ? { displayProcess: display.process } : {}),
         port: debuggingPort,
-        cdp,
         browserCdp,
-        tabs: new Map([[page.id, { id: page.id, url: "about:blank", title: "" }]]),
-        activeTab: page.id,
-        blockedWaiters: new Set<() => void>(),
-        width: DEFAULT_WIDTH,
-        height: DEFAULT_HEIGHT,
-        lastUsedAt: new Date().toISOString(),
-        frameTargets,
-        refFrames: new Map<string, PageFrame>(),
-        frameContexts: new Map<string, number>(),
-        inputQueue: Promise.resolve(),
-        lastInputAt: 0,
+        browsers: new Set<RunningBrowserSession>(),
+        claimed: new Set([page.id]),
+        creating: 0,
       };
-      processHandle.once("exit", () => {
-        const current = this.sessions.get(profile);
-        if (current === session) {
-          this.stopWatch(current);
-          current.cdp.close();
-          current.browserCdp.close();
-          current.displayProcess?.kill("SIGTERM");
-          this.sessions.delete(profile);
-        }
-      });
-      await this.setupPage(session, cdp, frameTargets);
-      await this.trackTabs(session);
-      this.sessions.set(profile, session);
-      await this.dispatchInput(session, "Page.navigate", { url });
-      this.touch(session);
-      await wait(500);
-      return await this.summary(session);
+      processHandle.once("exit", () => this.forgetChrome(chrome));
+      const tab = { id: page.id, windowId: await this.windowOf(chrome, page.id) };
+      await this.trackTargets(chrome);
+      this.chromes.set(profile, chrome);
+      return { chrome, tab };
     } catch (error) {
+      browserCdp?.close();
       await stopChildProcess(processHandle);
       await stopChildProcess(display.process);
       throw error;
     }
   }
 
+  /** Saved profiles, running or not. */
   list(): BrowserSessionSummary[] {
     const root = browserDataDir();
     const saved = new Set<string>();
@@ -1562,25 +1776,15 @@ export class BrowserSessionManager {
         if (entry.isDirectory() && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(entry.name)) saved.add(entry.name);
       }
     } catch {}
-    for (const profile of this.sessions.keys()) saved.add(profile);
-    return [...saved].sort().map((profile) => {
-      const running = this.sessions.get(profile);
-      return running
-        ? {
-            profile,
-            label: running.label,
-            running: true,
-            sessionId: running.sessionId,
-            url: running.url,
-            lastUsedAt: running.lastUsedAt,
-          }
-        : { profile, label: profile, running: false };
-    });
+    for (const profile of this.chromes.keys()) saved.add(profile);
+    return [...saved].sort().map((profile) => ({ profile, label: profile, running: this.chromes.has(profile) }));
   }
 
+  /** Open browser windows. */
   active(): BrowserSessionSummary[] {
     return [...this.sessions.values()].map((session) => ({
-      profile: session.profile,
+      profile: session.id,
+      browserProfile: session.chrome.profile,
       label: session.label,
       running: true,
       sessionId: session.sessionId,
@@ -1589,14 +1793,26 @@ export class BrowserSessionManager {
     }));
   }
 
-  async status(profileValue: string): Promise<BrowserSessionSummary> {
-    const profile = normalizeBrowserProfile(profileValue);
-    const session = this.require(profile);
-    return await this.summary(session);
+  /**
+   * The browser [value] names for chat [sessionId]. One of the chat's own
+   * browsers wins, by ID and then by profile, so the agent can keep using a
+   * profile name after opening it. Otherwise any browser, the same way.
+   */
+  resolve(value: string, sessionId?: string): string {
+    const name = value.trim().toLowerCase();
+    const all = [...this.sessions.values()];
+    const pick = (browsers: RunningBrowserSession[]) => browsers.find((session) => session.id === name)
+      ?? latestBrowser(browsers.filter((session) => session.chrome.profile === name));
+    const own = sessionId ? pick(all.filter((session) => session.sessionId === sessionId)) : undefined;
+    return (own ?? pick(all))?.id ?? name;
   }
 
-  async frame(profileValue: string): Promise<BrowserFrame> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async status(browserId: string): Promise<BrowserSessionSummary> {
+    return await this.summary(this.require(browserId));
+  }
+
+  async frame(browserId: string): Promise<BrowserFrame> {
+    const session = this.require(browserId);
     this.touch(session);
     const [capture, location, title] = await Promise.all([
       session.cdp.command("Page.captureScreenshot", {
@@ -1614,7 +1830,7 @@ export class BrowserSessionManager {
     session.url = url;
     session.title = readStringResult(title) || session.title;
     return {
-      profile: session.profile,
+      profile: session.id,
       imageBase64,
       mimeType: "image/jpeg",
       width: session.width,
@@ -1629,8 +1845,8 @@ export class BrowserSessionManager {
    * order, so a fast typist's keys and a drag's moves never overtake each
    * other.
    */
-  async phoneInput(profileValue: string, input: BrowserPhoneInput): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async phoneInput(browserId: string, input: BrowserPhoneInput): Promise<void> {
+    const session = this.require(browserId);
     this.touch(session);
     session.lastInputAt = Date.now();
     await this.enqueue(session, () => this.applyInput(session, input));
@@ -1723,8 +1939,8 @@ export class BrowserSessionManager {
    * Whether the focused element takes typing, so a phone viewer can open
    * its keyboard when a page field gets focus and close it otherwise.
    */
-  async focusState(profileValue: string): Promise<BrowserFocusState> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async focusState(browserId: string): Promise<BrowserFocusState> {
+    const session = this.require(browserId);
     // Read focus only after the input that may have moved it has run.
     await session.inputQueue;
     let kind = readStringResult(await session.cdp.command("Runtime.evaluate", {
@@ -1763,13 +1979,13 @@ export class BrowserSessionManager {
    * Lists the page's text and visible controls, including those inside
    * embedded frames, and tags each control with a ref for click and type.
    */
-  async snapshot(profileValue: string): Promise<BrowserSnapshot> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async snapshot(browserId: string): Promise<BrowserSnapshot> {
+    const session = this.require(browserId);
     this.touch(session);
     const dialog = this.openDialog(session);
     if (dialog) {
       return {
-        profile: session.profile,
+        profile: session.id,
         url: session.url,
         title: session.title,
         text: `The page is showing a ${dialog.dialogType} dialog and is paused until it is answered: "${dialog.message}". `
@@ -1820,25 +2036,25 @@ export class BrowserSessionManager {
       }
     }
     session.url = url || session.url;
-    return { profile: session.profile, url, title, text: text.slice(0, SNAPSHOT_TOTAL_TEXT), elements, frames: listedFrames };
+    return { profile: session.id, url, title, text: text.slice(0, SNAPSHOT_TOTAL_TEXT), elements, frames: listedFrames };
   }
 
-  async click(profileValue: string, ref: string): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async click(browserId: string, ref: string): Promise<void> {
+    const session = this.require(browserId);
     this.assertNoDialog(session);
     const point = await this.elementPoint(session, ref, false);
-    await this.phoneInput(session.profile, { action: "tap", x: point.x, y: point.y });
+    await this.phoneInput(session.id, { action: "tap", x: point.x, y: point.y });
   }
 
-  async type(profileValue: string, ref: string, text: string): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async type(browserId: string, ref: string, text: string): Promise<void> {
+    const session = this.require(browserId);
     if (text.length > 16_384) throw new Error("Browser text input is too large.");
     this.assertNoDialog(session);
     const point = await this.elementPoint(session, ref, true);
     // Script focus inside a cross-origin frame does not move keyboard focus to that
     // frame, so a real tap does it. The page's own fields only need the script focus.
     if (point.frame) {
-      await this.phoneInput(session.profile, { action: "tap", x: point.x, y: point.y });
+      await this.phoneInput(session.id, { action: "tap", x: point.x, y: point.y });
       await this.waitForFocus(session, point.frame, ref);
     }
     await this.pressKey(session, "CTRL+A");
@@ -1846,13 +2062,13 @@ export class BrowserSessionManager {
   }
 
   /** Taps a point in the viewport, for elements a snapshot cannot list. */
-  async tap(profileValue: string, x: number, y: number): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async tap(browserId: string, x: number, y: number): Promise<void> {
+    const session = this.require(browserId);
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > session.width || y > session.height) {
       throw new Error(`Tap coordinates must be inside the ${session.width}x${session.height} viewport.`);
     }
     this.assertNoDialog(session);
-    await this.phoneInput(session.profile, { action: "tap", x, y });
+    await this.phoneInput(session.id, { action: "tap", x, y });
   }
 
   /**
@@ -2051,23 +2267,23 @@ export class BrowserSessionManager {
     throw new Error("The browser field did not take focus. Refresh the snapshot and retry.");
   }
 
-  async navigate(profileValue: string, rawUrl: string): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async navigate(browserId: string, rawUrl: string): Promise<void> {
+    const session = this.require(browserId);
     session.url = normalizeBrowserUrl(rawUrl);
-    await this.phoneInput(profileValue, { action: "navigate", url: rawUrl });
+    await this.phoneInput(browserId, { action: "navigate", url: rawUrl });
   }
 
-  async key(profileValue: string, key: string): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async key(browserId: string, key: string): Promise<void> {
+    const session = this.require(browserId);
     await this.pressKey(session, key);
   }
 
-  async scroll(profileValue: string, deltaY: number): Promise<void> {
-    await this.phoneInput(profileValue, { action: "scroll", deltaY });
+  async scroll(browserId: string, deltaY: number): Promise<void> {
+    await this.phoneInput(browserId, { action: "scroll", deltaY });
   }
 
-  async readClipboard(profileValue: string): Promise<string> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async readClipboard(browserId: string): Promise<string> {
+    const session = this.require(browserId);
     await this.grantClipboardAccess(session);
     const result = await session.cdp.command("Runtime.evaluate", {
       expression: "navigator.clipboard.readText()",
@@ -2086,8 +2302,8 @@ export class BrowserSessionManager {
    * Runs in the input queue, so a viewer's paste shortcut sent right after
    * this lands on the new clipboard contents.
    */
-  async writeClipboard(profileValue: string, text: string): Promise<void> {
-    const session = this.require(normalizeBrowserProfile(profileValue));
+  async writeClipboard(browserId: string, text: string): Promise<void> {
+    const session = this.require(browserId);
     if (text.length > 65_536) throw new Error("Browser clipboard text is too large.");
     await this.enqueue(session, () => this.writeClipboardNow(session, text));
   }
@@ -2106,23 +2322,28 @@ export class BrowserSessionManager {
     this.touch(session);
   }
 
-  /** Browsers stay open until the agent or a viewer closes them, or the server stops. */
-  async close(profileValue: string): Promise<void> {
-    const profile = normalizeBrowserProfile(profileValue);
-    const session = this.sessions.get(profile);
+  /**
+   * Close one browser window. Browsers stay open until the agent or a viewer
+   * closes them, or the server stops. Chrome exits with its last window.
+   */
+  async close(browserId: string): Promise<void> {
+    const session = this.sessions.get(browserId);
     if (!session) return;
-    this.sessions.delete(profile);
-    this.stopWatch(session);
-    session.cdp.close();
-    session.browserCdp.close();
-    await stopChildProcess(session.process);
-    await stopChildProcess(session.displayProcess);
-    fs.rmSync(path.join(session.profileDir, "SocketAgent Uploads"), { recursive: true, force: true });
+    const chrome = session.chrome;
+    this.detach(session);
+    if (chrome.browsers.size === 0) {
+      await this.stopChrome(chrome);
+      return;
+    }
+    await Promise.all([...session.tabs.keys()].map((targetId) =>
+      chrome.browserCdp.command("Target.closeTarget", { targetId }).catch(() => {})));
   }
 
+  /** Close every window on the profile and delete it, sign-ins and all. */
   async clear(profileValue: string): Promise<void> {
     const profile = normalizeBrowserProfile(profileValue);
-    await this.close(profile);
+    const chrome = this.chromes.get(profile) ?? await this.launching.get(profile)?.catch(() => undefined);
+    if (chrome) await this.stopChrome(chrome);
     const root = browserDataDir();
     const target = path.join(root, profile);
     if (path.dirname(target) !== root) throw new Error("Browser profile path is invalid.");
@@ -2135,12 +2356,129 @@ export class BrowserSessionManager {
   }
 
   async closeAll(): Promise<void> {
-    await Promise.all([...this.sessions.keys()].map((profile) => this.close(profile)));
+    await Promise.all([...this.chromes.values()].map((chrome) => this.stopChrome(chrome)));
   }
 
-  private require(profile: string): RunningBrowserSession {
-    const session = this.sessions.get(profile);
-    if (!session) throw new Error(`Browser profile ${profile} is not running. Open it first.`);
+  /**
+   * Move a browser to another profile. Its window closes and one opens on
+   * [profileValue] at the same page, keeping the browser's ID, chat, and view
+   * size. Only the tab on show carries over.
+   */
+  async switchProfile(browserId: string, profileValue: string): Promise<BrowserSessionSummary> {
+    const session = this.require(browserId);
+    const profile = normalizeBrowserProfile(profileValue);
+    const from = session.chrome.profile;
+    if (from === profile) return await this.summary(session);
+    const spec = await this.specOf(session);
+    await this.close(browserId);
+    try {
+      return await this.reopen(profile, { ...spec, label: spec.label === from ? profile : spec.label });
+    } catch (error) {
+      await this.reopen(from, spec).catch(() => {});
+      throw error;
+    }
+  }
+
+  /**
+   * Copy the browser's profile to [nameValue] and move the browser onto the
+   * copy. Chrome locks a profile's files while it runs, so every window on
+   * the profile closes for the copy and reopens at its page afterwards.
+   */
+  async saveProfileAs(browserId: string, nameValue: string): Promise<BrowserSessionSummary> {
+    const session = this.require(browserId);
+    const name = normalizeBrowserProfile(nameValue);
+    const chrome = session.chrome;
+    const root = browserDataDir();
+    const target = path.join(root, name);
+    if (path.dirname(target) !== root) throw new Error("Browser profile path is invalid.");
+    if (fs.existsSync(target) || this.chromes.has(name)) throw new Error(`A profile named ${name} already exists.`);
+    const windows = await Promise.all([...chrome.browsers].map((browser) => this.specOf(browser)));
+    await this.stopChrome(chrome);
+    let copied = false;
+    try {
+      await copyProfile(chrome.profileDir, target);
+      copied = true;
+    } finally {
+      // Reopen every window, the saving one on the copy if it was made.
+      for (const spec of windows) {
+        const moving = copied && spec.id === browserId;
+        const reopened = this.reopen(moving ? name : chrome.profile, {
+          ...spec,
+          label: moving && spec.label === chrome.profile ? name : spec.label,
+        });
+        if (spec.id === browserId) await reopened;
+        else await reopened.catch((error: unknown) => console.warn(`[BrowserSession] ${spec.id} did not reopen: ${errorMessage(error)}`));
+      }
+    }
+    return await this.status(browserId);
+  }
+
+  private async specOf(session: RunningBrowserSession): Promise<WindowSpec> {
+    await this.refreshLocation(session).catch(() => {});
+    return {
+      id: session.id,
+      label: session.label,
+      ...(session.sessionId ? { sessionId: session.sessionId } : {}),
+      width: session.width,
+      height: session.height,
+      url: session.url,
+      ...(session.watch ? { watchUntil: session.watch.expiresAt } : {}),
+    };
+  }
+
+  /** Open [spec]'s browser again on [profile], at its page and with its live view if one was running. */
+  private async reopen(profile: string, spec: WindowSpec): Promise<BrowserSessionSummary> {
+    const session = await this.openWindow(profile, spec);
+    if (/^https?:/.test(spec.url)) {
+      session.url = spec.url;
+      await this.dispatchInput(session, "Page.navigate", { url: spec.url });
+    }
+    const watchFor = (spec.watchUntil ?? 0) - Date.now();
+    if (watchFor > 0) await this.watch(session.id, watchFor).catch(() => {});
+    this.touch(session);
+    return await this.summary(session);
+  }
+
+  /** Forget a window without touching Chrome. */
+  private detach(session: RunningBrowserSession): void {
+    if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+    session.chrome.browsers.delete(session);
+    this.stopWatch(session);
+    this.closePrompt(session);
+    for (const release of session.blockedWaiters) release();
+    session.blockedWaiters.clear();
+    session.cdp.close();
+  }
+
+  /** Forget Chrome and its windows once it has gone. */
+  private forgetChrome(chrome: ChromeInstance): void {
+    for (const session of [...chrome.browsers]) this.detach(session);
+    if (this.chromes.get(chrome.profile) === chrome) this.chromes.delete(chrome.profile);
+    chrome.browserCdp.close();
+    chrome.displayProcess?.kill("SIGTERM");
+  }
+
+  /**
+   * Quit Chrome. Asking it first lets it write its cookies, so a sign-in made
+   * moments ago survives; Windows would otherwise lose them to a hard stop.
+   */
+  private async stopChrome(chrome: ChromeInstance): Promise<void> {
+    const exited = chrome.process.exitCode !== null
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => chrome.process.once("exit", () => resolve()));
+    await Promise.race([
+      chrome.browserCdp.command("Browser.close").then(() => exited),
+      wait(5_000),
+    ]).catch(() => {});
+    this.forgetChrome(chrome);
+    await stopChildProcess(chrome.process);
+    await stopChildProcess(chrome.displayProcess);
+    fs.rmSync(path.join(chrome.profileDir, "SocketAgent Uploads"), { recursive: true, force: true });
+  }
+
+  private require(browserId: string): RunningBrowserSession {
+    const session = this.sessions.get(browserId);
+    if (!session) throw new Error(`Browser ${browserId} is not running. Open it first.`);
     return session;
   }
 
@@ -2152,7 +2490,8 @@ export class BrowserSessionManager {
     await this.refreshLocation(session);
     const url = session.url;
     return {
-      profile: session.profile,
+      profile: session.id,
+      browserProfile: session.chrome.profile,
       label: session.label,
       running: true,
       sessionId: session.sessionId,

@@ -168,22 +168,56 @@ export interface BrowserWatchMessage {
   watching: boolean;
 }
 
-/** Close the profile's browser. Its sign-ins stay saved. Servers advertise this with `browserSessions.close`. */
+/**
+ * Close one browser window. Its profile's sign-ins stay saved. Servers
+ * advertise this with `browserSessions.close`.
+ *
+ * In browser messages, `profile` is the browser's ID. A profile's first
+ * window uses the profile's name; later ones add a suffix such as `~2`.
+ */
 export interface BrowserSessionCloseMessage {
   type: "browser_session_close";
   profile: string;
 }
 
 /**
- * Open a browser for a chat session without the agent. Reusing a saved profile
- * keeps its sign-ins; a new name creates one. Servers advertise this with
- * `browserSessions.start` and answer with `browser_session_state`.
+ * Open a new browser window for a chat session without the agent, on the
+ * Chrome profile named `profile`. Reusing a saved profile keeps its sign-ins;
+ * a new name creates one. Servers advertise this with `browserSessions.start`
+ * and answer with `browser_session_state`, or `browser_session_error`,
+ * carrying `requestId`.
  */
 export interface BrowserSessionStartMessage {
   type: "browser_session_start";
   sessionId: string;
   profile: string;
   url: string;
+  requestId?: string;
+}
+
+/**
+ * Move browser `profile` onto the saved profile `to`, at the same page. The
+ * browser keeps its ID. Servers advertise this with `browserSessions.profiles`
+ * and answer like `browser_session_start`.
+ */
+export interface BrowserProfileSwitchMessage {
+  type: "browser_profile_switch";
+  profile: string;
+  to: string;
+  requestId?: string;
+}
+
+/**
+ * Copy browser `profile`'s Chrome profile to a new profile `name` and move the
+ * browser onto the copy. Every window on the source profile reopens. Servers
+ * advertise this with `browserSessions.profiles` and answer like
+ * `browser_session_start`.
+ */
+export interface BrowserProfileSaveMessage {
+  type: "browser_profile_save";
+  profile: string;
+  name: string;
+  requestId?: string;
 }
 
 /** List saved browser profiles. Answered with `browser_profiles`. */
@@ -1264,6 +1298,8 @@ export type ClientMessage = { commandId?: string } & (
   | BrowserSessionStartMessage
   | BrowserProfilesRequestMessage
   | BrowserProfileDeleteMessage
+  | BrowserProfileSwitchMessage
+  | BrowserProfileSaveMessage
   | BrowserFrameAckMessage
   | BrowserPromptResponseMessage
   | BrowserViewportMessage
@@ -3128,7 +3164,10 @@ export interface SessionMemoryErrorServerMessage {
 
 export interface BrowserSessionOpenServerMessage {
   type: "browser_session_open";
+  /** The browser's ID. */
   profile: string;
+  /** The Chrome profile the browser runs in. Absent from older servers, where it is `profile`. */
+  browserProfile?: string;
   label: string;
   url: string;
   width: number;
@@ -3139,7 +3178,12 @@ export interface BrowserSessionOpenServerMessage {
 
 export interface BrowserSessionStateServerMessage {
   type: "browser_session_state";
+  /** The browser's ID. */
   profile: string;
+  /** The Chrome profile the browser runs in. Absent from older servers, where it is `profile`. */
+  browserProfile?: string;
+  /** Echoes the start, switch, or save that produced this state. */
+  requestId?: string;
   label: string;
   url: string;
   width: number;
@@ -3149,7 +3193,7 @@ export interface BrowserSessionStateServerMessage {
   runtimeRequired?: boolean;
 }
 
-/** Saved browser profiles. A running one names the chat session it belongs to. */
+/** Saved browser profiles, and whether Chrome is running on each. */
 export interface BrowserProfilesServerMessage {
   type: "browser_profiles";
   profiles: { profile: string; label: string; running: boolean; sessionId?: string }[];
@@ -3187,6 +3231,8 @@ export interface BrowserSessionErrorServerMessage {
   type: "browser_session_error";
   profile: string;
   message: string;
+  /** Set when the error answers a start, switch, or save. */
+  requestId?: string;
 }
 
 /**

@@ -139,8 +139,11 @@ function normalizeEnvHint(label: string, envHint?: string): string {
   return normalized || "SOCKETAGENT_SECRET";
 }
 
+/** A bare email address is an identifier, not a credential, so redacting it would hide it everywhere it appears. */
+const BARE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 function registerSecretValue(value: string): void {
-  if (value.length >= 4) secretValues.add(value);
+  if (value.length >= 4 && !BARE_EMAIL.test(value.trim())) secretValues.add(value);
 }
 
 function loadExistingSecretsForRedaction(): void {

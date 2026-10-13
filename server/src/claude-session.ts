@@ -3565,7 +3565,7 @@ export class ClaudeSession {
           ),
           tool(
             "RequestSecureInput",
-            "Ask the user to enter a credential, API key, token, or other secret through a secure app card. The secret is saved to a local 0600 file on the server, and this tool returns only the file path and metadata. Use this instead of asking the user to paste secrets into chat.",
+            "Ask the user to enter a credential, API key, token, or other secret through a secure app card. The secret is saved to a local 0600 file on the server, and this tool returns only the file path and metadata. Use this instead of asking the user to paste secrets into chat. Not for plain identifiers such as email addresses or usernames; keep those in normal config.",
             {
               label: z.string().describe("Short label for the secret, e.g. OPENAI_API_KEY or GitHub token"),
               reason: z.string().optional().describe("Why you need this secret, shown to the user"),

@@ -17,6 +17,7 @@ const {
   completeSecureInputRequestWithSavedSecret,
   deleteSecureInput,
   replaceSecureInput,
+  redactSecrets,
 } = require("#server/secure-input-store");
 const {
   appendHistory,
@@ -265,4 +266,13 @@ test("a retried save with the same request ID returns the first secret", () => {
     1,
   );
   assert.notEqual(saveSecureInput({ ...args, clientRequestId: "other" }).secretId, first.secretId);
+});
+
+test("redacts saved credentials but not a saved email address", () => {
+  saveSecureInput({ label: "API_TOKEN", value: "tok-redact-me-123", scope: "global" });
+  saveSecureInput({ label: "ADMIN_EMAIL", value: "admin@example.com", scope: "global" });
+  assert.equal(
+    redactSecrets("token tok-redact-me-123 for admin@example.com"),
+    "token [secure-input:redacted] for admin@example.com",
+  );
 });

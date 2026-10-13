@@ -2921,6 +2921,7 @@ export function getMissedMessages(
                 entries.push({
                   role: "user",
                   content: block.text,
+                  ...(typeof msg.uuid === "string" && msg.uuid ? { uuid: msg.uuid } : {}),
                   timestamp: msg.timestamp,
                 });
               }
@@ -2930,6 +2931,7 @@ export function getMissedMessages(
           entries.push({
             role: "user",
             content,
+            ...(typeof msg.uuid === "string" && msg.uuid ? { uuid: msg.uuid } : {}),
             timestamp: msg.timestamp,
           });
         }
@@ -2940,6 +2942,21 @@ export function getMissedMessages(
   }
 
   return entries;
+}
+
+/**
+ * Claude transcript entries to append to an existing history. SocketAgent
+ * records a prompt a few milliseconds before Claude writes it to its JSONL, so
+ * a timestamp cutoff alone reads that prompt back as missed and the chat shows
+ * it twice. Prompts whose UUID history already holds are skipped.
+ */
+export function getUnrecordedClaudeMessages(
+  sessionId: string,
+  cwd: string,
+  afterTimestamp: string,
+): HistoryEntry[] {
+  return getMissedMessages(sessionId, cwd, afterTimestamp).filter((entry) =>
+    entry.role !== "user" || !entry.uuid || !hasPersistedUserMessage(sessionId, entry.uuid));
 }
 
 // ── SDK event history (separate JSONL files per session) ──

@@ -3007,6 +3007,9 @@
             "publicKey": {
               "type": "string"
             },
+            "keepToken": {
+              "type": "boolean"
+            },
             "commandId": {
               "type": "string"
             }

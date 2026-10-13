@@ -9850,7 +9850,7 @@ function createConnectionHandler(
         }
         // Rotate first: the registry change below broadcasts capabilities,
         // and that one broadcast must already carry the new direct token.
-        if (entry.kind === "device") rotateAuthToken();
+        if (entry.kind === "device" && msg.keepToken !== true) rotateAuthToken();
         deviceRegistry.revoke(publicKey);
         clearDevicePending(publicKey);
         if (entry.kind === "device") {

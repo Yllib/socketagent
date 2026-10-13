@@ -1351,11 +1351,14 @@ export interface DeviceDenyMessage {
   publicKey: string;
 }
 
-/** Revokes the key on every lane. For device keys this also rotates AUTH_TOKEN. */
+/** Revokes the key on every lane. For device keys this also rotates AUTH_TOKEN,
+ *  unless `keepToken` is set: the app forgets a device whose install is gone,
+ *  so nothing that knows the token is left to shut out. */
 export interface DeviceRemoveMessage {
   type: "device_remove";
   requestId?: string;
   publicKey: string;
+  keepToken?: boolean;
 }
 
 /** Learning mode becomes enforced. Replies with device_list_result. */

@@ -114,7 +114,7 @@ minutes, along with its `device_pending` notice (send `device_pending_cleared`).
 `device_remove`:
 - moves the key to `revoked` and closes its connections on all lanes
 - rotates `AUTH_TOKEN`, so a removed device can't re-enroll with the token it
-  knows. The new token is written to `.env`, used in memory from then on, and
+  knows. `keepToken: true` skips the rotation, for Forget below. The new token is written to `.env`, used in memory from then on, and
   pushed to open enrolled peers through the existing `direct.token` field in
   `server_capabilities`.
 - Before building rotation, audit every reader of `AUTH_TOKEN`: loopback HTTP
@@ -266,6 +266,19 @@ account.
    Google account can read the new key. To cut it off completely, they also
    remove it from their Google account. The computers refuse its device key
    either way.
+
+### Forgetting a device
+
+A reinstall makes a new device key, so the old install stays listed. Forget
+drops it without the cost of Remove:
+1. Send `device_remove` with `keepToken: true` to every reachable computer.
+2. Move the key from `devices` to `revokedDevices` with `forgotten: true`, and
+   sync as usual. The account key stays the same and Google isn't needed.
+3. Devices that catch up later also send `keepToken: true` for a forgotten
+   key.
+
+Forget is only safe when nothing holds the old key or the computers' tokens.
+For a lost device that may still have the app, use Remove.
 
 The relay's rotation record (`rotation` on PUT) isn't used in this design.
 

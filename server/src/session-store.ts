@@ -44,6 +44,7 @@ import {
   hydrateHistoryEntry,
   toolOutputSessionDir,
 } from "./history-storage";
+import { claudeConfigDir } from "./backend-config-files";
 import {
   TranscriptDatabase,
   type TranscriptLegacyFingerprint,
@@ -1746,11 +1747,10 @@ const _backfilledSessions = new Set<string>();
 
 /**
  * Locate the Claude Code JSONL transcript for a session without needing the cwd.
- * Scans ~/.claude/projects/* for `<sessionId>.jsonl` and returns the first match.
+ * Scans <Claude config dir>/projects/* for `<sessionId>.jsonl` and returns the first match.
  */
 function findJsonlForSession(sessionId: string): string | undefined {
-  const homeDir = process.env.HOME || os.homedir();
-  const projectsRoot = path.join(homeDir, ".claude", "projects");
+  const projectsRoot = path.join(claudeConfigDir(), "projects");
   if (!fs.existsSync(projectsRoot)) return undefined;
   let projects: string[];
   try { projects = fs.readdirSync(projectsRoot); } catch { return undefined; }
@@ -1759,6 +1759,14 @@ function findJsonlForSession(sessionId: string): string | undefined {
     if (fs.existsSync(p)) return p;
   }
   return undefined;
+}
+
+/**
+ * Claude Code deletes transcripts older than its cleanupPeriodDays (30 by
+ * default). Resuming one of those fails with "No conversation found".
+ */
+export function hasClaudeTranscript(sessionId: string): boolean {
+  return findJsonlForSession(sessionId) !== undefined;
 }
 
 /** Extract plain text from a Claude Code JSONL user message's content field. */

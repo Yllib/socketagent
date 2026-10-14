@@ -419,7 +419,11 @@ function recentRunContext(sessionId: string, limit: number): string[] {
   });
 }
 
-export function buildSessionMemoryContinuityContext(sessionId: string, cwd: string): string {
+export function buildSessionMemoryContinuityContext(
+  sessionId: string,
+  cwd: string,
+  reason = "This is a user-requested SocketAgent context rollover inside the same visible session.",
+): string {
   const state = readState(sessionId);
   const kindOrder: SessionMemoryKind[] = [
     "active_work",
@@ -442,7 +446,7 @@ export function buildSessionMemoryContinuityContext(sessionId: string, cwd: stri
   const runs = recentRunContext(sessionId, state.settings.recentRuns);
   const epoch = state.epochs.at(-1);
   return [
-    "This is a user-requested SocketAgent context rollover inside the same visible session.",
+    reason,
     "Treat the current user message as a continuation, not a new project.",
     `Project directory: ${cwd}`,
     `Previous native thread: ${sessionId}`,

@@ -12,6 +12,7 @@ const {
   getMissedMessages,
   getJsonlPath,
   getUnrecordedClaudeMessages,
+  hasClaudeTranscript,
   recordUserPrompt,
 } = require("#server/session-store");
 const { RESTART_CONTINUATION_PROMPT } = require("#server/restart-recovery");
@@ -81,4 +82,11 @@ test("a prompt already in history is not read back from the transcript", (t) => 
   const added = getUnrecordedClaudeMessages(SESSION_ID, CWD, "2026-10-13T01:57:56.960Z");
 
   assert.deepEqual(added.map((e) => e.content), ["typed in the terminal"]);
+});
+
+test("a transcript Claude Code deleted is reported missing", () => {
+  const p = writeTranscript([userMessage("hi", "2026-01-01T00:00:00.000Z")]);
+  assert.equal(hasClaudeTranscript(SESSION_ID), true);
+  fs.rmSync(p);
+  assert.equal(hasClaudeTranscript(SESSION_ID), false);
 });

@@ -43,7 +43,7 @@ import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummary } from "./session-list-snapshot";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
@@ -5635,6 +5635,26 @@ function createConnectionHandler(
           console.log(`[Clear] Session ${resumeId} was cleared, starting fresh (no resume)`);
           clearedSessions.delete(resumeId);
           activeSession.replacesSessionId = resumeId;
+          resumeId = undefined;
+        }
+
+        // Claude Code has deleted this transcript, so continue in a new Claude
+        // thread seeded from SocketAgent's own history. The visible session
+        // keeps its ID and history, like a cleared context.
+        if (resumeId && resumeSessionInfo?.backend === "claude" && !hasClaudeTranscript(resumeId)) {
+          console.log(`[Resume] Claude transcript for ${resumeId} is gone, continuing in a new thread`);
+          activeSession.setPendingTransferContext(buildSessionMemoryContinuityContext(
+            resumeId,
+            resumeSessionInfo.cwd,
+            "Claude Code deleted this session's native transcript, so SocketAgent started a new native thread inside the same visible session.",
+          ));
+          activeSession.replacesSessionId = resumeId;
+          appendHistory(resumeId, {
+            role: "notification",
+            content: "Claude Code had deleted this chat's transcript, so it continues in a new Claude thread with a summary of recent turns. Full history stays searchable.",
+            status: "info",
+            timestamp: new Date().toISOString(),
+          });
           resumeId = undefined;
         }
 

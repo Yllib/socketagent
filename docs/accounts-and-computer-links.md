@@ -207,22 +207,34 @@ rename.
 
 ```jsonc
 {
-  "v": 1,
+  "v": 2,
   "updatedAt": "<iso>", "updatedBy": "<device name>",
   "computers": [ /* ServerConfig.toJson() minus local-only fields */ ],
   "removedComputers": ["<connectionIdentity>"],   // tombstones so merges don't resurrect
   "subscription": { "token": "...", "email": "..." },
   "devices": [{ "publicKey": "<X25519 b64>", "name": "...", "platform": "...", "addedAt": "<iso>" }],
   "revokedDevices": ["<X25519 b64>"],
+  "pinnedSessions": [{ "sessionId": "...", "at": 0 }],  // chat IDs are unique across computers
+  "unpinnedSessions": [{ "key": "<sessionId>", "at": 0 }],
+  "projects": [{ "id": "p_...", "name": "...", "at": 0 }],  // session list groups
+  "removedProjects": [{ "key": "<projectId>", "at": 0 }],
+  "projectMembers": [{ "sessionId": "...", "projectId": "p_...", "at": 0 }],
+  "removedProjectMembers": [{ "key": "<sessionId>", "at": 0 }],
   "preferences": { /* settings that make sense on every device */ }
 }
 ```
 
 Sync is read, merge, then PUT with `expectedVersion`, retried on 409. Merging
-is per item, keyed by connectionIdentity for computers and publicKey for
-devices, with tombstones winning. Each device remembers the highest vault
+is per item, keyed by connectionIdentity for computers, publicKey for
+devices, session ID for pins and project members, and project ID for
+projects, with tombstones winning. Each device remembers the highest vault
 version it has seen. If the relay later serves a lower one, the device warns
 and doesn't write over newer local state.
+
+`v` is the format. Format 2 added pins and projects. Builds that know only 1
+refuse a newer vault and write nothing, so they can't drop fields they don't
+know. From 2 on, a build keeps top-level fields it doesn't recognize and
+writes them back, so a new field doesn't need another bump.
 
 ### Signing in (every device, first or not)
 

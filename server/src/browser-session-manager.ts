@@ -303,6 +303,9 @@ const FRAME_ACK_TIMEOUT_MS = 1_000;
 /** How soon a frame held for a backed-up connection checks again. */
 const CONGESTION_RETRY_MS = 40;
 
+/** The keys the key action takes, for its tool description and errors. */
+export const BROWSER_KEYS = "Enter, Tab, Backspace, Escape, Space, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, or Ctrl+A";
+
 /** Windows virtual key codes, which Chrome needs to run keys like Backspace and arrows. */
 const VIRTUAL_KEY_CODES: Record<string, number> = {
   Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 16, ShiftRight: 16,
@@ -810,6 +813,7 @@ const snapshotFrameSchema = z.object({
   elements: z.array(z.object({
     ref: z.string(), tag: z.string(), role: z.string().optional(), name: z.string(),
     type: z.string().optional(), value: z.string().optional(),
+    options: z.array(z.string()).optional(),
     checked: z.boolean().optional(), disabled: z.boolean(),
   })),
 });
@@ -846,14 +850,24 @@ function snapshotExpression(start: number, limit: number, textLimit: number): st
       const checked = checkedAttr === null
         ? (type === 'checkbox' || type === 'radio' ? Boolean(el.checked) : undefined)
         : checkedAttr === 'true';
+      // A dropdown's innerText is every option, so name it by its label and
+      // show the chosen option's text. The select action takes these labels.
+      const select = el instanceof HTMLSelectElement;
+      const optionLabel = (option) => (option.label || option.text).trim();
+      const name = select
+        ? el.getAttribute('aria-label') || el.getAttribute('title') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('name')
+        : el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name');
       return {
         ref,
         tag: el.tagName.toLowerCase(),
         role: el.getAttribute('role') || undefined,
         ...(checked === undefined ? {} : { checked }),
-        name: String(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || '').trim().slice(0, 240),
+        name: String(name || '').trim().slice(0, 240),
         type: type || undefined,
-        value: secret ? undefined : (typeof el.value === 'string' ? el.value.slice(0, 500) : undefined),
+        value: secret ? undefined
+          : select ? (el.selectedOptions[0] ? optionLabel(el.selectedOptions[0]) : '')
+          : (typeof el.value === 'string' ? el.value.slice(0, 500) : undefined),
+        ...(select ? { options: Array.from(el.options).slice(0, 50).map(optionLabel) } : {}),
         disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')
       };
     });
@@ -875,6 +889,7 @@ function elementExpression(ref: string, forTyping: boolean): string {
   return `(() => {
     const el = document.querySelector('[data-socketagent-ref="${ref}"]');
     if (!el) return '';
+    if (el instanceof HTMLSelectElement) return JSON.stringify({ select: true });
     if (${forTyping}) {
       const hint = [el.getAttribute('type'), el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase();
       if (/(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(hint)) return JSON.stringify({ secret: true });
@@ -885,6 +900,48 @@ function elementExpression(ref: string, forTyping: boolean): string {
     return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
   })()`;
 }
+
+/**
+ * Chooses the option of a tagged dropdown whose label, or failing that whose
+ * value, matches [choice], ignoring case. Fires input and change like a
+ * person choosing it. Clicking a dropdown opens the phone's picker instead,
+ * so agents choose through this.
+ */
+function selectOptionExpression(ref: string, choice: string): string {
+  return `((choice) => {
+    const el = document.querySelector('[data-socketagent-ref="${ref}"]');
+    if (!el) return '';
+    if (!(el instanceof HTMLSelectElement)) return JSON.stringify({ error: 'not_select' });
+    const label = (option) => (option.label || option.text).trim();
+    const options = Array.from(el.options);
+    const want = choice.trim().toLowerCase();
+    const match = options.find((option) => label(option).toLowerCase() === want)
+      || options.find((option) => option.value.toLowerCase() === want);
+    if (!match) return JSON.stringify({ error: 'no_option', options: options.slice(0, 100).map(label) });
+    if (el.disabled || match.disabled) return JSON.stringify({ error: 'disabled' });
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    el.focus();
+    el.selectedIndex = match.index;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return JSON.stringify({ chosen: label(match) });
+  })(${JSON.stringify(choice)})`;
+}
+
+/** A tagged dropdown's chosen option label, read back after the page reacts. */
+function selectedOptionExpression(ref: string): string {
+  return `(() => {
+    const el = document.querySelector('[data-socketagent-ref="${ref}"]');
+    const option = el instanceof HTMLSelectElement ? el.selectedOptions[0] : undefined;
+    return JSON.stringify({ label: option ? (option.label || option.text).trim() : '', value: option ? option.value : '' });
+  })()`;
+}
+
+const selectOptionResultSchema = z.union([
+  z.object({ chosen: z.string() }),
+  z.object({ error: z.enum(["not_select", "disabled"]) }),
+  z.object({ error: z.literal("no_option"), options: z.array(z.string()) }),
+]);
 
 /** A tagged element's center in its frame's viewport, without scrolling. */
 function elementCenterExpression(ref: string): string {
@@ -898,6 +955,7 @@ function elementCenterExpression(ref: string): string {
 
 const elementPointSchema = z.union([
   z.object({ secret: z.literal(true) }),
+  z.object({ select: z.literal(true) }),
   z.object({ x: z.number(), y: z.number() }),
 ]);
 
@@ -2061,6 +2119,39 @@ export class BrowserSessionManager {
     await session.cdp.command("Input.insertText", { text });
   }
 
+  /**
+   * Chooses a dropdown option by its label or value, then reads the dropdown
+   * back once the page has reacted, so a page that rejects the choice fails
+   * here instead of looking like it worked.
+   */
+  async select(browserId: string, ref: string, choice: string): Promise<{ label: string; value: string }> {
+    const session = this.require(browserId);
+    this.assertNoDialog(session);
+    const { ref: safeRef, frame } = await this.refFrame(session, ref);
+    const serialized = readStringResult(await this.evaluateInFrame(session, frame, selectOptionExpression(safeRef, choice)));
+    if (!serialized) throw new Error("Browser element is no longer available. Refresh the snapshot.");
+    const result = selectOptionResultSchema.parse(JSON.parse(serialized));
+    if ("error" in result) {
+      switch (result.error) {
+        case "not_select":
+          throw new Error("That element is not a dropdown. Use click for custom menus.");
+        case "disabled":
+          throw new Error("That dropdown or option is disabled.");
+        case "no_option":
+          throw new Error(`No option matches "${choice}". Options: ${result.options.join(" | ")}`);
+      }
+    }
+    await wait(150);
+    const selected = z.object({ label: z.string(), value: z.string() }).parse(JSON.parse(
+      readStringResult(await this.evaluateInFrame(session, frame, selectedOptionExpression(safeRef))) || "null",
+    ));
+    if (selected.label !== result.chosen) {
+      throw new Error(`The page changed the dropdown back to "${selected.label}" after "${result.chosen}" was chosen.`);
+    }
+    this.touch(session);
+    return selected;
+  }
+
   /** Taps a point in the viewport, for elements a snapshot cannot list. */
   async tap(browserId: string, x: number, y: number): Promise<void> {
     const session = this.require(browserId);
@@ -2211,14 +2302,13 @@ export class BrowserSessionManager {
   }
 
   /**
-   * Scrolls a snapshot element into view and returns its center in page
-   * viewport coordinates, plus the embedded frame holding it, if any.
+   * The frame holding a snapshot element. [frames] is the page's frame list
+   * when the element sits in an embedded frame.
    */
-  private async elementPoint(
+  private async refFrame(
     session: RunningBrowserSession,
     ref: string,
-    forTyping: boolean,
-  ): Promise<{ x: number; y: number; frame?: PageFrame }> {
+  ): Promise<{ ref: string; frame: PageFrame; frames?: Map<string, PageFrame> }> {
     const safeRef = String(ref).trim();
     if (!/^sa-[1-9][0-9]{0,3}$/.test(safeRef)) throw new Error("Browser element reference is invalid. Refresh the snapshot.");
     const unavailable = new Error("Browser element is no longer available. Refresh the snapshot.");
@@ -2228,10 +2318,24 @@ export class BrowserSessionManager {
     const frames = tagged.parentFrameId ? await this.listFrames(session) : undefined;
     const frame = frames ? frames.get(tagged.frameId) : tagged;
     if (!frame) throw unavailable;
+    return { ref: safeRef, frame, ...(frames ? { frames } : {}) };
+  }
+
+  /**
+   * Scrolls a snapshot element into view and returns its center in page
+   * viewport coordinates, plus the embedded frame holding it, if any.
+   */
+  private async elementPoint(
+    session: RunningBrowserSession,
+    ref: string,
+    forTyping: boolean,
+  ): Promise<{ x: number; y: number; frame?: PageFrame }> {
+    const { ref: safeRef, frame, frames } = await this.refFrame(session, ref);
     const serialized = readStringResult(await this.evaluateInFrame(session, frame, elementExpression(safeRef, forTyping)));
-    if (!serialized) throw unavailable;
+    if (!serialized) throw new Error("Browser element is no longer available. Refresh the snapshot.");
     const point = elementPointSchema.parse(JSON.parse(serialized));
     if ("secret" in point) throw new Error("The agent cannot type into password fields. Open the protected phone browser.");
+    if ("select" in point) throw new Error("That element is a dropdown. Use the select action with the option's label or value.");
     if (!frames) return point;
     // Scrolling inside a cross-site frame scrolls the page around it from another
     // process, which finishes later. Measure until the position holds still.
@@ -2503,17 +2607,27 @@ export class BrowserSessionManager {
 
   private async pressKey(session: RunningBrowserSession, rawKey: string): Promise<void> {
     const key = String(rawKey || "").trim().toUpperCase();
-    const definitions: Record<string, { key: string; code: string; windowsVirtualKeyCode: number; modifiers?: number }> = {
+    const definitions: Record<string, { key: string; code: string; windowsVirtualKeyCode: number; modifiers?: number; text?: string }> = {
       ENTER: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
       TAB: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
       BACKSPACE: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
       ESCAPE: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+      SPACE: { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " },
+      PAGEUP: { key: "PageUp", code: "PageUp", windowsVirtualKeyCode: 33 },
+      PAGEDOWN: { key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34 },
+      END: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
+      HOME: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
+      ARROWLEFT: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+      ARROWUP: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+      ARROWRIGHT: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
+      ARROWDOWN: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
       "CTRL+A": { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 },
     };
     const definition = definitions[key];
-    if (!definition) throw new Error("Supported browser keys are Enter, Tab, Backspace, Escape, and Ctrl+A.");
+    if (!definition) throw new Error(`Supported browser keys are ${BROWSER_KEYS}.`);
+    const { text, ...keyUp } = definition;
     await this.dispatchInput(session, "Input.dispatchKeyEvent", { type: "keyDown", ...definition });
-    await this.dispatchInput(session, "Input.dispatchKeyEvent", { type: "keyUp", ...definition });
+    await this.dispatchInput(session, "Input.dispatchKeyEvent", { type: "keyUp", ...keyUp });
     this.touch(session);
   }
 

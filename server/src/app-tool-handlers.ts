@@ -118,7 +118,7 @@ export interface McpMediaResult {
 }
 
 export interface BrowserSessionToolArgs {
-  action: "open" | "show" | "list" | "status" | "snapshot" | "screenshot" | "navigate" | "click" | "type" | "tap" | "key" | "scroll" | "clipboard_read" | "clipboard_write" | "clipboard_to_secret" | "close" | "clear";
+  action: "open" | "show" | "list" | "status" | "snapshot" | "screenshot" | "navigate" | "click" | "type" | "select" | "tap" | "key" | "scroll" | "clipboard_read" | "clipboard_write" | "clipboard_to_secret" | "close" | "clear";
   profile?: string;
   url?: string;
   label?: string;
@@ -269,6 +269,12 @@ export async function handleBrowserSessionTool(
         if (typeof args.text !== "string") throw new Error("BrowserSession type requires text.");
         await browserSessionManager.type(profile, args.ref, args.text);
         break;
+      case "select": {
+        if (!args.ref) throw new Error("BrowserSession select requires a dropdown ref from snapshot.");
+        if (typeof args.text !== "string") throw new Error("BrowserSession select requires the option's label or value as text.");
+        const selected = await browserSessionManager.select(profile, args.ref, args.text);
+        return { content: [{ type: "text", text: JSON.stringify({ profile, selected }) }] };
+      }
       case "tap":
         if (typeof args.x !== "number" || typeof args.y !== "number") {
           throw new Error("BrowserSession tap requires x and y from a screenshot.");

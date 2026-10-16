@@ -1,4 +1,5 @@
 import * as crypto from "crypto";
+import { z } from "zod";
 import { isRecord, unknownArray, errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
@@ -8,6 +9,7 @@ import { generateKokoroAudio } from "./kokoro-tts";
 import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
 import {
+  listAvailableSecureInputs,
   requestSecureInput,
   saveSecureInput,
   type SecureInputRequestArgs,
@@ -64,10 +66,12 @@ import {
   upsertSessionMemoryEntry,
 } from "./session-memory-store";
 import {
+  BROWSER_KEYS,
   browserSessionManager,
   normalizeBrowserProfile,
   normalizeBrowserUrl,
   type BrowserSessionSummary,
+  type BrowserSnapshot,
 } from "./browser-session-manager";
 
 export interface AppToolContext {
@@ -117,22 +121,91 @@ export interface McpMediaResult {
   isError?: boolean;
 }
 
-export interface BrowserSessionToolArgs {
-  action: "open" | "show" | "list" | "status" | "snapshot" | "screenshot" | "navigate" | "click" | "type" | "select" | "tap" | "key" | "scroll" | "clipboard_read" | "clipboard_write" | "clipboard_to_secret" | "close" | "clear";
-  profile?: string;
-  url?: string;
-  label?: string;
-  ref?: string;
-  text?: string;
-  key?: string;
-  /** Tap position in screenshot pixels, which are viewport CSS pixels. */
-  x?: number;
-  y?: number;
-  delta_y?: number;
-  secret_label?: string;
-  secret_scope?: SecureInputScope;
-  secret_env_hint?: string;
-  clear_clipboard?: boolean;
+export const BROWSER_SESSION_DESCRIPTION = "Open and control a persistent isolated browser profile. Open adds a browser button to the phone session header without adding a transcript card; show deliberately sends a card. Snapshot lists the page text and its controls with refs, including those in embedded frames and web components; click, hover, type and select take those refs. Navigate, click, key, back and forward wait for the page to load and report where it ended up. Type replaces a field's text, or adds to it with append, and reports what the field holds. For a password or other credential, pass secret_file with a path from the secret inventory instead of text, so the value is typed without entering the conversation. Choose native dropdown options with select. When the page waits on something, such as a dialog, file chooser, date or color picker, or a sign-in, results say so; answer it with respond. Wait pauses until text appears on the page. When a control is missing from the snapshot, screenshot returns an image of the viewport and tap clicks at x, y in that image's pixels. Use clipboard_read only for non-sensitive text because it returns the value to the agent; clipboard_to_secret saves the clipboard to secure storage without returning it. Use clear only when the user explicitly asks to delete a saved browser profile. The user's own browsers run on the profile named default, which holds their everyday sign-ins; open it only when the user wants those. List returns saved profiles and open browsers. A browser the user opened in this chat can be controlled by its ID or profile name.";
+
+export const BROWSER_SESSION_INPUT = {
+  action: z.enum([
+    "open", "show", "list", "status", "snapshot", "screenshot", "navigate", "back", "forward",
+    "click", "hover", "type", "select", "tap", "key", "scroll", "respond", "wait",
+    "clipboard_read", "clipboard_write", "clipboard_to_secret", "close", "clear",
+  ]),
+  profile: z.string().optional().describe("Profile name for open and clear, for example google-play-william, or default for the user's everyday profile. Other actions also take a browser ID from list."),
+  url: z.string().optional().describe("HTTP or HTTPS URL for open or navigate"),
+  label: z.string().optional().describe("User-facing profile label used when opening"),
+  ref: z.string().optional().describe("Element ref returned by snapshot"),
+  text: z.string().optional().describe("Text to type, the option label or value for select, the answer for respond (prompt text, picker value, dropdown option, or sign-in username), the text to wait for, or text to write to the browser clipboard"),
+  append: z.boolean().optional().describe("For type: add to the end of the field instead of replacing its text"),
+  secret_file: z.string().optional().describe("For type and respond: path of a stored secret from the secret inventory. Its value is typed, or used as the sign-in password, without being returned."),
+  accept: z.boolean().optional().describe("For respond: false dismisses or cancels; defaults to true"),
+  files: z.array(z.string()).optional().describe("For respond to a file chooser: absolute paths of files on this computer"),
+  timeout_seconds: z.number().min(1).max(60).optional().describe("For wait: seconds to wait for the text; defaults to 10"),
+  key: z.string().optional().describe(BROWSER_KEYS),
+  x: z.number().optional().describe("Horizontal tap position in screenshot pixels"),
+  y: z.number().optional().describe("Vertical tap position in screenshot pixels"),
+  delta_y: z.number().optional().describe("Vertical scroll distance in CSS pixels"),
+  secret_label: z.string().optional().describe("Required label when clipboard_to_secret saves the browser clipboard without revealing it"),
+  secret_scope: z.enum(["session", "project", "global"]).optional().describe("Secure-storage scope; defaults to session"),
+  secret_env_hint: z.string().optional().describe("Optional environment variable name for the saved secret"),
+  clear_clipboard: z.boolean().optional().describe("Clear the browser clipboard after saving; defaults to true"),
+};
+
+export type BrowserSessionToolArgs = z.infer<z.ZodObject<typeof BROWSER_SESSION_INPUT>>;
+
+/**
+ * Reads a stored secret the agent named by its file path. Only secrets this
+ * chat may use are accepted, and a trailing newline is dropped.
+ */
+function readSecretForBrowser(ctx: Pick<AppToolContext, "getSessionId" | "getCwd">, filePath: string): string {
+  const resolved = path.resolve(filePath);
+  const secret = listAvailableSecureInputs(ctx.getSessionId(), ctx.getCwd?.())
+    .find((candidate) => path.resolve(candidate.filePath) === resolved);
+  if (!secret) throw new Error("secret_file must be a file path from this chat's secret inventory.");
+  return fs.readFileSync(resolved, "utf8").replace(/\r?\n$/, "");
+}
+
+/** Where the page is after an action, and what it waits on. */
+function pageStateText(state: { url: string; title: string; prompt?: string }): string {
+  return [`Now at ${state.url}${state.title ? ` (${state.title})` : ""}.`, state.prompt].filter(Boolean).join("\n");
+}
+
+/**
+ * A snapshot as plain lines: the page text, then one line per control. Far
+ * smaller than the JSON, and refs, names and states read at a glance.
+ */
+export function formatBrowserSnapshot(snapshot: BrowserSnapshot): string {
+  const origin = (() => {
+    try { return new URL(snapshot.url).origin; } catch { return ""; }
+  })();
+  const shortHref = (href: string) => {
+    if (href.startsWith("javascript:")) return "";
+    return origin && href.startsWith(origin + "/") ? href.slice(origin.length) : href;
+  };
+  const kinds: Record<string, string> = { a: "link", select: "dropdown", textarea: "textarea", body: "editor" };
+  const kindOf = (element: BrowserSnapshot["elements"][number]) =>
+    element.role ?? (element.tag === "input" ? element.type || "text" : kinds[element.tag] ?? element.tag);
+  const lines = [`URL: ${snapshot.url}`, `Title: ${snapshot.title}`];
+  if (snapshot.prompt) lines.push(`Waiting: ${snapshot.prompt}`);
+  for (const frame of snapshot.frames) lines.push(`Frame ${frame.frame}: ${frame.url}`);
+  lines.push("", "Text:", snapshot.text.trim(), "", "Controls:");
+  for (const element of snapshot.elements) {
+    const href = element.href ? shortHref(element.href) : "";
+    lines.push([
+      element.ref,
+      element.frame ? `[frame ${element.frame}]` : "",
+      kindOf(element),
+      element.name ? JSON.stringify(element.name) : "",
+      // A checkbox's value is the form value it submits, usually "on", not its state.
+      element.value && element.checked === undefined ? `= ${JSON.stringify(element.value)}` : "",
+      element.checked === undefined ? "" : element.checked ? "[checked]" : "[unchecked]",
+      element.pressed ? "[pressed]" : "",
+      element.expanded === undefined ? "" : element.expanded ? "[expanded]" : "[collapsed]",
+      element.disabled ? "[disabled]" : "",
+      href ? `-> ${href}` : "",
+      element.options ? `options: ${element.options.join(" | ")}` : "",
+    ].filter(Boolean).join(" "));
+  }
+  if (!snapshot.elements.length) lines.push("(none)");
+  return lines.join("\n");
 }
 
 function publishBrowserSessionState(
@@ -240,10 +313,11 @@ export async function handleBrowserSessionTool(
       case "status": {
         const session = await browserSessionManager.status(profile);
         publishBrowserSessionState(ctx, session, session.url || args.url || "https://localhost/", true);
-        return { content: [{ type: "text", text: JSON.stringify(session, null, 2) }] };
+        const prompt = browserSessionManager.pendingPrompt(profile);
+        return { content: [{ type: "text", text: JSON.stringify(prompt ? { ...session, waiting: prompt } : session, null, 2) }] };
       }
       case "snapshot":
-        return { content: [{ type: "text", text: JSON.stringify(await browserSessionManager.snapshot(profile), null, 2) }] };
+        return { content: [{ type: "text", text: formatBrowserSnapshot(await browserSessionManager.snapshot(profile)) }] };
       case "screenshot": {
         const frame = await browserSessionManager.frame(profile);
         return {
@@ -259,21 +333,56 @@ export async function handleBrowserSessionTool(
       case "navigate":
         if (!args.url) throw new Error("BrowserSession navigate requires a URL.");
         await browserSessionManager.navigate(profile, args.url);
-        break;
+        return { content: [{ type: "text", text: pageStateText(await browserSessionManager.pageState(profile, 15_000)) }] };
+      case "back":
+      case "forward":
+        await browserSessionManager.phoneInput(profile, { action: args.action });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return { content: [{ type: "text", text: pageStateText(await browserSessionManager.pageState(profile)) }] };
       case "click":
         if (!args.ref) throw new Error("BrowserSession click requires an element ref from snapshot.");
         await browserSessionManager.click(profile, args.ref);
+        // Let a navigation or dialog the click starts begin before reporting.
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return { content: [{ type: "text", text: `Clicked. ${pageStateText(await browserSessionManager.pageState(profile))}` }] };
+      case "hover":
+        if (!args.ref) throw new Error("BrowserSession hover requires an element ref from snapshot.");
+        await browserSessionManager.hover(profile, args.ref);
         break;
-      case "type":
+      case "type": {
         if (!args.ref) throw new Error("BrowserSession type requires an element ref from snapshot.");
-        if (typeof args.text !== "string") throw new Error("BrowserSession type requires text.");
-        await browserSessionManager.type(profile, args.ref, args.text);
-        break;
-      case "select": {
-        if (!args.ref) throw new Error("BrowserSession select requires a dropdown ref from snapshot.");
-        if (typeof args.text !== "string") throw new Error("BrowserSession select requires the option's label or value as text.");
-        const selected = await browserSessionManager.select(profile, args.ref, args.text);
-        return { content: [{ type: "text", text: JSON.stringify({ profile, selected }) }] };
+        const secret = args.secret_file ? readSecretForBrowser(ctx, args.secret_file) : undefined;
+        const text = secret ?? args.text;
+        if (typeof text !== "string") throw new Error("BrowserSession type requires text or secret_file.");
+        const value = await browserSessionManager.type(profile, args.ref, text, { append: args.append });
+        return {
+          content: [{
+            type: "text",
+            text: secret !== undefined
+              ? "Typed the secret. Its value was not returned."
+              : `Typed. The field now holds ${JSON.stringify(value)}.`,
+          }],
+        };
+      }
+      case "respond": {
+        await browserSessionManager.respond(profile, {
+          accept: args.accept !== false,
+          ...(args.text !== undefined ? { text: args.text } : {}),
+          ...(args.files ? { files: args.files } : {}),
+          ...(args.secret_file ? { password: readSecretForBrowser(ctx, args.secret_file) } : {}),
+        });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return { content: [{ type: "text", text: `Answered. ${pageStateText(await browserSessionManager.pageState(profile))}` }] };
+      }
+      case "wait": {
+        if (!args.text) throw new Error("BrowserSession wait requires the text to wait for.");
+        const seconds = args.timeout_seconds ?? 10;
+        const found = await browserSessionManager.waitForText(profile, args.text, seconds * 1000);
+        const prompt = browserSessionManager.pendingPrompt(profile);
+        const outcome = found
+          ? `${JSON.stringify(args.text)} is on the page.`
+          : `${JSON.stringify(args.text)} did not appear within ${seconds}s.`;
+        return { content: [{ type: "text", text: [outcome, prompt].filter(Boolean).join("\n") }] };
       }
       case "tap":
         if (typeof args.x !== "number" || typeof args.y !== "number") {
@@ -284,7 +393,8 @@ export async function handleBrowserSessionTool(
       case "key":
         if (!args.key) throw new Error("BrowserSession key requires a supported key.");
         await browserSessionManager.key(profile, args.key);
-        break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return { content: [{ type: "text", text: `Pressed ${args.key}. ${pageStateText(await browserSessionManager.pageState(profile))}` }] };
       case "scroll":
         await browserSessionManager.scroll(profile, Number(args.delta_y || 0));
         break;

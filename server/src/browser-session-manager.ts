@@ -66,8 +66,15 @@ export interface BrowserSnapshotElement {
   name: string;
   type?: string;
   value?: string;
+  /** A dropdown's option labels, which select takes. */
+  options?: string[];
+  /** Where a link goes. */
+  href?: string;
   /** Present only on things that can be on or off. */
   checked?: boolean;
+  /** aria-pressed and aria-expanded, when the element sets them. */
+  pressed?: boolean;
+  expanded?: boolean;
   disabled: boolean;
   /** The embedded frame holding the element. Absent for the page itself. */
   frame?: number;
@@ -81,6 +88,8 @@ export interface BrowserSnapshot {
   elements: BrowserSnapshotElement[];
   /** Embedded frames with content, numbered as elements reference them. */
   frames: Array<{ frame: number; url: string }>;
+  /** What the page waits on, from pendingPrompt. */
+  prompt?: string;
 }
 
 export type BrowserMouseButton = "left" | "middle" | "right" | "none";
@@ -399,6 +408,24 @@ const FOCUS_EXPRESSION = `(() => {
 
 /** The same check for an out-of-process frame, which answers only while it holds focus. */
 const FRAME_FOCUS_EXPRESSION = `(document.hasFocus() ? ${FOCUS_EXPRESSION} : "unfocused")`;
+/**
+ * Page script: every open shadow root under the document, document first.
+ * Web components keep their controls in these, where querySelectorAll on
+ * the document never looks.
+ */
+const SHADOW_ROOTS = `(() => {
+  const roots = [document];
+  for (let i = 0; i < roots.length; i++) {
+    for (const el of roots[i].querySelectorAll('*')) if (el.shadowRoot) roots.push(el.shadowRoot);
+  }
+  return roots;
+})()`;
+
+/** Page script: the element a snapshot tagged with a ref, inside shadow roots too. */
+function findRef(ref: string): string {
+  return `${SHADOW_ROOTS}.map((root) => root.querySelector('[data-socketagent-ref="${ref}"]')).find(Boolean)`;
+}
+
 /** Element refs a snapshot hands out per frame and in total. */
 const SNAPSHOT_FRAME_ELEMENTS = 300;
 const SNAPSHOT_TOTAL_ELEMENTS = 600;
@@ -813,8 +840,9 @@ const snapshotFrameSchema = z.object({
   elements: z.array(z.object({
     ref: z.string(), tag: z.string(), role: z.string().optional(), name: z.string(),
     type: z.string().optional(), value: z.string().optional(),
-    options: z.array(z.string()).optional(),
-    checked: z.boolean().optional(), disabled: z.boolean(),
+    options: z.array(z.string()).optional(), href: z.string().optional(),
+    checked: z.boolean().optional(), pressed: z.boolean().optional(), expanded: z.boolean().optional(),
+    disabled: z.boolean(),
   })),
 });
 
@@ -829,7 +857,8 @@ function snapshotExpression(start: number, limit: number, textLimit: number): st
       const rect = el.getBoundingClientRect();
       return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
     };
-    document.querySelectorAll('[data-socketagent-ref]').forEach((el) => el.removeAttribute('data-socketagent-ref'));
+    const roots = ${SHADOW_ROOTS};
+    for (const root of roots) root.querySelectorAll('[data-socketagent-ref]').forEach((el) => el.removeAttribute('data-socketagent-ref'));
     const selector = [
       'a','button','input','textarea','select','summary',
       '[contenteditable="true"]',
@@ -838,11 +867,34 @@ function snapshotExpression(start: number, limit: number, textLimit: number): st
       '[role="button"]','[role="link"]','[role="checkbox"]','[role="radio"]',
       '[role="switch"]','[role="tab"]','[role="option"]','[role="combobox"]',
       '[role="menuitem"]','[role="menuitemcheckbox"]','[role="menuitemradio"]',
-      '[role="treeitem"]','[role="slider"]'
+      '[role="treeitem"]','[role="slider"]','[role="textbox"]','[role="searchbox"]'
     ].join(',');
-    const elements = Array.from(document.querySelectorAll(selector)).filter(visible).slice(0, ${limit}).map((el, index) => {
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const byIds = (ids) => clean(String(ids || '').split(/\s+/).map((id) => {
+      const target = id && (el.getRootNode().getElementById?.(id) || document.getElementById(id));
+      return target ? target.innerText || target.textContent : '';
+    }).join(' '));
+    let el;
+    // Fields get their name from a label; other controls from what they show.
+    const nameOf = (field) => clean(
+      el.getAttribute('aria-label')
+      || byIds(el.getAttribute('aria-labelledby'))
+      || (field && el.labels && Array.from(el.labels, (label) => label.innerText).join(' '))
+      || el.getAttribute('title')
+      || (field ? '' : el.innerText || el.querySelector('img[alt]')?.alt || (el.tagName === 'INPUT' ? el.value : ''))
+      || el.getAttribute('placeholder')
+      || el.getAttribute('alt')
+      || el.getAttribute('name')
+    ).slice(0, 240);
+    const flag = (attr) => {
+      const value = el.getAttribute(attr);
+      return value === null ? undefined : value === 'true';
+    };
+    const elements = roots.flatMap((root) => Array.from(root.querySelectorAll(selector))).filter(visible).slice(0, ${limit}).map((node, index) => {
+      el = node;
       const ref = 'sa-' + (${start} + index + 1);
       el.setAttribute('data-socketagent-ref', ref);
+      const tag = el.tagName.toLowerCase();
       const type = String(el.getAttribute('type') || '').toLowerCase();
       const secretHint = [type, el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase();
       const secret = type === 'password' || /(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(secretHint);
@@ -850,24 +902,28 @@ function snapshotExpression(start: number, limit: number, textLimit: number): st
       const checked = checkedAttr === null
         ? (type === 'checkbox' || type === 'radio' ? Boolean(el.checked) : undefined)
         : checkedAttr === 'true';
-      // A dropdown's innerText is every option, so name it by its label and
-      // show the chosen option's text. The select action takes these labels.
+      // A dropdown's innerText is every option, so show the chosen option's
+      // text instead. The select action takes these labels.
       const select = el instanceof HTMLSelectElement;
+      const field = select || tag === 'textarea' || (tag === 'input' && !['submit', 'button', 'reset', 'image'].includes(type));
       const optionLabel = (option) => (option.label || option.text).trim();
-      const name = select
-        ? el.getAttribute('aria-label') || el.getAttribute('title') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('name')
-        : el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name');
+      const editable = el.isContentEditable && el.getAttribute('role') !== 'button';
+      const value = secret ? undefined
+        : select ? (el.selectedOptions[0] ? optionLabel(el.selectedOptions[0]) : '')
+        : typeof el.value === 'string' ? el.value.slice(0, 500)
+        : editable ? clean(el.innerText).slice(0, 500) : undefined;
       return {
         ref,
-        tag: el.tagName.toLowerCase(),
+        tag,
         role: el.getAttribute('role') || undefined,
-        ...(checked === undefined ? {} : { checked }),
-        name: String(name || '').trim().slice(0, 240),
+        name: nameOf(field || editable),
         type: type || undefined,
-        value: secret ? undefined
-          : select ? (el.selectedOptions[0] ? optionLabel(el.selectedOptions[0]) : '')
-          : (typeof el.value === 'string' ? el.value.slice(0, 500) : undefined),
+        ...(value ? { value } : {}),
         ...(select ? { options: Array.from(el.options).slice(0, 50).map(optionLabel) } : {}),
+        ...(tag === 'a' && el.href ? { href: el.href.slice(0, 300) } : {}),
+        ...(checked === undefined ? {} : { checked }),
+        ...(flag('aria-pressed') === undefined ? {} : { pressed: flag('aria-pressed') }),
+        ...(flag('aria-expanded') === undefined ? {} : { expanded: flag('aria-expanded') }),
         disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')
       };
     });
@@ -882,22 +938,48 @@ function snapshotExpression(start: number, limit: number, textLimit: number): st
 
 /**
  * Scrolls a tagged element into view and returns its center in its frame's
- * viewport. With [forTyping], it refuses credential fields and focuses the
- * element instead.
+ * viewport. With [forTyping], it also focuses the element.
  */
 function elementExpression(ref: string, forTyping: boolean): string {
   return `(() => {
-    const el = document.querySelector('[data-socketagent-ref="${ref}"]');
+    const el = ${findRef(ref)};
     if (!el) return '';
     if (el instanceof HTMLSelectElement) return JSON.stringify({ select: true });
-    if (${forTyping}) {
-      const hint = [el.getAttribute('type'), el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')].filter(Boolean).join(' ').toLowerCase();
-      if (/(password|passcode|one-time|otp|mfa|token|secret|recovery|verification.code)/.test(hint)) return JSON.stringify({ secret: true });
-    }
     el.scrollIntoView({ block: 'center', inline: 'center' });
     if (${forTyping}) el.focus();
     const r = el.getBoundingClientRect();
     return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  })()`;
+}
+
+/** Puts the caret at the end of a tagged field, so typing adds to what is there. */
+function caretToEndExpression(ref: string): string {
+  return `(() => {
+    const el = ${findRef(ref)};
+    if (!el) return;
+    if (typeof el.value === 'string') {
+      try { el.setSelectionRange(el.value.length, el.value.length); } catch {}
+      return;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  })()`;
+}
+
+/**
+ * What a tagged field holds after typing: its value, or the text of an
+ * editable element. Empty for password fields, so a typed secret never
+ * comes back to the agent.
+ */
+function fieldValueExpression(ref: string): string {
+  return `(() => {
+    const el = ${findRef(ref)};
+    if (!el || el.type === 'password') return '';
+    return String(typeof el.value === 'string' ? el.value : el.innerText || '').slice(0, 2000);
   })()`;
 }
 
@@ -909,7 +991,7 @@ function elementExpression(ref: string, forTyping: boolean): string {
  */
 function selectOptionExpression(ref: string, choice: string): string {
   return `((choice) => {
-    const el = document.querySelector('[data-socketagent-ref="${ref}"]');
+    const el = ${findRef(ref)};
     if (!el) return '';
     if (!(el instanceof HTMLSelectElement)) return JSON.stringify({ error: 'not_select' });
     const label = (option) => (option.label || option.text).trim();
@@ -931,7 +1013,7 @@ function selectOptionExpression(ref: string, choice: string): string {
 /** A tagged dropdown's chosen option label, read back after the page reacts. */
 function selectedOptionExpression(ref: string): string {
   return `(() => {
-    const el = document.querySelector('[data-socketagent-ref="${ref}"]');
+    const el = ${findRef(ref)};
     const option = el instanceof HTMLSelectElement ? el.selectedOptions[0] : undefined;
     return JSON.stringify({ label: option ? (option.label || option.text).trim() : '', value: option ? option.value : '' });
   })()`;
@@ -946,7 +1028,7 @@ const selectOptionResultSchema = z.union([
 /** A tagged element's center in its frame's viewport, without scrolling. */
 function elementCenterExpression(ref: string): string {
   return `(() => {
-    const el = document.querySelector('[data-socketagent-ref="${ref}"]');
+    const el = ${findRef(ref)};
     if (!el) return '';
     const r = el.getBoundingClientRect();
     return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
@@ -954,7 +1036,6 @@ function elementCenterExpression(ref: string): string {
 }
 
 const elementPointSchema = z.union([
-  z.object({ secret: z.literal(true) }),
   z.object({ select: z.literal(true) }),
   z.object({ x: z.number(), y: z.number() }),
 ]);
@@ -1125,7 +1206,7 @@ export class BrowserSessionManager {
     const dialog = this.openDialog(session);
     if (dialog) {
       throw new Error(`The page is showing a ${dialog.dialogType} dialog ("${dialog.message.slice(0, 200)}"). `
-        + "Ask the user to answer it in the phone browser.");
+        + "Answer it with respond first.");
     }
   }
 
@@ -2046,8 +2127,7 @@ export class BrowserSessionManager {
         profile: session.id,
         url: session.url,
         title: session.title,
-        text: `The page is showing a ${dialog.dialogType} dialog and is paused until it is answered: "${dialog.message}". `
-          + "The user answers it in the phone browser.",
+        text: this.pendingPrompt(browserId) ?? "",
         elements: [],
         frames: [],
       };
@@ -2094,7 +2174,11 @@ export class BrowserSessionManager {
       }
     }
     session.url = url || session.url;
-    return { profile: session.id, url, title, text: text.slice(0, SNAPSHOT_TOTAL_TEXT), elements, frames: listedFrames };
+    const prompt = this.pendingPrompt(browserId);
+    return {
+      profile: session.id, url, title, text: text.slice(0, SNAPSHOT_TOTAL_TEXT), elements, frames: listedFrames,
+      ...(prompt ? { prompt } : {}),
+    };
   }
 
   async click(browserId: string, ref: string): Promise<void> {
@@ -2104,7 +2188,12 @@ export class BrowserSessionManager {
     await this.phoneInput(session.id, { action: "tap", x: point.x, y: point.y });
   }
 
-  async type(browserId: string, ref: string, text: string): Promise<void> {
+  /**
+   * Types [text] into a snapshot field, replacing what it holds or, with
+   * [append], adding to the end. Returns what the field holds afterwards,
+   * which is empty for password fields.
+   */
+  async type(browserId: string, ref: string, text: string, options: { append?: boolean } = {}): Promise<string> {
     const session = this.require(browserId);
     if (text.length > 16_384) throw new Error("Browser text input is too large.");
     this.assertNoDialog(session);
@@ -2115,8 +2204,142 @@ export class BrowserSessionManager {
       await this.phoneInput(session.id, { action: "tap", x: point.x, y: point.y });
       await this.waitForFocus(session, point.frame, ref);
     }
-    await this.pressKey(session, "CTRL+A");
+    const { ref: safeRef, frame } = await this.refFrame(session, ref);
+    if (options.append) {
+      await this.evaluateInFrame(session, frame, caretToEndExpression(safeRef));
+    } else {
+      await this.pressKey(session, "CTRL+A");
+    }
     await session.cdp.command("Input.insertText", { text });
+    this.touch(session);
+    return readStringResult(await this.evaluateInFrame(session, frame, fieldValueExpression(safeRef)));
+  }
+
+  /** Moves the mouse over a snapshot element, for menus and details that show on hover. */
+  async hover(browserId: string, ref: string): Promise<void> {
+    const session = this.require(browserId);
+    this.assertNoDialog(session);
+    const point = await this.elementPoint(session, ref, false);
+    await this.phoneInput(session.id, {
+      action: "pointer", phase: "move", x: point.x, y: point.y, button: "none", buttons: 0, clickCount: 0, modifiers: 0,
+    });
+  }
+
+  /**
+   * What the page is waiting on, in words an agent can act on, or undefined.
+   * Dialogs, file choosers, date and color pickers, and sign-ins all wait on
+   * an answer, which respond gives.
+   */
+  pendingPrompt(browserId: string): string | undefined {
+    const prompt = this.require(browserId).prompt?.prompt;
+    if (!prompt) return undefined;
+    switch (prompt.kind) {
+      case "dialog":
+        return `The page is paused on a ${prompt.dialogType} dialog: "${prompt.message}". `
+          + (prompt.dialogType === "prompt" ? "Answer it with respond and text, or accept false to cancel." : "Answer it with respond, accept true or false.");
+      case "file":
+        return `A file chooser is open${prompt.multiple ? " for one or more files" : ""}. Answer it with respond and files, or accept false to cancel.`;
+      case "picker":
+        return `A ${prompt.inputType} picker is open at "${prompt.value}". Answer it with respond and text in the input's own format, such as 2026-10-20, 13:45 or #ff0000.`;
+      case "select":
+        return `A dropdown is open. Answer it with respond and an option: ${prompt.options.map((option) => option.label).join(" | ")}`;
+      case "auth":
+        return `${prompt.origin} asks for a ${prompt.scheme} sign-in${prompt.realm ? ` to "${prompt.realm}"` : ""}. `
+          + "Answer it with respond, text as the username and secret_file for the password.";
+    }
+  }
+
+  /**
+   * Answers what the page is waiting on, the way the phone viewer does.
+   * Files are copied into the profile's upload folder first, so the page
+   * gets them under their own names.
+   */
+  async respond(
+    browserId: string,
+    reply: { accept: boolean; text?: string; files?: string[]; password?: string },
+  ): Promise<void> {
+    const session = this.require(browserId);
+    const open = session.prompt;
+    if (!open) throw new Error("Nothing on the page is waiting for an answer.");
+    const { prompt } = open;
+    const answer = ((): BrowserPromptAnswer => {
+      if (!reply.accept) return { accept: false };
+      switch (prompt.kind) {
+        case "dialog":
+          return { accept: true, ...(reply.text !== undefined ? { value: reply.text } : {}) };
+        case "picker":
+          if (reply.text === undefined) throw new Error(`Give the ${prompt.inputType} value as text.`);
+          return { accept: true, value: reply.text };
+        case "select": {
+          const want = (reply.text ?? "").trim().toLowerCase();
+          const option = prompt.options.find((candidate) => candidate.label.trim().toLowerCase() === want)
+            ?? prompt.options.find((candidate) => candidate.value.toLowerCase() === want);
+          if (!option) throw new Error(`No option matches "${reply.text ?? ""}".`);
+          return { accept: true, value: option.value };
+        }
+        case "file": {
+          const files = reply.files ?? [];
+          if (!files.length) throw new Error("Give the files to upload as absolute paths.");
+          if (!prompt.multiple && files.length > 1) throw new Error("This file chooser takes one file.");
+          return {
+            accept: true,
+            files: files.map((file) => {
+              if (!path.isAbsolute(file) || !fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
+                throw new Error(`Not a file: ${file}`);
+              }
+              const copy = path.join(prompt.uploadDir, path.basename(file));
+              fs.copyFileSync(file, copy);
+              return copy;
+            }),
+          };
+        }
+        case "auth":
+          return { accept: true, username: reply.text ?? "", password: reply.password ?? "" };
+      }
+    })();
+    await this.answerPrompt(session.id, open.id, answer);
+  }
+
+  /**
+   * Waits for the page to finish loading, then reports where it is and what
+   * it waits on. A dialog stops the wait, because it pauses the page.
+   */
+  async pageState(browserId: string, timeoutMs = 10_000): Promise<{ url: string; title: string; prompt?: string }> {
+    const session = this.require(browserId);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && !this.openDialog(session)) {
+      // A dialog opening mid-check would hold the answer back until it closes.
+      const state = await Promise.race([
+        session.cdp.command("Runtime.evaluate", { expression: "document.readyState", returnByValue: true }).then(readStringResult),
+        wait(1_000).then(() => ""),
+      ]).catch(() => "");
+      if (state === "complete") break;
+      await wait(150);
+    }
+    await this.refreshLocation(session).catch(() => {});
+    const prompt = this.pendingPrompt(browserId);
+    return { url: session.url, title: session.title, ...(prompt ? { prompt } : {}) };
+  }
+
+  /**
+   * Waits until [text] shows on the page, ignoring case. Returns false when
+   * [timeoutMs] runs out or a dialog pauses the page first.
+   */
+  async waitForText(browserId: string, text: string, timeoutMs: number): Promise<boolean> {
+    const session = this.require(browserId);
+    const expression = `String(document.body && document.body.innerText || '').toLowerCase().includes(${JSON.stringify(text.toLowerCase())})`;
+    const deadline = Date.now() + timeoutMs;
+    while (!this.openDialog(session)) {
+      const found = await Promise.race([
+        session.cdp.command("Runtime.evaluate", { expression, returnByValue: true })
+          .then((result) => isRecord(result.result) && result.result.value === true),
+        wait(1_000).then(() => false),
+      ]).catch(() => false);
+      if (found) return true;
+      if (Date.now() >= deadline) return false;
+      await wait(250);
+    }
+    return false;
   }
 
   /**
@@ -2334,7 +2557,6 @@ export class BrowserSessionManager {
     const serialized = readStringResult(await this.evaluateInFrame(session, frame, elementExpression(safeRef, forTyping)));
     if (!serialized) throw new Error("Browser element is no longer available. Refresh the snapshot.");
     const point = elementPointSchema.parse(JSON.parse(serialized));
-    if ("secret" in point) throw new Error("The agent cannot type into password fields. Open the protected phone browser.");
     if ("select" in point) throw new Error("That element is a dropdown. Use the select action with the option's label or value.");
     if (!frames) return point;
     // Scrolling inside a cross-site frame scrolls the page around it from another
@@ -2362,7 +2584,12 @@ export class BrowserSessionManager {
    * before it lands goes nowhere.
    */
   private async waitForFocus(session: RunningBrowserSession, frame: PageFrame, ref: string): Promise<void> {
-    const expression = `document.hasFocus() && document.activeElement?.getAttribute('data-socketagent-ref') === ${JSON.stringify(ref.trim())}`;
+    // Focus inside a shadow root shows on the document as its host.
+    const expression = `(() => {
+      let active = document.activeElement;
+      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+      return document.hasFocus() && active?.getAttribute('data-socketagent-ref') === ${JSON.stringify(ref.trim())};
+    })()`;
     for (let attempt = 0; attempt < 40; attempt++) {
       const result = await this.evaluateInFrame(session, frame, expression);
       if (isRecord(result.result) && result.result.value === true) return;
@@ -2373,6 +2600,7 @@ export class BrowserSessionManager {
 
   async navigate(browserId: string, rawUrl: string): Promise<void> {
     const session = this.require(browserId);
+    this.assertNoDialog(session);
     session.url = normalizeBrowserUrl(rawUrl);
     await this.phoneInput(browserId, { action: "navigate", url: rawUrl });
   }

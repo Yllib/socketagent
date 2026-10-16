@@ -25,8 +25,9 @@ import {
   handleSpeakTool,
   handleTaskBatchTool,
   handleWorkReviewTool,
+  BROWSER_SESSION_DESCRIPTION,
+  BROWSER_SESSION_INPUT,
 } from "./app-tool-handlers";
-import { BROWSER_KEYS } from "./browser-session-manager";
 import { COMPUTERS_TOOL_DESCRIPTION, COMPUTERS_TOOL_INPUT, handleComputersTool } from "./computers-tool";
 import {
   AGENT_SESSION_TOOL_DESCRIPTION,
@@ -233,23 +234,8 @@ function createServer(context: AppToolContext): McpServer {
     "BrowserSession",
     {
       title: "Remote Browser Session",
-      description: "Open and control a persistent isolated browser profile. Open adds a browser button to the phone session header without adding a transcript card; show deliberately sends a card. Snapshot lists text and element refs for the page and its embedded frames, with each dropdown's options; click and type take those refs. Choose a dropdown option with select, passing the ref and the option's label or value as text; it reports the option the page kept. Clicking a native dropdown does not open it for the agent. When a control is missing from the snapshot, screenshot returns an image of the viewport and tap clicks at x, y in that image's pixels. Use clipboard_read only for non-sensitive text because it returns the value to the agent. When the user explicitly asks to save sensitive clipboard data, use clipboard_to_secret so the value goes directly to secure storage and is never returned. Never type or otherwise read credentials. Use clear only when the user explicitly asks to delete a saved browser profile. The user's own browsers run on the profile named default, which holds their everyday sign-ins; open it only when the user wants those. List returns saved profiles and open browsers. A browser the user opened in this chat can be controlled by its ID or profile name.",
-      inputSchema: {
-        action: z.enum(["open", "show", "list", "status", "snapshot", "screenshot", "navigate", "click", "type", "select", "tap", "key", "scroll", "clipboard_read", "clipboard_write", "clipboard_to_secret", "close", "clear"]),
-        profile: z.string().optional().describe("Profile name for open and clear, for example google-play-william, or default for the user's everyday profile. Other actions also take a browser ID from list."),
-        url: z.string().optional().describe("HTTP or HTTPS URL for open or navigate"),
-        label: z.string().optional().describe("User-facing profile label used when opening"),
-        ref: z.string().optional().describe("Element ref returned by snapshot"),
-        text: z.string().optional().describe("Non-sensitive text to enter, the dropdown option label or value for select, or text to write to the browser clipboard. Never pass a secret here."),
-        key: z.string().optional().describe(BROWSER_KEYS),
-        x: z.number().optional().describe("Horizontal tap position in screenshot pixels"),
-        y: z.number().optional().describe("Vertical tap position in screenshot pixels"),
-        delta_y: z.number().optional().describe("Vertical scroll distance in CSS pixels"),
-        secret_label: z.string().optional().describe("Required label when clipboard_to_secret saves the browser clipboard without revealing it"),
-        secret_scope: z.enum(["session", "project", "global"]).optional().describe("Secure-storage scope; defaults to session"),
-        secret_env_hint: z.string().optional().describe("Optional environment variable name for the saved secret"),
-        clear_clipboard: z.boolean().optional().describe("Clear the browser clipboard after saving; defaults to true"),
-      },
+      description: BROWSER_SESSION_DESCRIPTION,
+      inputSchema: BROWSER_SESSION_INPUT,
     },
     async (args) => handleBrowserSessionTool(context, args),
   );

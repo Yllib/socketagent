@@ -10,8 +10,8 @@ $ErrorActionPreference = "Stop"
 
 $RepoUrl = if ($env:SOCKETAGENT_REPO_URL) { $env:SOCKETAGENT_REPO_URL } else { "https://github.com/Yllib/socketagent.git" }
 $Branch = if ($env:SOCKETAGENT_BRANCH) { $env:SOCKETAGENT_BRANCH } else { "master" }
-$InstallDir = $env:SOCKETAGENT_INSTALL_DIR
-if (-not $InstallDir) {
+# Finds this Windows user's existing SocketAgent checkout, or returns nothing.
+function Find-SocketAgentInstall {
     $candidates = @()
     $locationFile = Join-Path $env:LOCALAPPDATA 'SocketAgent\install-location.txt'
     if (Test-Path $locationFile) { $candidates += (Get-Content $locationFile -Raw).Trim() }
@@ -25,7 +25,19 @@ if (-not $InstallDir) {
         }
     }
     $candidates += Join-Path $env:USERPROFILE 'socketagent'
-    $InstallDir = $candidates | Where-Object { $_ -and (Test-Path (Join-Path $_ '.git')) -and (Test-Path (Join-Path $_ 'install.ps1')) } | Select-Object -First 1
+    $candidates | Where-Object { $_ -and (Test-Path (Join-Path $_ '.git')) -and (Test-Path (Join-Path $_ 'install.ps1')) } | Select-Object -First 1
+}
+
+# The Windows server installer asks where an existing server lives before it
+# offers a folder, so a second server is never installed beside the first.
+if ($env:SOCKETAGENT_FIND_INSTALL -eq '1') {
+    Find-SocketAgentInstall
+    exit 0
+}
+
+$InstallDir = $env:SOCKETAGENT_INSTALL_DIR
+if (-not $InstallDir) {
+    $InstallDir = Find-SocketAgentInstall
     if ($InstallDir) { Write-Host "Using existing installation: $InstallDir" }
     else {
         $InstallDir = Join-Path $env:USERPROFILE 'socketagent'

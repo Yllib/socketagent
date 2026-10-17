@@ -447,6 +447,13 @@ try {
 
 $LIMITED_INSTALL = Resolve-SocketAgentLimitedInstall
 
+# Keep the legacy task name when repairing an older installation, so setup
+# replaces its supervisor instead of leaving two tasks competing for the port.
+if (-not (Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue) -and
+    (Get-ScheduledTask -TaskName 'SocketClaude' -ErrorAction SilentlyContinue)) {
+    $TASK_NAME = 'SocketClaude'
+}
+
 # ── Pre-flight: check if port is available ──
 $existingTask = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
 $portInUse = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -454,11 +461,16 @@ if ($portInUse) {
     # Check if it's our own task — that's fine, we'll stop it in Phase 6
     $ourPids = @()
     if ($existingTask -and $existingTask.State -eq "Running") {
-        $ourPids = (Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -in
+        $ourPids = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -in
             (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$TASK_NAME*" -or $_.CommandLine -like "*run-service*" }).ProcessId -or
             $_.CommandLine -like "*socketagent*dist*index.js*"
-        }).ProcessId
+        } | ForEach-Object ProcessId)
     }
+    # This checkout's own server, even when its task is stopped or renamed.
+    $ownEntry = Join-Path $SERVER_DIR 'dist\index.js'
+    $ourPids += @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+        Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($ownEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+        ForEach-Object ProcessId)
     $conflictPids = $portInUse.OwningProcess | Where-Object { $_ -notin $ourPids }
     if ($conflictPids) {
         $procInfo = Get-Process -Id $conflictPids[0] -ErrorAction SilentlyContinue
@@ -751,13 +763,6 @@ Write-Phase "Phase 6: Register Windows Service"
 $nodeExe = (Get-Command node).Source
 $powerShellExe = Get-CurrentPowerShellExecutable
 $serverScript = Join-Path (Join-Path $SERVER_DIR "dist") "index.js"
-
-# Keep the legacy task name when repairing an older installation, so setup
-# replaces its supervisor instead of leaving two tasks competing for the port.
-if (-not (Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue) -and
-    (Get-ScheduledTask -TaskName 'SocketClaude' -ErrorAction SilentlyContinue)) {
-    $TASK_NAME = 'SocketClaude'
-}
 
 # Stop and remove existing task
 $existing = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue

@@ -38,13 +38,13 @@ UsedUserAreasWarning=no
 Source: "server-setup.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "pairing-qr.js"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SupportDir}\server-bootstrap.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SupportDir}\server-support.zip"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SupportDir}\app_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "server-setup.ps1"; Flags: dontcopy
 Source: "{#SupportDir}\server-bootstrap.ps1"; Flags: dontcopy
 
 [UninstallDelete]
 Type: files; Name: "{app}\server-location.ini"
+; Left by 1.1.918 and earlier, which bundled the setup support files.
 Type: filesandordirs; Name: "{app}\server-support"
 
 [Code]

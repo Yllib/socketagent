@@ -2,7 +2,8 @@
 # Copies the reviewed Windows setup files into <remote dir> on the build host:
 # server-bootstrap.ps1 and server-support.zip, which install-windows.ps1 lays
 # over the clone so setup matches this checkout. Never copies server
-# configuration or private data. Used by both Windows installers.
+# configuration or private data. Used by the desktop installer, so its server
+# setup matches the app version it ships with.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 HOST="$1"

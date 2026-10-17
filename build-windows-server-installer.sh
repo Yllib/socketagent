@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Builds SocketAgent-Server-Setup.exe on the Windows build host. No publishing;
 # ./publish-desktop-installer.sh --server publishes it.
+# The installer carries only the wizard and the install-windows.ps1 bootstrap.
+# The server and its setup scripts come from the clone at install time, so a
+# rebuild is only needed when windows-installer/ or install-windows.ps1 changes.
 # --sign signs it, which counts as the day's signing run (see sign-windows.sh).
 set -euo pipefail
 SIGN=false
@@ -21,7 +24,7 @@ VERSION="$BASE.$(git -C "$ROOT" rev-list --count HEAD)"
 # Fail before the build, not after it, when today's signing run is used up.
 if $SIGN; then "$ROOT/sign-windows.sh" --check; fi
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force '$REMOTE_DIR/input' | Out-Null\""
-"$ROOT/stage-windows-setup-support.sh" "$HOST" "$REMOTE_DIR/input"
+scp -q "$ROOT/install-windows.ps1" "$HOST:$REMOTE_DIR/input/server-bootstrap.ps1"
 scp -q "$APP_DIR/windows/runner/resources/app_icon.ico" "$HOST:$REMOTE_DIR/input/app_icon.ico"
 scp -q "$ROOT/windows-installer/socketagent-server.iss" "$ROOT/windows-installer/server-setup.ps1" "$ROOT/windows-installer/pairing-qr.js" "$HOST:$REMOTE_DIR/"
 ssh "$HOST" "powershell -NoProfile -Command \"& (Join-Path \$env:LOCALAPPDATA 'Programs/Inno Setup 6/ISCC.exe') /Q '/DSupportDir=$REMOTE_DIR/input' '/DAppVersion=$VERSION' '$REMOTE_DIR/socketagent-server.iss'; exit \$LASTEXITCODE\""

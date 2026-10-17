@@ -64,9 +64,8 @@ try {
     }
     $env:SOCKETAGENT_UNATTENDED = '1'
     $env:SOCKETAGENT_INSTALL_DIR = $destination
-    $support = Join-Path $PSScriptRoot 'server-support'
-    Expand-Archive -LiteralPath (Join-Path $PSScriptRoot 'server-support.zip') -DestinationPath $support -Force
-    $env:SOCKETAGENT_INSTALLER_SUPPORT = $support
+    # No SOCKETAGENT_INSTALLER_SUPPORT: setup runs install.ps1 and the Windows
+    # service scripts from the fresh clone, so fixes to them need no new installer.
     $logFolder = Join-Path $env:LOCALAPPDATA 'SocketAgent/setup-logs'
     New-Item -ItemType Directory -Force $logFolder | Out-Null
     $logFile = Join-Path $logFolder ('server-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')

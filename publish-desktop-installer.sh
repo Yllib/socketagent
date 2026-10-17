@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publishes the Windows desktop installer to the public download URL.
+# Publishes the Windows desktop installer, or with --server the server
+# installer, to its public download URL.
 #
 # This stable URL is for manual downloads. The app's update checker uses the
 # versioned GitHub installer attached by build-app.sh --deploy. Run standalone to
@@ -12,6 +13,7 @@ set -euo pipefail
 #   ./publish-desktop-installer.sh                          # publish the built installer
 #   ./publish-desktop-installer.sh --installer <path>       # publish a specific file
 #   ./publish-desktop-installer.sh --version 1.0.253        # repoint to a retained release
+#   ./publish-desktop-installer.sh --server                 # publish build-windows-server-installer.sh output
 #
 # --version alone, with no matching local file, repoints the stable URL at a
 # release already on the host, which is the rollback path.
@@ -26,23 +28,34 @@ DOWNLOAD_KEY="${SOCKETAGENT_DOWNLOAD_KEY:-$HOME/.ssh/hetzner_prod_ed25519}"
 DOWNLOAD_DIR="${SOCKETAGENT_DOWNLOAD_DIR:-/home/deploy/apps/sector-downloads/public}"
 PUBLIC_URL="${SOCKETAGENT_DOWNLOAD_URL:-https://rubanoenterprises.com/socketagent_desktop_installer.exe}"
 STABLE_NAME="socketagent_desktop_installer.exe"
+KIND="desktop"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --installer) INSTALLER="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
-    *) echo "Unknown option: $1"; echo "Usage: $0 [--installer <path>] [--version <x.y.z>]"; exit 1 ;;
+    --server)
+      KIND="server"
+      INSTALLER="$REPO_ROOT/build/windows/SocketAgent-Server-Setup.exe"
+      STABLE_NAME="socketagent_server_installer.exe"
+      PUBLIC_URL="${PUBLIC_URL%/*}/$STABLE_NAME"
+      shift ;;
+    *) echo "Unknown option: $1"; echo "Usage: $0 [--server] [--installer <path>] [--version <x.y.z>]"; exit 1 ;;
   esac
 done
 
-if [[ -z "$VERSION" ]]; then
+if [[ -z "$VERSION" && "$KIND" == "server" ]]; then
+  # Same version build-windows-server-installer.sh stamps on the installer.
+  BASE="$(node -p "require('$REPO_ROOT/server/package.json').version.split('.').slice(0, 2).join('.')")"
+  VERSION="$BASE.$(git -C "$REPO_ROOT" rev-list --count HEAD)"
+elif [[ -z "$VERSION" ]]; then
   VERSION=$(grep '^version:' "$APP_DIR/pubspec.yaml" | sed 's/version: //' | cut -d+ -f1)
 fi
 
-RELEASE_NAME="socketagent-desktop-$VERSION.exe"
+RELEASE_NAME="socketagent-$KIND-$VERSION.exe"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 -i "$DOWNLOAD_KEY")
 
-echo "Publishing desktop installer v$VERSION..."
+echo "Publishing $KIND installer v$VERSION..."
 
 if [[ -f "$INSTALLER" ]]; then
   LOCAL_HASH=$(sha256sum "$INSTALLER" | cut -d' ' -f1)
@@ -91,6 +104,6 @@ if [[ "$PUBLIC_HASH" != "$LOCAL_HASH" ]]; then
   exit 1
 fi
 
-echo "Desktop installer published: $PUBLIC_URL"
+echo "${KIND^} installer published: $PUBLIC_URL"
 echo "  version: $VERSION"
 echo "  sha256:  $PUBLIC_HASH"

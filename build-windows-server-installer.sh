@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds SocketAgent-Server-Setup.exe on the Windows build host. No publishing.
+# Builds SocketAgent-Server-Setup.exe on the Windows build host. No publishing;
+# ./publish-desktop-installer.sh --server publishes it.
 # --sign signs it, which counts as the day's signing run (see sign-windows.sh).
 set -euo pipefail
 SIGN=false

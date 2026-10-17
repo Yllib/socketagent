@@ -704,6 +704,39 @@ export function appendClaudeResourceLinks(output: string, value: unknown): strin
   return `${output.trim()}${output.trim() ? "\n\n" : ""}Resources:\n${links.join("\n")}`;
 }
 
+/**
+ * The text a finished SDK task leaves on its card and in history.
+ *
+ * A bash task's output_file is its stdout, so that is the result. An agent
+ * task's output_file is its transcript JSONL (the file is named
+ * agent-<id>.jsonl), and the SDK already puts the agent's final report in
+ * `summary`, so the file is never read for one. `outputFile` is only returned
+ * when it is worth showing the user.
+ */
+export function claudeTaskTerminalOutput(args: {
+  status: string;
+  summary: string;
+  taskType?: string;
+  outputFile?: string;
+  isSubagent: boolean;
+  readFile: (filePath: string) => string;
+}): { output: string; outputFile?: string } {
+  const agentTask = args.isSubagent
+    || args.taskType === "local_agent"
+    || args.taskType === "remote_agent"
+    || /(^|[\\/])agent-[^\\/]+\.jsonl$/.test(args.outputFile || "");
+  let fileContent = "";
+  if (args.outputFile && !agentTask) {
+    try {
+      fileContent = args.readFile(args.outputFile);
+    } catch {}
+  }
+  return {
+    output: fileContent || args.summary || `Task ${args.status}`,
+    ...(args.outputFile && !agentTask ? { outputFile: args.outputFile } : {}),
+  };
+}
+
 export function filterClaudePhoneCommands(
   commands: unknown[],
   terminalCommands: Iterable<string, unknown, unknown>,
@@ -4989,16 +5022,19 @@ export class ClaudeSession {
             this._cleanupMonitor(sdkTaskId, false);
           }
 
-          // Read full output file before cleaning up (for history persistence)
-          let bgOutputContent = "";
-          const bgOutputFile = tn.output_file || (sdkTaskId ? this._taskOutputFiles.get(sdkTaskId) : undefined);
-          if (bgOutputFile) {
-            try {
-              if (fs.existsSync(bgOutputFile)) {
-                bgOutputContent = fs.readFileSync(bgOutputFile, "utf-8");
-              }
-            } catch {}
-          }
+          // Read a bash task's output file before cleaning up (for history
+          // persistence). An agent task's file is its transcript, not a
+          // result; its summary is the report.
+          const terminal = claudeTaskTerminalOutput({
+            status: tn.status || "completed",
+            summary: String(tn.summary || ""),
+            taskType: this._sdkBackgroundTasks.get(sdkTaskId)?.taskType,
+            outputFile: tn.output_file || (sdkTaskId ? this._taskOutputFiles.get(sdkTaskId) : undefined),
+            isSubagent: Boolean(subagentState),
+            readFile: (filePath) => fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf-8") : "",
+          });
+          const bgOutputFile = terminal.outputFile;
+          const hasTerminalOutput = Boolean(bgOutputFile || subagentState || workflowRun);
 
           if (sdkTaskId) this._taskOutputFiles.delete(sdkTaskId);
           if (sdkTaskId) this._stopBgBashWatcher(sdkTaskId);
@@ -5007,13 +5043,8 @@ export class ClaudeSession {
           // acknowledgement, completes a background card. Always emit a final
           // tool result for subagents so live UI and history settle identically,
           // including failed/stopped tasks with no output file.
-          const terminalOutput = appendClaudeResourceLinks(
-            bgOutputContent
-              || String(tn.summary || "")
-              || `Task ${tn.status || "completed"}`,
-            tn.resource_links,
-          );
-          if (originToolUseId && (bgOutputContent || subagentState || workflowRun)) {
+          const terminalOutput = appendClaudeResourceLinks(terminal.output, tn.resource_links);
+          if (originToolUseId && hasTerminalOutput) {
             this.send({
               type: "tool_result",
               toolUseId: originToolUseId,
@@ -5023,7 +5054,7 @@ export class ClaudeSession {
               sessionId: this.sessionId || "",
             });
           }
-          if (originToolUseId && (bgOutputContent || subagentState || workflowRun) && this.sessionId) {
+          if (originToolUseId && hasTerminalOutput && this.sessionId) {
             appendHistory(this.sessionId, {
               role: "tool_result",
               content: "",

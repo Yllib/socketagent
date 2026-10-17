@@ -581,6 +581,13 @@ export interface RenameSessionMessage {
   title: string;
 }
 
+/** Hides completed tasks for every client. Keys follow taskDisplayKey. */
+export interface DismissTasksMessage {
+  type: "dismiss_tasks";
+  sessionId: string;
+  keys: string[];
+}
+
 export interface AbortMessage {
   type: "abort";
   sessionId?: string;
@@ -1490,6 +1497,7 @@ export type ClientMessage = { commandId?: string } & (
   | SetCodexCollaborationModeMessage
   | DeleteSessionMessage
   | RenameSessionMessage
+  | DismissTasksMessage
   | ClearContextMessage
   | CompactContextMessage
   | GetSessionMemoryMessage
@@ -1802,6 +1810,7 @@ export interface CodexPlanServerMessage {
 
 export interface TodosServerMessage {
   type: "todos";
+  /** Rows the user dismissed carry `dismissed: true`. */
   todos: Record<string, unknown>[];
   sessionId: string;
 }
@@ -2281,6 +2290,10 @@ export interface ServerCapabilitiesMessage {
     version: number;
   };
   codexGoals?: {
+    version: number;
+  };
+  /** Accepts dismiss_tasks and marks dismissed rows in todos. */
+  taskDismissals?: {
     version: number;
   };
   /** Backends supported by this server build. Health/auth state is in backendHealth. */

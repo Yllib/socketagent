@@ -2556,10 +2556,9 @@ export class ClaudeSession {
       isBackgrounded: false,
     });
     if (JSON.stringify(current) !== JSON.stringify(next)) {
-      saveTodos(this.sessionId, next);
       this.send({
         type: "todos",
-        todos: next,
+        todos: saveTodos(this.sessionId, next),
         sessionId: this.sessionId,
       });
     }
@@ -2604,10 +2603,9 @@ export class ClaudeSession {
       });
     }
     if (JSON.stringify(current) !== JSON.stringify(next)) {
-      saveTodos(this.sessionId, next);
       this.send({
         type: "todos",
-        todos: next,
+        todos: saveTodos(this.sessionId, next),
         sessionId: this.sessionId,
       });
     }
@@ -5505,10 +5503,10 @@ export class ClaudeSession {
                   const todos = toolInput.todos;
                   if (Array.isArray(todos)) {
                     const prev = this.sessionId ? getTodos(this.sessionId) : [];
-                    const next = replaceClaudeTodoWriteTodos(prev, todos);
+                    const replaced = replaceClaudeTodoWriteTodos(prev, todos);
+                    const next = this.sessionId ? saveTodos(this.sessionId, replaced) : replaced;
                     const changed = JSON.stringify(next) !== JSON.stringify(prev);
                     if (this.sessionId) {
-                      saveTodos(this.sessionId, next);
                       if (changed) {
                         appendHistory(this.sessionId, {
                           role: "todos_update",

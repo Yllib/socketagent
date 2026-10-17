@@ -1422,6 +1422,32 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "dismiss_tasks"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "keys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "keys",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "clear_context"
             },
             "sessionId": {

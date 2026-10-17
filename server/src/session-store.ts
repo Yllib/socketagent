@@ -2648,9 +2648,49 @@ function todosFile(sessionId: string): string {
   return path.join(TODOS_DIR, `${sessionId}.json`);
 }
 
-export function saveTodos(sessionId: string, todos: Record<string, unknown>[]): void {
+/**
+ * Identifies a task row across rewrites. The app computes the same key
+ * (taskDisplayKey in lib/models/task_display.dart).
+ */
+export function taskDisplayKey(task: Record<string, unknown>): string {
+  const source = String(task.source ?? "todo");
+  const id = String(task.id ?? task.taskId ?? "");
+  return id ? `${source}:${id}` : `${source}:content:${String(task.content ?? "")}`;
+}
+
+/**
+ * Saves a session's task list and returns what was saved; send that to
+ * clients. A completed row the user dismissed keeps `dismissed: true` when an
+ * agent rewrites the list, and loses it when the task is reopened.
+ */
+export function saveTodos(sessionId: string, todos: Record<string, unknown>[]): Record<string, unknown>[] {
+  const dismissed = new Set(
+    getTodos(sessionId).filter((task) => task.dismissed === true).map(taskDisplayKey),
+  );
+  const saved = todos.map((task) => {
+    const { dismissed: _flag, ...rest } = task;
+    return task.status === "completed" && (task.dismissed === true || dismissed.has(taskDisplayKey(task)))
+      ? { ...rest, dismissed: true }
+      : rest;
+  });
   ensureTodosDir();
-  fs.writeFileSync(todosFile(sessionId), JSON.stringify(todos, null, 2), "utf-8");
+  fs.writeFileSync(todosFile(sessionId), JSON.stringify(saved, null, 2), "utf-8");
+  return saved;
+}
+
+/**
+ * Hides completed tasks for every client of the session. Returns the saved
+ * list, or undefined when nothing changed.
+ */
+export function dismissTodos(sessionId: string, keys: string[]): Record<string, unknown>[] | undefined {
+  const wanted = new Set(keys);
+  let changed = false;
+  const next = getTodos(sessionId).map((task) => {
+    if (task.status !== "completed" || task.dismissed === true || !wanted.has(taskDisplayKey(task))) return task;
+    changed = true;
+    return { ...task, dismissed: true };
+  });
+  return changed ? saveTodos(sessionId, next) : undefined;
 }
 
 export function getTodos(sessionId: string): Record<string, unknown>[] {

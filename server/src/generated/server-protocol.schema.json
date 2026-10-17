@@ -4113,6 +4113,17 @@
             "version"
           ]
         },
+        "taskDismissals": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        },
         "backends": {
           "type": "array",
           "items": {

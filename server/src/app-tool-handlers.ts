@@ -867,9 +867,9 @@ export async function handleTaskBatchTool(
         throw new Error(`Unsupported TaskBatch mode: ${String(args.mode)}`);
     }
 
-    const next = [...otherTasks, ...managed];
+    let next = [...otherTasks, ...managed];
     if (args.mode !== "list" && JSON.stringify(next) !== JSON.stringify(current)) {
-      saveTodos(sessionId, next);
+      next = saveTodos(sessionId, next);
       ctx.appendHistory?.({
         role: "todos_update",
         content: JSON.stringify(next),

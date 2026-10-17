@@ -5,7 +5,7 @@ const { randomUUID } = require("node:crypto");
 require("./test-data-dir");
 
 const { handleTaskBatchTool } = require("#server/app-tool-handlers");
-const { getTodos, saveTodos } = require("#server/session-store");
+const { dismissTodos, getTodos, saveTodos } = require("#server/session-store");
 
 /** @param {string} sessionId
  * @returns {{ sent: import('#server/protocol').ServerMessage[], history: import('#server/protocol').HistoryEntry[], context: import('#server/app-tool-handlers').AppToolContext }} */
@@ -135,4 +135,26 @@ test("TaskBatch rejects duplicate and unknown task IDs without changing storage"
   assert.match(unknown.content[0].text, /Unknown SocketAgent task id/);
   assert.deepEqual(getTodos(sessionId), []);
   assert.equal(sent.length, 0);
+});
+
+test("a dismissed task stays hidden through agent rewrites until it is reopened", () => {
+  const sessionId = `dismiss-${randomUUID()}`;
+  saveTodos(sessionId, [
+    { id: "1", content: "Ship it", status: "completed", source: "claude_tasks" },
+    { id: "2", content: "Test it", status: "in_progress", source: "claude_tasks" },
+  ]);
+  const dismissed = dismissTodos(sessionId, ["claude_tasks:1", "claude_tasks:2"]);
+  assert.deepEqual(dismissed?.map((task) => task.dismissed ?? false), [true, false], "only completed tasks are dismissed");
+  assert.equal(dismissTodos(sessionId, ["claude_tasks:1"]), undefined, "a repeat changes nothing");
+
+  // TodoWrite-style rewrites drop the flag; the store keeps it.
+  saveTodos(sessionId, [
+    { id: "1", content: "Ship it", status: "completed", source: "claude_tasks" },
+    { id: "2", content: "Test it", status: "completed", source: "claude_tasks" },
+  ]);
+  assert.deepEqual(getTodos(sessionId).map((task) => task.dismissed ?? false), [true, false]);
+
+  saveTodos(sessionId, [{ id: "1", content: "Ship it", status: "in_progress", source: "claude_tasks" }]);
+  saveTodos(sessionId, [{ id: "1", content: "Ship it", status: "completed", source: "claude_tasks" }]);
+  assert.equal(getTodos(sessionId)[0].dismissed, undefined, "reopening a task brings it back");
 });

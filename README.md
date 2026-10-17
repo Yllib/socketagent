@@ -2,42 +2,22 @@
 
 Access Claude Code and OpenAI Codex agents on your computers from your Android phone or Windows desktop. Install the free SocketAgent server software on the computers you want to connect to, then pair them with the app.
 
-## Download SocketAgent Desktop for Windows
+## Get the app
 
-[Download SocketAgent Desktop for Windows](https://rubanoenterprises.com/socketagent_desktop_installer.exe)
+- Windows desktop: [SocketAgent Desktop installer](https://rubanoenterprises.com/socketagent_desktop_installer.exe)
+- Android: [Google Play](https://play.google.com/store/apps/details?id=com.socketagent.app) or the [APK](https://github.com/Yllib/socketagent/releases/latest/download/app-release.apk)
 
-Run the installer on Windows 10 or 11, 64-bit. Setup detects an existing local
-SocketAgent server and links to it automatically. If there is no local server,
-setup offers to install one.
+The desktop installer can also install the server on the same PC.
 
-A local server is optional. You can add other computers via their pairing codes
-without installing a server on this computer. You can also import the computer
-transfer QR code exported by the Android app.
+## Install the server
 
-SocketAgent Desktop includes a resizable session sidebar, system tray support,
-saved window size and position, and desktop menus. Press Enter to send a message
-or Shift+Enter for a new line. Closing the window keeps the app in the tray;
-choose Quit from the tray menu to exit.
-
-The desktop app checks for updates automatically. When an update is available,
-download it in the app, then select **Install & restart**. Downloads resume after
-interruptions. Upgrades keep your linked computers, pins, and settings.
-
-## Download the Android App
-
-Download the latest APK:
-
-[Download SocketAgent for Android](https://github.com/Yllib/socketagent/releases/latest/download/app-release.apk)
-
-## Install the Server
-
-Install the server on the computer you want SocketAgent to control. The Windows
-desktop installer above can do this for you, or you can install only the server
-using the commands below.
+Install the server on each computer you want to reach from the app.
 
 ### Windows
 
-Open PowerShell and paste this command:
+Download the [SocketAgent Server installer](https://rubanoenterprises.com/socketagent_server_installer.exe),
+or run this script in PowerShell. Both do the same thing. Run the script from
+an administrator PowerShell for full features.
 
 ```powershell
 irm https://raw.githubusercontent.com/Yllib/socketagent/master/install-windows.ps1 | iex
@@ -45,32 +25,11 @@ irm https://raw.githubusercontent.com/Yllib/socketagent/master/install-windows.p
 
 ### macOS, Linux, or WSL
 
-Open a terminal and paste this command:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yllib/socketagent/master/install.sh | bash
 ```
 
-Windows setup offers a destination folder on a first install and reuses the existing
-folder on subsequent runs. It installs SocketAgent plus
-both supported agent CLIs, starts SocketAgent, and then shows the pairing QR
-code. Sign in to Claude or Codex later from the app or the relevant CLI.
-
-For a custom Windows destination without prompts:
-
-```powershell
-$env:SOCKETAGENT_INSTALL_DIR = 'D:\Apps\SocketAgent'
-$env:SOCKETAGENT_UNATTENDED = '1'
-irm https://raw.githubusercontent.com/Yllib/socketagent/master/install-windows.ps1 | iex
-```
-
-Windows stores server files in the selected folder, managed Claude/Codex tools in
-`%USERPROFILE%\.socket-agent\toolchains\npm-global`, and session data in
-`%USERPROFILE%\.socket-agent`. Existing legacy data is preserved. The launcher
-and command shortcuts live under `%LOCALAPPDATA%\SocketAgent`. Setup prints the
-actual locations, including any configured overrides.
-
-## Pair the App
+## Pair the app
 
 At the end of setup, the installer shows a QR code.
 
@@ -89,18 +48,18 @@ the relay everywhere else, switching as you move. The server advertises itself
 over mDNS (`_socketagent._tcp`), so a changed LAN address is found again. To pin
 one route, edit the computer in the app and pick Relay or Direct.
 
-## What Gets Installed
+## What gets installed
 
 The installer sets up:
 
 - Git if needed
 - Node.js if needed
 - The SocketAgent server
-- Claude and Codex support
+- The Claude Code and Codex CLIs
 - A background service so SocketAgent starts automatically
-- A `socketagent` command for pairing, repair, logs, and status
+- A `socketagent` command for pairing, reinstalling, logs, and status
 
-## Useful Commands
+## Useful commands
 
 Run these on the server computer:
 
@@ -111,6 +70,7 @@ socketagent status    # check server status
 socketagent logs      # view server logs
 socketagent doctor    # run basic diagnostics
 socketagent restart   # restart the server safely
+socketagent install   # re-run the installer, keeping pairing and auth data
 ```
 
 ## Notifications
@@ -181,7 +141,8 @@ Then scan the new QR code.
 SocketAgent runs in the background after you sign in to Windows. Updated servers
 repair older startup tasks for their next start. If Windows protects the old task,
 the window may flash briefly before hiding. Open PowerShell with **Run as administrator**
-and rerun setup to replace that task and remove the flash.
+and rerun setup, or run the server installer again, to replace that task and
+remove the flash.
 Use `socketagent status` to check readiness and `socketagent logs`
 to view server output.
 
@@ -203,7 +164,8 @@ socketagent pair
 
 **The app says a backend is not ready**
 
-Open the server in SocketAgent settings and use the repair or sign-in action for Claude or Codex.
+Open the computer in SocketAgent settings and use **Reinstall** or the sign-in
+action for Claude or Codex.
 
 ## License
 

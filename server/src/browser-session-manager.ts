@@ -807,6 +807,26 @@ async function trackFrameTargets(cdp: CdpClient, targets: Set<string>): Promise<
   await cdp.command("Target.setAutoAttach", FRAME_AUTO_ATTACH);
 }
 
+/**
+ * Passkey requests open Chrome's own window, which the live view never shows
+ * and which holds the page's input until it closes. An emulated authenticator
+ * with no passkeys and no way to verify the user replaces that window, so sign
+ * in and registration fail at once and sites fall back to their other options.
+ */
+async function blockPasskeys(cdp: CdpClient): Promise<void> {
+  await cdp.command("WebAuthn.enable", { enableUI: false });
+  await cdp.command("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "usb",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: false,
+      automaticPresenceSimulation: true,
+    },
+  });
+}
+
 /** Runs the picker script in every frame of a page or out-of-process frame, now and after each navigation. */
 async function installPickers(cdp: CdpClient, sessionId?: string): Promise<void> {
   await cdp.command("Runtime.addBinding", { name: PICKER_BINDING, executionContextName: PICKER_WORLD }, sessionId);
@@ -1241,9 +1261,10 @@ export class BrowserSessionManager {
   }
 
   /**
-   * Prepare a tab's connection: the viewport, and the handlers that turn
+   * Prepare a tab's connection: the viewport, the handlers that turn
    * dialogs, file choosers, sign-in challenges, and native pickers into
-   * prompts. Handlers ignore a tab once it is no longer the active one.
+   * prompts, and the passkey block. Handlers ignore a tab once it is no
+   * longer the active one.
    */
   private async setupPage(session: RunningBrowserSession, cdp: CdpClient, frameTargets: Set<string>): Promise<void> {
     const active = () => session.cdp === cdp;
@@ -1346,6 +1367,7 @@ export class BrowserSessionManager {
         patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }],
       }),
       installPickers(cdp),
+      blockPasskeys(cdp),
     ]);
   }
 

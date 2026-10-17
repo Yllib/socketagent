@@ -22,5 +22,9 @@ ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File $REMOTE_DIR/scr
 mkdir -p "$APP_DIR/build/windows/packages"
 scp "$HOST:$REMOTE_DIR/build/windows/packages/SocketAgent-windows-x64.zip" "$APP_DIR/build/windows/packages/"
 scp "$HOST:$REMOTE_DIR/build/windows/packages/SocketAgent-Desktop-Setup.exe" "$APP_DIR/build/windows/packages/"
+# Only a deploy signs, since each signing is billed; test packages stay unsigned.
+if [[ "${SOCKETAGENT_SIGN_WINDOWS:-0}" == "1" ]]; then
+  "$ROOT/sign-windows.sh" "$APP_DIR/build/windows/packages/SocketAgent-Desktop-Setup.exe"
+fi
 echo "Windows installer: $APP_DIR/build/windows/packages/SocketAgent-Desktop-Setup.exe"
 echo "Windows test package: $APP_DIR/build/windows/packages/SocketAgent-windows-x64.zip"

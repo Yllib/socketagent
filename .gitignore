@@ -47,3 +47,6 @@ server/.secrets/
 # OS
 .DS_Store
 *.swp
+
+# Per-machine code signing setup for sign-windows.sh
+/signing.local.env

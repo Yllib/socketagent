@@ -16,9 +16,13 @@ fi
 #   ./build-app.sh --deploy            # Build, bump patch, deploy to GitHub
 #   ./build-app.sh --deploy --bump minor   # Build, bump minor, deploy
 #   ./build-app.sh --deploy --skip-desktop # Deploy Android only
+#   ./build-app.sh --deploy --allow-extra-signing  # Second signed deploy today
 #
-# A deploy also builds Windows, publishes its installer to the public download
-# URL, and attaches it to GitHub so desktop clients can discover the update.
+# A deploy also builds Windows, signs its installer, publishes it to the public
+# download URL, and attaches it to GitHub so desktop clients can discover the
+# update. eSigner bills per signing, so only one deploy a day may sign. Another
+# one stops before changing anything unless the user approves
+# --allow-extra-signing.
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 REPO_PARENT="$(cd "$REPO_ROOT/.." && pwd)"
@@ -53,9 +57,10 @@ while [[ $# -gt 0 ]]; do
     --flavor) FLAVOR="$2"; shift 2 ;;
     --bundle) BUNDLE=true; shift ;;
     --skip-desktop) SKIP_DESKTOP=true; shift ;;
+    --allow-extra-signing) export SOCKETAGENT_ALLOW_EXTRA_SIGNING=1; shift ;;
     --local) echo "Local app builds are disabled. Use the remote build machine."; exit 1 ;;
     --bump) BUMP="$2"; shift 2 ;;
-    *) echo "Unknown option: $1"; echo "Usage: $0 [--flavor direct|play] [--bundle] [--deploy] [--bump major|minor|patch] [--skip-desktop]"; exit 1 ;;
+    *) echo "Unknown option: $1"; echo "Usage: $0 [--flavor direct|play] [--bundle] [--deploy] [--bump major|minor|patch] [--skip-desktop] [--allow-extra-signing]"; exit 1 ;;
   esac
 done
 
@@ -88,7 +93,10 @@ else
   REMOTE_ARTIFACT_RELATIVE="build/app/outputs/flutter-apk/app-${FLAVOR}-release.apk"
 fi
 
-# Before any version bump, so a mismatch leaves nothing to undo.
+# Before any version bump, so a refusal leaves nothing to undo.
+if $DEPLOY && ! $SKIP_DESKTOP; then
+  "$REPO_ROOT/sign-windows.sh" --check
+fi
 "$REPO_ROOT/check-flutter-version.sh" "$REMOTE_HOST" "$REMOTE_FLUTTER"
 
 git_signed() {
@@ -359,7 +367,7 @@ if $SKIP_DESKTOP; then
 else
   echo ""
   echo "Building the Windows desktop app..."
-  "$REPO_ROOT/build-windows-app.sh"
+  SOCKETAGENT_SIGN_WINDOWS=1 "$REPO_ROOT/build-windows-app.sh"
   "$REPO_ROOT/publish-desktop-installer.sh" --version "$NEW_VERSION"
   gh release upload "v$NEW_VERSION" \
     "$APP_DIR/build/windows/packages/SocketAgent-Desktop-Setup.exe" \

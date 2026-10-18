@@ -110,3 +110,53 @@ test("Codex sends a fresh cached catalog without starting app-server", async () 
   assert.equal(session.sessionModel, "gpt-test");
   assert.equal(session.appServer, null);
 });
+
+/**
+ * Codex session whose live catalog is `models`, without starting app-server.
+ * @param {string} model
+ * @param {Array<Record<string, unknown>>} models
+ */
+async function codexSessionWithCatalog(model, models) {
+  saveCachedModelCatalog("codex", [{ value: "gpt-6-sol", displayName: "GPT-6-Sol" }]);
+  /** @type {import("#server/protocol").ServerMessage[]} */
+  const sent = [];
+  const session = new CodexSession(testSocket(sent), process.cwd(), []);
+  session.sessionId = crypto.randomUUID();
+  await session.setModel(model);
+  session.listCodexModelRecords = async () => models;
+  return { session, sent };
+}
+
+test("Codex replaces a model the catalog no longer lists with the default", async () => {
+  const { session, sent } = await codexSessionWithCatalog("gpt-5.5", [
+    { id: "gpt-6.1-sol", displayName: "GPT-6.1-Sol", isDefault: true },
+    { id: "gpt-6-sol", displayName: "GPT-6-Sol" },
+  ]);
+
+  assert.equal(await session.resolveTurnModel(), "gpt-6.1-sol");
+  assert.equal(session.sessionModel, "gpt-6.1-sol");
+  const card = sent.find((entry) => entry.type === "model_changed");
+  assert.equal(card.content, "Codex no longer offers gpt-5.5. Model changed to GPT-6.1-Sol.");
+  assert.equal(card.model, "gpt-6.1-sol");
+});
+
+test("Codex keeps a hidden model the live catalog still lists", async () => {
+  const { session, sent } = await codexSessionWithCatalog("gpt-internal", [
+    { id: "gpt-6-sol", displayName: "GPT-6-Sol", isDefault: true },
+    { id: "gpt-internal", displayName: "Internal", hidden: true },
+  ]);
+
+  assert.equal(await session.resolveTurnModel(), "gpt-internal");
+  assert.equal(sent.some((entry) => entry.type === "model_changed"), false);
+});
+
+test("Codex records a card with display names when the user switches models", async () => {
+  const { session, sent } = await codexSessionWithCatalog("gpt-6-sol", []);
+  await session.refreshSupportedModels();
+
+  await session.setModel("gpt-6.1-sol");
+
+  const cards = sent.filter((entry) => entry.type === "model_changed");
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].content, "Model changed from GPT-6-Sol to gpt-6.1-sol");
+});

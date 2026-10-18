@@ -72,6 +72,7 @@ import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
+import { recordModelChange } from "./model-change";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { createInteractiveRequestId } from "./interactive-request-id";
@@ -1136,7 +1137,7 @@ export class ClaudeSession {
   private _restartingForSettings = false;
   private _lastPreview: string = "";
   private _lastSessionInit: ServerMessage | null = null;
-  private _lastSupportedModels: ServerMessage | null = null;
+  private _lastSupportedModels: SupportedModelsServerMessage | null = null;
   private _lastSupportedCommands: ServerMessage | null = null;
   private _lastSupportedAgents: ServerMessage | null = null;
   private clientSockets = new Set<ClientTransport>();
@@ -3150,7 +3151,9 @@ export class ClaudeSession {
   }
 
   /** Switch model mid-session. Pass undefined to reset to default. */
+  /** Applies a model to this and later turns, and records a model-change card. */
   async setModel(model?: string): Promise<void> {
+    const previous = this._requestedModel || this._sessionModel;
     this._requestedModel = model ?? null;
     this._sessionModel = model ?? null;
     if (this.activeQuery) {
@@ -3158,6 +3161,8 @@ export class ClaudeSession {
       console.log(`[Model] Set to ${model || 'default'} for session ${this.sessionId || '(pending)'}`);
     }
     this.persistAgentSettings({ model });
+    const change = recordModelChange(this.sessionId, previous, model, this._lastSupportedModels?.models ?? []);
+    if (change) this.send(change);
   }
 
   private publishSupportedModels(

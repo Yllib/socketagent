@@ -59,6 +59,9 @@
           "$ref": "#/definitions/PermissionModeChangedServerMessage"
         },
         {
+          "$ref": "#/definitions/ModelChangedServerMessage"
+        },
+        {
           "$ref": "#/definitions/SessionStateChangedServerMessage"
         },
         {
@@ -1132,6 +1135,29 @@
       "required": [
         "type",
         "permissionMode"
+      ]
+    },
+    "ModelChangedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "model_changed"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "content"
       ]
     },
     "SessionStateChangedServerMessage": {
@@ -4652,6 +4678,7 @@
             "notification",
             "task_state",
             "permission_mode",
+            "model_change",
             "run_boundary",
             "error",
             "computer_access"

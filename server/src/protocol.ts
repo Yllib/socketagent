@@ -1167,6 +1167,8 @@ export interface ForkSessionMessage {
 export interface SetModelMessage {
   type: "set_model";
   model?: string;
+  /** Session to change. Older apps omit it and change the attached session. */
+  sessionId?: string;
 }
 
 export interface SetPermissionModeMessage {
@@ -1791,6 +1793,15 @@ export interface PermissionModeChangedServerMessage {
   type: "permission_mode_changed";
   permissionMode: string | null;
   sessionId?: string;
+}
+
+/** A session's model changed. `content` is the card text, also saved as a model_change history entry. */
+export interface ModelChangedServerMessage {
+  type: "model_changed";
+  sessionId: string;
+  content: string;
+  /** Absent when the session went back to the default model. */
+  model?: string;
 }
 
 export interface SessionStateChangedServerMessage {
@@ -2431,7 +2442,7 @@ export interface SessionArchiveFailedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "run_boundary" | "error" | "computer_access";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "model_change" | "run_boundary" | "error" | "computer_access";
   content: string;
   /** Display-only snapshot references; native conversation text stays unchanged. */
   inlineImageContent?: string;
@@ -3737,6 +3748,7 @@ export type ServerMessage =
   | BashBackgroundedServerMessage
   | SubagentResultServerMessage
   | PermissionModeChangedServerMessage
+  | ModelChangedServerMessage
   | SessionStateChangedServerMessage
   | CodexPlanServerMessage
   | TodosServerMessage

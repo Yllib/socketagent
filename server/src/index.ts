@@ -114,7 +114,8 @@ import {
   managedBackendSpecsNeedingUpdate,
   parseNpmVersionOutput,
 } from "./managed-backend-update";
-import { invalidateCachedModelCatalog } from "./model-catalog-store";
+import { getCachedModelCatalog, invalidateCachedModelCatalog } from "./model-catalog-store";
+import { recordModelChange } from "./model-change";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
 import { lastClaudePlanUsage } from "./claude-plan-usage-cache";
 import { activeAppMonitorRecords, AppToolContext, publishWorkReviewCard, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
@@ -8320,10 +8321,27 @@ function createConnectionHandler(
 
       case "set_model": {
         const model = msg.model;
-        if (activeSession) {
-          activeSession.setModel(model).catch((e: unknown) => {
+        const targetId = String(msg.sessionId || "").trim();
+        const target = !targetId || activeSession?.getSessionId?.() === targetId
+          ? activeSession
+          : activeSessions.get(targetId) ?? null;
+        if (target) {
+          target.setModel(model).catch((e: unknown) => {
             console.error(`[set_model] error: ${e}`);
             sendJson({ type: "error", message: `Failed to set model: ${errorMessage(e) || e}` });
+          });
+        } else if (targetId && getSession(targetId)) {
+          // Not running here. The saved setting applies when the session resumes.
+          const stored = getSession(targetId);
+          updateSessionAgentSettings(targetId, { model });
+          const catalog = getCachedModelCatalog(stored?.backend === "codex" ? "codex" : "claude");
+          const change = recordModelChange(targetId, stored?.agentSettings?.model, model, catalog?.models ?? []);
+          if (change) sendJson({ ...change });
+        } else if (targetId) {
+          sendJson({
+            type: "error",
+            sessionId: targetId,
+            message: "The model did not change because this computer does not have this session open. Reopen the session and pick the model again.",
           });
         }
         break;

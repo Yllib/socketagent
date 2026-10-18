@@ -68,6 +68,7 @@ import { buildSocketAgentIntegrationInstructions } from "./socketagent-instructi
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
+import { recordModelChange } from "./model-change";
 import {
   CodexAppServerApprovalPolicy,
   CodexAppServerApprovalsReviewer,
@@ -655,6 +656,8 @@ export class CodexSession {
     contextWindow: number;
   } | null = null;
   private _lastSupportedModels: SupportedModelsServerMessage | null = null;
+  /** A model change made before a new thread had an ID, recorded once it does. */
+  private pendingModelChange: { previous: string; next: string; reason: string; models: Array<Record<string, unknown>> } | null = null;
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
   private pendingQuestions = new Map<string, PendingQuestion>();
@@ -864,13 +867,28 @@ export class CodexSession {
         : "default";
   }
 
-  /** Mirrors ClaudeSession.setModel — async to match signature. */
+  /** Mirrors ClaudeSession.setModel — async to match signature. Records a model-change card. */
   async setModel(model?: string): Promise<void> {
+    const previous = this._model;
+    this.applyModel(model);
+    const change = recordModelChange(this.sessionId, previous, model, this._lastSupportedModels?.models ?? []);
+    if (change) this.send(change);
+  }
+
+  private applyModel(model?: string): void {
     this._model = model ?? null;
     this.normalizeEffortForModel(this._model);
     this.persistAgentSettings({ model: this._model || undefined, effort: this._effort });
     this.updateCachedSupportedModelSelection();
     if (this._lastSupportedModels) this.send(this._lastSupportedModels);
+  }
+
+  private flushPendingModelChange(): void {
+    const pending = this.pendingModelChange;
+    if (!pending || !this.sessionId) return;
+    this.pendingModelChange = null;
+    const change = recordModelChange(this.sessionId, pending.previous, pending.next, pending.models, pending.reason);
+    if (change) this.send(change);
   }
 
   /**
@@ -1612,7 +1630,7 @@ export class CodexSession {
   private async ensureRealtimeThread(): Promise<string> {
     await this.resetInvalidatedAppServerAuthentication();
     await this.ensureAppServer();
-    if (!this.codexModel()) await this.refreshSupportedModels();
+    await this.resolveTurnModel();
     const resumeTarget = this.threadId || this.sessionId || this._resumeSessionId || null;
     const threadConfig = this.buildAppServerThreadParams();
     let startedNewThread = false;
@@ -2164,11 +2182,7 @@ export class CodexSession {
       if (modelCatalogIsFresh(cachedCatalog)) return;
     }
     try {
-      await this.ensureAppServer();
-      const result = await this.appServer!.listModels();
-      const response = isCodexRecord(result) ? result : {};
-      const rawModels = codexRecordArray(Array.isArray(response.data) ? response.data :
-        Array.isArray(response.models) ? response.models : result);
+      const rawModels = await this.listCodexModelRecords();
       const visible = rawModels
         .filter((model) => model && model.hidden !== true)
         .slice(0, 50);
@@ -2218,6 +2232,46 @@ export class CodexSession {
     } catch (e) {
       console.warn(`[CodexModels] Failed to list models: ${codexAppServerErrorMessage(e, String(e))}`);
     }
+  }
+
+  /** Lists Codex's model catalog for this account, hidden models included. */
+  private async listCodexModelRecords(): Promise<Array<Record<string, unknown>>> {
+    await this.ensureAppServer();
+    const result = await this.appServer!.listModels();
+    const response = isCodexRecord(result) ? result : {};
+    return codexRecordArray(Array.isArray(response.data) ? response.data :
+      Array.isArray(response.models) ? response.models : result);
+  }
+
+  /**
+   * Picks the model for the next turn. A saved model Codex no longer lists,
+   * such as a retired one, fails every turn, so it is replaced with the
+   * catalog default and the user is told.
+   */
+  private async resolveTurnModel(): Promise<string | undefined> {
+    if (!this.codexModel()) await this.refreshSupportedModels();
+    const model = this.codexModel();
+    if (!model || playReviewModeEnabled()) return model;
+    // The cached catalog holds only visible models, so a miss is checked live.
+    if (getCachedModelCatalog("codex")?.models.some((entry) => entry.value === model)) return model;
+    let catalog: Array<Record<string, unknown>>;
+    try {
+      catalog = await this.listCodexModelRecords();
+    } catch {
+      return model;
+    }
+    if (catalog.length === 0 || catalog.some((entry) => this.codexModelId(entry) === model)) return model;
+    const visible = catalog.filter((entry) => entry.hidden !== true);
+    const replacement = visible.find((entry) => entry.isDefault === true) || visible[0];
+    const replacementId = replacement ? this.codexModelId(replacement) : "";
+    if (!replacement || !replacementId) return model;
+    console.warn(`[CodexModels] ${model} is no longer offered; session now uses ${replacementId}`);
+    this.applyModel(replacementId);
+    // The model may have come from config.toml, so the change is recorded
+    // from `model` rather than through setModel.
+    this.pendingModelChange = { previous: model, next: replacementId, reason: `Codex no longer offers ${model}.`, models: catalog };
+    this.flushPendingModelChange();
+    return replacementId;
   }
 
   private publishSupportedModels(
@@ -2676,8 +2730,7 @@ export class CodexSession {
       // Current app-server versions require model on turn/start. A new session
       // can reach this path before the app explicitly selects a model, so adopt
       // the account-aware catalog default before creating any thread state.
-      if (!this.codexModel()) await this.refreshSupportedModels();
-      const turnModel = this.codexModel();
+      const turnModel = await this.resolveTurnModel();
       if (!turnModel) {
         throw new Error("Codex did not provide an available model for this session");
       }
@@ -3341,6 +3394,7 @@ export class CodexSession {
     const isFirstTime = !this.sessionId;
     const replacesSessionId = this.replacesSessionId;
     this.sessionId = threadId;
+    this.flushPendingModelChange();
     if (nativeModel || nativeReasoningEffort) {
       this.persistAgentSettings({
         ...(nativeModel ? { model: nativeModel } : {}),
@@ -4835,7 +4889,11 @@ export class CodexSession {
           const summary = String(p?.message || p?.summary);
           const details = String(p?.details || "").trim();
           const message = details ? `${summary}\n${details}` : summary;
-          if (isCodexAuthError(p) || isCodexAuthError(message)) {
+          if (/^This session was recorded with model /.test(summary)) {
+            // Codex warns after every model switch on an existing thread.
+            // Only set_model changes the model, so the switch was deliberate.
+            console.log(`[CodexModels] ${summary}`);
+          } else if (isCodexAuthError(p) || isCodexAuthError(message)) {
             void this.handleAppServerAuthFailure(message, {
               hintedMcp: isMcpAuthSignal(p) || isMcpAuthSignal(message),
               terminal: false,

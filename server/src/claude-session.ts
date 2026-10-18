@@ -12,6 +12,7 @@ import { readClaudeSupportedModels } from "./claude-model-discovery";
 import { handleClaudeResumeDialog } from "./claude-resume-dialog";
 import { waitForInteractiveAnswer } from "./interactive-answer";
 import { prepareCodexMcpElicitation, resolveCodexMcpElicitation } from "./codex-elicitation";
+import { bashCapturePath, removeBashCapture, wrapBashForCapture } from "./bash-capture";
 import * as crypto from "crypto";
 import { execFile, execFileSync, spawn, spawnSync } from "child_process";
 import * as pty from "node-pty";
@@ -4100,11 +4101,15 @@ export class ClaudeSession {
                 // Wrap Bash commands with tee for live streaming output
                 if (toolName === "Bash" && toolInput.command) {
                   const toolUseId = input.tool_use_id || "unknown";
-                  const outFile = `/tmp/claude-bash-${toolUseId}.log`;
-                  try { fs.writeFileSync(outFile, ""); } catch {}
-                  const wrapped = `set -o pipefail; (${toolInput.command}) 2>&1 | stdbuf -oL tee ${outFile}`;
-                  console.log(`[Hook] Bash tee: toolUseId=${toolUseId} outFile=${outFile}`);
-                  // Log the updatedInput to verify it's being applied
+                  let wrapped: string;
+                  try {
+                    wrapped = wrapBashForCapture(String(toolInput.command), toolUseId);
+                  } catch (err) {
+                    // No capture file means no live output, but the command still runs.
+                    console.warn(`[Hook] Bash capture unavailable for ${toolUseId}: ${String(err)}`);
+                    return { continue: true };
+                  }
+                  console.log(`[Hook] Bash tee: toolUseId=${toolUseId} outFile=${bashCapturePath(toolUseId)}`);
                   const result = {
                     hookSpecificOutput: {
                       hookEventName: "PreToolUse" as const,
@@ -5617,11 +5622,9 @@ export class ClaudeSession {
                   }
                 }
 
-                // Start watching the global bash log file for streaming output
-                // Start watching for bash output — file path derived from tool_use_id
-                // (matches the path the PreToolUse hook uses for tee wrapping)
+                // Stream the capture file the PreToolUse hook tees this command into
                 if (block.name === "Bash") {
-                  this._startBashWatcher(`/tmp/claude-bash-${block.id}.log`);
+                  this._startBashWatcher(bashCapturePath(block.id));
                 }
 
                 // Track all Agent (subagent) tool calls (renamed from "Task" in SDK 0.2.76)
@@ -5839,8 +5842,9 @@ export class ClaudeSession {
                   // Don't replace card content — just send the tool_result normally
                   // but the app will handle it specially
                 } else {
-                  // Stop bash output watcher — tool finished normally
+                  // Tool finished normally, so its capture has been streamed in full
                   this._stopBashWatcher();
+                  removeBashCapture(toolUseId);
                 }
 
                 // A background Agent tool result is only the launch

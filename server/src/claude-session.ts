@@ -13,6 +13,7 @@ import { handleClaudeResumeDialog } from "./claude-resume-dialog";
 import { waitForInteractiveAnswer } from "./interactive-answer";
 import { prepareCodexMcpElicitation, resolveCodexMcpElicitation } from "./codex-elicitation";
 import { bashCapturePath, removeBashCapture, wrapBashForCapture } from "./bash-capture";
+import { saveFullOutput } from "./full-output-store";
 import * as crypto from "crypto";
 import { execFile, execFileSync, spawn, spawnSync } from "child_process";
 import * as pty from "node-pty";
@@ -1113,6 +1114,8 @@ export class ClaudeSession {
   private _taskOutputFiles: Map<string, string> = new Map();  // taskId → outputFile path
   private _activeSubagents: Map<string, ClaudeSubagentState> = new Map();
   private _activeBashStream: { interval: NodeJS.Timeout; filePath: string; lastSize: number } | null = null;
+  // Bash tool calls whose command the PreToolUse hook gave an extra tee before a filter.
+  private readonly _filteredBashToolUseIds = new Set<string>();
   private _bgBashWatchers: Map<string, { interval: NodeJS.Timeout; filePath: string; lastSize: number }> = new Map();
   private _activeToolUseId: string | null = null;  // currently-executing tool call
   private _activeToolName: string | null = null;
@@ -1384,6 +1387,23 @@ export class ClaudeSession {
       } catch {}
     }, 500) };
     this._activeBashStream = state;
+  }
+
+  /**
+   * Stores a finished Bash command's full output when the agent saw less of
+   * it: the command filtered its own output, or the result came back
+   * truncated. Returns the stored size.
+   */
+  private _keepBashFullOutput(toolUseId: string, shown: string): number | undefined {
+    const filtered = this._filteredBashToolUseIds.delete(toolUseId);
+    if (!this.sessionId) return undefined;
+    const capturePath = bashCapturePath(toolUseId);
+    try {
+      if (!filtered && fs.statSync(capturePath).size <= Buffer.byteLength(shown, "utf8") + 1024) return undefined;
+      return saveFullOutput(this.sessionId, toolUseId, capturePath, shown) ?? undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private _stopBashWatcher(): void {
@@ -4103,7 +4123,9 @@ export class ClaudeSession {
                   const toolUseId = input.tool_use_id || "unknown";
                   let wrapped: string;
                   try {
-                    wrapped = wrapBashForCapture(String(toolInput.command), toolUseId);
+                    const capture = wrapBashForCapture(String(toolInput.command), toolUseId);
+                    wrapped = capture.command;
+                    if (capture.filtered) this._filteredBashToolUseIds.add(toolUseId);
                   } catch (err) {
                     // No capture file means no live output, but the command still runs.
                     console.warn(`[Hook] Bash capture unavailable for ${toolUseId}: ${String(err)}`);
@@ -5813,6 +5835,7 @@ export class ClaudeSession {
 
                 // Detect bash command moved to background (any wording)
                 const backgrounded = parseClaudeBackgroundedBash(output);
+                let fullOutputBytes: number | undefined;
                 if (backgrounded && this._activeBashStream) {
                   backgroundPending = true;
                   const bgTaskId = backgrounded.taskId;
@@ -5844,6 +5867,7 @@ export class ClaudeSession {
                 } else {
                   // Tool finished normally, so its capture has been streamed in full
                   this._stopBashWatcher();
+                  fullOutputBytes = this._keepBashFullOutput(toolUseId, output);
                   removeBashCapture(toolUseId);
                 }
 
@@ -5888,6 +5912,7 @@ export class ClaudeSession {
                       done: i + CHUNK_SIZE >= shownOutput.length,
                       sessionId: this.sessionId || "",
                       parentToolUseId: parentId,
+                      ...(fullOutputBytes && i + CHUNK_SIZE >= shownOutput.length ? { fullOutputBytes } : {}),
                     });
                   }
                 } else {
@@ -5897,6 +5922,7 @@ export class ClaudeSession {
                     toolUseId,
                     output: shownOutput,
                     backgroundPending,
+                    fullOutputBytes,
                     sessionId: this.sessionId || "",
                     parentToolUseId: parentId,
                     uuid: msgUuid,
@@ -5913,6 +5939,7 @@ export class ClaudeSession {
                     toolUseId: block.tool_use_id || "",
                     toolOutput: shownOutput,
                     backgroundPending,
+                    fullOutputBytes,
                     parentToolUseId: parentId,
                     uuid: msgUuid,
                     timestamp: now(),

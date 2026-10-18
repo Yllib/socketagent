@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import type { Backend, BackendHealthInfo, CodexDriver, ComputerIssue } from "./protocol";
-import { buildCodexSpawn } from "./codex-env";
+import { buildCodexSpawn, resolveCodexCommand } from "./codex-env";
 import { getCodexLinuxSandboxHealth } from "./codex-linux-sandbox";
 import { resolveClientPath } from "./path-utils";
 import { backendConfigFileIdForPath } from "./backend-config-files";
@@ -218,14 +218,15 @@ function firstOutputLine(stdout?: string | Buffer, stderr?: string | Buffer): st
 
 function codexHealth(): BackendHealthInfo {
   const codexVersion = buildCodexSpawn(["--version"]);
-  const source = codexCommandSource(codexVersion.command);
+  const resolved = resolveCodexCommand(codexVersion.env);
+  const source = codexCommandSource(resolved);
   const base: BackendHealthInfo = {
     backend: "codex",
     enabled: true,
     available: false,
     severity: "error",
     source,
-    command: codexVersion.command,
+    command: resolved,
     installRoot: managedNpmPrefix(),
   };
 

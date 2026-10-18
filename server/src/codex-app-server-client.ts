@@ -15,7 +15,10 @@ import type { CodexRealtimeMethods } from "./codex-realtime";
 type CodexRequestParams = { [M in keyof CodexMethods]: CodexMethods[M]["params"] } & {
   // Retained only for older CLIs. Current versions use the verified revert fallback.
   "thread/rollback": { threadId: string; numTurns: number };
-} & { [M in keyof CodexRealtimeMethods]: CodexRealtimeMethods[M]["params"] };
+  // Used only to trust SocketAgent's own capture hook; see codex-capture-hook-config.
+  "hooks/list": { cwds?: string[] };
+  "config/value/write": { keyPath: string; value: { [key: string]: { trusted_hash: string } }; mergeStrategy: "upsert" };
+} &{ [M in keyof CodexRealtimeMethods]: CodexRealtimeMethods[M]["params"] };
 import { isCodexRecord, parseRewindResponse } from "./codex-rewind-contract";
 import { parseCodexResponse } from "./codex-contracts";
 
@@ -396,8 +399,13 @@ export class CodexAppServerClient extends EventEmitter {
     await this.stop("SIGTERM", 3000, true);
     this.stdoutChunks = [];
     try {
+      // Keep what precedes `app-server` in the launch args: the codex.js
+      // script on Windows and global `-c` flags.
+      const launchArgs = this.options.args ?? [];
+      const subcommandAt = launchArgs.indexOf("app-server");
+      const leadingArgs = subcommandAt > 0 ? launchArgs.slice(0, subcommandAt) : [];
       const { stdout } = await execFileAsync(this.options.command ?? "codex",
-        ["migrate-rollouts", "--apply", "--thread", threadId, "--json"], {
+        [...leadingArgs, "migrate-rollouts", "--apply", "--thread", threadId, "--json"], {
           cwd: this.options.cwd, env: this.options.env ?? process.env,
           shell: this.options.shell, windowsHide: true, timeout: 120_000, maxBuffer: 1024 * 1024,
         });

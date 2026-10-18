@@ -87,6 +87,10 @@ import { createInteractiveRequestId } from "./interactive-request-id";
 import { waitForInteractiveAnswer } from "./interactive-answer";
 import { buildCodexRateLimitEvents } from "./rate-limit-events";
 import { recordRateLimitEvent } from "./rate-limit-cache";
+import { codexCaptureHookArgs } from "./codex-capture-hook-config";
+import { commandCapturePath, followCaptureFile } from "./bash-capture";
+import { stripCaptureStages } from "./command-capture";
+import { saveFullOutput } from "./full-output-store";
 import {
   recordSessionMemoryCompaction,
   recordSessionMemoryContextUsage,
@@ -602,6 +606,8 @@ export class CodexSession {
   private appServerReasoningStartedAt = new Map<string, number>();
   private appServerPlanText = new Map<string, string>();
   private appServerToolOutput = new Map<string, string>();
+  // Commands the capture hook rewrote, by item id: their capture file and its follower.
+  private commandCaptures = new Map<string, { path: string; stop: () => void }>();
   private appServerActiveToolCalls = new Map<string, {
     tool: string;
     input: Record<string, unknown>;
@@ -2877,6 +2883,7 @@ export class CodexSession {
     } finally {
       this._isRunning = false;
       this._runStartedAt = null;
+      this.stopCommandCaptures();
       this.activeAppServerTurnId = null;
       this.appServerTurnSettler = null;
       this.onActivity?.();
@@ -2893,6 +2900,36 @@ export class CodexSession {
     }
   }
 
+  /** Streams a rewritten command's full output into its card while it runs. */
+  private followCommandCapture(itemId: string, capturePath: string): void {
+    this.commandCaptures.get(itemId)?.stop();
+    const stop = followCaptureFile(capturePath, (content) => {
+      const sessionId = this.sessionId;
+      if (sessionId) this.send({ type: "tool_stderr", toolUseId: itemId, content, sessionId });
+    });
+    this.commandCaptures.set(itemId, { path: capturePath, stop });
+  }
+
+  /** Stores a finished command's full output and removes its capture. Returns the stored size. */
+  private finishCommandCapture(itemId: string, sessionId: string, shown: string): number | undefined {
+    const capture = this.commandCaptures.get(itemId);
+    if (!capture) return undefined;
+    capture.stop();
+    this.commandCaptures.delete(itemId);
+    try {
+      return saveFullOutput(sessionId, itemId, capture.path, shown) ?? undefined;
+    } catch {
+      return undefined;
+    } finally {
+      fs.rm(capture.path, { force: true }, () => {});
+    }
+  }
+
+  private stopCommandCaptures(): void {
+    for (const capture of this.commandCaptures.values()) capture.stop();
+    this.commandCaptures.clear();
+  }
+
   private async ensureAppServer(): Promise<void> {
     if (this.appServerStopPromise) await this.appServerStopPromise;
     if (this._abortRequested) {
@@ -2904,7 +2941,7 @@ export class CodexSession {
     }
     if (!this.appServer) {
       this.appServerTerminalFailureHandled = false;
-      const codex = buildCodexSpawn(["app-server", "--listen", "stdio://"]);
+      const codex = buildCodexSpawn([...await codexCaptureHookArgs(), "app-server", "--listen", "stdio://"]);
       const socketAgentSessionId = this.sessionId || this.threadId || this._resumeSessionId || "";
       const codexEnv: NodeJS.ProcessEnv = { ...codex.env };
       codexEnv.SOCKETAGENT_PORT = process.env.PORT || "8085";
@@ -3697,7 +3734,7 @@ export class CodexSession {
     try {
       switch (method) {
         case "item/commandExecution/requestApproval": {
-          const command = String(params.command || "");
+          const command = stripCaptureStages(String(params.command || ""));
           const allowed = await this.canApproveAppServerTool("Bash", {
             ...params, command,
           }, request.id);
@@ -3706,9 +3743,9 @@ export class CodexSession {
         }
 
         case "execCommandApproval": {
-          const command = Array.isArray(params.command)
+          const command = stripCaptureStages(Array.isArray(params.command)
             ? params.command.join(" ")
-            : String(params.command || "");
+            : String(params.command || ""));
           const allowed = await this.canApproveAppServerTool("Bash", {
             ...params, command,
           }, request.id);
@@ -5101,8 +5138,11 @@ export class CodexSession {
 
     if (item.type === "commandExecution") {
       if (method === "item/started") {
+        const ranCommand = String(item.command || "");
+        const capturePath = commandCapturePath(ranCommand);
+        if (capturePath) this.followCommandCapture(item.id, capturePath);
         const input = {
-          command: item.command || "",
+          command: stripCaptureStages(ranCommand),
           description: summarizeCodexCommandActions(item.commandActions, item.command),
           cwd: item.cwd || "",
           commandActions: unknownArray(item.commandActions),
@@ -5129,6 +5169,7 @@ export class CodexSession {
         const baseOutput = item.aggregatedOutput ?? buffered;
         const suffix = item.exitCode ? `\n[exit ${item.exitCode}]` : "";
         const output = `${baseOutput || ""}${suffix}`;
+        const fullOutputBytes = this.finishCommandCapture(item.id, sid, output);
         sendItem({
           type: "tool_result_chunk",
           toolUseId: item.id,
@@ -5141,6 +5182,7 @@ export class CodexSession {
           type: "tool_result",
           toolUseId: item.id,
           output,
+          fullOutputBytes,
           sessionId: sid,
         });
         appendItem({
@@ -5148,6 +5190,7 @@ export class CodexSession {
           content: output,
           toolUseId: item.id,
           toolOutput: output,
+          fullOutputBytes,
           timestamp: now(),
         });
         this.appServerToolOutput.delete(item.id);

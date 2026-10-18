@@ -14,11 +14,26 @@ const DAY = 24 * 60 * 60 * 1000;
 test("the wrapped command keeps its output and exit status and fills the capture", () => {
   const id = `toolu_test_${process.pid}`;
   const wrapped = wrapBashForCapture("echo out; echo err >&2; exit 3", id);
-  const run = spawnSync("bash", ["-c", wrapped], { encoding: "utf8" });
+  const run = spawnSync("bash", ["-c", wrapped.command], { encoding: "utf8" });
   try {
+    assert.equal(wrapped.filtered, false);
     assert.equal(run.status, 3);
     assert.equal(run.stdout, "out\nerr\n");
     assert.equal(fs.readFileSync(bashCapturePath(id), "utf8"), "out\nerr\n");
+  } finally {
+    fs.rmSync(bashCapturePath(id), { force: true });
+  }
+});
+
+test("a filtered command's capture holds the stream before the filter", () => {
+  const id = `toolu_filtered_${process.pid}`;
+  const wrapped = wrapBashForCapture("seq 1 5 | tail -1", id);
+  const run = spawnSync("bash", ["-c", wrapped.command], { encoding: "utf8" });
+  try {
+    assert.equal(wrapped.filtered, true);
+    assert.equal(run.stdout, "5\n");
+    // The full stream, then what the agent saw.
+    assert.equal(fs.readFileSync(bashCapturePath(id), "utf8"), "1\n2\n3\n4\n5\n5\n");
   } finally {
     fs.rmSync(bashCapturePath(id), { force: true });
   }

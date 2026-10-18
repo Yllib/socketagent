@@ -4,6 +4,7 @@ import { isRecord, unknownArray } from "./value-guards";
 import * as path from "path";
 import type { HistoryEntry } from "./protocol";
 import { normalizeCodexSubagentStatus, codexSubagentIsActive } from "./codex-subagent-state";
+import { stripCaptureStages } from "./command-capture";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -101,7 +102,7 @@ function normalizeToolName(name: unknown): string {
 function toolCallContent(toolName: string, args: Record<string, unknown>, fallback = ""): string {
   if (toolName === "Bash") {
     const cmd = args.cmd ?? args.command;
-    return typeof cmd === "string" ? cmd : fallback || jsonPreview(args);
+    return typeof cmd === "string" ? stripCaptureStages(cmd) : fallback || jsonPreview(args);
   }
   if (toolName === "ApplyPatch") {
     const patch = args.patch ?? args.input;
@@ -391,7 +392,7 @@ export function codexAppServerThreadToHistory(thread: unknown): HistoryEntry[] {
       }
 
       if (item.type === "commandExecution") {
-        const command = String(item.command ?? "");
+        const command = stripCaptureStages(String(item.command ?? ""));
         result.push({
           role: "tool_call",
           content: command,

@@ -70,7 +70,7 @@ export const historyEntrySchema = z.object({
   fileSize: optionalNumber, fileVersion: optionalText, fileDeliveryPath: optionalText,
   toolOutputRef: optionalText, toolOutputBytes: optionalNumber,
   toolOutputStoredBytes: optionalNumber, toolOutputPreview: optionalText,
-  toolOutputEncoding: z.literal("gzip").optional(),
+  toolOutputEncoding: z.literal("gzip").optional(), fullOutputBytes: optionalNumber,
   questionId: optionalText, questions: z.array(questionSchema).optional(),
   asyncQuestion: optionalBoolean, emailPreview: emailPreviewSchema.optional(),
   answered: optionalBoolean, answers: z.record(z.string(), z.string()).optional(),

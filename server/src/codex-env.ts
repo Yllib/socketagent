@@ -82,12 +82,27 @@ export function resolveCodexCommand(env: NodeJS.ProcessEnv = buildCodexProcessEn
   return "codex";
 }
 
+/**
+ * The launcher script behind npm's Windows shim (codex.cmd), or null. Running
+ * it with Node directly keeps arguments away from cmd.exe, which would split
+ * or reinterpret any containing spaces, quotes, `&` or `^`.
+ */
+export function codexShimScript(command: string): string | null {
+  if (!/\.cmd$/i.test(command)) return null;
+  const script = path.join(path.dirname(command), "node_modules", "@openai", "codex", "bin", "codex.js");
+  return fs.existsSync(script) ? script : null;
+}
+
 export function buildCodexSpawn(
   args: string[],
   base: NodeJS.ProcessEnv = process.env
 ): { command: string; args: string[]; env: NodeJS.ProcessEnv; shell: boolean } {
   const env = buildCodexProcessEnv(base);
   const command = resolveCodexCommand(env);
+  if (process.platform === "win32") {
+    const script = codexShimScript(command);
+    if (script) return { command: process.execPath, args: [script, ...args], env, shell: false };
+  }
   const shell = process.platform === "win32" && !/\.(?:exe|com)$/i.test(command);
   return { command, args, env, shell };
 }

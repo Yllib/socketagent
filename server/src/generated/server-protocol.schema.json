@@ -20,6 +20,9 @@
           "$ref": "#/definitions/ToolResultServerMessage"
         },
         {
+          "$ref": "#/definitions/FullOutputServerMessage"
+        },
+        {
           "$ref": "#/definitions/ToolResultChunkServerMessage"
         },
         {
@@ -672,6 +675,9 @@
         "backgroundPending": {
           "type": "boolean"
         },
+        "fullOutputBytes": {
+          "type": "number"
+        },
         "parentToolUseId": {
           "type": [
             "string",
@@ -698,6 +704,33 @@
         "sessionId"
       ]
     },
+    "FullOutputServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "full_output"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "toolUseId": {
+          "type": "string"
+        },
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "toolUseId",
+        "content"
+      ]
+    },
     "ToolResultChunkServerMessage": {
       "type": "object",
       "properties": {
@@ -712,6 +745,9 @@
           "type": "string"
         },
         "chunkIndex": {
+          "type": "number"
+        },
+        "fullOutputBytes": {
           "type": "number"
         },
         "done": {
@@ -4736,6 +4772,9 @@
         "toolOutputEncoding": {
           "type": "string",
           "const": "gzip"
+        },
+        "fullOutputBytes": {
+          "type": "number"
         },
         "timestamp": {
           "type": "string"

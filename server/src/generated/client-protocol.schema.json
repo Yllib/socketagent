@@ -2322,6 +2322,29 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "get_full_output"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "toolUseId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "toolUseId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "get_sdk_event_history"
             },
             "sessionId": {

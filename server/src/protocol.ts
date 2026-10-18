@@ -1184,6 +1184,13 @@ export interface GetContextUsageMessage {
   type: "get_context_usage";
 }
 
+/** Requests the stored full output of one command. */
+export interface GetFullOutputMessage {
+  type: "get_full_output";
+  sessionId: string;
+  toolUseId: string;
+}
+
 export interface GetSdkEventHistoryMessage {
   type: "get_sdk_event_history";
   sessionId?: string;
@@ -1535,6 +1542,7 @@ export type ClientMessage = { commandId?: string } & (
   | SetPermissionModeMessage
   | McpStatusRequestMessage
   | GetContextUsageMessage
+  | GetFullOutputMessage
   | GetSdkEventHistoryMessage
   | McpReconnectMessage
   | McpToggleMessage
@@ -1686,6 +1694,8 @@ export interface ToolResultServerMessage {
   sessionId: string;
   /** The Agent tool returned its non-terminal async launch acknowledgement. */
   backgroundPending?: boolean;
+  /** Size of the command's full output when the agent saw less; fetch it with get_full_output. */
+  fullOutputBytes?: number;
   parentToolUseId?: string | null;
   uuid?: string;
   entryId?: string;
@@ -1693,11 +1703,21 @@ export interface ToolResultServerMessage {
   revision?: number;
 }
 
+/** Reply to get_full_output. `content` is null when nothing is stored. */
+export interface FullOutputServerMessage {
+  type: "full_output";
+  sessionId: string;
+  toolUseId: string;
+  content: string | null;
+}
+
 export interface ToolResultChunkServerMessage {
   type: "tool_result_chunk";
   toolUseId: string;
   content: string;
   chunkIndex: number;
+  /** Set on the final chunk; see ToolResultServerMessage.fullOutputBytes. */
+  fullOutputBytes?: number;
   done: boolean;
   sessionId: string;
   parentToolUseId?: string | null;
@@ -2466,6 +2486,8 @@ export interface HistoryEntry {
   toolOutputStoredBytes?: number;
   toolOutputPreview?: string;
   toolOutputEncoding?: "gzip";
+  /** The command's full output is stored apart; see ToolResultServerMessage.fullOutputBytes. */
+  fullOutputBytes?: number;
   timestamp: string;
   // Question fields (role === "question")
   questionId?: string;
@@ -3735,6 +3757,7 @@ export type ServerMessage =
   | TextServerMessage
   | ToolCallServerMessage
   | ToolResultServerMessage
+  | FullOutputServerMessage
   | ToolResultChunkServerMessage
   | ToolStderrServerMessage
   | SessionInitServerMessage

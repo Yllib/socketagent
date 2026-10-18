@@ -47,8 +47,8 @@ if (!envFile || !keysFile) {
 const existingEnv = {};
 if (fs.existsSync(envFile)) {
   const content = fs.readFileSync(envFile, "utf-8");
-  for (const line of content.split("\n")) {
-    const match = line.match(/^([A-Z_]+)=(.*)$/);
+  for (const line of content.split(/\r?\n/)) {
+    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
     if (match) existingEnv[match[1]] = match[2];
   }
   console.log(`Read existing config from ${envFile}`);
@@ -77,6 +77,9 @@ function secureSecretFileMode(filePath) {
 }
 
 // --- Write .env ---
+// Keys this script doesn't manage, such as the LINK_ROOM_TOKEN the server
+// writes, are kept. Dropping that one breaks every link to this computer.
+const managedKeys = new Set(["PORT", "BIND_HOST", "AUTH_TOKEN", "DEFAULT_CWD", "RELAY_URL", "PAIRING_TOKEN"]);
 const envContent = [
   `PORT=${envPort}`,
   ...(envBindHost ? [`BIND_HOST=${envBindHost}`] : []),
@@ -84,6 +87,9 @@ const envContent = [
   `DEFAULT_CWD=${envCwd}`,
   `RELAY_URL=${envRelay}`,
   `PAIRING_TOKEN=${pairingToken}`,
+  ...Object.entries(existingEnv)
+    .filter(([key]) => !managedKeys.has(key))
+    .map(([key, value]) => `${key}=${value}`),
 ].join("\n") + "\n";
 
 fs.mkdirSync(path.dirname(envFile), { recursive: true });

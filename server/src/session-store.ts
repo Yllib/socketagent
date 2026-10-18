@@ -622,12 +622,19 @@ function hydrateHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
 
 type HistoryCacheEntry = {
   entries: HistoryEntry[];
+  /** Stored JSON length when known; otherwise the entries are serialized to size them. */
+  bytes?: number;
 };
 
 const historyCache = new ByteBoundedLru<string, HistoryCacheEntry>(
   HISTORY_CACHE_MAX_BYTES,
-  (entry) => Buffer.byteLength(JSON.stringify(entry.entries), "utf8"),
+  (entry) => entry.bytes ?? Buffer.byteLength(JSON.stringify(entry.entries), "utf8"),
 );
+
+/** Grow a cached history's size estimate by one written entry. */
+function noteCachedHistoryWrite(cached: HistoryCacheEntry, entry: HistoryEntry): void {
+  if (cached.bytes !== undefined) cached.bytes += JSON.stringify(entry).length;
+}
 
 function historyDatabase(): TranscriptDatabase {
   ensureHistoryDir();
@@ -1224,9 +1231,9 @@ function readHistoryEntries(sessionId: string, options: { backfillUserUuids?: bo
   const cached = historyCache.get(sessionId);
   if (cached) return cached.entries;
 
-  const entries = historyDatabase().getAll(sessionId);
+  const { entries, bytes } = historyDatabase().getAllSized(sessionId);
   syncTranscriptPositionState(sessionId, entries);
-  historyCache.set(sessionId, { entries });
+  historyCache.set(sessionId, { entries, bytes });
   warnIfSlow("history_read", startedAt, {
     sessionId,
     entries: entries.length,
@@ -1442,6 +1449,7 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
       cached.entries.push(safeEntry);
       cached.entries.sort((left, right) => Number(left.sessionSeq || 0) - Number(right.sessionSeq || 0));
     }
+    noteCachedHistoryWrite(cached, safeEntry);
     historyCache.refresh(sessionId);
   }
   updateSessionHistoryMetadataFromDatabase(sessionId);
@@ -1503,8 +1511,11 @@ export function attachSendFileDeliveryToHistory(
   metadata: SendFileDeliveryMetadata,
 ): HistoryEntry | undefined {
   if (!sessionId || !metadata.filePath || !metadata.fileId) return undefined;
-  const entries = readHistoryEntries(sessionId);
   const earliestMatch = metadata.advertisedAtMs - 5_000;
+  // The delivery ID is minted when the file is advertised, so only calls
+  // inside the match window can carry it or receive it.
+  ensureHistoryDatabaseSession(sessionId);
+  const entries = historyDatabase().getSinceTimestamp(sessionId, new Date(earliestMatch).toISOString());
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
     if (!isSendFileCall(entry) || sendFilePath(entry) !== metadata.filePath) continue;
@@ -1597,6 +1608,7 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
       const index = indexes.get(entry.entryId);
       if (index === undefined) cached.entries.push(entry);
       else cached.entries[index] = entry;
+      noteCachedHistoryWrite(cached, entry);
     }
     cached.entries.sort((left, right) => Number(left.sessionSeq || 0) - Number(right.sessionSeq || 0));
     historyCache.refresh(sessionId);
@@ -1785,7 +1797,9 @@ function extractJsonlUserText(content: unknown): string {
  * Backfill UUIDs onto user history entries that pre-date self-assigned UUIDs.
  * Reads the Claude Code JSONL transcript for the session and matches user
  * entries by content in order. Idempotent: if no entries are missing UUIDs,
- * the JSONL is never read.
+ * the JSONL is never read. Some entries never match, so the transcript
+ * database remembers how far the JSONL was read and later passes read only
+ * what Claude appended since.
  */
 export function backfillUserUuids(sessionId: string): void {
   if (_backfilledSessions.has(sessionId)) return;
@@ -1803,18 +1817,22 @@ export function backfillUserUuids(sessionId: string): void {
   // Pull user prompts from the JSONL in order. Skip entries that don't carry a
   // uuid (queue-operation rows etc.) and synthetic tool_result echoes.
   const jsonlUsers: { uuid: string; text: string }[] = [];
+  let scanOffset = database.userUuidScanOffset(sessionId);
   try {
-    const lines = fs.readFileSync(jsonlPath, "utf-8").split("\n").filter(Boolean);
-    for (const line of lines) {
-      let row: unknown;
-      try { row = JSON.parse(line); } catch { continue; }
-      if (!isRecord(row)) continue;
-      if (row.type !== "user" || typeof row.uuid !== "string" || !isRecord(row.message)) continue;
-      const text = extractJsonlUserText(row.message.content);
-      if (!text) continue;
-      jsonlUsers.push({ uuid: row.uuid, text });
-    }
+    if (fs.statSync(jsonlPath).size < scanOffset) scanOffset = 0;
+    scanOffset = readCompleteLinesFrom(jsonlPath, scanOffset, (lines) => {
+      for (const line of lines) {
+        let row: unknown;
+        try { row = JSON.parse(line); } catch { continue; }
+        if (!isRecord(row)) continue;
+        if (row.type !== "user" || typeof row.uuid !== "string" || !isRecord(row.message)) continue;
+        const text = extractJsonlUserText(row.message.content);
+        if (!text) continue;
+        jsonlUsers.push({ uuid: row.uuid, text });
+      }
+    });
   } catch { return; }
+  database.setUserUuidScanOffset(sessionId, scanOffset);
 
   if (jsonlUsers.length === 0) return;
 
@@ -1888,16 +1906,11 @@ export function markQuestionAnswered(
   answers: Record<string, string> = {},
 ): void {
   try {
-    const entries = readHistoryEntries(sessionId);
-    if (entries.length === 0) return;
+    ensureHistoryDatabaseSession(sessionId);
+    const entries = historyDatabase()
+      .getByRolesAndQuestionId(sessionId, ["question", "elicitation_url"], questionId);
     const changedEntries: HistoryEntry[] = [];
     for (const entry of entries) {
-      if (
-        (entry.role !== "question" && entry.role !== "elicitation_url")
-        || entry.questionId !== questionId
-      ) {
-        continue;
-      }
       const answersChanged = JSON.stringify(entry.answers || {}) !== JSON.stringify(answers);
       if (entry.answered && !answersChanged) continue;
       entry.answered = true;
@@ -1924,10 +1937,10 @@ export function getPersistedSecureInputRequest(
   sessionId: string,
   requestId: string,
 ): PersistedSecureInputRequest | undefined {
-  const entries = readHistoryEntries(sessionId);
+  ensureHistoryDatabaseSession(sessionId);
+  const entries = historyDatabase().getByRolesAndQuestionId(sessionId, ["secure_input"], requestId);
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
-    if (entry.role !== "secure_input" || entry.questionId !== requestId) continue;
     if (entry.answered || ["saved", "cancelled", "expired"].includes(String(entry.status))) {
       return undefined;
     }
@@ -1950,10 +1963,10 @@ export function markSecureInputRequestResolved(
   status: "saved" | "cancelled" | "expired",
 ): void {
   try {
-    const entries = readHistoryEntries(sessionId);
+    ensureHistoryDatabaseSession(sessionId);
+    const entries = historyDatabase().getByRolesAndQuestionId(sessionId, ["secure_input"], requestId);
     const changedEntries: HistoryEntry[] = [];
     for (const entry of entries) {
-      if (entry.role !== "secure_input" || entry.questionId !== requestId) continue;
       if (
         entry.answered
         && entry.status === status
@@ -1982,10 +1995,10 @@ export function markComputerAccessResolved(
   decision: "once" | "chat" | "deny" | "linked" | "expired",
 ): void {
   try {
-    const entries = readHistoryEntries(sessionId);
+    ensureHistoryDatabaseSession(sessionId);
+    const entries = historyDatabase().getByRolesAndQuestionId(sessionId, ["computer_access"], requestId);
     const changedEntries: HistoryEntry[] = [];
     for (const entry of entries) {
-      if (entry.role !== "computer_access" || entry.questionId !== requestId) continue;
       if (entry.answered && entry.status === decision) continue;
       entry.answered = true;
       entry.status = decision;
@@ -2002,6 +2015,12 @@ export function getHistory(sessionId: string): HistoryEntry[] {
   // Recover UUIDs on user prompts saved before self-assigned UUIDs (Apr 22 →
   // Apr 27). Once-per-process and a no-op when nothing's missing.
   return hydrateHistoryEntries(readHistoryEntries(sessionId, { backfillUserUuids: true }));
+}
+
+/** User and assistant entries only. Run statistics need nothing else. */
+export function getConversationHistory(sessionId: string): HistoryEntry[] {
+  ensureHistoryDatabaseSession(sessionId);
+  return hydrateHistoryEntries(historyDatabase().getByRoles(sessionId, ["user", "assistant"]));
 }
 
 /** Latest canonical lifecycle snapshot for every native task/runtime task. */
@@ -2711,7 +2730,8 @@ export function getTodos(sessionId: string): Record<string, unknown>[] {
  * One-time-compatible recovery for Claude's modern TaskCreate/TaskUpdate list.
  * Older SocketAgent builds persisted the tool transcript but discarded the
  * TaskCreated hooks, so rebuild missing native task rows from the full durable
- * history before sending the bounded resume page.
+ * history before sending the bounded resume page. The transcript database
+ * records the scan, so each session pays for it once.
  */
 export function deriveClaudeTasksFromHistoryEntries(entries: HistoryEntry[]): Record<string, unknown>[] {
   const derived = new Map<string, Record<string, unknown>>();
@@ -2780,6 +2800,7 @@ export function backfillClaudeTasksFromHistory(sessionId: string): Record<string
   CLAUDE_TASK_BACKFILL_SCANNED.add(sessionId);
   ensureHistoryDatabaseSession(sessionId);
   const database = historyDatabase();
+  if (database.claudeTasksBackfilled(sessionId)) return current;
   const toolCalls = database.getByToolNames(sessionId, ["TaskCreate", "TaskUpdate"])
     .filter((entry) => entry.role === "tool_call");
   const createToolUseIds = toolCalls
@@ -2799,9 +2820,13 @@ export function backfillClaudeTasksFromHistory(sessionId: string): Record<string
   const recovered = derived.filter(
     (item) => !existingIds.has(String(item.id)),
   );
-  if (recovered.length === 0) return current;
+  if (recovered.length === 0) {
+    database.markClaudeTasksBackfilled(sessionId);
+    return current;
+  }
   const merged = [...current, ...recovered];
   saveTodos(sessionId, merged);
+  database.markClaudeTasksBackfilled(sessionId);
   for (const task of recovered) {
     appendHistory(sessionId, {
       role: "task_state",
@@ -2883,9 +2908,81 @@ export function getLastHistoryTimestamp(sessionId: string): string {
 }
 
 /**
+ * Passes a file's complete lines from byte `start` on to `onLines`, one chunk
+ * at a time. Returns the offset just past the last complete line, so a line
+ * still being written is read on the next pass.
+ */
+function readCompleteLinesFrom(
+  filePath: string,
+  start: number,
+  onLines: (lines: string[]) => void,
+  chunkBytes = 1024 * 1024,
+): number {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const size = fs.fstatSync(fd).size;
+    let position = start;
+    let consumed = start;
+    let carry = Buffer.alloc(0);
+    while (position < size) {
+      const chunk = Buffer.allocUnsafe(Math.min(chunkBytes, size - position));
+      const read = fs.readSync(fd, chunk, 0, chunk.length, position);
+      if (read <= 0) break;
+      position += read;
+      const buffer = Buffer.concat([carry, chunk.subarray(0, read)]);
+      const lastNewline = buffer.lastIndexOf(10);
+      if (lastNewline < 0) {
+        carry = buffer;
+        continue;
+      }
+      onLines(buffer.toString("utf8", 0, lastNewline).split("\n").filter(Boolean));
+      consumed = position - (buffer.length - lastNewline - 1);
+      carry = Buffer.from(buffer.subarray(lastNewline + 1));
+    }
+    return consumed;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Yields a file's complete lines one chunk at a time, last chunk first, so a
+ * large transcript is never held in memory whole. Lines within each yielded
+ * chunk keep file order.
+ */
+function* readLineChunksBackward(filePath: string, chunkBytes = 1024 * 1024): Generator<string[], void, undefined> {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    let position = fs.fstatSync(fd).size;
+    let carry = Buffer.alloc(0);
+    while (position > 0) {
+      const length = Math.min(chunkBytes, position);
+      position -= length;
+      const chunk = Buffer.allocUnsafe(length);
+      const read = fs.readSync(fd, chunk, 0, length, position);
+      const buffer = Buffer.concat([chunk.subarray(0, read), carry]);
+      // The bytes before the first newline may continue in the previous chunk.
+      const start = position > 0 ? buffer.indexOf(10) + 1 : 0;
+      if (position > 0 && start === 0) {
+        carry = buffer;
+        continue;
+      }
+      carry = Buffer.from(buffer.subarray(0, start > 0 ? start - 1 : 0));
+      yield buffer.toString("utf8", start).split("\n").filter(Boolean);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
  * Read missed messages from Claude Code's own session JSONL file.
  * Returns HistoryEntry[] for messages that occurred after `afterTimestamp`.
  * This fills gaps when the server was down but Claude kept working.
+ *
+ * Claude appends in time order, so the file is read backwards and the scan
+ * stops at the first chunk whose timestamped lines are all at or before the
+ * cutoff. A whole chunk of older lines absorbs small out-of-order writes.
  */
 export function getMissedMessages(
   sessionId: string,
@@ -2897,99 +2994,114 @@ export function getMissedMessages(
   if (!fs.existsSync(jsonlPath)) return [];
 
   const afterTime = new Date(afterTimestamp).getTime();
-  const entries: HistoryEntry[] = [];
+  // Newest chunk first; each chunk's entries are in file order.
+  const newerChunks: HistoryEntry[][] = [];
 
   try {
-    const lines = fs.readFileSync(jsonlPath, "utf-8").split("\n").filter(Boolean);
-
-    for (const line of lines) {
-      let msg: unknown;
-      try { msg = JSON.parse(line); } catch { continue; }
-      if (!isRecord(msg)) continue;
-
-      // Skip messages before our cutoff
-      if (typeof msg.timestamp !== "string" || !msg.timestamp) continue;
-      const msgTime = new Date(msg.timestamp).getTime();
-      if (msgTime <= afterTime) continue;
-
-      // Convert to our HistoryEntry format
-      if (msg.type === "assistant" && isRecord(msg.message) && msg.message.content) {
-        const content = msg.message.content;
-        // Extract text
-        const textParts = Array.isArray(content)
-          ? extractJsonlUserText(content)
-          : "";
-        if (textParts) {
-          entries.push({
-            role: "assistant",
-            content: textParts,
-            parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
-            timestamp: msg.timestamp,
-          });
-        }
-        // Extract tool calls
-        if (Array.isArray(content)) {
-          for (const block of unknownArray(content).filter(isRecord)) {
-            if (block.type === "tool_use") {
-              entries.push({
-                role: "tool_call",
-                content: "",
-                toolName: typeof block.name === "string" ? block.name : undefined,
-                toolInput: isRecord(block.input) ? block.input : undefined,
-                toolUseId: typeof block.id === "string" ? block.id : undefined,
-                parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
-                timestamp: msg.timestamp,
-              });
-            }
-          }
-        }
-      } else if (msg.type === "user" && isRecord(msg.message) && msg.message.content) {
-        const content = msg.message.content;
-        if (Array.isArray(content)) {
-          for (const block of unknownArray(content).filter(isRecord)) {
-            if (block.type === "tool_result") {
-              const output = typeof block.content === "string"
-                ? block.content
-                : Array.isArray(block.content)
-                  ? unknownArray(block.content).filter(isRecord).filter((c) => c.type === "text" && typeof c.text === "string").map((c) => c.text).join("\n")
-                  : "";
-              entries.push({
-                role: "tool_result",
-                content: "",
-                toolUseId: typeof block.tool_use_id === "string" ? block.tool_use_id : "",
-                toolOutput: output.slice(0, 2000), // Truncate large outputs
-                parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
-                timestamp: msg.timestamp,
-              });
-            } else if (block.type === "text" && typeof block.text === "string") {
-              // SocketAgent's own restart continuation is in the transcript
-              // because the model had to receive it, not because the user sent
-              // it. Reading it back here would undo that.
-              if (!isRestartContinuationPrompt(block.text)) {
-                entries.push({
-                  role: "user",
-                  content: block.text,
-                  ...(typeof msg.uuid === "string" && msg.uuid ? { uuid: msg.uuid } : {}),
-                  timestamp: msg.timestamp,
-                });
-              }
-            }
-          }
-        } else if (typeof content === "string" && !isRestartContinuationPrompt(content)) {
-          entries.push({
-            role: "user",
-            content,
-            ...(typeof msg.uuid === "string" && msg.uuid ? { uuid: msg.uuid } : {}),
-            timestamp: msg.timestamp,
-          });
-        }
+    for (const lines of readLineChunksBackward(jsonlPath)) {
+      const chunkEntries: HistoryEntry[] = [];
+      let sawTimestamp = false;
+      let sawNewer = false;
+      for (const line of lines) {
+        let msg: unknown;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (!isRecord(msg)) continue;
+        const timestamp = msg.timestamp;
+        if (typeof timestamp !== "string" || !timestamp) continue;
+        sawTimestamp = true;
+        // Skip messages before our cutoff
+        if (new Date(timestamp).getTime() <= afterTime) continue;
+        sawNewer = true;
+        appendClaudeJsonlEntries(chunkEntries, msg, timestamp);
       }
+      newerChunks.push(chunkEntries);
+      if (sawTimestamp && !sawNewer) break;
     }
   } catch (e) {
     console.error(`[MissedMessages] Error reading JSONL: ${e}`);
   }
 
-  return entries;
+  return newerChunks.reverse().flat();
+}
+
+/** Convert one Claude JSONL row to the history entries it represents. */
+function appendClaudeJsonlEntries(
+  entries: HistoryEntry[],
+  msg: Record<string, unknown>,
+  timestamp: string,
+): void {
+  // Convert to our HistoryEntry format
+  if (msg.type === "assistant" && isRecord(msg.message) && msg.message.content) {
+    const content = msg.message.content;
+    // Extract text
+    const textParts = Array.isArray(content)
+      ? extractJsonlUserText(content)
+      : "";
+    if (textParts) {
+      entries.push({
+        role: "assistant",
+        content: textParts,
+        parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
+        timestamp,
+      });
+    }
+    // Extract tool calls
+    if (Array.isArray(content)) {
+      for (const block of unknownArray(content).filter(isRecord)) {
+        if (block.type === "tool_use") {
+          entries.push({
+            role: "tool_call",
+            content: "",
+            toolName: typeof block.name === "string" ? block.name : undefined,
+            toolInput: isRecord(block.input) ? block.input : undefined,
+            toolUseId: typeof block.id === "string" ? block.id : undefined,
+            parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
+            timestamp,
+          });
+        }
+      }
+    }
+  } else if (msg.type === "user" && isRecord(msg.message) && msg.message.content) {
+    const content = msg.message.content;
+    if (Array.isArray(content)) {
+      for (const block of unknownArray(content).filter(isRecord)) {
+        if (block.type === "tool_result") {
+          const output = typeof block.content === "string"
+            ? block.content
+            : Array.isArray(block.content)
+              ? unknownArray(block.content).filter(isRecord).filter((c) => c.type === "text" && typeof c.text === "string").map((c) => c.text).join("\n")
+              : "";
+          entries.push({
+            role: "tool_result",
+            content: "",
+            toolUseId: typeof block.tool_use_id === "string" ? block.tool_use_id : "",
+            toolOutput: output.slice(0, 2000), // Truncate large outputs
+            parentToolUseId: typeof msg.parent_tool_use_id === "string" ? msg.parent_tool_use_id : null,
+            timestamp,
+          });
+        } else if (block.type === "text" && typeof block.text === "string") {
+          // SocketAgent's own restart continuation is in the transcript
+          // because the model had to receive it, not because the user sent
+          // it. Reading it back here would undo that.
+          if (!isRestartContinuationPrompt(block.text)) {
+            entries.push({
+              role: "user",
+              content: block.text,
+              ...(typeof msg.uuid === "string" && msg.uuid ? { uuid: msg.uuid } : {}),
+              timestamp,
+            });
+          }
+        }
+      }
+    } else if (typeof content === "string" && !isRestartContinuationPrompt(content)) {
+      entries.push({
+        role: "user",
+        content,
+        ...(typeof msg.uuid === "string" && msg.uuid ? { uuid: msg.uuid } : {}),
+        timestamp,
+      });
+    }
+  }
 }
 
 /**
@@ -4302,9 +4414,13 @@ export async function listCodexNativeSdkSessions(cwd: string, limit = 30): Promi
 }
 
 /** On startup, close out any tool_calls that never got a result (e.g. server crashed mid-query) */
-export function cleanupPendingToolCalls(): void {
-  ensureHistoryDir();
-  const sessionIds = historyDatabase().listSessionIds();
+/**
+ * Give tool calls a previous server process left unfinished an empty result,
+ * so they do not show as running forever. Pass session ids to check only
+ * those; by default every stored transcript is checked. Never pass a session
+ * whose agent is live in this process: its open calls are real.
+ */
+export function cleanupPendingToolCalls(sessionIds: readonly string[] = historyDatabase().listSessionIds()): void {
   for (const sessionId of sessionIds) {
     let pending: HistoryEntry[];
     try {
@@ -4327,6 +4443,22 @@ export function cleanupPendingToolCalls(): void {
     if (modified > 0) {
       console.log(`Cleaned up ${modified} pending tool calls in ${sessionId}`);
     }
+  }
+}
+
+/**
+ * The same cleanup across every stored transcript, a batch of sessions per
+ * event-loop turn so a cold database never stalls the server. `skip` is
+ * checked as each session is reached.
+ */
+export async function cleanupAllPendingToolCallsInBatches(
+  skip: (sessionId: string) => boolean,
+  batchSize = 25,
+): Promise<void> {
+  const sessionIds = historyDatabase().listSessionIds();
+  for (let offset = 0; offset < sessionIds.length; offset += batchSize) {
+    cleanupPendingToolCalls(sessionIds.slice(offset, offset + batchSize).filter((id) => !skip(id)));
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }
 

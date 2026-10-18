@@ -7,12 +7,13 @@ import type {
 } from "./protocol";
 import {
   appendHistory,
-  getHistory,
+  getConversationHistory,
   getSdkRunLifecycleEvents,
   getSession,
   saveSession,
 } from "./session-store";
 import type { DelegatedAgentRecord } from "./delegated-agent-types";
+import { delegatedReportSettled } from "./delegated-agent-store";
 import { deriveHistoricalRuns } from "./session-run-backfill";
 
 export const SESSION_RUN_BACKFILL_VERSION = 1;
@@ -48,7 +49,7 @@ export function hasOutstandingDelegatedRuns(
   return records.some((record) => record.runs.some((run) => {
     if (new Date(run.startedAt).getTime() < startedMs) return false;
     if (run.status === "starting" || run.status === "running") return true;
-    return run.reportStatus !== "delivered";
+    return !delegatedReportSettled(run);
   }));
 }
 
@@ -116,7 +117,7 @@ export function backfillSessionRunStats(
   }
 
   const derived = deriveHistoricalRuns(
-    getHistory(sessionId),
+    getConversationHistory(sessionId),
     getSdkRunLifecycleEvents(sessionId),
     delegations,
   );

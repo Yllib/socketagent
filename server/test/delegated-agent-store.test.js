@@ -81,6 +81,29 @@ test("persists delegation lineage, runs, and pending completion reports", () => 
   assert.equal(listDelegatedAgents("supervisor-1").length, 1);
 });
 
+// The report retry timer re-applies the same patch every few seconds; each
+// write rewrote the whole store, which added up to ~110 GB a day.
+test("an unchanged update leaves the store file alone and undeliverable reports settle", () => {
+  saveDelegatedAgent(record("delegation-2"));
+  addDelegatedAgentRun("delegation-2", {
+    runId: "run-2",
+    runNumber: 1,
+    promptPreview: "Report to a deleted chat",
+    startedAt: new Date().toISOString(),
+    status: "completed",
+    reportStatus: "pending",
+  });
+  const storeFile = path.join(dataDir, "delegated-agent-sessions.json");
+  const before = fs.statSync(storeFile).ino;
+  updateDelegatedAgentRun("delegation-2", "run-2", { reportStatus: "pending" }, "completed");
+  assert.equal(fs.statSync(storeFile).ino, before);
+  assert.equal(pendingDelegatedAgentReports().length, 1);
+
+  updateDelegatedAgentRun("delegation-2", "run-2", { reportStatus: "undeliverable" });
+  assert.notEqual(fs.statSync(storeFile).ino, before);
+  assert.equal(pendingDelegatedAgentReports().length, 0);
+});
+
 test("AgentSession handler returns stable child IDs and follow-up guidance", async () => {
   /** @type {Parameters<NonNullable<import("#server/app-tool-handlers").AppToolContext["manageAgentSession"]>>[0][]} */
   const calls = [];

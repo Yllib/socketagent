@@ -43,7 +43,7 @@ import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
-import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, compactHistoryStorage, getTodos, dismissTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummary } from "./session-list-snapshot";
 import { watchNativeSessionFolders } from "./native-session-watcher";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
@@ -2279,6 +2279,10 @@ function durableMonitorContext(record: DurableMonitorRecord): AppToolContext {
 }
 
 const delegatedReportDeliveries = new Set<string>();
+// Failed attempts per report, kept in memory so the 15 s retry timer backs off
+// for a supervisor that exists but keeps refusing. A restart starts fresh.
+const delegatedReportRetryBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
+const DELEGATED_REPORT_MAX_BACKOFF_MS = 10 * 60_000;
 const interruptedDelegationIdsAtStartup = new Set(
   listDelegatedAgents()
     .filter((record) => record.status === "running" || record.status === "starting")
@@ -2711,6 +2715,16 @@ function deliverDelegatedAgentReport(record: DelegatedAgentRecord, run: Delegate
     );
     return Promise.resolve();
   }
+  if (!activeSessions.has(record.supervisorSessionId) && !getSession(record.supervisorSessionId)) {
+    // Nothing can ever accept this report, so settle it instead of retrying.
+    updateDelegatedAgentRun(record.delegationId, run.runId, { reportStatus: "undeliverable" });
+    delegatedReportRetryBackoff.delete(deliveryKey);
+    console.warn(
+      `[DelegatedAgent] Report undeliverable delegation=${record.delegationId}`
+      + ` run=${run.runId}: supervisor ${record.supervisorSessionId} no longer exists`,
+    );
+    return Promise.resolve();
+  }
   delegatedReportDeliveries.add(deliveryKey);
   // Attempt delivery immediately. Durable `pending` state is the fallback only
   // when direct safe-boundary injection/startup fails.
@@ -2729,11 +2743,17 @@ function deliverDelegatedAgentReport(record: DelegatedAgentRecord, run: Delegate
         setSessionRunSupervisorSettled(record.supervisorSessionId, true, "completed");
       }
       maybeFinalizeLogicalRun(record.supervisorSessionId);
+      delegatedReportRetryBackoff.delete(deliveryKey);
       console.log(`[DelegatedAgent] Report delivered delegation=${record.delegationId} run=${run.runId} supervisor=${record.supervisorSessionId}`);
     })()
     .catch((err: unknown) => {
       updateDelegatedAgentRun(record.delegationId, run.runId, {
         reportStatus: "pending",
+      });
+      const failures = (delegatedReportRetryBackoff.get(deliveryKey)?.failures ?? 0) + 1;
+      delegatedReportRetryBackoff.set(deliveryKey, {
+        failures,
+        nextAttemptAt: Date.now() + Math.min(15_000 * 2 ** (failures - 1), DELEGATED_REPORT_MAX_BACKOFF_MS),
       });
       console.warn(`[DelegatedAgent] Report pending delegation=${record.delegationId} run=${run.runId}: ${errorMessage(err) || err}`);
     });
@@ -3702,9 +3722,17 @@ function deviceListResult(requestId: string | undefined, self: string | undefine
   };
 }
 
-function retryPendingDelegatedAgentReports(): void {
+/**
+ * Retries every unsettled local report. The periodic timer passes
+ * `respectBackoff` so a supervisor that keeps refusing is retried less often;
+ * event-driven callers (startup, a user prompt) retry immediately.
+ */
+function retryPendingDelegatedAgentReports(respectBackoff = false): void {
+  const now = Date.now();
   for (const { record, run } of pendingDelegatedAgentReports()) {
     if (sessionAutomationLocks.isLocked(record.supervisorSessionId)) continue;
+    const backoff = delegatedReportRetryBackoff.get(`${record.delegationId}:${run.runId}`);
+    if (respectBackoff && backoff && backoff.nextAttemptAt > now) continue;
     void deliverDelegatedAgentReport(record, run);
   }
 }
@@ -3801,7 +3829,7 @@ function recoverInterruptedDelegatedAgentRuns(): void {
   }
 }
 
-const delegatedReportRetryTimer = setInterval(retryPendingDelegatedAgentReports, 15_000);
+const delegatedReportRetryTimer = setInterval(() => retryPendingDelegatedAgentReports(true), 15_000);
 delegatedReportRetryTimer.unref?.();
 setTimeout(() => {
   recoverUntrackedDelegatedRestartContinuations();
@@ -11141,8 +11169,17 @@ async function initializeListeningServer(): Promise<void> {
   recoveryTimer.unref();
 }
 
-// Clean up any tool calls left pending from a previous server crash
-cleanupPendingToolCalls();
+// Close tool calls left pending by the previous process. Sessions that were
+// running (the restart journal) are fixed before listening, ahead of crash
+// recovery resuming them; the rest are swept after startup.
+cleanupPendingToolCalls([...new Set(restartRecovery.list().map((run) => run.sessionId))]);
+setTimeout(() => {
+  void cleanupAllPendingToolCallsInBatches((sessionId) =>
+    activeSessions.has(sessionId)
+    || liveSessionInstances.instances(sessionId).length > 0
+    || restartRecovery.get(sessionId) !== undefined)
+    .catch((err: unknown) => console.warn(`[Startup] Pending tool call sweep failed: ${errorMessage(err)}`));
+}, 5_000).unref();
 
 if (process.env.SOCKETAGENT_HISTORY_COMPACT_ON_STARTUP !== "0") {
   const runStartupHistoryCompaction = () => {

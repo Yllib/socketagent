@@ -8,7 +8,8 @@ export type DelegatedAgentAction =
   | "list"
   | "stop";
 export type DelegatedAgentStatus = "starting" | "running" | "completed" | "failed" | "stopped";
-export type DelegatedAgentReportStatus = "pending" | "delivering" | "delivered";
+/** `undeliverable` is final: the supervisor session no longer exists. */
+export type DelegatedAgentReportStatus = "pending" | "delivering" | "delivered" | "undeliverable";
 
 export interface AgentSessionToolArgs {
   action: DelegatedAgentAction;

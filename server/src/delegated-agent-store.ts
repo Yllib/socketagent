@@ -16,7 +16,11 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-function readRecords(): DelegatedAgentRecord[] {
+// This process is the file's only writer, so the parsed records stay in
+// memory after the first read and the file is rewritten only on a change.
+let cachedRecords: DelegatedAgentRecord[] | undefined;
+
+function loadRecords(): DelegatedAgentRecord[] {
   try {
     if (!fs.existsSync(STORE_FILE)) return [];
     const parsed: unknown = JSON.parse(fs.readFileSync(STORE_FILE, "utf8"));
@@ -30,6 +34,12 @@ function readRecords(): DelegatedAgentRecord[] {
   }
 }
 
+/** The live cached array. Callers clone anything they hand out. */
+function readRecords(): DelegatedAgentRecord[] {
+  cachedRecords ??= loadRecords();
+  return cachedRecords;
+}
+
 function writeRecords(records: DelegatedAgentRecord[]): void {
   fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
   const temporary = `${STORE_FILE}.${process.pid}.${Date.now()}.tmp`;
@@ -38,6 +48,7 @@ function writeRecords(records: DelegatedAgentRecord[]): void {
     mode: 0o600,
   });
   fs.renameSync(temporary, STORE_FILE);
+  cachedRecords = records;
 }
 
 export function listDelegatedAgents(supervisorSessionId?: string): DelegatedAgentRecord[] {
@@ -59,7 +70,7 @@ export function getDelegatedAgent(
 }
 
 export function saveDelegatedAgent(record: DelegatedAgentRecord): DelegatedAgentRecord {
-  const records = readRecords();
+  const records = [...readRecords()];
   const next = clone({ ...record, updatedAt: new Date().toISOString() });
   const index = records.findIndex((candidate) => candidate.delegationId === next.delegationId);
   if (index >= 0) records[index] = next;
@@ -68,13 +79,19 @@ export function saveDelegatedAgent(record: DelegatedAgentRecord): DelegatedAgent
   return clone(next);
 }
 
+/** True when applying the patch would leave every patched field unchanged. */
+function patchMatches<T extends object>(current: T, patch: Partial<T>): boolean {
+  return JSON.stringify({ ...current, ...patch }) === JSON.stringify(current);
+}
+
 export function updateDelegatedAgent(
   delegationId: string,
   patch: Partial<DelegatedAgentRecord>,
 ): DelegatedAgentRecord | undefined {
-  const records = readRecords();
+  const records = [...readRecords()];
   const index = records.findIndex((record) => record.delegationId === delegationId);
   if (index < 0) return undefined;
+  if (patchMatches(records[index], patch)) return clone(records[index]);
   records[index] = {
     ...records[index],
     ...clone(patch),
@@ -107,6 +124,9 @@ export function updateDelegatedAgentRun(
   if (!record) return undefined;
   const index = record.runs.findIndex((run) => run.runId === runId);
   if (index < 0) return undefined;
+  if (patchMatches(record.runs[index], patch) && (!recordStatus || record.status === recordStatus)) {
+    return record;
+  }
   record.runs[index] = {
     ...record.runs[index],
     ...clone(patch),
@@ -115,6 +135,11 @@ export function updateDelegatedAgentRun(
   };
   if (recordStatus) record.status = recordStatus;
   return saveDelegatedAgent(record);
+}
+
+/** A report is settled once delivered, or once its supervisor no longer exists. */
+export function delegatedReportSettled(run: DelegatedAgentRun): boolean {
+  return run.reportStatus === "delivered" || run.reportStatus === "undeliverable";
 }
 
 export function pendingDelegatedAgentReports(): Array<{
@@ -126,7 +151,7 @@ export function pendingDelegatedAgentReports(): Array<{
     for (const run of record.runs) {
       if (
         (run.status === "completed" || run.status === "failed" || run.status === "stopped")
-        && run.reportStatus !== "delivered"
+        && !delegatedReportSettled(run)
       ) {
         pending.push({ record: clone(record), run: clone(run) });
       }

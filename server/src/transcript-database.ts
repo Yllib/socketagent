@@ -107,8 +107,10 @@ const storedSummaryRowSchema = z.object({
 const schemaVersionRowSchema = z.object({ user_version: z.number() });
 const tableColumnsSchema = z.array(z.object({ name: z.string() }));
 const sessionIdRowsSchema = z.array(z.object({ session_id: z.string() }));
+const toolUseIdRowsSchema = z.array(z.object({ tool_use_id: z.string() }));
 const optionalSummaryRowSchema = storedSummaryRowSchema.optional();
 const scalarRowSchema = z.object({ value: z.number() });
+const optionalScalarRowSchema = scalarRowSchema.optional();
 const transferSizeRowSchema = z.object({ stored: z.number(), spilled: z.number() });
 const entryPositionRowSchema = z.object({ entry_id: z.string(), session_seq: z.number(), revision: z.number() });
 const optionalEntryRowSchema = storedTranscriptRowSchema.optional();
@@ -243,7 +245,9 @@ export class TranscriptDatabase {
         legacy_size INTEGER,
         legacy_mtime_ms REAL,
         migrated_at TEXT,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        claude_tasks_backfilled INTEGER NOT NULL DEFAULT 0,
+        user_uuid_scan_offset INTEGER NOT NULL DEFAULT 0
       ) STRICT;
       CREATE TABLE IF NOT EXISTS transcript_entries (
         session_id TEXT NOT NULL,
@@ -366,6 +370,14 @@ export class TranscriptDatabase {
         SET tool_use_id = json_extract(entry_json, '$.toolUseId')
         WHERE tool_use_id IS NULL`);
     }
+    const sessionColumns = tableColumnsSchema.parse(this.db.prepare("PRAGMA table_info(transcript_sessions)")
+      .all());
+    if (!sessionColumns.some((column) => column.name === "claude_tasks_backfilled")) {
+      this.db.exec("ALTER TABLE transcript_sessions ADD COLUMN claude_tasks_backfilled INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!sessionColumns.some((column) => column.name === "user_uuid_scan_offset")) {
+      this.db.exec("ALTER TABLE transcript_sessions ADD COLUMN user_uuid_scan_offset INTEGER NOT NULL DEFAULT 0");
+    }
     this.db.exec(`CREATE INDEX IF NOT EXISTS transcript_entries_tool_use
       ON transcript_entries(session_id, tool_use_id, role) WHERE tool_use_id IS NOT NULL`);
     this.insertEntry = this.db.prepare(`
@@ -485,9 +497,18 @@ export class TranscriptDatabase {
   }
 
   getAll(sessionId: string): HistoryEntry[] {
-    return (entryRowsSchema.parse(this.db.prepare(`
+    return this.getAllSized(sessionId).entries;
+  }
+
+  /** Every entry plus the stored JSON length, so a cache can be sized without re-serializing. */
+  getAllSized(sessionId: string): { entries: HistoryEntry[]; bytes: number } {
+    const rows = entryRowsSchema.parse(this.db.prepare(`
       SELECT * FROM transcript_entries WHERE session_id = ? ORDER BY session_seq
-    `).all(sessionId))).map(parseEntry);
+    `).all(sessionId));
+    return {
+      entries: rows.map(parseEntry),
+      bytes: rows.reduce((sum, row) => sum + row.entry_json.length, 0),
+    };
   }
 
   count(sessionId: string): number {
@@ -522,18 +543,31 @@ export class TranscriptDatabase {
     return Number(row.value);
   }
 
+  /**
+   * Rows at positions [offset, offset + limit) in sequence order. A position
+   * in the newer half is reached by stepping back from the newest row, so a
+   * resume page on a long transcript does not walk every earlier entry.
+   */
+  private positionedRows(sessionId: string, columns: string, offset: number, limit: number) {
+    const total = this.count(sessionId);
+    const end = Math.min(total, offset + limit);
+    if (offset * 2 < total || end <= offset) {
+      return this.db.prepare(`SELECT ${columns} FROM transcript_entries
+        WHERE session_id = ? ORDER BY session_seq LIMIT ? OFFSET ?`).all(sessionId, limit, offset);
+    }
+    return this.db.prepare(`SELECT ${columns} FROM transcript_entries
+      WHERE session_id = ? ORDER BY session_seq DESC LIMIT ? OFFSET ?`)
+      .all(sessionId, end - offset, total - end).reverse();
+  }
+
   windowDigest(sessionId: string, offset: number, limit: number): string {
-    const rows = this.db.prepare(`SELECT session_seq, entry_id, revision FROM transcript_entries
-      WHERE session_id=? ORDER BY session_seq LIMIT ? OFFSET ?`).all(sessionId, limit, offset);
+    const rows = this.positionedRows(sessionId, "session_seq, entry_id, revision", offset, limit);
     return createHash("sha256").update(rows.map(row =>
       `${row.session_seq}:${row.entry_id}:${row.revision}\n`).join("")).digest("hex");
   }
 
   getPage(sessionId: string, offset: number, limit: number): HistoryEntry[] {
-    return (entryRowsSchema.parse(this.db.prepare(`
-      SELECT * FROM transcript_entries
-      WHERE session_id = ? ORDER BY session_seq LIMIT ? OFFSET ?
-    `).all(sessionId, limit, offset))).map(parseEntry);
+    return entryRowsSchema.parse(this.positionedRows(sessionId, "*", offset, limit)).map(parseEntry);
   }
 
   getTail(sessionId: string, limit: number): HistoryEntry[] {
@@ -741,6 +775,62 @@ export class TranscriptDatabase {
     `).get(sessionId, prefix, prefix);
   }
 
+  /**
+   * The Claude task backfill scans every row of a session (there is no
+   * tool_name index; building one on a large store blocks startup for tens of
+   * seconds), so it runs once per transcript and records that here.
+   */
+  claudeTasksBackfilled(sessionId: string): boolean {
+    return !!this.db.prepare(
+      "SELECT 1 FROM transcript_sessions WHERE session_id = ? AND claude_tasks_backfilled = 1",
+    ).get(sessionId);
+  }
+
+  markClaudeTasksBackfilled(sessionId: string): void {
+    this.db.prepare(
+      "UPDATE transcript_sessions SET claude_tasks_backfilled = 1 WHERE session_id = ?",
+    ).run(sessionId);
+  }
+
+  /** Interactive cards (questions, secure input, access requests) for one request id. */
+  getByRolesAndQuestionId(sessionId: string, roles: string[], questionId: string): HistoryEntry[] {
+    if (roles.length === 0) return [];
+    const placeholders = roles.map(() => "?").join(", ");
+    return (entryRowsSchema.parse(this.db.prepare(`
+      SELECT * FROM transcript_entries
+      WHERE session_id = ? AND role IN (${placeholders})
+        AND json_extract(entry_json, '$.questionId') = ?
+      ORDER BY session_seq
+    `).all(sessionId, ...roles, questionId))).map(parseEntry);
+  }
+
+  getByRoles(sessionId: string, roles: string[]): HistoryEntry[] {
+    if (roles.length === 0) return [];
+    const placeholders = roles.map(() => "?").join(", ");
+    return (entryRowsSchema.parse(this.db.prepare(`
+      SELECT * FROM transcript_entries
+      WHERE session_id = ? AND role IN (${placeholders})
+      ORDER BY session_seq
+    `).all(sessionId, ...roles))).map(parseEntry);
+  }
+
+  /**
+   * How far into the session's Claude JSONL the user UUID backfill has read.
+   * A remap starts a new JSONL file, so the remapped row starts again at 0.
+   */
+  userUuidScanOffset(sessionId: string): number {
+    const row = optionalScalarRowSchema.parse(this.db.prepare(
+      "SELECT user_uuid_scan_offset AS value FROM transcript_sessions WHERE session_id = ?",
+    ).get(sessionId));
+    return row ? Number(row.value) : 0;
+  }
+
+  setUserUuidScanOffset(sessionId: string, offset: number): void {
+    this.db.prepare(
+      "UPDATE transcript_sessions SET user_uuid_scan_offset = ? WHERE session_id = ?",
+    ).run(offset, sessionId);
+  }
+
   getByToolNames(sessionId: string, toolNames: string[]): HistoryEntry[] {
     if (toolNames.length === 0) return [];
     const placeholders = toolNames.map(() => "?").join(", ");
@@ -768,13 +858,17 @@ export class TranscriptDatabase {
     return results.sort((left, right) => Number(left.sessionSeq || 0) - Number(right.sessionSeq || 0));
   }
 
+  // The planner prefers the role index, which reads every user row; on a cold
+  // cache that is ~0.4 s for a 2,800-prompt session. The uuid index reads 3 ms.
   getUsersMissingUuid(sessionId: string): HistoryEntry[] {
     return (entryRowsSchema.parse(this.db.prepare(`
-      SELECT * FROM transcript_entries
-      WHERE session_id = ? AND role = 'user'
-        AND COALESCE(json_extract(entry_json, '$.uuid'), '') = ''
+      SELECT * FROM transcript_entries INDEXED BY transcript_entries_user_uuid
+      WHERE session_id = ? AND role = 'user' AND json_extract(entry_json, '$.uuid') IS NULL
+      UNION ALL
+      SELECT * FROM transcript_entries INDEXED BY transcript_entries_user_uuid
+      WHERE session_id = ? AND role = 'user' AND json_extract(entry_json, '$.uuid') = ''
       ORDER BY session_seq
-    `).all(sessionId))).map(parseEntry);
+    `).all(sessionId, sessionId))).map(parseEntry);
   }
 
   getUserUuids(sessionId: string): string[] {
@@ -812,13 +906,16 @@ export class TranscriptDatabase {
     return Number(row.value);
   }
 
+  /** Position of a row. Counted from the newest row, since callers ask about recent ones. */
   offsetForSessionSeq(sessionId: string, sessionSeq: number): number | undefined {
-    if (!this.getBySessionSeq(sessionId, sessionSeq)) return undefined;
+    if (!this.db.prepare(
+      "SELECT 1 FROM transcript_entries WHERE session_id = ? AND session_seq = ?",
+    ).get(sessionId, sessionSeq)) return undefined;
     const row = scalarRowSchema.parse(this.db.prepare(`
       SELECT COUNT(*) AS value FROM transcript_entries
-      WHERE session_id = ? AND session_seq < ?
+      WHERE session_id = ? AND session_seq >= ?
     `).get(sessionId, sessionSeq));
-    return Number(row.value);
+    return this.count(sessionId) - Number(row.value);
   }
 
   recentUserPromptOffset(sessionId: string, promptCount: number): number | undefined {
@@ -1162,11 +1259,11 @@ export class TranscriptDatabase {
         INSERT INTO transcript_sessions (
           session_id, entry_count, user_prompt_count, latest_timestamp,
           message_preview, latest_conversation_seq, legacy_path, legacy_size,
-          legacy_mtime_ms, migrated_at, updated_at
+          legacy_mtime_ms, migrated_at, updated_at, claude_tasks_backfilled
         )
         SELECT ?, entry_count, user_prompt_count, latest_timestamp,
           message_preview, latest_conversation_seq, NULL, NULL, NULL,
-          migrated_at, ?
+          migrated_at, ?, claude_tasks_backfilled
         FROM transcript_sessions WHERE session_id = ?
       `).run(newSessionId, new Date().toISOString(), oldSessionId);
 
@@ -1395,18 +1492,24 @@ export class TranscriptDatabase {
     });
   }
 
+  /** Tool calls without a result. Finding them reads only the tool_use index, not entry rows. */
   pendingToolCalls(sessionId: string): HistoryEntry[] {
-    return (entryRowsSchema.parse(this.db.prepare(`
-      SELECT call.* FROM transcript_entries AS call
-      WHERE call.session_id = ? AND call.role = 'tool_call' AND call.tool_use_id IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM transcript_entries AS result
-          WHERE result.session_id = call.session_id
-            AND result.role = 'tool_result'
-            AND result.tool_use_id = call.tool_use_id
-        )
-      ORDER BY call.session_seq
-    `).all(sessionId))).map(parseEntry);
+    const toolUseIds = toolUseIdRowsSchema.parse(this.db.prepare(`
+      SELECT tool_use_id FROM transcript_entries
+      WHERE session_id = ? AND tool_use_id IS NOT NULL AND role IN ('tool_call', 'tool_result')
+      GROUP BY tool_use_id
+      HAVING MAX(role = 'tool_call') = 1 AND MAX(role = 'tool_result') = 0
+    `).all(sessionId)).map((row) => row.tool_use_id);
+    const calls: HistoryEntry[] = [];
+    for (let offset = 0; offset < toolUseIds.length; offset += 500) {
+      const chunk = toolUseIds.slice(offset, offset + 500);
+      const placeholders = chunk.map(() => "?").join(", ");
+      calls.push(...entryRowsSchema.parse(this.db.prepare(`
+        SELECT * FROM transcript_entries
+        WHERE session_id = ? AND role = 'tool_call' AND tool_use_id IN (${placeholders})
+      `).all(sessionId, ...chunk)).map(parseEntry));
+    }
+    return calls.sort((left, right) => Number(left.sessionSeq || 0) - Number(right.sessionSeq || 0));
   }
 }
 

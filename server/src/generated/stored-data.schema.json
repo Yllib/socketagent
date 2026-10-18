@@ -301,7 +301,8 @@
       "enum": [
         "pending",
         "delivering",
-        "delivered"
+        "delivered",
+        "undeliverable"
       ]
     },
     "DurableMonitorRecord": {

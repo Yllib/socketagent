@@ -90,3 +90,25 @@ test("a transcript Claude Code deleted is reported missing", () => {
   fs.rmSync(p);
   assert.equal(hasClaudeTranscript(SESSION_ID), false);
 });
+
+// The transcript is read backwards in 1 MB chunks so a 400 MB file is never
+// loaded whole. Lines straddle chunk boundaries, some with multibyte text.
+test("only the newer tail of a large transcript is read, in order", (t) => {
+  /** @type {unknown[]} */
+  const lines = [];
+  for (let index = 0; index < 1200; index++) {
+    const timestamp = new Date(Date.UTC(2026, 9, 1) + index * 1000).toISOString();
+    lines.push(userMessage(`prompt ${index} ${"é".repeat(index % 2 ? 1000 : 1500)}`, timestamp));
+  }
+  const written = writeTranscript(lines);
+  t.after(() => fs.rmSync(path.dirname(written), { recursive: true, force: true }));
+  assert.ok(fs.statSync(written).size > 2 * 1024 * 1024);
+
+  const cutoff = new Date(Date.UTC(2026, 9, 1) + 900 * 1000).toISOString();
+  const missed = getMissedMessages(SESSION_ID, CWD, cutoff);
+  assert.deepEqual(
+    missed.map((entry) => Number(String(entry.content).split(" ")[1])),
+    Array.from({ length: 299 }, (/** @type {unknown} */ _, /** @type {number} */ index) => 901 + index),
+  );
+  assert.equal(getMissedMessages(SESSION_ID, CWD, new Date(0).toISOString()).length, 1200);
+});

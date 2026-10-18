@@ -5141,11 +5141,17 @@ export class CodexSession {
         const ranCommand = String(item.command || "");
         const capturePath = commandCapturePath(ranCommand);
         if (capturePath) this.followCommandCapture(item.id, capturePath);
+        const command = stripCaptureStages(ranCommand);
+        // Each action repeats the command it came from, tee included.
+        const commandActions = unknownArray(item.commandActions).map((action) =>
+          isCodexRecord(action) && typeof action.command === "string"
+            ? { ...action, command: stripCaptureStages(action.command) }
+            : action);
         const input = {
-          command: stripCaptureStages(ranCommand),
-          description: summarizeCodexCommandActions(item.commandActions, item.command),
+          command,
+          description: summarizeCodexCommandActions(commandActions, command),
           cwd: item.cwd || "",
-          commandActions: unknownArray(item.commandActions),
+          commandActions,
           source: item.source || "",
           _codexItemType: "commandExecution",
         };

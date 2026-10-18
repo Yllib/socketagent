@@ -65,7 +65,9 @@ function readCapture(capturePath: string): string | null {
  */
 export function saveFullOutput(sessionId: string, toolUseId: string, capturePath: string, shown: string): number | null {
   const text = readCapture(capturePath);
-  if (!text || text.trim() === shown.trim()) return null;
+  // Nothing to add when the agent already saw all of it, for example inside
+  // an error report that wraps the same text.
+  if (!text?.trim() || shown.includes(text.trim())) return null;
   const file = fullOutputFile(sessionId, toolUseId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);

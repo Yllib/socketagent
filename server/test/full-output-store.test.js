@@ -27,6 +27,7 @@ test("keeps the full output only when the agent saw less", () => {
   assert.equal(saveFullOutput("s1", "t2", capture("same\n"), "same"), null);
   assert.equal(readFullOutput("s1", "t2"), null);
   assert.equal(saveFullOutput("s1", "t3", path.join(dataDir, "missing.log"), ""), null);
+  assert.equal(saveFullOutput("s1", "t4", capture("boom\n"), "Exit code 2\nboom"), null);
 });
 
 test("reads PowerShell's UTF-16 captures", () => {

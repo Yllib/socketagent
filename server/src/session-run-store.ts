@@ -166,7 +166,7 @@ export function backfillSessionRunStats(
     backfillVersion: SESSION_RUN_BACKFILL_VERSION,
   };
   session.runStats = next;
-  saveSession(session);
+  saveSession(session, "coalesced");
   return normalizedStats(next);
 }
 
@@ -181,7 +181,7 @@ export function beginSessionRun(
   if (!stats.current) {
     stats.current = { runId, startedAt, supervisorSettled: false };
     session.runStats = stats;
-    saveSession(session);
+    saveSession(session, "coalesced");
   }
   return normalizedStats(stats);
 }
@@ -201,7 +201,7 @@ export function setSessionRunSupervisorSettled(
     ...(!settled ? { pendingOutcome: undefined } : {}),
   };
   session.runStats = stats;
-  saveSession(session);
+  saveSession(session, "coalesced");
   return normalizedStats(stats);
 }
 
@@ -249,7 +249,7 @@ export function finishSessionRun(
     backfillVersion: stats.backfillVersion,
   };
   session.runStats = next;
-  saveSession(session);
+  saveSession(session, "coalesced");
 
   appendHistory(sessionId, {
     role: "run_boundary",

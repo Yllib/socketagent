@@ -61,11 +61,15 @@ const TRANSCRIPT_IDENTITY_REPAIR_MARKER = path.join(STORE_DIR, ".transcript-iden
 const HISTORY_IO_WARN_MS = Number(process.env.SOCKETAGENT_HISTORY_IO_WARN_MS || 500);
 const HISTORY_PAGE_WARN_MS = Number(process.env.SOCKETAGENT_HISTORY_PAGE_WARN_MS || 250);
 const SESSION_LIST_WARN_MS = Number(process.env.SOCKETAGENT_SESSION_LIST_WARN_MS || 500);
+// Coalesced metadata changes (activity, previews, context usage) reach disk at
+// most this often. Every flush rewrites the whole store, which is megabytes on
+// a busy computer, so streaming activity must not flush per update. Shutdown
+// flushes pending changes; a hard crash can lose this window of metadata.
 const configuredSessionStoreFlushMs = Number(process.env.SOCKETAGENT_SESSION_STORE_FLUSH_MS);
 const SESSION_STORE_FLUSH_MS = Number.isFinite(configuredSessionStoreFlushMs)
   && configuredSessionStoreFlushMs >= 0
   ? configuredSessionStoreFlushMs
-  : 100;
+  : 5_000;
 const HISTORY_COMPACT_MIN_BYTES = Number(process.env.SOCKETAGENT_HISTORY_COMPACT_MIN_BYTES || 8 * 1024 * 1024);
 const configuredHistoryCacheMaxBytes = Number(process.env.SOCKETAGENT_HISTORY_CACHE_MAX_BYTES);
 const HISTORY_CACHE_MAX_BYTES = Number.isFinite(configuredHistoryCacheMaxBytes)
@@ -190,7 +194,8 @@ export function flushSessionStore(): void {
   if (!pendingSessionStoreSnapshot) return;
   ensureStoreDir();
   const snapshot = pendingSessionStoreSnapshot;
-  const serialized = JSON.stringify(snapshot, null, 2);
+  // Compact: pretty-printing made the store over 50% larger on every rewrite.
+  const serialized = JSON.stringify(snapshot);
   if (process.platform === "win32") {
     fs.writeFileSync(STORE_FILE, serialized, { encoding: "utf8", mode: 0o600 });
   } else {
@@ -262,7 +267,11 @@ export function listSessions(): SessionInfo[] {
   );
 }
 
-export function saveSession(session: SessionInfo): void {
+/** Saves a session. Pass "coalesced" for frequent metadata such as run stats. */
+export function saveSession(
+  session: SessionInfo,
+  mode: "immediate" | "coalesced" = "immediate",
+): void {
   const sessions = readStore();
   const idx = sessions.findIndex((s) => s.id === session.id);
   if (idx >= 0) {
@@ -270,7 +279,7 @@ export function saveSession(session: SessionInfo): void {
   } else {
     sessions.push(session);
   }
-  writeStore(sessions);
+  writeStore(sessions, mode);
 }
 
 export function getSession(id: string): SessionInfo | undefined {
@@ -1289,7 +1298,7 @@ function updateSessionHistoryMetadata(sessionId: string, entries: HistoryEntry[]
     }
   }
 
-  writeStore(sessions);
+  writeStore(sessions, "coalesced");
 }
 
 /**

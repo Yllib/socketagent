@@ -55,3 +55,44 @@ export function deleteSendFileDelivery(filePath: string | undefined): void {
   const deliveryDirectory = path.join(SEND_FILE_DIR, relative.split(path.sep)[0]);
   fs.rmSync(deliveryDirectory, { recursive: true, force: true });
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Deletes SendFile snapshots older than `retentionDays`, judged by when the
+ * snapshot was taken. Zero keeps them forever. Returns how many were removed.
+ */
+export async function pruneSendFiles(retentionDays: number, now = Date.now()): Promise<number> {
+  if (retentionDays <= 0) return 0;
+  const cutoff = now - retentionDays * DAY_MS;
+  let names: string[];
+  try {
+    names = await fs.promises.readdir(SEND_FILE_DIR);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    const directory = path.join(SEND_FILE_DIR, name);
+    try {
+      const stat = await fs.promises.stat(directory);
+      if (!stat.isDirectory() || stat.mtimeMs >= cutoff) continue;
+      await fs.promises.rm(directory, { recursive: true, force: true });
+      removed++;
+    } catch {
+      // Gone already or unreadable; the next pass retries.
+    }
+  }
+  return removed;
+}
+
+/** Prunes a minute after startup, then hourly, reading the retention each time. */
+export function startSendFilePruning(retentionDays: () => number): void {
+  const run = () => {
+    void pruneSendFiles(retentionDays()).then((removed) => {
+      if (removed > 0) console.log(`[SendFile] Removed ${removed} sent files older than ${retentionDays()} days`);
+    });
+  };
+  setTimeout(run, 60_000).unref();
+  setInterval(run, 60 * 60 * 1000).unref();
+}

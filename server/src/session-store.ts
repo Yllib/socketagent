@@ -4160,16 +4160,19 @@ function claudeNativeCwdCandidates(): string[] {
       const projectPath = path.join(projectsRoot, project.name);
       let files: string[] = [];
       try {
+        // Stat each file once; a stat inside the comparator ran
+        // n log n times over folders with 10k transcripts.
         files = fs.readdirSync(projectPath)
           .filter((file) => file.endsWith(".jsonl") && !file.startsWith("agent-"))
-          .sort((left, right) => {
+          .map((file) => {
             try {
-              return fs.statSync(path.join(projectPath, right)).mtimeMs
-                - fs.statSync(path.join(projectPath, left)).mtimeMs;
+              return { file, mtime: fs.statSync(path.join(projectPath, file)).mtimeMs };
             } catch {
-              return 0;
+              return { file, mtime: 0 };
             }
-          });
+          })
+          .sort((left, right) => right.mtime - left.mtime)
+          .map((entry) => entry.file);
       } catch {}
       for (const file of files.slice(0, 3)) {
         try {

@@ -18,6 +18,25 @@ export function generateKeyPair(): KeyPair {
   return nacl.box.keyPair();
 }
 
+// nacl.box redoes the X25519 key exchange on every call. The shared key per
+// key pair is cached instead, so each message costs only the symmetric cipher.
+const sharedKeys = new WeakMap<Uint8Array, Map<string, Uint8Array>>();
+
+function sharedKey(theirPublicKey: Uint8Array, mySecretKey: Uint8Array): Uint8Array {
+  let byPeer = sharedKeys.get(mySecretKey);
+  if (!byPeer) {
+    byPeer = new Map();
+    sharedKeys.set(mySecretKey, byPeer);
+  }
+  const peer = Buffer.from(theirPublicKey).toString("base64");
+  let key = byPeer.get(peer);
+  if (!key) {
+    key = nacl.box.before(theirPublicKey, mySecretKey);
+    byPeer.set(peer, key);
+  }
+  return key;
+}
+
 /** Encrypt a message string using NaCl box */
 export function encrypt(
   message: string,
@@ -26,7 +45,7 @@ export function encrypt(
 ): EncryptedEnvelope {
   const nonce = nacl.randomBytes(nacl.box.nonceLength);
   const messageBytes = new TextEncoder().encode(message);
-  const ciphertext = nacl.box(messageBytes, nonce, theirPublicKey, mySecretKey);
+  const ciphertext = nacl.box.after(messageBytes, nonce, sharedKey(theirPublicKey, mySecretKey));
   if (!ciphertext) throw new Error("Encryption failed");
   return {
     n: Buffer.from(nonce).toString("base64"),
@@ -42,7 +61,7 @@ export function decrypt(
 ): string {
   const nonce = new Uint8Array(Buffer.from(envelope.n, "base64"));
   const ciphertext = new Uint8Array(Buffer.from(envelope.c, "base64"));
-  const plaintext = nacl.box.open(ciphertext, nonce, theirPublicKey, mySecretKey);
+  const plaintext = nacl.box.open.after(ciphertext, nonce, sharedKey(theirPublicKey, mySecretKey));
   if (!plaintext) throw new Error("Decryption failed — invalid key or corrupted message");
   return new TextDecoder().decode(plaintext);
 }
@@ -58,7 +77,7 @@ export function encryptBinary(
   mySecretKey: Uint8Array
 ): Buffer {
   const nonce = nacl.randomBytes(nacl.box.nonceLength);
-  const ciphertext = nacl.box(plaintext, nonce, theirPublicKey, mySecretKey);
+  const ciphertext = nacl.box.after(plaintext, nonce, sharedKey(theirPublicKey, mySecretKey));
   if (!ciphertext) throw new Error("Encryption failed");
   return Buffer.concat([Buffer.from(nonce), Buffer.from(ciphertext)]);
 }
@@ -72,7 +91,7 @@ export function decryptBinary(
   if (envelope.length < nacl.box.nonceLength) throw new Error("Envelope too short");
   const nonce = new Uint8Array(envelope.subarray(0, nacl.box.nonceLength));
   const ciphertext = new Uint8Array(envelope.subarray(nacl.box.nonceLength));
-  const plaintext = nacl.box.open(ciphertext, nonce, theirPublicKey, mySecretKey);
+  const plaintext = nacl.box.open.after(ciphertext, nonce, sharedKey(theirPublicKey, mySecretKey));
   if (!plaintext) throw new Error("Decryption failed — invalid key or corrupted message");
   return plaintext;
 }

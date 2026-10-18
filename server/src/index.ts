@@ -71,7 +71,7 @@ import { encodeBinaryBrowserFrame, supportsBinaryBrowserFrames } from "./browser
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { onInlineImagesSaved } from "./session-store";
 import { inlineImageStore } from "./inline-image-store";
-import { isSendFileDeliveryPath } from "./send-file-store";
+import { isSendFileDeliveryPath, startSendFilePruning } from "./send-file-store";
 import { SocketAgentPlugin, PluginContext, SessionContext } from "./plugin-api";
 import { parseSocketAgentPlugin } from "./plugin-contract";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
@@ -91,7 +91,7 @@ import { KeyPair, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, lo
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { isAuthFailureMessage } from "./backend-auth";
-import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt } from "./server-settings";
+import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays } from "./server-settings";
 import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
@@ -5079,6 +5079,9 @@ function createConnectionHandler(
             };
             applyDefault(activeSession);
             for (const session of activeSessions.values()) applyDefault(session);
+          }
+          if (typeof msg.sentFileRetentionDays === "number") {
+            setSentFileRetentionDays(msg.sentFileRetentionDays);
           }
           if (Object.prototype.hasOwnProperty.call(msg, "claudeAutoCompactWindow")) {
             const window = normalizeClaudeAutoCompactWindow(
@@ -11194,6 +11197,7 @@ setTimeout(() => {
 }, 5_000).unref();
 startBashCapturePruning();
 startFullOutputTrimming();
+startSendFilePruning(getSentFileRetentionDays);
 
 if (process.env.SOCKETAGENT_HISTORY_COMPACT_ON_STARTUP !== "0") {
   const runStartupHistoryCompaction = () => {

@@ -229,10 +229,16 @@ export class TranscriptDatabase {
     this.db = new DatabaseSync(filePath);
     this.db.exec("PRAGMA journal_mode=WAL");
     try { fs.chmodSync(filePath, 0o600); } catch {}
-    this.db.exec("PRAGMA synchronous=FULL");
+    // NORMAL in WAL mode can lose the last commits on power loss but never
+    // corrupts the file, and each commit costs far less than FULL.
+    this.db.exec("PRAGMA synchronous=NORMAL");
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA wal_autocheckpoint=1000");
+    // A checkpoint reuses the WAL file but never shrinks it, so one large
+    // write left it at hundreds of MB for good. Cap it and shrink it now.
+    this.db.exec("PRAGMA journal_size_limit=67108864");
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS transcript_sessions (
         session_id TEXT PRIMARY KEY,

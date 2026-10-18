@@ -29,12 +29,15 @@ export interface ServerSettings {
    * default; true means the user deliberately selected the stored value.
    */
   claudeAutoCompactWindowConfigured?: boolean;
+  /** Days to keep SendFile snapshots; 0 keeps them forever. */
+  sentFileRetentionDays: number;
 }
 
 const STORE_DIR = socketAgentDataPath();
 const SETTINGS_FILE = path.join(STORE_DIR, "server-settings.json");
 const DEFAULT_CODEX_DRIVER: CodexDriver = "app-server";
 export const DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW = 250_000;
+export const DEFAULT_SENT_FILE_RETENTION_DAYS = 30;
 const BOOT_DEFAULT_CWD = resolveClientPath(process.env.DEFAULT_CWD || process.cwd()).resolvedPath || path.resolve(process.cwd());
 const CODEX_DRIVER_CACHE_MS = 5000;
 const BACKEND_HEALTH_CACHE_MS = 10000;
@@ -67,6 +70,15 @@ export function normalizeClaudeAutoCompactWindow(value: unknown): number | null 
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 100_000 || parsed > 1_000_000) {
     throw new Error("Claude auto-compact window must be an integer from 100,000 to 1,000,000 tokens");
+  }
+  return parsed;
+}
+
+export function normalizeSentFileRetentionDays(value: unknown): number {
+  if (value === undefined || value === null || value === "") return DEFAULT_SENT_FILE_RETENTION_DAYS;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 3650) {
+    throw new Error("Sent file retention must be a whole number of days from 0 to 3650");
   }
   return parsed;
 }
@@ -379,6 +391,7 @@ export function loadServerSettings(): ServerSettings {
       systemPromptInitialized: false,
       claudeAutoCompactWindow: DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW,
       claudeAutoCompactWindowConfigured: false,
+      sentFileRetentionDays: DEFAULT_SENT_FILE_RETENTION_DAYS,
     };
     return cachedSettings;
   }
@@ -402,6 +415,13 @@ export function loadServerSettings(): ServerSettings {
           && rawClaudeAutoCompactWindow !== null
           && rawClaudeAutoCompactWindow !== ""
         ),
+      sentFileRetentionDays: (() => {
+        try {
+          return normalizeSentFileRetentionDays(raw.sentFileRetentionDays);
+        } catch {
+          return DEFAULT_SENT_FILE_RETENTION_DAYS;
+        }
+      })(),
     };
   } catch (err: unknown) {
     console.warn(`[settings] Failed to read server settings: ${errorMessage(err)}`);
@@ -412,6 +432,7 @@ export function loadServerSettings(): ServerSettings {
       systemPromptInitialized: false,
       claudeAutoCompactWindow: DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW,
       claudeAutoCompactWindowConfigured: false,
+      sentFileRetentionDays: DEFAULT_SENT_FILE_RETENTION_DAYS,
     };
   }
   return cachedSettings;
@@ -432,6 +453,9 @@ export function saveServerSettings(settings: ServerSettings): ServerSettings {
       settings.claudeAutoCompactWindowConfigured
       ?? previous.claudeAutoCompactWindowConfigured
       ?? false,
+    sentFileRetentionDays: normalizeSentFileRetentionDays(
+      settings.sentFileRetentionDays ?? previous.sentFileRetentionDays,
+    ),
   };
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(cachedSettings, null, 2), "utf-8");
   return cachedSettings;
@@ -459,6 +483,14 @@ export function getServerSystemPrompt(): string {
 
 export function isServerSystemPromptInitialized(): boolean {
   return loadServerSettings().systemPromptInitialized;
+}
+
+export function setSentFileRetentionDays(days: number): ServerSettings {
+  return saveServerSettings({ ...loadServerSettings(), sentFileRetentionDays: normalizeSentFileRetentionDays(days) });
+}
+
+export function getSentFileRetentionDays(): number {
+  return loadServerSettings().sentFileRetentionDays;
 }
 
 export function setClaudeAutoCompactWindow(window: number | null): ServerSettings {
@@ -543,6 +575,7 @@ export function getAdvertisedServerSettings(): ServerSettings & {
     systemPrompt: settings.systemPrompt,
     systemPromptInitialized: settings.systemPromptInitialized,
     claudeAutoCompactWindow: settings.claudeAutoCompactWindow,
+    sentFileRetentionDays: settings.sentFileRetentionDays,
     codexDriversAvailable,
     backendHealth: getBackendHealth(),
     issues: getComputerIssues(),

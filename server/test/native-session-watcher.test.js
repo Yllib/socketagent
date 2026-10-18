@@ -39,3 +39,31 @@ test("reports a new transcript once and ignores appends to it", async (t) => {
   await settle();
   assert.equal(calls, 1);
 });
+
+test("reports a transcript in a folder created after watching began", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-native-watch-"));
+  const codex = path.join(root, "sessions");
+  const claude = path.join(root, "projects");
+  fs.mkdirSync(codex);
+  fs.mkdirSync(claude);
+  let calls = 0;
+  const stop = watchNativeSessionFolders(() => { calls += 1; }, { codex, claude }, 100);
+  t.after(() => {
+    stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  /** @returns {Promise<void>} */
+  const settle = () => new Promise((resolve) => { setTimeout(resolve, 400); });
+
+  const day = path.join(codex, "2026", "10", "18");
+  fs.mkdirSync(day, { recursive: true });
+  fs.writeFileSync(path.join(day, "rollout-new.jsonl"), "{}\n");
+  await settle();
+  assert.equal(calls, 1);
+
+  fs.mkdirSync(path.join(claude, "-home-me-new"));
+  await settle();
+  fs.writeFileSync(path.join(claude, "-home-me-new", "abc.jsonl"), "{}\n");
+  await settle();
+  assert.equal(calls, 2);
+});

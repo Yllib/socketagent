@@ -1240,6 +1240,9 @@
                 "null"
               ]
             },
+            "sentFileRetentionDays": {
+              "type": "number"
+            },
             "systemPromptIfUnset": {
               "type": "string"
             },

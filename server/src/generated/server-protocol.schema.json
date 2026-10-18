@@ -4471,6 +4471,9 @@
             "null"
           ]
         },
+        "sentFileRetentionDays": {
+          "type": "number"
+        },
         "codexDriversAvailable": {
           "type": "array",
           "items": {
@@ -4496,6 +4499,7 @@
         "defaultCwd",
         "systemPrompt",
         "claudeAutoCompactWindow",
+        "sentFileRetentionDays",
         "codexDriversAvailable"
       ]
     },

@@ -549,6 +549,8 @@ export interface SetServerSettingsMessage {
    * default.
    */
   claudeAutoCompactWindow?: number | null;
+  /** Days to keep files sent with SendFile, 0 to 3650. Zero keeps them forever. */
+  sentFileRetentionDays?: number;
   /** Migration helper: seed the server only when it has no prompt yet. */
   systemPromptIfUnset?: string;
 }
@@ -2423,6 +2425,8 @@ export interface ServerSettingsMessage {
   systemPromptInitialized?: boolean;
   /** Null explicitly means use the Claude SDK/model default. */
   claudeAutoCompactWindow: number | null;
+  /** Days the server keeps files sent with SendFile; 0 keeps them forever. */
+  sentFileRetentionDays: number;
   codexDriversAvailable: CodexDriver[];
   backendHealth?: BackendHealthInfo[];
   /** Problems on the computer that a backend reinstall does not fix, such as a bad Codex config. */

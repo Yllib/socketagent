@@ -181,24 +181,6 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
     if ($gitResult.ExitCode -ne 0) { throw "git clone failed" }
 }
 
-# The desktop setup carries its tested Windows setup support with the app.
-# Core server code still comes from the selected repository; existing standalone
-# installs are unchanged when no support directory is supplied.
-if ($env:SOCKETAGENT_INSTALLER_SUPPORT) {
-    foreach ($relative in @(
-        'install.ps1', 'bin/socketagent.ps1',
-        'server/scripts/windows-service.ps1', 'server/scripts/windows-launcher.cs',
-        'server/scripts/register-windows-recovery.ps1', 'server/scripts/migrate-windows-service.ps1',
-        'server/scripts/check-health.js', 'server/src/windows-managed-shims.ts'
-    )) {
-        $source = Join-Path $env:SOCKETAGENT_INSTALLER_SUPPORT $relative
-        if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing bundled setup support: $relative" }
-        $target = Join-Path $InstallDir $relative
-        New-Item -ItemType Directory -Force (Split-Path $target) | Out-Null
-        Copy-Item -LiteralPath $source -Destination $target -Force
-    }
-}
-
 $installer = Join-Path $InstallDir "install.ps1"
 if (-not (Test-Path $installer)) {
     throw "Cannot find $installer"

@@ -16,13 +16,12 @@ fi
 #   ./build-app.sh --deploy            # Build, bump patch, deploy to GitHub
 #   ./build-app.sh --deploy --bump minor   # Build, bump minor, deploy
 #   ./build-app.sh --deploy --skip-desktop # Deploy Android only
-#   ./build-app.sh --deploy --allow-extra-signing  # Second signed deploy today
 #
-# A deploy also builds Windows, signs its installer, publishes it to the public
-# download URL, and attaches it to GitHub so desktop clients can discover the
-# update. eSigner bills per signing, so only one deploy a day may sign. Another
-# one stops before changing anything unless the user approves
-# --allow-extra-signing.
+# A deploy also builds the Windows app and attaches SocketAgent-windows-x64.zip
+# to the GitHub release, plus the signed desktop installer, which downloads that
+# zip. The installer only changes when its setup does, so deploys never sign.
+# When setup has changed, the deploy stops before changing anything until
+# build-windows-desktop-installer.sh --sign has built and recorded a new one.
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 REPO_PARENT="$(cd "$REPO_ROOT/.." && pwd)"
@@ -57,10 +56,9 @@ while [[ $# -gt 0 ]]; do
     --flavor) FLAVOR="$2"; shift 2 ;;
     --bundle) BUNDLE=true; shift ;;
     --skip-desktop) SKIP_DESKTOP=true; shift ;;
-    --allow-extra-signing) export SOCKETAGENT_ALLOW_EXTRA_SIGNING=1; shift ;;
     --local) echo "Local app builds are disabled. Use the remote build machine."; exit 1 ;;
     --bump) BUMP="$2"; shift 2 ;;
-    *) echo "Unknown option: $1"; echo "Usage: $0 [--flavor direct|play] [--bundle] [--deploy] [--bump major|minor|patch] [--skip-desktop] [--allow-extra-signing]"; exit 1 ;;
+    *) echo "Unknown option: $1"; echo "Usage: $0 [--flavor direct|play] [--bundle] [--deploy] [--bump major|minor|patch] [--skip-desktop]"; exit 1 ;;
   esac
 done
 
@@ -94,8 +92,9 @@ else
 fi
 
 # Before any version bump, so a refusal leaves nothing to undo.
+DESKTOP_INSTALLER="$APP_DIR/build/windows/packages/SocketAgent-Desktop-Setup.exe"
 if $DEPLOY && ! $SKIP_DESKTOP; then
-  "$REPO_ROOT/sign-windows.sh" --check
+  "$REPO_ROOT/build-windows-desktop-installer.sh" --check "$DESKTOP_INSTALLER"
 fi
 "$REPO_ROOT/check-flutter-version.sh" "$REMOTE_HOST" "$REMOTE_FLUTTER"
 
@@ -360,18 +359,18 @@ gh release create "v$NEW_VERSION" "$ARTIFACT_PATH" \
   --notes "App version $NEW_VERSION" \
   --latest
 
-# ── Build and publish the desktop installer ──
+# ── Build and attach the desktop app ──
 DESKTOP_URL=""
 if $SKIP_DESKTOP; then
-  echo "Skipping the desktop installer (--skip-desktop)."
+  echo "Skipping the desktop app (--skip-desktop)."
 else
   echo ""
   echo "Building the Windows desktop app..."
-  SOCKETAGENT_SIGN_WINDOWS=1 "$REPO_ROOT/build-windows-app.sh"
-  "$REPO_ROOT/publish-desktop-installer.sh" --version "$NEW_VERSION"
-  gh release upload "v$NEW_VERSION" \
-    "$APP_DIR/build/windows/packages/SocketAgent-Desktop-Setup.exe" \
-    --repo "$SERVER_REPO"
+  "$REPO_ROOT/build-windows-app.sh"
+  # The zip goes first. Desktop apps update when a release has the installer,
+  # and the installer downloads the newest release's zip.
+  gh release upload "v$NEW_VERSION" "$APP_DIR/build/windows/packages/SocketAgent-windows-x64.zip" --repo "$SERVER_REPO"
+  gh release upload "v$NEW_VERSION" "$DESKTOP_INSTALLER" --repo "$SERVER_REPO"
   DESKTOP_URL="${SOCKETAGENT_DOWNLOAD_URL:-https://rubanoenterprises.com/socketagent_desktop_installer.exe}"
 fi
 
@@ -383,5 +382,5 @@ echo "Users will see the update banner on next app launch."
 if [[ -n "$DESKTOP_URL" ]]; then
   echo "Desktop installer: $DESKTOP_URL"
 else
-  echo "Desktop installer: not published; run ./publish-desktop-installer.sh after building it."
+  echo "Desktop app: not attached (--skip-desktop)."
 fi

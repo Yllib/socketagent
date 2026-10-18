@@ -5,9 +5,9 @@ set -euo pipefail
 # installer, to its public download URL.
 #
 # This stable URL is for manual downloads. The app's update checker uses the
-# versioned GitHub installer attached by build-app.sh --deploy. Run standalone to
-# republish or roll back without redoing an app release; build-app.sh --deploy
-# calls it as its last step.
+# installer attached to each GitHub release by build-app.sh --deploy.
+# build-windows-desktop-installer.sh --sign calls this; run it standalone to
+# republish or roll back.
 #
 # Usage:
 #   ./publish-desktop-installer.sh                          # publish the built installer

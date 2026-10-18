@@ -21,6 +21,8 @@ const PAGE = `<body>
   <label for="email">Email</label><input id="email">
   <input id="password" type="password" aria-label="Password">
   <div id="notes" contenteditable="true" aria-label="Notes">Hello</div>
+  <textarea id="release" aria-label="Release notes">Old line one
+Old line two</textarea>
   <shadow-host></shadow-host>
   <button id="menu">Menu</button>
   <button id="delete">Delete</button>
@@ -36,6 +38,8 @@ const PAGE = `<body>
         root.querySelector("button").addEventListener("click", () => log("shadow clicked"));
       }
     });
+    // Some web apps take Ctrl+A for themselves, so typing must not rely on it.
+    document.addEventListener("keydown", (e) => { if (e.ctrlKey && e.key === "a") e.preventDefault(); });
     document.getElementById("password").addEventListener("input", (e) => log("password length " + e.target.value.length));
     document.getElementById("menu").addEventListener("mouseenter", () => log("hovered"));
     document.getElementById("delete").addEventListener("click", () => log("confirm " + confirm("Delete it?")));
@@ -87,6 +91,9 @@ test("agents fill forms, answer page prompts and reach web components", {
   assert.equal(await manager.type(profile, ref("Email"), "bc", { append: true }), "abc");
   assert.equal(await manager.type(profile, ref("Password"), "hunter2"), "", "a typed password is not read back");
   assert.equal(await manager.type(profile, ref("Notes"), " world", { append: true }), "Hello world");
+  assert.equal(await manager.type(profile, ref("Release notes"), "New notes"), "New notes");
+  assert.equal(await manager.type(profile, ref("Notes"), "Replaced"), "Replaced");
+  assert.equal(await manager.type(profile, ref("Release notes"), ""), "");
 
   await manager.click(profile, ref("Shadow button"));
   await manager.hover(profile, ref("Menu"));

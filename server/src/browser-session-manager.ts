@@ -972,18 +972,24 @@ function elementExpression(ref: string, forTyping: boolean): string {
   })()`;
 }
 
-/** Puts the caret at the end of a tagged field, so typing adds to what is there. */
-function caretToEndExpression(ref: string): string {
+/**
+ * Selects everything in a tagged field so typing replaces it, or with
+ * [toEnd] puts the caret at the end so typing adds to it. This runs in the
+ * page because a Ctrl+A keypress is unreliable: Chrome on macOS moves to the
+ * line start, and some web apps take the shortcut for themselves.
+ */
+function selectFieldExpression(ref: string, toEnd: boolean): string {
   return `(() => {
     const el = ${findRef(ref)};
     if (!el) return;
     if (typeof el.value === 'string') {
+      if (!${toEnd}) return el.select();
       try { el.setSelectionRange(el.value.length, el.value.length); } catch {}
       return;
     }
     const range = document.createRange();
     range.selectNodeContents(el);
-    range.collapse(false);
+    if (${toEnd}) range.collapse(false);
     const selection = getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
@@ -2227,12 +2233,10 @@ export class BrowserSessionManager {
       await this.waitForFocus(session, point.frame, ref);
     }
     const { ref: safeRef, frame } = await this.refFrame(session, ref);
-    if (options.append) {
-      await this.evaluateInFrame(session, frame, caretToEndExpression(safeRef));
-    } else {
-      await this.pressKey(session, "CTRL+A");
-    }
-    await session.cdp.command("Input.insertText", { text });
+    await this.evaluateInFrame(session, frame, selectFieldExpression(safeRef, Boolean(options.append)));
+    // Inserting nothing leaves a selection in place, so clearing deletes it.
+    if (text) await session.cdp.command("Input.insertText", { text });
+    else if (!options.append) await this.pressKey(session, "BACKSPACE");
     this.touch(session);
     return readStringResult(await this.evaluateInFrame(session, frame, fieldValueExpression(safeRef)));
   }
@@ -2857,7 +2861,7 @@ export class BrowserSessionManager {
 
   private async pressKey(session: RunningBrowserSession, rawKey: string): Promise<void> {
     const key = String(rawKey || "").trim().toUpperCase();
-    const definitions: Record<string, { key: string; code: string; windowsVirtualKeyCode: number; modifiers?: number; text?: string }> = {
+    const definitions: Record<string, { key: string; code: string; windowsVirtualKeyCode: number; modifiers?: number; text?: string; commands?: string[] }> = {
       ENTER: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
       TAB: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
       BACKSPACE: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
@@ -2871,11 +2875,12 @@ export class BrowserSessionManager {
       ARROWUP: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
       ARROWRIGHT: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
       ARROWDOWN: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
-      "CTRL+A": { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 },
+      // Chrome on macOS selects all only when the command is named.
+      "CTRL+A": { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2, ...(process.platform === "darwin" ? { commands: ["selectAll"] } : {}) },
     };
     const definition = definitions[key];
     if (!definition) throw new Error(`Supported browser keys are ${BROWSER_KEYS}.`);
-    const { text, ...keyUp } = definition;
+    const { text, commands, ...keyUp } = definition;
     await this.dispatchInput(session, "Input.dispatchKeyEvent", { type: "keyDown", ...definition });
     await this.dispatchInput(session, "Input.dispatchKeyEvent", { type: "keyUp", ...keyUp });
     this.touch(session);

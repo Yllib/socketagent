@@ -206,6 +206,13 @@ interface ChromeInstance {
   profile: string;
   profileDir: string;
   process: ChildProcess;
+  /**
+   * The browser process when Chrome restarted itself to drop admin rights.
+   * The spawned process has exited by then, so this is the one to stop.
+   */
+  handoffPid?: number;
+  /** Resolves once Chrome has quit. */
+  exited: Promise<void>;
   displayProcess?: ChildProcess;
   /** Chrome's debugging port, for connecting to tabs as they open. */
   port: number;
@@ -584,6 +591,24 @@ async function stopChildProcess(processHandle: ChildProcess | undefined): Promis
   });
 }
 
+/** Chrome's browser process ID, as Chrome reports it. */
+async function browserProcessId(cdp: CdpClient): Promise<number | undefined> {
+  const info = z.object({
+    processInfo: z.array(z.object({ type: z.string(), id: z.number() })),
+  }).safeParse(await cdp.command("SystemInfo.getProcessInfo").catch(() => null));
+  return info.success ? info.data.processInfo.find((entry) => entry.type === "browser")?.id : undefined;
+}
+
+/** Waits up to [ms] for a process this server did not spawn to exit, then kills it. */
+async function stopProcessId(pid: number, ms: number): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); } catch { return; }
+    await wait(100);
+  }
+  try { process.kill(pid, "SIGKILL"); } catch {}
+}
+
 async function reserveLoopbackPort(): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     const server = createServer();
@@ -674,9 +699,12 @@ class CdpClient {
     timer: NodeJS.Timeout;
   }>();
   private listeners = new Map<string, Set<(params: JsonRecord, sessionId?: string) => void>>();
+  /** Resolves when the connection closes, which it does when Chrome quits. */
+  readonly closed: Promise<void>;
 
   private constructor(socket: WebSocket) {
     this.socket = socket;
+    this.closed = new Promise((resolve) => socket.once("close", () => resolve()));
     socket.on("message", (raw) => this.onMessage(raw.toString()));
     socket.on("close", () => this.rejectAll(new Error("Browser connection closed.")));
     socket.on("error", (error) => this.rejectAll(error));
@@ -1910,10 +1938,18 @@ export class BrowserSessionManager {
       const version = z.object({ webSocketDebuggerUrl: z.string() })
         .parse(await (await fetch(`http://127.0.0.1:${debuggingPort}/json/version`)).json());
       browserCdp = await CdpClient.connect(version.webSocketDebuggerUrl);
+      // Chrome started by an elevated server restarts itself without admin
+      // rights, so the process we spawned is gone and only the connection
+      // closing says when the real one quits.
+      const handedOff = processHandle.exitCode !== null;
       const chrome: ChromeInstance = {
         profile,
         profileDir,
         process: processHandle,
+        ...(handedOff ? { handoffPid: await browserProcessId(browserCdp) } : {}),
+        exited: handedOff
+          ? browserCdp.closed
+          : new Promise<void>((resolve) => processHandle.once("exit", () => resolve())),
         ...(display.process ? { displayProcess: display.process } : {}),
         port: debuggingPort,
         browserCdp,
@@ -1921,7 +1957,7 @@ export class BrowserSessionManager {
         claimed: new Set([page.id]),
         creating: 0,
       };
-      processHandle.once("exit", () => this.forgetChrome(chrome));
+      void chrome.exited.then(() => this.forgetChrome(chrome));
       const tab = { id: page.id, windowId: await this.windowOf(chrome, page.id) };
       await this.trackTargets(chrome);
       this.chromes.set(profile, chrome);
@@ -2821,15 +2857,14 @@ export class BrowserSessionManager {
    * moments ago survives; Windows would otherwise lose them to a hard stop.
    */
   private async stopChrome(chrome: ChromeInstance): Promise<void> {
-    const exited = chrome.process.exitCode !== null
-      ? Promise.resolve()
-      : new Promise<void>((resolve) => chrome.process.once("exit", () => resolve()));
     await Promise.race([
-      chrome.browserCdp.command("Browser.close").then(() => exited),
+      chrome.browserCdp.command("Browser.close").then(() => chrome.exited),
       wait(5_000),
     ]).catch(() => {});
     this.forgetChrome(chrome);
     await stopChildProcess(chrome.process);
+    // The connection closes before Chrome finishes writing, so give it time.
+    if (chrome.handoffPid) await stopProcessId(chrome.handoffPid, 5_000);
     await stopChildProcess(chrome.displayProcess);
     fs.rmSync(path.join(chrome.profileDir, "SocketAgent Uploads"), { recursive: true, force: true });
   }
@@ -2914,7 +2949,9 @@ export class BrowserSessionManager {
 
   private async waitForPageTarget(port: number, processHandle: ChildProcess): Promise<CdpTarget[]> {
     for (let attempt = 0; attempt < 150; attempt++) {
-      if (processHandle.exitCode !== null) {
+      // A clean exit can be Chrome handing off to a copy of itself without
+      // admin rights, which opens the port instead.
+      if (processHandle.signalCode !== null || (processHandle.exitCode !== null && processHandle.exitCode !== 0)) {
         throw new Error("Browser exited before its control channel opened.");
       }
       try {

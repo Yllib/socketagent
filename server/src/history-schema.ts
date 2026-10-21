@@ -109,7 +109,7 @@ export const historyEntrySchema = z.object({
   runFinishedAt: optionalText, runDurationMs: optionalNumber,
   runOutcome: sessionRunOutcomeSchema.optional(), reviewId: optionalText,
   workReview: unknownRecord.optional(), entryId: optionalText, sessionSeq: optionalNumber,
-  revision: optionalNumber, streamId: optionalText,
+  revision: optionalNumber, streamId: optionalText, modelNotice: z.enum(["old_model", "refusal"]).optional(),
 } satisfies Shape<HistoryEntry>).passthrough();
 
 export function parseHistoryEntry(value: unknown): HistoryEntry {

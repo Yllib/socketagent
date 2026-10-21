@@ -1188,12 +1188,22 @@
         },
         "model": {
           "type": "string"
+        },
+        "notice": {
+          "$ref": "#/definitions/ModelNotice"
         }
       },
       "required": [
         "type",
         "sessionId",
         "content"
+      ]
+    },
+    "ModelNotice": {
+      "type": "string",
+      "enum": [
+        "old_model",
+        "refusal"
       ]
     },
     "SessionStateChangedServerMessage": {
@@ -4726,6 +4736,9 @@
         },
         "content": {
           "type": "string"
+        },
+        "modelNotice": {
+          "$ref": "#/definitions/ModelNotice"
         },
         "inlineImageContent": {
           "type": "string"

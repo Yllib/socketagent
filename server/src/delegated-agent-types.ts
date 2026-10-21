@@ -6,7 +6,8 @@ export type DelegatedAgentAction =
   | "status"
   | "tail"
   | "list"
-  | "stop";
+  | "stop"
+  | "answer";
 export type DelegatedAgentStatus = "starting" | "running" | "completed" | "failed" | "stopped";
 /** `undeliverable` is final: the supervisor session no longer exists. */
 export type DelegatedAgentReportStatus = "pending" | "delivering" | "delivered" | "undeliverable";
@@ -28,6 +29,10 @@ export interface AgentSessionToolArgs {
   limit?: number;
   /** A linked computer's name or public key. With it, the action runs there. */
   computer?: string;
+  /** For answer: the child's question ID from the question report. */
+  question_id?: string;
+  /** For answer: one answer per question, in order. */
+  answers?: string[];
 }
 
 export interface DelegatedAgentTailEntry {

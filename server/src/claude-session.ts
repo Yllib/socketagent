@@ -1,7 +1,7 @@
 import type { ClientTransport } from "./client-transport";
 import { isRecord, unknownArray } from "./value-guards";
 import { requestTranscriptAccess } from "./transcript-access-approval";
-import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type ElicitationRequest, type ElicitationResult, type Settings, type PermissionMode, type SDKTaskStartedMessage, type SDKTaskProgressMessage, type SDKTaskUpdatedMessage, type McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import { query, createSdkMcpServer, tool, forkSession as sdkForkSession, type ElicitationRequest, type ElicitationResult, type Settings, type PermissionMode, type SDKTaskStartedMessage, type SDKTaskProgressMessage, type SDKTaskUpdatedMessage, type McpServerConfig, type SDKModelRefusalFallbackMessage } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { rememberClaudePlanUsage } from "./claude-plan-usage-cache";
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -74,7 +74,7 @@ import { SessionEventDelivery } from "./session-event-delivery";
 import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { getCachedModelCatalog, modelCatalogIsFresh, saveCachedModelCatalog } from "./model-catalog-store";
-import { recordModelChange } from "./model-change";
+import { claudeModelVersion, claudeVersionLabel, outdatedModelWarning, recordModelChange, recordModelNotice } from "./model-change";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { createInteractiveRequestId } from "./interactive-request-id";
@@ -1130,6 +1130,10 @@ export class ClaudeSession {
   private _lastContextWindow = 0;  // last known context window size from modelUsage
   private _sessionModel: string | null = null;  // model reported by SessionStart hook
   private _requestedModel: string | null = null;
+  // Models of the assistant messages in the current turn, for the old-model warning.
+  private _turnModels = new Set<string>();
+  // Set when a refusal fallback swapped the session model; the next prompt restores it.
+  private _modelBeforeFallback: string | null = null;
   private _streamingText = new Map<string, { content: string; parentToolUseId?: string; uuid?: string; startedAtMs?: number }>();
   private _streamingThinking = new Map<string, { content: string; parentToolUseId?: string; uuid?: string; startedAtMs?: number }>();
   private _thinkingProgress: { startedAtMs: number; estimatedTokens: number; uuid?: string } | null = null;
@@ -1159,6 +1163,8 @@ export class ClaudeSession {
   /** Fires when the harness starts or ends a turn nobody prompted for. */
   public onHarnessRunStateChanged?: (running: boolean) => void;
   public onAgentSessionRequest?: AgentSessionToolExecutor;
+  /** Called for each question card this session sends, permission prompts included. */
+  public onQuestionAsked?: (question: QuestionServerMessage) => void;
   public onComputersRequest?: ComputersToolExecutor;
   // When set, this fresh session replaces an old cleared session — remap the ID in the store
   public replacesSessionId?: string;
@@ -2966,6 +2972,7 @@ export class ClaudeSession {
   }
 
   public send(msg: ServerMessage): void {
+    if (msg.type === "question") this.onQuestionAsked?.(msg);
     if (msg.type === "error") {
       try {
         recordSessionError(msg.sessionId || this.sessionId || "", msg);
@@ -3044,6 +3051,12 @@ export class ClaudeSession {
       pendingQuestions: this.pendingQuestions,
       questionCounter: { next: () => createInteractiveRequestId("q") },
     };
+  }
+
+  /** The question with this ID while it still waits for an answer. */
+  pendingQuestion(questionId: string): QuestionServerMessage | undefined {
+    const data = this.pendingQuestions.get(questionId)?.questionData;
+    return data?.type === "question" ? data : undefined;
   }
 
   resolveQuestion(questionId: string, answers: Record<string, string>): boolean {
@@ -3169,6 +3182,33 @@ export class ClaudeSession {
         timestamp: new Date().toISOString(),
       });
     }
+  }
+
+  /**
+   * Shows the fallback notice in chat. A session-scope fallback swaps the
+   * CLI's model for the rest of the session, so the next prompt switches back.
+   */
+  private _noteRefusalFallback(message: SDKModelRefusalFallbackMessage): void {
+    if (message.scope !== "local") this._modelBeforeFallback = message.original_model;
+    const original = claudeModelVersion(message.original_model);
+    const fallback = claudeModelVersion(message.fallback_model);
+    const originalLabel = original ? claudeVersionLabel(original) : message.original_model;
+    const fallbackLabel = fallback ? claudeVersionLabel(fallback) : message.fallback_model;
+    const category = message.api_refusal_category ? ` (${message.api_refusal_category})` : "";
+    const content = message.scope === "local"
+      ? `${originalLabel} safeguards flagged a subagent${category}. ${fallbackLabel} answered for it.`
+      : `${originalLabel} safeguards flagged this turn${category}. ${fallbackLabel} answered instead. Your next message goes back to ${originalLabel}.`;
+    console.warn(`[Model] Refusal fallback ${message.original_model} -> ${message.fallback_model} scope=${message.scope ?? "session"} category=${message.api_refusal_category ?? "none"}`);
+    if (this.sessionId) this.send(recordModelNotice(this.sessionId, "refusal", content));
+  }
+
+  /** Adds a warning card when this turn used a model older than the newest of its family. */
+  private _warnAboutOldModels(): void {
+    const used = [...this._turnModels];
+    this._turnModels.clear();
+    const catalog = this._lastSupportedModels?.models ?? getCachedModelCatalog("claude")?.models ?? [];
+    const content = outdatedModelWarning(used, catalog);
+    if (content && this.sessionId) this.send(recordModelNotice(this.sessionId, "old_model", content));
   }
 
   /** Switch model mid-session. Pass undefined to reset to default. */
@@ -3375,6 +3415,13 @@ export class ClaudeSession {
     this._isRunning = true;
     this._runStartedAt = new Date().toISOString();
     this._authErrorSent = false;
+    this._turnModels.clear();
+    if (this._modelBeforeFallback) {
+      const restore = this._requestedModel || this._modelBeforeFallback;
+      this._modelBeforeFallback = null;
+      await this.activeQuery.setModel(restore);
+      console.log(`[Model] Restored ${restore} after a refusal fallback for ${this.sessionId || "(pending)"}`);
+    }
     this._streamingText.clear();
     this._streamingThinking.clear();
     this._thinkingProgress = null;
@@ -3448,6 +3495,9 @@ export class ClaudeSession {
     this.abortController = new AbortController();
     this._stopRequested = false;
     this._unexpectedCancellations = 0;
+    this._turnModels.clear();
+    const coldModel = this._requestedModel || this._modelBeforeFallback;
+    this._modelBeforeFallback = null;
     this._lastThinkingTokensSentAt = 0;
     this._isRunning = true;
     this._runStartedAt = new Date().toISOString();
@@ -3681,7 +3731,7 @@ export class ClaudeSession {
             "AgentSession",
             AGENT_SESSION_TOOL_DESCRIPTION,
             {
-              action: z.enum(["start", "message", "status", "tail", "list", "stop"]).describe("start a child; message an existing child; optionally inspect status or interim activity; list children; or stop one. Completion is delivered automatically; do not poll merely to wait"),
+              action: z.enum(["start", "message", "status", "tail", "list", "stop", "answer"]).describe("start a child; message an existing child; optionally inspect status or interim activity; list children; stop one; or answer a question or permission prompt the child is blocked on. Completion and child questions are delivered automatically; do not poll merely to wait"),
               prompt: z.string().optional().describe("Required for start and message. A message to a running child is queued at its next safe boundary."),
               session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/tail/stop unless delegation_id is used"),
               delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),
@@ -3694,6 +3744,8 @@ export class ClaudeSession {
               effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Optional reasoning effort for start"),
               permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
               computer: z.string().optional().describe("Run this action on a linked computer, by name or public key. See the Computers tool."),
+              question_id: z.string().optional().describe("For answer, the question_id from the child's question report"),
+              answers: z.array(z.string()).optional().describe("For answer, one answer per question in order: an option label such as Approve, or your own text"),
             },
             async (args) => handleAgentSessionTool(appToolContext, args)
           ),
@@ -4050,7 +4102,7 @@ export class ClaudeSession {
           abortController: this.abortController,
           effort: this._effort,
           thinking: this._thinking,
-          ...(this._requestedModel ? { model: this._requestedModel } : {}),
+          ...(coldModel ? { model: coldModel } : {}),
           systemPrompt: { type: "preset", preset: "claude_code", append: this._appendSystemPrompt ? toolContext + '\n\n' + this._appendSystemPrompt : toolContext },
           tools: { type: "preset", preset: "claude_code" },
           disallowedTools: claudeDisallowedTools(this._disallowedTools),
@@ -4259,8 +4311,9 @@ export class ClaudeSession {
                   const model = input.model || "";
                   const agentType = input.agent_type || "";
                   console.log(`[Hook] SessionStart: source=${source} model=${model} agentType=${agentType}`);
+                  // Display only. A refusal fallback reports the fallback model
+                  // here, and saving it would pin the session to that model.
                   if (model) this._sessionModel = model;
-                  if (model) this.persistAgentSettings({ model });
                   this.send({
                     type: "session_lifecycle",
                     event: "start",
@@ -4581,9 +4634,18 @@ export class ClaudeSession {
 
         if (message.type === "assistant") {
           this._retractClaudeMessages(message.supersedes);
+          const usedModel = message.message.model;
+          if (usedModel && usedModel !== "<synthetic>") this._turnModels.add(usedModel);
         }
         if (message.type === "system" && message.subtype === "model_refusal_fallback") {
           this._retractClaudeMessages(message.retracted_message_uuids);
+          this._noteRefusalFallback(message);
+        }
+        if (message.type === "system" && message.subtype === "model_refusal_no_fallback" && this.sessionId) {
+          const version = claudeModelVersion(message.original_model);
+          const category = message.api_refusal_category ? ` (${message.api_refusal_category})` : "";
+          this.send(recordModelNotice(this.sessionId, "refusal",
+            `${version ? claudeVersionLabel(version) : message.original_model} safeguards stopped this turn${category}. No other model answered.`));
         }
         if (message.type === "conversation_reset") {
           this._handleClaudeConversationReset(message);
@@ -5979,6 +6041,7 @@ export class ClaudeSession {
             });
             continue;
           }
+          this._warnAboutOldModels();
           if (isClaudeTaskNotificationResult(result)) {
             // Claude may synthesize a main-thread follow-up after background
             // work completes. Its assistant content has already streamed, but

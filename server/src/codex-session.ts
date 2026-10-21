@@ -686,6 +686,8 @@ export class CodexSession {
   public onSessionIdChanged?: (previousSessionId: string, nextSessionId: string) => void;
   public onMonitorOutput?: (text: string) => void;
   public onAgentSessionRequest?: AgentSessionToolExecutor;
+  /** Called for each question card this session sends, permission prompts included. */
+  public onQuestionAsked?: (question: QuestionServerMessage) => void;
   public onComputersRequest?: ComputersToolExecutor;
   public replacesSessionId?: string;
   // Mirrors the cast-accessed private on ClaudeSession; used by index.ts to
@@ -1421,6 +1423,12 @@ export class CodexSession {
   }
   setKokoroVoice(v: string): void { this._kokoroVoice = v; }
   setKokoroSpeed(s: number): void { this._kokoroSpeed = s; }
+  /** The question with this ID while it still waits for an answer. */
+  pendingQuestion(questionId: string): QuestionServerMessage | undefined {
+    const data = this.pendingQuestions.get(questionId)?.questionData;
+    return data?.type === "question" ? data : undefined;
+  }
+
   resolveQuestion(questionId: string, answers: Record<string, string>): boolean {
     const pending = this.pendingQuestions.get(questionId);
     if (!pending) return false;
@@ -2447,6 +2455,7 @@ export class CodexSession {
   }
 
   public send(msg: ServerMessage): void {
+    if (msg.type === "question") this.onQuestionAsked?.(msg);
     if (msg.type === "error") {
       try {
         recordSessionError(msg.sessionId || this.sessionId || "", msg);

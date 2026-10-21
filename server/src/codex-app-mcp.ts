@@ -399,7 +399,7 @@ function createServer(context: AppToolContext): McpServer {
       title: "Agent Session",
       description: AGENT_SESSION_TOOL_DESCRIPTION,
       inputSchema: {
-        action: z.enum(["start", "message", "status", "tail", "list", "stop"]).describe("start a child; message an existing child; optionally inspect status or interim activity; list children; or stop one. Completion is delivered automatically; do not poll merely to wait"),
+        action: z.enum(["start", "message", "status", "tail", "list", "stop", "answer"]).describe("start a child; message an existing child; optionally inspect status or interim activity; list children; stop one; or answer a question or permission prompt the child is blocked on. Completion and child questions are delivered automatically; do not poll merely to wait"),
         prompt: z.string().optional().describe("Required for start and message. A message to a running child is queued at its next safe boundary."),
         session_id: z.string().optional().describe("Child session ID returned by start; required for message/status/tail/stop unless delegation_id is used"),
         delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),
@@ -412,6 +412,8 @@ function createServer(context: AppToolContext): McpServer {
         effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Optional reasoning effort for start"),
         permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
         computer: z.string().optional().describe("Run this action on a linked computer, by name or public key. See the Computers tool."),
+        question_id: z.string().optional().describe("For answer, the question_id from the child's question report"),
+        answers: z.array(z.string()).optional().describe("For answer, one answer per question in order: an option label such as Approve, or your own text"),
       },
     },
     async (args) => handleAgentSessionTool(context, args),

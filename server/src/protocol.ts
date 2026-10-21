@@ -1818,12 +1818,20 @@ export interface PermissionModeChangedServerMessage {
 }
 
 /** A session's model changed. `content` is the card text, also saved as a model_change history entry. */
+export type ModelNotice = "old_model" | "refusal";
+
 export interface ModelChangedServerMessage {
   type: "model_changed";
   sessionId: string;
   content: string;
   /** Absent when the session went back to the default model. */
   model?: string;
+  /**
+   * Set on server-made notices. `old_model`: a turn ran on an older model than
+   * the newest of its family. `refusal`: safeguards flagged a turn and another
+   * model answered.
+   */
+  notice?: ModelNotice;
 }
 
 export interface SessionStateChangedServerMessage {
@@ -2468,6 +2476,8 @@ export interface SessionArchiveFailedServerMessage {
 export interface HistoryEntry {
   role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "model_change" | "run_boundary" | "error" | "computer_access";
   content: string;
+  /** On a model_change entry: the notice kind, as on ModelChangedServerMessage. */
+  modelNotice?: ModelNotice;
   /** Display-only snapshot references; native conversation text stays unchanged. */
   inlineImageContent?: string;
   toolName?: string;

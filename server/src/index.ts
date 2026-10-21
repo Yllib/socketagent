@@ -170,6 +170,7 @@ import {
   delegatedAgentResultToolUseId,
 } from "./delegated-agent-result-card";
 import { findUntrackedDelegatedRestartContinuation } from "./delegated-agent-restart-recovery";
+import { answersForQuestion, delegatedQuestionPrompt } from "./delegated-agent-question";
 import {
   buildSessionMemoryContinuityContext,
   deleteSessionMemoryEntry,
@@ -190,7 +191,7 @@ import {
   SESSION_RUN_BACKFILL_VERSION,
   setSessionRunSupervisorSettled,
 } from "./session-run-store";
-import type { SessionRunOutcome, HistoryEntry, ServerMessage } from "./protocol";
+import type { SessionRunOutcome, HistoryEntry, QuestionServerMessage, ServerMessage } from "./protocol";
 import {
   archiveWorkReview,
   cancelWorkReview,
@@ -1853,6 +1854,7 @@ function attachSessionLifecycleCallbacks(session: Session): void {
     notifySessionActivity();
   };
   session.onAgentSessionRequest = (args) => manageAgentSession(session, args);
+  session.onQuestionAsked = (question) => reportDelegatedQuestion(session, question);
   session.onComputersRequest = (args, signal) => manageComputers(session, args, signal);
   session.onSessionIdChanged = (previousSessionId: string, nextSessionId: string) => {
     commandReceipts.remapConversation(previousSessionId, nextSessionId);
@@ -2628,6 +2630,41 @@ async function runDelegatedSupervisorReport(
     `delegated-report:${record.delegationId}:${run.runId}`, "delegated agent completion");
 }
 
+const reportedDelegatedQuestions = new Set<string>();
+const DELEGATED_QUESTION_RETRY_MS = 15_000;
+
+/**
+ * Continues the supervising agent when its delegated child stops on a question
+ * or permission prompt, so the supervisor can answer with action=answer.
+ * Retries while the question is still open and the supervisor can't take it.
+ */
+function reportDelegatedQuestion(child: Session, question: QuestionServerMessage): void {
+  if (question.asyncQuestion || reportedDelegatedQuestions.has(question.questionId)) return;
+  const childSessionId = question.sessionId || sessionInstanceId(child) || "";
+  const record = childSessionId
+    ? listDelegatedAgents().find((candidate) => candidate.childSessionId === childSessionId)
+    : undefined;
+  if (!record) return;
+  if (record.remoteSupervisor) {
+    console.log(`[DelegatedAgent] Question ${question.questionId} stays with the child; its supervisor is on ${record.remoteSupervisor.name}`);
+    return;
+  }
+  reportedDelegatedQuestions.add(question.questionId);
+  const text = delegatedQuestionPrompt(record, question);
+  const attempt = (): void => {
+    // The child may have been answered in the app before this runs.
+    if (!child.pendingQuestion(question.questionId)) return;
+    runSessionReport(record.supervisorSessionId, text, `delegated-question:${question.questionId}`, "delegated agent question")
+      .then(() => console.log(`[DelegatedAgent] Question ${question.questionId} sent to supervisor ${record.supervisorSessionId}`))
+      .catch((error: unknown) => {
+        console.warn(`[DelegatedAgent] Question ${question.questionId} not delivered yet: ${errorMessage(error) || error}`);
+        if (child.pendingQuestion(question.questionId)) setTimeout(attempt, DELEGATED_QUESTION_RETRY_MS);
+      });
+  };
+  // AskUserQuestion sends its card before it registers the wait, so look a tick later.
+  setImmediate(attempt);
+}
+
 /** Shared continuation route for delegated work and explicitly linked schedules. */
 async function runSessionReport(sessionId: string, text: string, messageId: string, reason: string): Promise<void> {
   if (!serverReady || restartPreparing || shuttingDown || continuationStarting.has(sessionId) || isCodexRewinding(sessionId)) {
@@ -3245,6 +3282,17 @@ async function manageDelegatedAgents(
       message: "Delegated agent stopped.",
     };
   }
+  if (action === "answer") {
+    const questionId = args.question_id?.trim();
+    if (!questionId) throw new Error("action=answer requires question_id");
+    const child = record.childSessionId ? activeSessions.get(record.childSessionId) : undefined;
+    const pending = child?.pendingQuestion(questionId);
+    if (!child || !pending) throw new Error(`Question ${questionId} is no longer waiting. It may already be answered.`);
+    const answers = answersForQuestion(pending, args.answers ?? []);
+    child.resolveQuestion(questionId, answers);
+    child.send({ type: "question_answered", questionId, sessionId: pending.sessionId, answers });
+    return { action, delegation: record, message: "Answered. The child continues." };
+  }
   if (action === "message") {
     const prompt = args.prompt?.trim();
     if (!prompt) throw new Error("action=message requires prompt");
@@ -3510,7 +3558,7 @@ async function requestOnComputer(
 }
 
 const remoteAgentResponseSchema = z.object({
-  action: z.enum(["start", "message", "status", "tail", "list", "stop"]),
+  action: z.enum(["start", "message", "status", "tail", "list", "stop", "answer"]),
   delegation: z.unknown().optional(),
   delegations: z.array(z.unknown()).optional(),
   tail: z.object({
@@ -3577,6 +3625,7 @@ async function manageRemoteDelegation(
   const computer = { publicKey: connection.record.targetPubkey, name: connection.record.name };
   const forwarded: AgentSessionToolArgs = { ...args };
   delete forwarded.computer;
+  if (args.action === "answer") throw new Error(`action=answer works only for children on this computer, not on ${computer.name}`);
   const action = `agent_${args.action}` as const;
   const result = await requestOnComputer(supervisorSessionId, connection, action, { ...forwarded });
   const parsed = remoteAgentResponseSchema.parse(result);

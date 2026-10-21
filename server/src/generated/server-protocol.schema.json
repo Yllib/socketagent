@@ -1332,6 +1332,24 @@
               "items": {
                 "type": "object",
                 "properties": {
+                  "id": {
+                    "type": "string",
+                    "enum": [
+                      "system_prompt",
+                      "system_tools",
+                      "mcp_tools",
+                      "mcp_instructions",
+                      "mcp_tools_deferred",
+                      "system_tools_deferred",
+                      "custom_agents",
+                      "memory_files",
+                      "skills",
+                      "messages",
+                      "autocompact_buffer",
+                      "compact_buffer",
+                      "free_space"
+                    ]
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -1461,6 +1479,24 @@
                 ]
               }
             },
+            "mcpInstructions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "serverName": {
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "serverName",
+                  "tokens"
+                ]
+              }
+            },
             "deferredBuiltinTools": {
               "type": "array",
               "items": {
@@ -1530,6 +1566,12 @@
                   "source": {
                     "type": "string"
                   },
+                  "pluginId": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
                   "tokens": {
                     "type": "number"
                   }
@@ -1581,6 +1623,15 @@
                         "type": "string"
                       },
                       "source": {
+                        "type": "string"
+                      },
+                      "pluginName": {
+                        "type": "string"
+                      },
+                      "pluginId": {
+                        "type": "string"
+                      },
+                      "path": {
                         "type": "string"
                       },
                       "tokens": {

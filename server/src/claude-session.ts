@@ -12,7 +12,8 @@ import { readClaudeSupportedModels } from "./claude-model-discovery";
 import { handleClaudeResumeDialog } from "./claude-resume-dialog";
 import { waitForInteractiveAnswer } from "./interactive-answer";
 import { prepareCodexMcpElicitation, resolveCodexMcpElicitation } from "./codex-elicitation";
-import { bashCapturePath, removeBashCapture, wrapBashForCapture } from "./bash-capture";
+import { bashCapturePath, removeBashCapture, unwrapBashCapture, wrapBashForCapture } from "./bash-capture";
+import { toolApprovalMarkdown } from "./tool-approval";
 import { saveFullOutput } from "./full-output-store";
 import * as crypto from "crypto";
 import { execFile, execFileSync, spawn, spawnSync } from "child_process";
@@ -2775,7 +2776,11 @@ export class ClaudeSession {
     // Reaching canUseTool means the SDK requires a decision, including explicit
     // ask rules in bypass mode. Never silently override those requests.
     const questionId = createInteractiveRequestId("approval");
-    const question = `Allow ${toolName}?\n${reason || ""}\n${JSON.stringify(redactSecretsDeep(input), null, 2)}`;
+    // The hook already rewrote a Bash command for capture; show the one the agent wrote.
+    const shown = toolName === "Bash" && typeof input.command === "string"
+      ? { ...input, command: unwrapBashCapture(input.command) }
+      : input;
+    const question = toolApprovalMarkdown(toolName, shown, reason);
     const message: QuestionServerMessage = {
       type: "question", questionId, sessionId: this.sessionId || "",
       questions: [{ question, header: "Tool approval", options: [{ label: "Approve" }, { label: "Decline" }], multiSelect: false }],

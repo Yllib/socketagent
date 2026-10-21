@@ -6,6 +6,7 @@ const { spawnSync } = require("node:child_process");
 const {
   bashCapturePath,
   wrapBashForCapture,
+  unwrapBashCapture,
   pruneBashCaptures,
 } = require("#server/bash-capture");
 
@@ -50,6 +51,17 @@ test("commands that open a subshell or end in a comment or heredoc still run", (
       const run = spawnSync("bash", ["-c", wrapBashForCapture(command, id).command], { encoding: "utf8" });
       assert.equal(run.status, 0, `${command}: ${run.stderr}`);
       assert.equal(run.stdout, expected);
+    }
+  } finally {
+    fs.rmSync(bashCapturePath(id), { force: true });
+  }
+});
+
+test("unwrapping gives back the command the agent wrote", () => {
+  const id = `toolu_unwrap_${process.pid}`;
+  try {
+    for (const command of ["cat > /tmp/x <<'EOF'\nrm -f \"$log/$name\"\nEOF", "seq 1 5 | tail -1"]) {
+      assert.equal(unwrapBashCapture(wrapBashForCapture(command, id).command), command);
     }
   } finally {
     fs.rmSync(bashCapturePath(id), { force: true });

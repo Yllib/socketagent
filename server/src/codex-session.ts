@@ -90,6 +90,7 @@ import { recordRateLimitEvent } from "./rate-limit-cache";
 import { codexCaptureHookArgs } from "./codex-capture-hook-config";
 import { commandCapturePath, followCaptureFile } from "./bash-capture";
 import { stripCaptureStages } from "./command-capture";
+import { toolApprovalMarkdown } from "./tool-approval";
 import { saveFullOutput } from "./full-output-store";
 import {
   recordSessionMemoryCompaction,
@@ -4094,8 +4095,10 @@ export class CodexSession {
 
   private async canApproveAppServerTool(toolName: string, input: Record<string, unknown>, requestId?: string | number): Promise<boolean> {
     if (!await this.checkAppServerToolPolicy(toolName, input)) return false;
-    const label = input.networkApprovalContext ? "Allow network access?" : "Allow " + toolName + "?";
-    return this.requestAppServerApproval(label + "\n" + JSON.stringify(redactSecretsDeep(input), null, 2), requestId);
+    const text = input.networkApprovalContext
+      ? toolApprovalMarkdown("network access", input)
+      : toolApprovalMarkdown(toolName, input);
+    return this.requestAppServerApproval(text, requestId);
   }
 
   private async canApproveAppServerFileChange(itemId: unknown, params: Record<string, unknown> = {}, requestId?: string | number): Promise<boolean> {

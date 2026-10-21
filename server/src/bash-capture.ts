@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { StringDecoder } from "string_decoder";
-import { insertShellTee } from "./command-capture";
+import { insertShellTee, stripCaptureStages } from "./command-capture";
 
 // Live output for Claude's Bash tool. The PreToolUse hook tees each command's
 // output into a capture file named after its tool_use_id, and the session
@@ -35,10 +35,23 @@ export function wrapBashForCapture(command: string, toolUseId: string): { comman
   const shellPath = process.platform === "win32" ? capturePath.replace(/\\/g, "/") : capturePath;
   const quoted = `'${shellPath.replace(/'/g, "'\\''")}'`;
   const teed = insertShellTee(command, shellPath);
-  // Both tees append, so their writes interleave instead of overwriting. The
-  // space keeps a leading "(" from forming "((" arithmetic, and the newline
-  // keeps a trailing comment or heredoc from swallowing the closing ")".
-  return { command: `set -o pipefail; ( ${teed ?? command}\n) 2>&1 | tee -a ${quoted}`, filtered: teed !== null };
+  // A prefix, not a wrapper: the command runs as written after the redirect,
+  // so Claude Code's safety checks parse it the same way. Wrapping it in
+  // "( ... )" hid heredoc bodies from those checks, which then flagged text
+  // being written to a file as if it would run. Both tees append, so their
+  // writes interleave instead of overwriting.
+  return { command: `${capturePrefix(quoted)}${teed ?? command}`, filtered: teed !== null };
+}
+
+function capturePrefix(quotedPath: string): string {
+  return `exec > >(tee -a ${quotedPath}) 2>&1; `;
+}
+
+const CAPTURE_PREFIX_PATTERN = /^exec > >\(tee -a '(?:[^']|'\\'')*'\) 2>&1; /;
+
+/** The command the agent wrote, from one wrapBashForCapture returned. */
+export function unwrapBashCapture(command: string): string {
+  return stripCaptureStages(command.replace(CAPTURE_PREFIX_PATTERN, ""));
 }
 
 export function removeBashCapture(toolUseId: string): void {

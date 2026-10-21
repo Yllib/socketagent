@@ -39,6 +39,23 @@ test("a filtered command's capture holds the stream before the filter", () => {
   }
 });
 
+test("commands that open a subshell or end in a comment or heredoc still run", () => {
+  const id = `toolu_shapes_${process.pid}`;
+  try {
+    for (const [command, expected] of [
+      ["(cd /tmp && echo sub)", "sub\n"],
+      ["echo note # trailing comment", "note\n"],
+      ["cat <<EOF\nheredoc\nEOF", "heredoc\n"],
+    ]) {
+      const run = spawnSync("bash", ["-c", wrapBashForCapture(command, id).command], { encoding: "utf8" });
+      assert.equal(run.status, 0, `${command}: ${run.stderr}`);
+      assert.equal(run.stdout, expected);
+    }
+  } finally {
+    fs.rmSync(bashCapturePath(id), { force: true });
+  }
+});
+
 test("tool ids cannot escape the capture folder", () => {
   assert.equal(bashCapturePath("../../etc/x'y").endsWith("______etc_x_y.log"), true);
 });

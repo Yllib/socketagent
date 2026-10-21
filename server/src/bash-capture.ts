@@ -35,8 +35,10 @@ export function wrapBashForCapture(command: string, toolUseId: string): { comman
   const shellPath = process.platform === "win32" ? capturePath.replace(/\\/g, "/") : capturePath;
   const quoted = `'${shellPath.replace(/'/g, "'\\''")}'`;
   const teed = insertShellTee(command, shellPath);
-  // Both tees append, so their writes interleave instead of overwriting.
-  return { command: `set -o pipefail; (${teed ?? command}) 2>&1 | tee -a ${quoted}`, filtered: teed !== null };
+  // Both tees append, so their writes interleave instead of overwriting. The
+  // space keeps a leading "(" from forming "((" arithmetic, and the newline
+  // keeps a trailing comment or heredoc from swallowing the closing ")".
+  return { command: `set -o pipefail; ( ${teed ?? command}\n) 2>&1 | tee -a ${quoted}`, filtered: teed !== null };
 }
 
 export function removeBashCapture(toolUseId: string): void {

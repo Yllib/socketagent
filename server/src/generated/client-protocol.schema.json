@@ -3118,6 +3118,20 @@
             "confirm": {
               "$ref": "#/definitions/ComputerConfirm"
             },
+            "expiresAt": {
+              "type": "number"
+            },
+            "oneTime": {
+              "type": "object",
+              "properties": {
+                "digest": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "digest"
+              ]
+            },
             "commandId": {
               "type": "string"
             }
@@ -3182,6 +3196,9 @@
             },
             "confirm": {
               "$ref": "#/definitions/ComputerConfirm"
+            },
+            "expiresAt": {
+              "type": "number"
             },
             "commandId": {
               "type": "string"
@@ -3314,7 +3331,9 @@
                 "once",
                 "chat",
                 "deny",
-                "linked"
+                "linked",
+                "today",
+                "action"
               ]
             },
             "approval": {

@@ -1385,7 +1385,11 @@ export interface DeviceLockMessage {
   requestId?: string;
 }
 
-/** Grants another computer's server key access here (target side of a link). */
+/**
+ * Grants another computer's server key access here (target side of a link).
+ * With `oneTime`, the target allows exactly one request whose
+ * `oneTimeDigest` matches and leaves any existing access as it was.
+ */
 export interface DeviceAuthorizeMessage {
   type: "device_authorize";
   requestId?: string;
@@ -1394,6 +1398,9 @@ export interface DeviceAuthorizeMessage {
   name: string;
   access: ComputerAccess;
   confirm: ComputerConfirm;
+  /** Unix ms when the link ends. Absent means it lasts until removed. */
+  expiresAt?: number;
+  oneTime?: { digest: string };
 }
 
 export interface LinkRoomInfoMessage {
@@ -1413,6 +1420,8 @@ export interface ComputerLinkSetMessage {
   ticketExpiresAt: number;
   access: ComputerAccess;
   confirm: ComputerConfirm;
+  /** Unix ms when the link ends. Absent means it lasts until removed. */
+  expiresAt?: number;
 }
 
 export interface ComputerLinkRemoveMessage {
@@ -1450,7 +1459,12 @@ export interface ComputerAccessAnswerMessage {
   type: "computer_access_answer";
   requestId: string;
   sessionId?: string;
-  decision: "once" | "chat" | "deny" | "linked";
+  /**
+   * once and chat answer an approval card. On a link card, action allows the
+   * one request the card shows, today links until local midnight, and linked
+   * links until removed.
+   */
+  decision: "once" | "chat" | "deny" | "linked" | "today" | "action";
   approval?: ComputerApprovalToken;
 }
 
@@ -2994,6 +3008,8 @@ export interface DeviceListEntry {
   online: boolean;
   access?: ComputerAccess;
   confirm?: ComputerConfirm;
+  /** Unix ms when a computer link ends. */
+  expiresAt?: number;
 }
 
 export interface DeviceListResultServerMessage {
@@ -3047,6 +3063,8 @@ export interface ComputerLinkSummary {
   /** The target's Node platform and run_command shell, learned from its hello. */
   platform?: string;
   shell?: string;
+  /** Unix ms when the link ends. Absent means it lasts until removed. */
+  expiresAt?: number;
 }
 
 export interface ComputerLinkListResultServerMessage {
@@ -3071,12 +3089,13 @@ export interface ComputerAccessRequestCard {
   source: { name: string; publicKey?: string };
   target: { name: string; publicKey: string };
   expiresAt: number;
-  // kind "approval"
+  // kind "approval", and kind "link" when a specific request is waiting
   action?: string;
   summary?: string;
-  challengeId?: string;
   digest?: string;
-  // kind "link"
+  // kind "approval"
+  challengeId?: string;
+  // kind "link": the boxes to start with, existing access plus what is asked
   access?: ComputerAccess;
   reason?: string;
 }
@@ -3094,7 +3113,7 @@ export interface ComputerAccessResolvedServerMessage {
   type: "computer_access_resolved";
   requestId: string;
   sessionId: string;
-  decision: "once" | "chat" | "deny" | "linked" | "expired";
+  decision: ComputerAccessAnswerMessage["decision"] | "expired";
 }
 
 export interface ReminderServerMessage {

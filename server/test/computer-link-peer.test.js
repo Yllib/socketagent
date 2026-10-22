@@ -5,7 +5,9 @@ const test = require("node:test");
 const dataDir = require("./test-data-dir");
 
 const { DeviceRegistry } = require("#server/device-registry");
-const { ComputerLinkPeerApi, requestDigest, canonicalJson, CHALLENGE_TTL_MS } = require("#server/computer-link-peer");
+const {
+  ComputerLinkPeerApi, requestDigest, canonicalJson, oneTimeDigest, CHALLENGE_TTL_MS, ONE_TIME_GRANT_TTL_MS,
+} = require("#server/computer-link-peer");
 const { generateKeyPair, encrypt, toBase64 } = require("#server/relay-crypto");
 const { peerShellName } = require("#server/peer-command");
 
@@ -198,4 +200,50 @@ test("access is enforced before any approval and unknown keys get nothing", asyn
   const device = await env.api.handle(request, toBase64(env.device.publicKey));
   assert.equal(device?.code, "access_denied");
   assert.deepEqual(env.ran, []);
+});
+
+test("a one-time grant allows that exact request once, past access and confirm", async () => {
+  const env = setup({ commands: false, confirm: "ask" });
+  env.api.grantOneTime(env.sourceKey, oneTimeDigest("run_command", { command: "echo hi" }));
+  const other = await env.api.handle({ ...request, args: { command: "echo bye" } }, env.sourceKey);
+  assert.equal(other?.code, "access_denied");
+  const allowed = await env.api.handle(request, env.sourceKey);
+  assert.equal(allowed?.ok, true);
+  const again = await env.api.handle(request, env.sourceKey);
+  assert.equal(again?.code, "access_denied");
+  assert.deepEqual(env.ran, ["echo hi"]);
+});
+
+test("a one-time grant lapses and belongs to one source computer", async () => {
+  const env = setup({ commands: false });
+  const digest = oneTimeDigest("run_command", { command: "echo hi" });
+  env.api.grantOneTime(toBase64(generateKeyPair().publicKey), digest);
+  assert.equal((await env.api.handle(request, env.sourceKey))?.code, "access_denied");
+  env.api.grantOneTime(env.sourceKey, digest);
+  env.advance(ONE_TIME_GRANT_TTL_MS + 1);
+  assert.equal((await env.api.handle(request, env.sourceKey))?.code, "access_denied");
+  assert.deepEqual(env.ran, []);
+});
+
+test("a link with expiresAt reports it in hello and is forgotten once it passes", async () => {
+  const env = setup({ confirm: "never" });
+  const until = Date.now() + 60_000;
+  env.registry.enroll({ ...env.registry.get(env.sourceKey), expiresAt: until });
+  const hello = await env.api.handle({ ...request, action: "hello", args: {} }, env.sourceKey);
+  assert.equal(hello?.result.expiresAt, until);
+  env.registry.enroll({ ...env.registry.get(env.sourceKey), expiresAt: Date.now() - 1 });
+  assert.equal(env.registry.get(env.sourceKey), undefined);
+  assert.equal(env.registry.isRevoked(env.sourceKey), false);
+  assert.equal((await env.api.handle(request, env.sourceKey))?.code, "access_denied");
+  assert.deepEqual(env.ran, []);
+});
+
+test("enrolling a link again without expiresAt makes it permanent", () => {
+  const env = setup();
+  env.registry.enroll({ ...env.registry.get(env.sourceKey), expiresAt: Date.now() + 60_000 });
+  const entry = env.registry.get(env.sourceKey);
+  assert.ok(entry?.expiresAt);
+  delete entry.expiresAt;
+  env.registry.enroll(entry);
+  assert.equal(env.registry.get(env.sourceKey)?.expiresAt, undefined);
 });

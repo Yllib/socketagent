@@ -17,6 +17,8 @@ export type PeerAction = typeof PEER_ACTIONS[number];
 
 export const CHALLENGE_TTL_MS = 10 * 60 * 1000;
 export const CHAT_GRANT_TTL_MS = 12 * 60 * 60 * 1000;
+/** How long the source has to make the one request a one-time grant allows. */
+export const ONE_TIME_GRANT_TTL_MS = 15 * 60 * 1000;
 
 const approvalTokenSchema = z.object({ from: z.string(), n: z.string(), c: z.string() });
 
@@ -156,7 +158,12 @@ export function requestDigest(parts: {
   return crypto.createHash("sha256").update(canonicalJson(parts)).digest("hex");
 }
 
-function accessFor(action: PeerAction): keyof ComputerAccess | null {
+/** What a one-time grant names: the action and its exact args, so it fits one request only. */
+export function oneTimeDigest(action: string, args: Record<string, unknown>): string {
+  return crypto.createHash("sha256").update(canonicalJson({ action, args })).digest("hex");
+}
+
+export function accessFor(action: PeerAction): keyof ComputerAccess | null {
   switch (action) {
     case "hello":
     case "agent_report_ack":
@@ -176,7 +183,7 @@ function needsConfirm(action: PeerAction): boolean {
   return action !== "hello" && action !== "agent_report_ack";
 }
 
-function approvalSummary(action: PeerAction, args: Record<string, unknown>): string {
+export function approvalSummary(action: PeerAction, args: Record<string, unknown>): string {
   if (action === "run_command") {
     const parsed = runCommandArgs.safeParse(args);
     if (!parsed.success) return "Run a command";
@@ -227,6 +234,8 @@ export class ComputerLinkPeerApi {
   private challenges = new Map<string, Challenge>();
   private chatGrants = new Map<string, number>();
   private usedTokens = new Map<string, number>();
+  /** `${sourceKey}\n${digest}` to when the grant lapses. */
+  private oneTimeGrants = new Map<string, number>();
 
   constructor(
     private readonly registry: DeviceRegistry,
@@ -263,16 +272,35 @@ export class ComputerLinkPeerApi {
     return { type: "peer_response", id: request.id, ok: true, result };
   }
 
+  /**
+   * The user allowed one request from `publicKey` whose oneTimeDigest is
+   * `digest`. It skips the access and confirm checks once. Returns when the
+   * grant lapses.
+   */
+  grantOneTime(publicKey: string, digest: string): number {
+    this.expire();
+    const expiresAt = this.now() + ONE_TIME_GRANT_TTL_MS;
+    this.oneTimeGrants.set(`${publicKey}\n${digest}`, expiresAt);
+    return expiresAt;
+  }
+
+  private consumeOneTime(request: PeerRequest, publicKey: string): boolean {
+    this.expire();
+    return this.oneTimeGrants.delete(`${publicKey}\n${oneTimeDigest(request.action, request.args)}`);
+  }
+
   private async dispatch(request: PeerRequest, entry: DeviceEntry, publicKey: string): Promise<PeerResponse> {
     const access: ComputerAccess = entry.access ?? { read: false, agents: false, commands: false };
     const confirm: ComputerConfirm = entry.confirm ?? "ask";
     const needed = accessFor(request.action);
-    if (needed && !access[needed]) {
-      return this.fail(request, "access_denied", `${needed} access is not allowed`);
-    }
-    if (needsConfirm(request.action) && confirm !== "never") {
-      const verdict = this.checkApproval(request, publicKey);
-      if (verdict !== "approved") return verdict;
+    if (!(needed && this.consumeOneTime(request, publicKey))) {
+      if (needed && !access[needed]) {
+        return this.fail(request, "access_denied", `${needed} access is not allowed`);
+      }
+      if (needsConfirm(request.action) && confirm !== "never") {
+        const verdict = this.checkApproval(request, publicKey);
+        if (verdict !== "approved") return verdict;
+      }
     }
     this.registry.touch(publicKey);
     switch (request.action) {
@@ -282,6 +310,7 @@ export class ComputerLinkPeerApi {
           name: this.host.serverName(),
           access,
           confirm,
+          ...(entry.expiresAt !== undefined ? { expiresAt: entry.expiresAt } : {}),
           platform: process.platform,
           shell: peerShellName(),
           backends: this.host.backends(),
@@ -412,5 +441,6 @@ export class ComputerLinkPeerApi {
     for (const [id, challenge] of this.challenges) if (challenge.expiresAt <= now) this.challenges.delete(id);
     for (const [key, until] of this.chatGrants) if (until <= now) this.chatGrants.delete(key);
     for (const [id, until] of this.usedTokens) if (until <= now) this.usedTokens.delete(id);
+    for (const [key, until] of this.oneTimeGrants) if (until <= now) this.oneTimeGrants.delete(key);
   }
 }

@@ -31,6 +31,8 @@ export interface DeviceEntry {
   via: DeviceVia;
   access?: ComputerAccess;
   confirm?: ComputerConfirm;
+  /** Unix ms when a computer link ends. The entry is dropped after that. */
+  expiresAt?: number;
 }
 
 export interface DeviceRegistryFile {
@@ -62,6 +64,7 @@ const deviceEntrySchema = z.object({
   via: z.enum(["migration", "token", "approval", "link"]),
   access: computerAccessSchema.optional(),
   confirm: computerConfirmSchema.optional(),
+  expiresAt: z.number().optional(),
 });
 
 const registryFileSchema = z.object({
@@ -145,10 +148,12 @@ export class DeviceRegistry {
   }
 
   list(): DeviceEntry[] {
+    this.dropExpired();
     return this.state.devices.map((entry) => ({ ...entry }));
   }
 
   get(publicKey: string): DeviceEntry | undefined {
+    this.dropExpired();
     const entry = this.state.devices.find((candidate) => candidate.publicKey === publicKey);
     return entry ? { ...entry } : undefined;
   }
@@ -164,7 +169,19 @@ export class DeviceRegistry {
     this.write();
   }
 
-  /** Adds or refreshes an entry. Approval and link enrollment un-revoke the key. */
+  /** Computer links past their expiresAt are forgotten, not revoked, so the user can link again. */
+  private dropExpired(): void {
+    const now = Date.now();
+    const kept = this.state.devices.filter((entry) => entry.expiresAt === undefined || entry.expiresAt > now);
+    if (kept.length === this.state.devices.length) return;
+    this.state.devices = kept;
+    this.write();
+  }
+
+  /**
+   * Adds or refreshes an entry. Approval and link enrollment un-revoke the
+   * key. A computer entry without expiresAt lasts until removed.
+   */
   enroll(entry: Omit<DeviceEntry, "addedAt" | "lastSeenAt"> & { addedAt?: string }): DeviceEntry {
     const now = new Date().toISOString();
     const existing = this.state.devices.find((candidate) => candidate.publicKey === entry.publicKey);
@@ -179,6 +196,7 @@ export class DeviceRegistry {
       delete next.access;
       delete next.confirm;
     }
+    if (entry.expiresAt === undefined) delete next.expiresAt;
     if (existing) {
       this.state.devices[this.state.devices.indexOf(existing)] = next;
     } else {

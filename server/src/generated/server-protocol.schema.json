@@ -5133,10 +5133,10 @@
         "summary": {
           "type": "string"
         },
-        "challengeId": {
+        "digest": {
           "type": "string"
         },
-        "digest": {
+        "challengeId": {
           "type": "string"
         },
         "access": {
@@ -6433,6 +6433,9 @@
         },
         "confirm": {
           "$ref": "#/definitions/ComputerConfirm"
+        },
+        "expiresAt": {
+          "type": "number"
         }
       },
       "required": [
@@ -6620,6 +6623,9 @@
         },
         "shell": {
           "type": "string"
+        },
+        "expiresAt": {
+          "type": "number"
         }
       },
       "required": [
@@ -6708,10 +6714,10 @@
         "summary": {
           "type": "string"
         },
-        "challengeId": {
+        "digest": {
           "type": "string"
         },
-        "digest": {
+        "challengeId": {
           "type": "string"
         },
         "access": {
@@ -6770,6 +6776,8 @@
             "chat",
             "deny",
             "linked",
+            "today",
+            "action",
             "expired"
           ]
         }

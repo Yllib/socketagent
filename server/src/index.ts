@@ -76,9 +76,12 @@ import { SocketAgentPlugin, PluginContext, SessionContext } from "./plugin-api";
 import { parseSocketAgentPlugin } from "./plugin-contract";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
 import { RelayClient, RelayStatus, relayPeerForMessage, relayPeerKeyForMessage } from "./relay-client";
-import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type DevicePlatform } from "./device-registry";
+import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
 import { DeviceAuthGate } from "./device-auth";
-import { ComputerLinkPeerApi, type PeerEvent, type PeerResponse, type RemoteSupervisor } from "./computer-link-peer";
+import {
+  ComputerLinkPeerApi, accessFor, approvalSummary, oneTimeDigest,
+  type PeerAction, type PeerEvent, type PeerResponse, type RemoteSupervisor,
+} from "./computer-link-peer";
 import { runPeerCommand } from "./peer-command";
 import { ComputerLinkManager, ComputerLinkStore, type ComputerLinkRecord, type LinkConnection } from "./computer-links";
 import { ComputerAccessRequests } from "./computer-access-requests";
@@ -3426,9 +3429,10 @@ const linkHelloSchema = z.object({
   confirm: computerConfirmSchema,
   platform: z.string().optional(),
   shell: z.string().optional(),
+  expiresAt: z.number().optional(),
 });
 
-/** Copies the target's current access, confirm, platform and shell into the stored link. */
+/** Copies the target's current access, confirm, expiry, platform and shell into the stored link. */
 async function syncComputerLink(targetPubkey: string): Promise<void> {
   const connection = computerLinks.get(targetPubkey);
   if (!connection) throw new Error("No link to that computer");
@@ -3439,6 +3443,7 @@ async function syncComputerLink(targetPubkey: string): Promise<void> {
   const current = computerLinks.get(targetPubkey)?.record;
   if (!current) return;
   const next = { ...current, ...hello };
+  if (hello.expiresAt === undefined) delete next.expiresAt;
   if (JSON.stringify(next) !== JSON.stringify(current)) computerLinks.set(next);
 }
 
@@ -3484,19 +3489,99 @@ function handleRemoteAgentReport(event: PeerEvent, link: ComputerLinkRecord): vo
   if (updated && updatedRun) void deliverDelegatedAgentReport(updated, updatedRun);
 }
 
-function resolveLinkedComputer(computer: string | undefined): LinkConnection {
+/** A computer the app told us about, by exact key or case-insensitive name. */
+function knownComputerNamed(wanted: string): { name: string; serverPubkey: string } | undefined {
+  return Array.from(knownComputers.values()).find((entry) =>
+    entry.serverPubkey === wanted || entry.name.toLowerCase() === wanted.toLowerCase());
+}
+
+/** Thrown by requestOnComputer when the target's link lacks the box the action needs. */
+class ComputerAccessDeniedError extends Error {}
+
+const NO_COMPUTER_ACCESS = { read: false, agents: false, commands: false };
+
+/**
+ * Shows a link card in the source chat. With `request`, the card shows that
+ * exact request and can allow it alone. Resolves once the user allowed it in
+ * any form; throws when they denied it or let it expire.
+ */
+async function askForComputerLink(
+  sessionId: string,
+  target: { name: string; serverPubkey: string },
+  card: { access: ComputerAccess; reason: string; request?: { action: PeerAction; args: Record<string, unknown> } },
+  signal?: AbortSignal,
+): Promise<void> {
+  const answer = await computerAccessRequests.ask(sessionId, {
+    kind: "link",
+    source: { name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey) },
+    target: { name: target.name, publicKey: target.serverPubkey },
+    access: card.access,
+    reason: card.reason,
+    ...(card.request ? {
+      action: card.request.action,
+      summary: approvalSummary(card.request.action, card.request.args),
+      digest: oneTimeDigest(card.request.action, card.request.args),
+    } : {}),
+  }, signal);
+  if (answer.decision === "deny") throw new Error(`The user declined access to ${target.name}.`);
+  if (answer.decision === "expired") throw new Error(`The user did not answer the access request for ${target.name} in time.`);
+}
+
+/** The link to `targetPubkey` once it is online. A link the app just made needs a few seconds. */
+async function waitForComputerLink(targetPubkey: string, name: string, signal?: AbortSignal): Promise<LinkConnection> {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const connection = computerLinks.get(targetPubkey);
+    if (connection?.online) return connection;
+    if (signal?.aborted) throw new Error("Cancelled");
+    if (Date.now() >= deadline) {
+      throw new Error(connection?.offlineReason || `The link to ${name} did not come online`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+/**
+ * One action on a computer named by the agent. When the computer isn't
+ * linked, or its link lacks the box the action needs, the user gets a link
+ * card that shows this request, and the call goes ahead once they allow it.
+ */
+async function callComputer(
+  sessionId: string,
+  computer: string | undefined,
+  action: PeerAction,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): Promise<{ result: unknown; link: ComputerLinkRecord }> {
   const wanted = (computer || "").trim();
   if (!wanted) throw new Error("computer is required. Use Computers list to see linked computers.");
   const connection = computerLinks.find(wanted);
-  if (!connection) {
-    const known = Array.from(knownComputers.values()).find((entry) =>
-      entry.serverPubkey === wanted || entry.name.toLowerCase() === wanted.toLowerCase());
-    throw new Error(known
-      ? `${known.name} is not linked to this computer. Use request_access.`
-      : `No linked computer named ${wanted}. Use Computers list to see linked computers.`);
+  if (connection) {
+    if (!connection.online) throw new Error(connection.offlineReason || `${connection.record.name} is offline`);
+    try {
+      return { result: await requestOnComputer(sessionId, connection, action, args, signal, timeoutMs), link: connection.record };
+    } catch (err: unknown) {
+      if (!(err instanceof ComputerAccessDeniedError) || !sessionId) throw err;
+    }
   }
-  if (!connection.online) throw new Error(connection.offlineReason || `${connection.record.name} is offline`);
-  return connection;
+  const target = connection
+    ? { name: connection.record.name, serverPubkey: connection.record.targetPubkey }
+    : knownComputerNamed(wanted);
+  if (!target) throw new Error(`No linked computer named ${wanted}. Use Computers list to see linked computers.`);
+  if (!sessionId) throw new Error(`${target.name} is not linked to this computer.`);
+  const access = { ...(connection?.record.access ?? NO_COMPUTER_ACCESS) };
+  const needed = accessFor(action);
+  if (needed) access[needed] = true;
+  await askForComputerLink(sessionId, target, {
+    access,
+    reason: connection
+      ? `The link to ${target.name} doesn't allow ${peerScopeForAction(action)}.`
+      : `${target.name} is not linked to this computer.`,
+    request: { action, args },
+  }, signal);
+  const linked = await waitForComputerLink(target.serverPubkey, target.name, signal);
+  return { result: await requestOnComputer(sessionId, linked, action, args, signal, timeoutMs), link: linked.record };
 }
 
 function peerScopeForAction(action: string): string {
@@ -3519,7 +3604,7 @@ function describePeerAction(action: string): string {
 async function requestOnComputer(
   sessionId: string,
   connection: LinkConnection,
-  action: Parameters<LinkConnection["request"]>[0],
+  action: PeerAction,
   args: Record<string, unknown>,
   signal?: AbortSignal,
   timeoutMs?: number,
@@ -3548,7 +3633,7 @@ async function requestOnComputer(
       continue;
     }
     if (response.code === "access_denied") {
-      throw new Error(`${target.name} doesn't allow ${peerScopeForAction(action)} from ${os.hostname()}. Use request_access.`);
+      throw new ComputerAccessDeniedError(`${target.name} doesn't allow ${peerScopeForAction(action)} from ${os.hostname()}.`);
     }
     if (response.code === "approval_invalid") {
       throw new Error(`${target.name} rejected the approval: ${response.error || "unknown reason"}`);
@@ -3622,13 +3707,12 @@ async function manageRemoteDelegation(
   supervisor: Session,
   args: AgentSessionToolArgs & { computer: string },
 ): Promise<AgentSessionToolResponse> {
-  const connection = resolveLinkedComputer(args.computer);
-  const computer = { publicKey: connection.record.targetPubkey, name: connection.record.name };
   const forwarded: AgentSessionToolArgs = { ...args };
   delete forwarded.computer;
-  if (args.action === "answer") throw new Error(`action=answer works only for children on this computer, not on ${computer.name}`);
+  if (args.action === "answer") throw new Error(`action=answer works only for children on this computer, not on ${args.computer}`);
   const action = `agent_${args.action}` as const;
-  const result = await requestOnComputer(supervisorSessionId, connection, action, { ...forwarded });
+  const { result, link } = await callComputer(supervisorSessionId, args.computer, action, { ...forwarded });
+  const computer = { publicKey: link.targetPubkey, name: link.name };
   const parsed = remoteAgentResponseSchema.parse(result);
   const parentSessionId = supervisor.getSessionId()?.trim() || supervisorSessionId;
   const delegation = parsed.delegation !== undefined
@@ -3676,54 +3760,43 @@ async function manageComputers(session: Session, args: ComputersToolArgs, signal
     case "run": {
       const command = args.command?.trim();
       if (!command) throw new Error("run requires command");
-      const connection = resolveLinkedComputer(args.computer);
       const timeoutSeconds = Math.min(600, Math.max(1, args.timeout_seconds ?? 120));
-      return requestOnComputer(sessionId, connection, "run_command", {
+      return (await callComputer(sessionId, args.computer, "run_command", {
         command,
         ...(args.cwd ? { cwd: args.cwd } : {}),
         timeoutSeconds,
-      }, signal, (timeoutSeconds + 15) * 1000);
+      }, signal, (timeoutSeconds + 15) * 1000)).result;
     }
-    case "sessions": {
-      const connection = resolveLinkedComputer(args.computer);
-      return requestOnComputer(sessionId, connection, "sessions_list", { ...(args.limit ? { limit: args.limit } : {}) }, signal);
-    }
+    case "sessions":
+      return (await callComputer(sessionId, args.computer, "sessions_list", { ...(args.limit ? { limit: args.limit } : {}) }, signal)).result;
     case "transcript": {
       if (!args.session_id) throw new Error("transcript requires session_id");
-      const connection = resolveLinkedComputer(args.computer);
-      return requestOnComputer(sessionId, connection, "transcript_read", {
+      return (await callComputer(sessionId, args.computer, "transcript_read", {
         sessionId: args.session_id,
         ...(args.after_seq !== undefined ? { afterSeq: args.after_seq } : {}),
         ...(args.limit ? { limit: args.limit } : {}),
-      }, signal);
+      }, signal)).result;
     }
     case "search": {
       const query = args.query?.trim();
       if (!query) throw new Error("search requires query");
-      const connection = resolveLinkedComputer(args.computer);
-      return requestOnComputer(sessionId, connection, "transcript_search", { query, ...(args.limit ? { limit: args.limit } : {}) }, signal);
+      return (await callComputer(sessionId, args.computer, "transcript_search", { query, ...(args.limit ? { limit: args.limit } : {}) }, signal)).result;
     }
     case "request_access": {
       if (!sessionId) throw new Error("This session has no ID yet; try again after the first reply.");
       const wanted = (args.computer || "").trim();
       if (!wanted) throw new Error("request_access requires computer");
       const link = computerLinks.find(wanted)?.record;
-      const known = link
-        ? { name: link.name, serverPubkey: link.targetPubkey }
-        : Array.from(knownComputers.values()).find((entry) =>
-          entry.serverPubkey === wanted || entry.name.toLowerCase() === wanted.toLowerCase());
+      const known = link ? { name: link.name, serverPubkey: link.targetPubkey } : knownComputerNamed(wanted);
       if (!known) throw new Error(`No computer named ${wanted} is known to the app. Ask the user to open that computer in the app once.`);
-      const access = args.access || { read: true, agents: true, commands: true };
-      const answer = await computerAccessRequests.ask(sessionId, {
-        kind: "link",
-        source: { name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey) },
-        target: { name: known.name, publicKey: known.serverPubkey },
-        access,
+      // The card starts with what the link already allows, so approving it never takes access away.
+      const asked = args.access || { read: true, agents: true, commands: true };
+      const current = link?.access ?? NO_COMPUTER_ACCESS;
+      await askForComputerLink(sessionId, known, {
+        access: { read: asked.read || current.read, agents: asked.agents || current.agents, commands: asked.commands || current.commands },
         reason: args.reason?.trim() || "The agent needs access to this computer.",
       }, signal);
-      if (answer.decision === "linked") return `The user linked ${known.name}. Use Computers list to see what it allows.`;
-      if (answer.decision === "deny") throw new Error(`The user declined to link ${known.name}.`);
-      throw new Error(`The user did not answer the link request for ${known.name} in time.`);
+      return `The user linked ${known.name}. Use Computers list to see what it allows.`;
     }
     default:
       throw new Error("Unsupported Computers action");
@@ -10062,11 +10135,28 @@ function createConnectionHandler(
           sendJson({ type: "device_approve_result", requestId, ok: false, publicKey, error: "That key belongs to a device, not a computer" });
           break;
         }
-        deviceRegistry.enroll({
-          publicKey, kind: "computer", via: "link",
-          name: msg.name.trim() || "Linked computer", platform: "computer",
-          access: msg.access, confirm: msg.confirm,
-        });
+        const name = msg.name.trim() || "Linked computer";
+        if (msg.oneTime) {
+          // One request only. An existing link keeps its settings; without
+          // one, a link with no access lasts as long as the grant.
+          if (!/^[0-9a-f]{64}$/.test(msg.oneTime.digest)) {
+            sendJson({ type: "device_approve_result", requestId, ok: false, publicKey, error: "Invalid request digest" });
+            break;
+          }
+          const grantExpiresAt = computerLinkPeerApi.grantOneTime(publicKey, msg.oneTime.digest);
+          if (!deviceRegistry.get(publicKey)) {
+            deviceRegistry.enroll({
+              publicKey, kind: "computer", via: "link", name, platform: "computer",
+              access: { read: false, agents: false, commands: false }, confirm: "ask", expiresAt: grantExpiresAt,
+            });
+          }
+        } else {
+          deviceRegistry.enroll({
+            publicKey, kind: "computer", via: "link", name, platform: "computer",
+            access: msg.access, confirm: msg.confirm,
+            ...(msg.expiresAt !== undefined ? { expiresAt: msg.expiresAt } : {}),
+          });
+        }
         deviceRegistry.lock();
         sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });
         break;
@@ -10097,6 +10187,7 @@ function createConnectionHandler(
             ticketExpiresAt: msg.ticketExpiresAt,
             access: msg.access,
             confirm: msg.confirm,
+            ...(msg.expiresAt !== undefined ? { expiresAt: msg.expiresAt } : {}),
           });
           sendJson({ type: "computer_link_result", requestId, ok: true, targetPubkey: saved.targetPubkey });
           sendJson({ type: "computer_link_list_result", links: computerLinks.list() });

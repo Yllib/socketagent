@@ -19,14 +19,17 @@ const linkRecordSchema = z.object({
   confirm: computerConfirmSchema,
   platform: z.string().optional(),
   shell: z.string().optional(),
+  /** Unix ms when the link ends. Absent means it lasts until removed. */
+  expiresAt: z.number().optional(),
 });
 export type ComputerLinkRecord = z.infer<typeof linkRecordSchema>;
 
 const linksFileSchema = z.object({ version: z.literal(1), links: z.array(linkRecordSchema) });
 
 /**
- * Outgoing links this computer holds. access, confirm, platform and shell are
- * a copy from the target's hello; the target enforces access and confirm.
+ * Outgoing links this computer holds. access, confirm, expiresAt, platform
+ * and shell are a copy from the target's hello; the target enforces access,
+ * confirm and expiry.
  */
 export class ComputerLinkStore {
   private links: ComputerLinkRecord[] = [];
@@ -130,21 +133,27 @@ export class LinkConnection {
       return;
     }
     const url = `${this.record.relayUrl}?token=${encodeURIComponent(this.record.linkRoom)}&role=phone&link_ticket=${encodeURIComponent(this.record.ticket)}`;
+    let ws: WebSocket;
     try {
-      this.ws = new WebSocket(url);
+      ws = new WebSocket(url);
     } catch (err: unknown) {
       this.offlineReason = errorMessage(err);
       this.scheduleReconnect();
       return;
     }
+    this.ws = ws;
     this.offlineReason = "Connecting";
-    this.ws.on("open", () => {
+    // update() replaces the socket; events from the one it closed are ignored.
+    const current = () => this.ws === ws;
+    ws.on("open", () => {
+      if (!current()) return;
       this.reconnectDelay = 1000;
       this.offlineReason = "Waiting for the target computer";
       this.startPing();
       this.hooks.onStatusChange?.();
     });
-    this.ws.on("message", (data) => {
+    ws.on("message", (data) => {
+      if (!current()) return;
       try {
         const raw = (Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data)).toString();
         this.handleFrame(JSON.parse(raw));
@@ -152,7 +161,8 @@ export class LinkConnection {
         console.warn(`[ComputerLinks] ${this.record.name}: bad frame: ${errorMessage(err)}`);
       }
     });
-    this.ws.on("close", (code, reason) => {
+    ws.on("close", (code, reason) => {
+      if (!current()) return;
       this.stopPing();
       this.ws = null;
       this.peerPresent = false;
@@ -167,14 +177,15 @@ export class LinkConnection {
       }
       this.hooks.onStatusChange?.();
     });
-    this.ws.on("error", (err) => {
-      this.offlineReason = err.message;
+    ws.on("error", (err) => {
+      if (current()) this.offlineReason = err.message;
     });
     // The relay answers a bad, expired or foreign ticket with HTTP 401 before
     // the socket opens. ws reports that here and emits nothing else once the
     // request is destroyed, so the cleanup "close" would do happens here.
-    this.ws.on("unexpected-response", (req, res) => {
+    ws.on("unexpected-response", (req, res) => {
       req.destroy();
+      if (!current()) return;
       this.ws = null;
       if (res.statusCode === 401 || res.statusCode === 403) {
         this.ticketRejected = true;
@@ -194,8 +205,12 @@ export class LinkConnection {
     this.record = record;
     if (ticketChanged) {
       this.ticketRejected = false;
+      this.stopPing();
       this.ws?.close();
       this.ws = null;
+      this.peerPresent = false;
+      this.approved = false;
+      this.failPending(new Error(`${this.record.name} reconnected with a new ticket`));
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
       this.connect();
@@ -374,6 +389,7 @@ export class LinkConnection {
 /** Keeps one LinkConnection per stored link and resolves computers by name or key. */
 export class ComputerLinkManager {
   private connections = new Map<string, LinkConnection>();
+  private expiryTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly store: ComputerLinkStore,
@@ -386,7 +402,18 @@ export class ComputerLinkManager {
   ) {}
 
   start(): void {
+    this.dropExpired();
     for (const record of this.store.list()) this.open(record);
+    this.expiryTimer = setInterval(() => this.dropExpired(), 60_000);
+    this.expiryTimer.unref?.();
+  }
+
+  /** Links past their expiresAt disconnect and are forgotten. */
+  private dropExpired(): void {
+    const now = Date.now();
+    for (const record of this.store.list()) {
+      if (record.expiresAt !== undefined && record.expiresAt <= now) this.remove(record.targetPubkey);
+    }
   }
 
   private open(record: ComputerLinkRecord): LinkConnection {
@@ -416,6 +443,7 @@ export class ComputerLinkManager {
   }
 
   list(): ComputerLinkSummary[] {
+    this.dropExpired();
     return this.store.list().map((record) => {
       const connection = this.connections.get(record.targetPubkey);
       return {
@@ -428,6 +456,7 @@ export class ComputerLinkManager {
         ticketExpiresAt: record.ticketExpiresAt,
         ...(record.platform ? { platform: record.platform } : {}),
         ...(record.shell ? { shell: record.shell } : {}),
+        ...(record.expiresAt !== undefined ? { expiresAt: record.expiresAt } : {}),
       };
     });
   }
@@ -436,6 +465,7 @@ export class ComputerLinkManager {
   find(computer: string): LinkConnection | undefined {
     const wanted = computer.trim();
     if (!wanted) return undefined;
+    this.dropExpired();
     const byKey = this.connections.get(wanted);
     if (byKey) return byKey;
     const lower = wanted.toLowerCase();
@@ -446,10 +476,13 @@ export class ComputerLinkManager {
   }
 
   get(targetPubkey: string): LinkConnection | undefined {
+    this.dropExpired();
     return this.connections.get(targetPubkey);
   }
 
   closeAll(): void {
+    if (this.expiryTimer) clearInterval(this.expiryTimer);
+    this.expiryTimer = null;
     for (const connection of this.connections.values()) connection.close();
     this.connections.clear();
   }

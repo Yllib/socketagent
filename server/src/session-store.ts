@@ -16,6 +16,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AgentSessionSettings,
+  ComputerAccessResolvedServerMessage,
   ContextUsage,
   Backend,
   SessionInfo,
@@ -2001,7 +2002,7 @@ export function markSecureInputRequestResolved(
 export function markComputerAccessResolved(
   sessionId: string,
   requestId: string,
-  decision: "once" | "chat" | "deny" | "linked" | "expired",
+  decision: ComputerAccessResolvedServerMessage["decision"],
 ): void {
   try {
     ensureHistoryDatabaseSession(sessionId);

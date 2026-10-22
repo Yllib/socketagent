@@ -4,12 +4,26 @@ import * as path from "path";
 
 const MIN_FREE_BYTES = 1024 ** 3;
 
+/** The disk is too full to install agent software. Retrying soon will not help. */
+export class InsufficientSpaceError extends Error {}
+
 async function requireSpace(directory: string, minimum: number): Promise<void> {
   const stat = await fs.promises.statfs(directory);
   const available = stat.bavail * stat.bsize;
   if (available < minimum) {
-    throw new Error(`Not enough free space to reinstall agent software: ${(available / 1024 ** 3).toFixed(1)} GiB available, ${(minimum / 1024 ** 3).toFixed(0)} GiB required. The installed software was not changed.`);
+    throw new InsufficientSpaceError(`Not enough free space to install agent software: ${(available / 1024 ** 3).toFixed(1)} GiB available, ${(minimum / 1024 ** 3).toFixed(0)} GiB required. The installed software was not changed.`);
   }
+}
+
+/**
+ * Throws InsufficientSpaceError when the disk holding `prefix` has less room
+ * than an install needs. The auto-update runs it before asking npm for
+ * versions, so a full disk costs no download.
+ */
+export async function requireManagedBackendSpace(prefix: string): Promise<void> {
+  let directory = path.resolve(prefix);
+  while (!fs.existsSync(directory) && path.dirname(directory) !== directory) directory = path.dirname(directory);
+  await requireSpace(directory, 2 * MIN_FREE_BYTES);
 }
 
 /** Build and probe a replacement outside the live prefix. Failed downloads,

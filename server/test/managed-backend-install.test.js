@@ -79,6 +79,13 @@ test('low disk space rejects repair before touching the live installation', asyn
   assert.equal(fs.readFileSync(path.join(f.prefix, f.main, 'file'), 'utf8'), 'broken');
 });
 
+test('the update check refuses a full disk before asking npm, even for a prefix not yet created', async t => {
+  const { InsufficientSpaceError, requireManagedBackendSpace } = require('#server/managed-backend-install');
+  const f = fixture(t);
+  t.mock.method(fs.promises, 'statfs', async () => ({ bavail: 1, bsize: 4096 }));
+  await assert.rejects(requireManagedBackendSpace(path.join(f.prefix, 'missing', 'prefix')), InsufficientSpaceError);
+});
+
 test('a failed promotion restores the original prefix', async t => {
   const f = fixture(t);
   const rename = fs.renameSync;

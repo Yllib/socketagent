@@ -102,6 +102,7 @@ import { getProcessHome, resolveClientPath } from "./path-utils";
 import { terminalSessionManager } from "./terminal-session";
 import { cancelSecureInputRequest, completeSecureInputRequest, completeSecureInputRequestWithSavedSecret, createSecureInputInventoryMessage, deleteSecureInput, getAccessibleSecureInput, isSecureInputPending, listAvailableSecureInputs, redactSecretsDeep, replaceSecureInput, saveSecureInput } from "./secure-input-store";
 import { managedNpmPrefix, socketAgentDataPath } from "./socket-agent-paths";
+import { InsufficientSpaceError, requireManagedBackendSpace } from "./managed-backend-install";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
 import { deleteHtmlPlan, deleteHtmlPlansForSession, diffHtmlPlanRevisions, getHtmlPlanRevision, listHtmlPlanRevisions, listHtmlPlans, renameHtmlPlan, rollbackHtmlPlan } from "./html-plan-store";
 import { HardAbortCoordinator, type AbortableSession } from "./hard-abort";
@@ -12654,18 +12655,26 @@ function managedBackendVersionsLabel(versions: Record<string, string | undefined
     .join(", ");
 }
 
+// npm view stores each package's full version list in the cache it uses, about
+// 18 MB for Claude Code, and never removes old copies. A throwaway cache keeps
+// the checks from growing the user's npm cache.
 async function latestManagedBackendVersions(runtime: UpdateRuntimeTools): Promise<Record<string, string>> {
-  const entries = await Promise.all(MANAGED_BACKEND_PACKAGES.map(async ({ name, spec }) => {
-    const output = await runUpdateToolAsync(
-      runtime,
-      runtime.npm,
-      ["view", spec, "version", "--json"],
-      SERVER_DIR,
-      30000,
-    );
-    return [name, parseNpmVersionOutput(output)] as const;
-  }));
-  return Object.fromEntries(entries);
+  const cache = await fs.promises.mkdtemp(path.join(os.tmpdir(), "socketagent-npm-view-"));
+  try {
+    const entries = await Promise.all(MANAGED_BACKEND_PACKAGES.map(async ({ name, spec }) => {
+      const output = await runUpdateToolAsync(
+        runtime,
+        runtime.npm,
+        ["view", spec, "version", "--json", "--cache", cache],
+        SERVER_DIR,
+        30000,
+      );
+      return [name, parseNpmVersionOutput(output)] as const;
+    }));
+    return Object.fromEntries(entries);
+  } finally {
+    await fs.promises.rm(cache, { recursive: true, force: true });
+  }
 }
 
 function refreshBackendRuntimeCaches(updatedBackends: readonly Backend[] = ["claude", "codex"]): void {
@@ -12685,6 +12694,7 @@ async function runManagedBackendUpdate(): Promise<void> {
   }
   const runtime = resolveUpdateRuntimeTools();
   const installed = installedManagedBackendVersions(runtime);
+  await requireManagedBackendSpace(managedNpmPrefix(runtime.env));
   const latest = await latestManagedBackendVersions(runtime);
   const specs = managedBackendSpecsNeedingUpdate(installed, latest);
   if (specs.length === 0) {
@@ -12780,7 +12790,17 @@ async function ensureManagedBackendsCurrent(reason: string): Promise<void> {
   } catch (e: unknown) {
     lastAutoUpdateError = `Managed backend update failed: ${errorMessage(e) || String(e)}`;
     console.error(`[Auto-update] ${lastAutoUpdateError}`);
-    managedBackendRetry.schedule(300000, () => void ensureManagedBackendsCurrent("retry"));
+    if (e instanceof InsufficientSpaceError) {
+      // A full disk will not clear in minutes. Wait for the next regular check.
+      markManagedBackendUpdateChecked();
+      managedBackendRetry.clear();
+      return;
+    }
+    const delayMs = managedBackendRetry.scheduleAfterFailure(
+      MANAGED_BACKENDS_UPDATE_INTERVAL_MS,
+      () => void ensureManagedBackendsCurrent("retry"),
+    );
+    console.log(`[Auto-update] Retrying the managed backend update in ${Math.round(delayMs / 60000)} min`);
   }
 }
 

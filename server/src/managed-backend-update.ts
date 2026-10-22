@@ -48,15 +48,18 @@ export function managedBackendCheckIsDue(
   return nowMs - lastCheckedAtMs >= intervalMs;
 }
 
+const FIRST_FAILURE_RETRY_MS = 5 * 60 * 1000;
+
 /** One retry deadline shared by startup, periodic checks, and deferred work. */
 export class ManagedBackendRetry {
   private timer?: NodeJS.Timeout;
   private retryAfter = 0;
+  private failures = 0;
 
   get isWaiting(): boolean { return Date.now() < this.retryAfter; }
 
   schedule(delayMs: number, retry: () => void): void {
-    this.clear();
+    this.cancel();
     this.retryAfter = Date.now() + delayMs;
     this.timer = setTimeout(() => {
       this.timer = undefined;
@@ -65,7 +68,24 @@ export class ManagedBackendRetry {
     this.timer.unref();
   }
 
+  /**
+   * Retries a failed check after 5 minutes, doubling the wait with each
+   * failure in a row up to `maxDelayMs`. Returns the wait.
+   */
+  scheduleAfterFailure(maxDelayMs: number, retry: () => void): number {
+    const delayMs = Math.min(FIRST_FAILURE_RETRY_MS * 2 ** this.failures, maxDelayMs);
+    this.failures++;
+    this.schedule(delayMs, retry);
+    return delayMs;
+  }
+
+  /** Drops any pending retry and the failure count, after a check that finished. */
   clear(): void {
+    this.cancel();
+    this.failures = 0;
+  }
+
+  private cancel(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     this.retryAfter = 0;

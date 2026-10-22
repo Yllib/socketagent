@@ -74,3 +74,14 @@ test('repeated update triggers share one retry deadline instead of multiplying c
   t.mock.timers.tick(300000);
   assert.equal(calls, 1);
 });
+
+test('failed checks back off from 5 minutes up to the regular interval', t => {
+  const { ManagedBackendRetry } = require('#server/managed-backend-update');
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
+  const retry = new ManagedBackendRetry();
+  const minutes = Array.from({ length: 8 }, () => retry.scheduleAfterFailure(360 * 60000, () => {}) / 60000);
+  assert.deepEqual(minutes, [5, 10, 20, 40, 80, 160, 320, 360]);
+  retry.clear();
+  assert.equal(retry.scheduleAfterFailure(360 * 60000, () => {}) / 60000, 5);
+  retry.clear();
+});

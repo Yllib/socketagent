@@ -1,7 +1,7 @@
 import type { ComputersToolExecutor } from "./computers-tool";
 import type { ClientTransport } from "./client-transport";
 import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
-import { recordCodexConfigWarning } from "./server-settings";
+import { peekClaudeAvailability, peekCodexAvailability, probeCodexAvailability, recordCodexConfigWarning, type CodexAvailability } from "./server-settings";
 import type { JsonValue } from "./generated/codex/types/serde_json/JsonValue";
 import type { CollaborationMode } from "./generated/codex/types/CollaborationMode";
 import type { ModeKind } from "./generated/codex/types/ModeKind";
@@ -80,7 +80,7 @@ import {
 } from "./codex-app-server-client";
 import { buildCodexSpawn } from "./codex-env";
 import { listSkills, SkillEntry } from "./skills-manager";
-import { ClaudeSession, getClaudeAvailability } from "./claude-session";
+import { ClaudeSession } from "./claude-session";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { createInteractiveRequestId } from "./interactive-request-id";
@@ -6091,15 +6091,17 @@ export function createSession(
     return new CodexSession(ws, cwd, plugins);
   }
   const requestedBackend = backend || "claude";
+  // Only a finished check that failed refuses here. Callers that need a
+  // current answer await getCodexAvailability before creating the session.
   if (requestedBackend === "codex") {
-    const availability = getCodexAvailability();
-    if (!availability.available) {
+    const availability = peekCodexAvailability();
+    if (availability && !availability.available) {
       throw new Error(`Codex backend is not available on this server: ${availability.reason || "unknown reason"}`);
     }
     return new CodexSession(ws, cwd, plugins);
   }
-  const availability = getClaudeAvailability();
-  if (!availability.available) {
+  const availability = peekClaudeAvailability();
+  if (availability && !availability.available) {
     throw new Error(`Claude backend is not available on this server: ${availability.reason || "unknown reason"}`);
   }
   return new ClaudeSession(ws, cwd, plugins);
@@ -6217,91 +6219,11 @@ export async function clearCodexAppServerGoal(threadId: string, cwd: string): Pr
 
 // ─── Backend availability detection ─────────────────────────────────────────
 
-const CODEX_AVAILABILITY_CACHE_MS = 5000;
-let _cachedCodexAvailability: { checkedAt: number; value: { available: boolean; reason?: string } } | null = null;
-
-export function invalidateCodexAvailabilityCache(): void {
-  _cachedCodexAvailability = null;
-}
-
-export function getCodexAvailability(): { available: boolean; reason?: string } {
+/** Waits for a current Codex CLI check without blocking the event loop. */
+export async function getCodexAvailability(): Promise<CodexAvailability> {
   // Review sessions use the built-in deterministic runner and require no CLI.
   if (playReviewModeEnabled()) return { available: true };
-  const now = Date.now();
-  if (_cachedCodexAvailability && now - _cachedCodexAvailability.checkedAt < CODEX_AVAILABILITY_CACHE_MS) {
-    return _cachedCodexAvailability.value;
-  }
-
-  const cache = (value: { available: boolean; reason?: string }): { available: boolean; reason?: string } => {
-    _cachedCodexAvailability = { checkedAt: Date.now(), value };
-    return value;
-  };
-
-  try {
-    const codex = buildCodexSpawn(["--version"]);
-    const result = spawnSync(codex.command, codex.args, {
-      timeout: 3000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: codex.env,
-      shell: codex.shell,
-      windowsHide: true,
-    });
-
-    if (result.error) {
-      const code = "code" in result.error ? result.error.code : undefined;
-      return cache({
-        available: false,
-        reason: code === "ENOENT"
-          ? "Codex CLI was not found on PATH"
-          : `Codex CLI probe failed: ${result.error.message}`,
-      });
-    }
-
-    if (result.status !== 0) {
-      const detail = (result.stderr || result.stdout || "").trim();
-      return cache({
-        available: false,
-        reason: detail
-          ? `Codex CLI probe exited ${result.status}: ${detail.slice(0, 300)}`
-          : `Codex CLI probe exited ${result.status}`,
-      });
-    }
-
-    const home = process.env.HOME || os.homedir();
-    if (!fs.existsSync(path.join(home, ".codex", "auth.json"))) {
-      return cache({
-        available: false,
-        reason: "Codex CLI is installed but ~/.codex/auth.json is missing",
-      });
-    }
-
-    const appServerHelp = buildCodexSpawn(["app-server", "--help"]);
-    const appServerResult = spawnSync(appServerHelp.command, appServerHelp.args, {
-      timeout: 3000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: appServerHelp.env,
-      shell: appServerHelp.shell,
-      windowsHide: true,
-    });
-    if (appServerResult.error || appServerResult.status !== 0) {
-      const detail = appServerResult.error?.message || (appServerResult.stderr || appServerResult.stdout || "").trim();
-      return cache({
-        available: false,
-        reason: detail
-          ? `Codex app-server probe failed: ${detail.slice(0, 300)}`
-          : "Codex app-server probe failed",
-      });
-    }
-
-    return cache({ available: true });
-  } catch (e) {
-    return cache({
-      available: false,
-      reason: `Codex availability check failed: ${codexAppServerErrorMessage(e, String(e))}`,
-    });
-  }
+  return probeCodexAvailability();
 }
 
 /**

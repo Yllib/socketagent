@@ -2,13 +2,13 @@ import { parseJsonObject, errorMessage, errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { spawnSync } from "child_process";
 import type { Backend, BackendHealthInfo, CodexDriver, ComputerIssue } from "./protocol";
 import { buildCodexSpawn, resolveCodexCommand } from "./codex-env";
 import { getCodexLinuxSandboxHealth } from "./codex-linux-sandbox";
 import { resolveClientPath } from "./path-utils";
 import { backendConfigFileIdForPath } from "./backend-config-files";
-import { getClaudeAvailability, getClaudeExecutableInfo } from "./claude-session";
+import { buildClaudeExecutableSpawn, getClaudeExecutableInfo, type ClaudeAvailability } from "./claude-session";
+import { BackgroundProbe, runProbe, type ProbeResult } from "./async-probe";
 import { readClaudeAuthState, readCodexAuthState } from "./backend-auth";
 import {
   legacyManagedNpmBinDir,
@@ -39,11 +39,12 @@ const DEFAULT_CODEX_DRIVER: CodexDriver = "app-server";
 export const DEFAULT_CLAUDE_AUTO_COMPACT_WINDOW = 250_000;
 export const DEFAULT_SENT_FILE_RETENTION_DAYS = 30;
 const BOOT_DEFAULT_CWD = resolveClientPath(process.env.DEFAULT_CWD || process.cwd()).resolvedPath || path.resolve(process.cwd());
-const CODEX_DRIVER_CACHE_MS = 5000;
 const BACKEND_HEALTH_CACHE_MS = 10000;
+// Probes run off the event loop, so they can wait out a slow first start,
+// such as antivirus scanning a freshly installed codex.exe.
+const BACKEND_PROBE_TIMEOUT_MS = 30_000;
 
 let cachedSettings: ServerSettings | null = null;
-let cachedDriversAvailable: { checkedAt: number; value: CodexDriver[] } | null = null;
 let cachedBackendHealth: { checkedAt: number; value: BackendHealthInfo[] } | null = null;
 
 const LEGACY_AUTOMATIC_HTML_PLAN_RULES = [
@@ -99,12 +100,11 @@ export function resolvePersistedClaudeAutoCompactWindow(
 }
 const backendHealthOverrides = new Map<Backend, BackendHealthInfo>();
 
-export function invalidateCodexDriverAvailabilityCache(): void {
-  cachedDriversAvailable = null;
-}
-
+/** Re-derives backend health and makes the next availability check probe the CLIs again. */
 export function invalidateBackendHealthCache(): void {
   cachedBackendHealth = null;
+  codexCliProbe.invalidate();
+  claudeCliProbe.invalidate();
 }
 
 export function markBackendAuthRequired(backend: Backend, detail?: string): void {
@@ -139,7 +139,12 @@ function modifiedAt(file: string): number {
   }
 }
 
-/** Calls [listener] when backend health changes outside a probe. Returns an unsubscribe. */
+function notifyBackendHealthChange(): void {
+  cachedBackendHealth = null;
+  for (const listener of backendHealthListeners) listener();
+}
+
+/** Calls [listener] when backend health changes. Returns an unsubscribe. */
 export function onBackendHealthChange(listener: () => void): () => void {
   backendHealthListeners.add(listener);
   return () => backendHealthListeners.delete(listener);
@@ -155,8 +160,7 @@ export function recordCodexConfigWarning(message: string, configPath?: string): 
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
   const file = configPath || path.join(codexHome, "config.toml");
   codexConfigWarnings.set(message, { file, mtimeMs: modifiedAt(file) });
-  invalidateBackendHealthCache();
-  for (const listener of backendHealthListeners) listener();
+  notifyBackendHealthChange();
 }
 
 /** The computer's problems: recorded Codex config problems whose file has not changed since. */
@@ -228,79 +232,128 @@ function firstOutputLine(stdout?: string | Buffer, stderr?: string | Buffer): st
   return text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
 }
 
-function codexHealth(): BackendHealthInfo {
+/** Why a probe failed, or undefined when it exited 0. */
+function probeFailure(label: string, result: ProbeResult): string | undefined {
+  if (result.error) {
+    return errorCode(result.error) === "ENOENT"
+      ? `${label} was not found.`
+      : `${label} probe failed: ${result.error.message}`;
+  }
+  if (result.timedOut) return `${label} probe timed out after ${BACKEND_PROBE_TIMEOUT_MS / 1000}s`;
+  if (result.status !== 0) {
+    const detail = firstOutputLine(result.stdout, result.stderr);
+    return detail ? `${label} probe exited ${result.status}: ${detail}` : `${label} probe exited ${result.status}`;
+  }
+  return undefined;
+}
+
+interface CodexCliProbe {
+  command: string;
+  version: ProbeResult;
+  /** Run only once `codex --version` succeeds. */
+  appServer?: ProbeResult;
+}
+
+async function probeCodexCli(): Promise<CodexCliProbe> {
   const codexVersion = buildCodexSpawn(["--version"]);
-  const resolved = resolveCodexCommand(codexVersion.env);
-  const source = codexCommandSource(resolved);
+  const command = resolveCodexCommand(codexVersion.env);
+  const version = await runProbe(codexVersion.command, codexVersion.args, {
+    env: codexVersion.env, shell: codexVersion.shell, timeoutMs: BACKEND_PROBE_TIMEOUT_MS,
+  });
+  if (version.status !== 0) return { command, version };
+  const appServerHelp = buildCodexSpawn(["app-server", "--help"]);
+  const appServer = await runProbe(appServerHelp.command, appServerHelp.args, {
+    env: appServerHelp.env, shell: appServerHelp.shell, timeoutMs: BACKEND_PROBE_TIMEOUT_MS,
+  });
+  return { command, version, appServer };
+}
+
+const codexCliProbe = new BackgroundProbe(probeCodexCli, BACKEND_HEALTH_CACHE_MS, notifyBackendHealthChange);
+
+export interface CodexAvailability {
+  available: boolean;
+  reason?: string;
+}
+
+function codexAvailabilityFrom(cli: CodexCliProbe): CodexAvailability {
+  const versionFailure = probeFailure("Codex CLI", cli.version);
+  if (versionFailure) return { available: false, reason: versionFailure };
+  const home = process.env.HOME || os.homedir();
+  if (!fs.existsSync(path.join(home, ".codex", "auth.json"))) {
+    return { available: false, reason: "Codex CLI is installed but ~/.codex/auth.json is missing" };
+  }
+  const appServerFailure = cli.appServer && probeFailure("Codex app-server", cli.appServer);
+  if (appServerFailure) return { available: false, reason: appServerFailure };
+  return { available: true };
+}
+
+/** Waits for a current Codex CLI check. Use where an answer is needed before acting. */
+export async function probeCodexAvailability(): Promise<CodexAvailability> {
+  return codexAvailabilityFrom(await codexCliProbe.fresh());
+}
+
+/** The last known Codex availability without waiting; undefined before the first check finishes. */
+export function peekCodexAvailability(): CodexAvailability | undefined {
+  const cli = codexCliProbe.peek();
+  return cli && codexAvailabilityFrom(cli);
+}
+
+async function probeClaudeCli(): Promise<ClaudeAvailability> {
+  const info = getClaudeExecutableInfo();
+  const probe = buildClaudeExecutableSpawn(["--version"], info);
+  if (!info.path || !probe) {
+    return { available: false, reason: info.reason || "No Claude executable is available." };
+  }
+  const result = await runProbe(probe.command, probe.args, {
+    shell: probe.shell, timeoutMs: BACKEND_PROBE_TIMEOUT_MS,
+  });
+  const detail = firstOutputLine(result.stdout, result.stderr);
+  if (result.error && errorCode(result.error) === "ENOENT") {
+    return { available: false, reason: "Claude executable was not found.", detail };
+  }
+  const failure = probeFailure("Claude executable", result);
+  if (failure) return { available: false, reason: failure, detail };
+  return { available: true, version: detail };
+}
+
+const claudeCliProbe = new BackgroundProbe(probeClaudeCli, BACKEND_HEALTH_CACHE_MS, notifyBackendHealthChange);
+
+/** Waits for a current Claude CLI check. */
+export async function getClaudeAvailability(): Promise<ClaudeAvailability> {
+  return claudeCliProbe.fresh();
+}
+
+/** The last known Claude availability without waiting; undefined before the first check finishes. */
+export function peekClaudeAvailability(): ClaudeAvailability | undefined {
+  return claudeCliProbe.peek();
+}
+
+function codexHealth(cli: CodexCliProbe): BackendHealthInfo {
+  const source = codexCommandSource(cli.command);
   const base: BackendHealthInfo = {
     backend: "codex",
     enabled: true,
     available: false,
     severity: "error",
     source,
-    command: resolved,
+    command: cli.command,
     installRoot: managedNpmPrefix(),
   };
 
-  const versionProbe = spawnSync(codexVersion.command, codexVersion.args, {
-    encoding: "utf8",
-    timeout: 3000,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: codexVersion.env,
-    shell: codexVersion.shell,
-    windowsHide: true,
-  });
-
-  if (versionProbe.error) {
-    const code = errorCode(versionProbe.error);
-    return {
-      ...base,
-      reason: code === "ENOENT"
-        ? "Codex CLI was not found."
-        : `Codex CLI probe failed: ${versionProbe.error.message}`,
-      detail: firstOutputLine(versionProbe.stdout, versionProbe.stderr),
-    };
+  const versionFailure = probeFailure("Codex CLI", cli.version);
+  if (versionFailure) {
+    return { ...base, reason: versionFailure, detail: firstOutputLine(cli.version.stdout, cli.version.stderr) };
   }
-
-  if (versionProbe.status !== 0) {
-    const detail = firstOutputLine(versionProbe.stdout, versionProbe.stderr);
-    return {
-      ...base,
-      reason: detail
-        ? `Codex CLI probe exited ${versionProbe.status}: ${detail}`
-        : `Codex CLI probe exited ${versionProbe.status}`,
-      detail,
-    };
-  }
+  const version = firstOutputLine(cli.version.stdout, cli.version.stderr);
 
   const auth = readCodexAuthState();
   if (!auth.authenticated) {
-    return {
-      ...base,
-      kind: "auth",
-      version: firstOutputLine(versionProbe.stdout, versionProbe.stderr),
-      reason: auth.reason,
-    };
+    return { ...base, kind: "auth", version, reason: auth.reason };
   }
 
-  const appServerHelp = buildCodexSpawn(["app-server", "--help"]);
-  const appServerProbe = spawnSync(appServerHelp.command, appServerHelp.args, {
-    encoding: "utf8",
-    timeout: 3000,
-    env: appServerHelp.env,
-    shell: appServerHelp.shell,
-    windowsHide: true,
-  });
-  if (appServerProbe.status !== 0 || appServerProbe.error) {
-    const detail = appServerProbe.error?.message || firstOutputLine(appServerProbe.stdout, appServerProbe.stderr);
-    return {
-      ...base,
-      version: firstOutputLine(versionProbe.stdout, versionProbe.stderr),
-      reason: detail
-        ? `Codex app-server probe failed: ${detail}`
-        : "Codex app-server probe failed.",
-      detail,
-    };
+  const appServerFailure = cli.appServer && probeFailure("Codex app-server", cli.appServer);
+  if (appServerFailure) {
+    return { ...base, version, reason: appServerFailure, detail: cli.appServer && firstOutputLine(cli.appServer.stdout, cli.appServer.stderr) };
   }
 
   const warning = managedSourceWarning("codex", source);
@@ -311,15 +364,14 @@ function codexHealth(): BackendHealthInfo {
     ...base,
     available: true,
     severity: warnings.length > 0 ? "warning" : "ok",
-    version: firstOutputLine(versionProbe.stdout, versionProbe.stderr),
+    version,
     reason: warnings.length > 0 ? warnings.join(" ") : undefined,
     detail: sandboxHealth?.available === false ? sandboxHealth.detail : undefined,
   };
 }
 
-function claudeHealth(): BackendHealthInfo {
+function claudeHealth(): BackendHealthInfo | undefined {
   const info = getClaudeExecutableInfo();
-  const availability = getClaudeAvailability();
   if (!info.path) {
     return {
       backend: "claude",
@@ -333,6 +385,8 @@ function claudeHealth(): BackendHealthInfo {
     };
   }
 
+  const availability = claudeCliProbe.peek();
+  if (!availability) return undefined;
   if (!availability.available) {
     return {
       backend: "claude",
@@ -506,58 +560,30 @@ export function getClaudeAutoCompactWindow(): number | null {
 }
 
 export function getCodexDriversAvailable(): CodexDriver[] {
-  const now = Date.now();
-  if (cachedDriversAvailable && now - cachedDriversAvailable.checkedAt < CODEX_DRIVER_CACHE_MS) {
-    return cachedDriversAvailable.value;
-  }
-  const cache = (value: CodexDriver[]): CodexDriver[] => {
-    cachedDriversAvailable = { checkedAt: Date.now(), value };
-    return value;
-  };
-
-  const codexVersion = buildCodexSpawn(["--version"]);
-  const codexProbe = spawnSync(codexVersion.command, codexVersion.args, {
-    encoding: "utf8",
-    timeout: 3000,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: codexVersion.env,
-    shell: codexVersion.shell,
-    windowsHide: true,
-  });
-  if (codexProbe.status !== 0) {
-    return cache([]);
-  }
-
+  const cli = codexCliProbe.peek();
+  if (cli?.appServer?.status !== 0) return [];
   const authPath = path.join(process.env.HOME || os.homedir(), ".codex", "auth.json");
-  if (!fs.existsSync(authPath)) {
-    return cache([]);
-  }
-
-  try {
-    const appServerHelp = buildCodexSpawn(["app-server", "--help"]);
-    const result = spawnSync(appServerHelp.command, appServerHelp.args, {
-      encoding: "utf8",
-      timeout: 3000,
-      env: appServerHelp.env,
-      shell: appServerHelp.shell,
-      windowsHide: true,
-    });
-    return cache(result.status === 0 ? ["app-server"] : []);
-  } catch {
-    return cache([]);
-  }
+  return fs.existsSync(authPath) ? ["app-server"] : [];
 }
 
+/**
+ * Backend health from the last finished probes. It never waits: a backend is
+ * left out until its first probe finishes, and listeners hear when it does.
+ */
 export function getBackendHealth(): BackendHealthInfo[] {
   const now = Date.now();
   if (cachedBackendHealth && now - cachedBackendHealth.checkedAt < BACKEND_HEALTH_CACHE_MS) {
     return cachedBackendHealth.value;
   }
 
-  const value = [
-    claudeHealth(),
-    codexHealth(),
-  ].map((entry) => backendHealthOverrides.get(entry.backend) ?? entry);
+  const codexCli = codexCliProbe.peek();
+  const derived: Array<[Backend, BackendHealthInfo | undefined]> = [
+    ["claude", claudeHealth()],
+    ["codex", codexCli && codexHealth(codexCli)],
+  ];
+  const value = derived
+    .map(([backend, entry]) => backendHealthOverrides.get(backend) ?? entry)
+    .filter((entry): entry is BackendHealthInfo => entry !== undefined);
   cachedBackendHealth = { checkedAt: Date.now(), value };
   return value;
 }

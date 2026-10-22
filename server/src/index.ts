@@ -42,7 +42,7 @@ import { flushSessionStore, flushSdkEventQueue } from "./session-store";
 import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
-import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, invalidateCodexAvailabilityCache, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
+import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { startBashCapturePruning } from "./bash-capture";
 import { readFullOutput, startFullOutputTrimming } from "./full-output-store";
 import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
@@ -94,7 +94,7 @@ import { KeyPair, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, lo
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { isAuthFailureMessage } from "./backend-auth";
-import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, invalidateCodexDriverAvailabilityCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays } from "./server-settings";
+import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays } from "./server-settings";
 import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
@@ -778,7 +778,7 @@ const transferJobs = new SessionTransferJobs(socketAgentDataPath("transfer-jobs"
   }),
   import: async (config, bundlePath, expectedSha256, onProgress) => {
     await waitForManagedBackendUpdate();
-    if (config.targetBackend === "codex" && !getCodexAvailability().available) throw new Error("Codex is not available on the destination computer");
+    if (config.targetBackend === "codex" && !(await getCodexAvailability()).available) throw new Error("Codex is not available on the destination computer");
     const result = await importSessionTransfer({ ...config, bundlePath, expectedSha256, transferId: config.jobId, onProgress });
     addRecentCwd(result.session.cwd);
     broadcastSessionList();
@@ -4415,21 +4415,19 @@ function createConnectionHandler(
     tick();
   }
 
-  function codexUnavailable(): boolean {
-    return !getCodexAvailability().available;
+  async function codexUnavailable(): Promise<boolean> {
+    return !(await getCodexAvailability()).available;
   }
 
   function isCodexMissingAuthReason(reason: string | undefined): boolean {
     return /auth\.json|authentication|auth/i.test(reason || "");
   }
 
-  function sendCodexUnavailable(prefix = "Codex backend is not available on this server", sessionId?: string): void {
-    const availability = getCodexAvailability();
+  async function sendCodexUnavailable(prefix = "Codex backend is not available on this server", sessionId?: string): Promise<void> {
+    const availability = await getCodexAvailability();
     const detail = availability.reason || "unknown reason";
     if (isCodexMissingAuthReason(detail)) {
       markBackendAuthRequired("codex", detail);
-      invalidateCodexAvailabilityCache();
-      invalidateCodexDriverAvailabilityCache();
       sendJson({
         type: "backend_auth_required",
         backend: "codex",
@@ -5053,8 +5051,6 @@ function createConnectionHandler(
           }
           if (backend === "claude") refreshClaudeExecutableInfo();
           clearBackendHealthOverride(backend);
-          invalidateCodexAvailabilityCache();
-          invalidateCodexDriverAvailabilityCache();
           invalidateBackendHealthCache();
           sendProgress({
             phase: "probe",
@@ -5070,8 +5066,6 @@ function createConnectionHandler(
           broadcastSessionList();
         }).catch((e: unknown) => {
           const cancelled = abortController.signal.aborted;
-          invalidateCodexAvailabilityCache();
-          invalidateCodexDriverAvailabilityCache();
           invalidateBackendHealthCache();
           sendProgress({
             phase: "probe",
@@ -5294,8 +5288,8 @@ function createConnectionHandler(
         stopExternalNativeWatcher();
         const cwd = msg.cwd || getDefaultCwd();
         await waitForManagedBackendUpdate();
-        if (msg.backend === "codex" && codexUnavailable()) {
-          sendCodexUnavailable();
+        if (msg.backend === "codex" && await codexUnavailable()) {
+          await sendCodexUnavailable();
           break;
         }
         // Detach old session so it stops sending to this client
@@ -5398,8 +5392,8 @@ function createConnectionHandler(
           break;
         }
         await waitForManagedBackendUpdate();
-        if (sessionInfo.backend === "codex" && codexUnavailable()) {
-          sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", msg.sessionId);
+        if (sessionInfo.backend === "codex" && await codexUnavailable()) {
+          await sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", msg.sessionId);
           break;
         }
 
@@ -5753,8 +5747,8 @@ function createConnectionHandler(
           const savedPromptSession = savedResumeId ? getSession(savedResumeId) : undefined;
           const promptBackend = savedPromptSession?.backend || (!savedResumeId ? msg.backend : undefined);
           await waitForManagedBackendUpdate();
-          if (promptBackend === "codex" && codexUnavailable()) {
-            sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", savedResumeId);
+          if (promptBackend === "codex" && await codexUnavailable()) {
+            await sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", savedResumeId);
             sendJson({
               type: "prompt_failed",
               messageId: promptMessageId,
@@ -6005,8 +5999,6 @@ function createConnectionHandler(
             settleLogicalRun(sessionForRun, "failed", resumeId);
             const detail = errorMessage(err) || String(err);
             markBackendAuthRequired("codex", detail);
-            invalidateCodexAvailabilityCache();
-            invalidateCodexDriverAvailabilityCache();
             if (isRecord(err) && err.codexMcpAuth === true) {
               clearBackendHealthOverride("codex");
             } else if (!isRecord(err) || err.codexPrimaryAuthSurfaced !== true) {
@@ -7327,7 +7319,7 @@ function createConnectionHandler(
             ? "codex"
             : "claude";
           await waitForManagedBackendUpdate();
-          if (targetBackend === "codex" && codexUnavailable()) {
+          if (targetBackend === "codex" && await codexUnavailable()) {
             throw new Error("Codex is not available on the destination server");
           }
           const result = await importSessionTransfer({
@@ -12435,24 +12427,43 @@ function autoUpdateVerifyMode(): "none" | "commit" {
   return "commit";
 }
 
-function verifyAutoUpdateTarget(commit: string): void {
-  if (autoUpdateVerifyMode() !== "commit") return;
+function verifyCommitArgs(commit: string): string[] | undefined {
+  if (autoUpdateVerifyMode() !== "commit") return undefined;
   if (!fs.existsSync(AUTO_UPDATE_ALLOWED_SIGNERS_FILE)) {
     throw new Error(`Auto-update trusted signers file is missing: ${AUTO_UPDATE_ALLOWED_SIGNERS_FILE}`);
   }
+  return [
+    "-c",
+    "gpg.format=ssh",
+    "-c",
+    `gpg.ssh.allowedSignersFile=${AUTO_UPDATE_ALLOWED_SIGNERS_FILE}`,
+    "verify-commit",
+    commit,
+  ];
+}
+
+function untrustedTargetError(commit: string): Error {
+  return new Error(`Auto-update target ${commit.substring(0, 7)} does not have a valid trusted git commit signature`);
+}
+
+function verifyAutoUpdateTarget(commit: string): void {
+  const args = verifyCommitArgs(commit);
+  if (!args) return;
   try {
-    gitRun([
-      "-c",
-      "gpg.format=ssh",
-      "-c",
-      `gpg.ssh.allowedSignersFile=${AUTO_UPDATE_ALLOWED_SIGNERS_FILE}`,
-      "verify-commit",
-      commit,
-    ], { timeout: 15000 });
-  } catch (e: unknown) {
-    throw new Error(
-      `Auto-update target ${commit.substring(0, 7)} does not have a valid trusted git commit signature`
-    );
+    gitRun(args, { timeout: 15000 });
+  } catch {
+    throw untrustedTargetError(commit);
+  }
+}
+
+/** verifyAutoUpdateTarget for the periodic check, which must not block the event loop. */
+async function verifyAutoUpdateTargetAsync(commit: string): Promise<void> {
+  const args = verifyCommitArgs(commit);
+  if (!args) return;
+  try {
+    await gitOutputAsync(args, { timeout: 15000 });
+  } catch {
+    throw untrustedTargetError(commit);
   }
 }
 
@@ -12711,12 +12722,12 @@ function managedBackendPackageDir(runtime: UpdateRuntimeTools, packageName: stri
   return path.join(nodeModules, ...packageName.split("/"));
 }
 
-function installedManagedBackendVersions(runtime: UpdateRuntimeTools): Record<string, string | undefined> {
+async function installedManagedBackendVersions(runtime: UpdateRuntimeTools): Promise<Record<string, string | undefined>> {
   const versions: Record<string, string | undefined> = {};
   for (const { name, backend } of MANAGED_BACKEND_PACKAGES) {
     try {
       const pkg = parseJsonObject(fs.readFileSync(path.join(managedBackendPackageDir(runtime, name), "package.json"), "utf8"));
-      versions[name] = typeof pkg.version === "string" && pkg.version.trim() && isManagedBackendUsable(runtime.env, backend)
+      versions[name] = typeof pkg.version === "string" && pkg.version.trim() && await isManagedBackendUsable(runtime.env, backend)
         ? pkg.version.trim() : undefined;
     } catch {
       versions[name] = undefined;
@@ -12758,8 +12769,6 @@ function refreshBackendRuntimeCaches(updatedBackends: readonly Backend[] = ["cla
     invalidateCachedModelCatalog(backend);
   }
   refreshClaudeExecutableInfo();
-  invalidateCodexAvailabilityCache();
-  invalidateCodexDriverAvailabilityCache();
   invalidateBackendHealthCache();
 }
 
@@ -12769,7 +12778,7 @@ async function runManagedBackendUpdate(): Promise<void> {
     return;
   }
   const runtime = resolveUpdateRuntimeTools();
-  const installed = installedManagedBackendVersions(runtime);
+  const installed = await installedManagedBackendVersions(runtime);
   await requireManagedBackendSpace(managedNpmPrefix(runtime.env));
   const latest = await latestManagedBackendVersions(runtime);
   const specs = managedBackendSpecsNeedingUpdate(installed, latest);
@@ -13351,20 +13360,20 @@ async function checkForUpdates(): Promise<void> {
     // Fetch latest from origin (async to avoid blocking event loop / relay pings)
     await gitOutputAsync(["fetch", "origin"], { timeout: 30000 });
 
-    // These are fast local git operations — safe to use execSync
-    const branch = gitOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
+    // Even local git commands can take seconds on a loaded Windows machine,
+    // and this runs every minute, so none of them may block the event loop.
+    const branch = await gitOutputAsync(["rev-parse", "--abbrev-ref", "HEAD"]);
     const remoteRef = `origin/${branch}`;
 
     let remote: string;
     try {
-      remote = gitOutput(["rev-parse", remoteRef]);
+      remote = await gitOutputAsync(["rev-parse", remoteRef]);
     } catch {
       return; // No remote tracking branch
     }
 
-    verifyAutoUpdateTarget(remote);
-
-    const local = gitOutput(["rev-parse", "HEAD"]);
+    const local = await gitOutputAsync(["rev-parse", "HEAD"]);
+    if (remote !== local) await verifyAutoUpdateTargetAsync(remote);
     if (process.platform === "win32") {
       if (remote === local) return;
       const blockReason = autoUpdateBlockReason();

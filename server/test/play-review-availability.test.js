@@ -7,7 +7,7 @@ test('review sessions need no provider executable and identify their simulated m
   const previous = process.env.SOCKETAGENT_PLAY_REVIEW_MODE;
   process.env.SOCKETAGENT_PLAY_REVIEW_MODE = '1';
   try {
-    assert.deepEqual(getCodexAvailability(), {available: true});
+    assert.deepEqual(await getCodexAvailability(), {available: true});
     /** @type {import("#server/protocol").ServerMessage[]} */
     const messages = [];
     const session = new CodexSession({readyState: 1, send: s => messages.push(parseServerMessage(JSON.parse(s)))}, '/tmp');

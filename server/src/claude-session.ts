@@ -149,8 +149,6 @@ interface ClaudeWorkflowRun {
   interval?: NodeJS.Timeout;
 }
 
-const CLAUDE_AVAILABILITY_CACHE_MS = 5000;
-
 /**
  * Claude local/slash commands can return text only on the final result event.
  * Do not use that fallback when the SDK already emitted a completed assistant
@@ -552,7 +550,6 @@ function resolveClaudeExecutable(): ClaudeExecutableInfo {
 
 let CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
 let CLAUDE_BINARY_OVERRIDE: string | undefined = CLAUDE_EXECUTABLE_INFO.path;
-let cachedClaudeAvailability: { checkedAt: number; value: ClaudeAvailability } | null = null;
 
 function logClaudeExecutableInfo(): void {
   if (CLAUDE_BINARY_OVERRIDE) {
@@ -639,15 +636,6 @@ export function buildClaudeExecutableSpawn(
     args,
     shell: false,
   };
-}
-
-function firstClaudeOutputLine(stdout?: string | Buffer, stderr?: string | Buffer): string | undefined {
-  const text = `${stdout || ""}\n${stderr || ""}`.trim();
-  return text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-}
-
-export function invalidateClaudeAvailabilityCache(): void {
-  cachedClaudeAvailability = null;
 }
 
 /**
@@ -829,69 +817,6 @@ function isCancelledToolResult(output: string): boolean {
   return TOOL_CANCELLED_SENTINELS.some((s) => trimmed.startsWith(s));
 }
 
-export function getClaudeAvailability(): ClaudeAvailability {
-  const now = Date.now();
-  if (cachedClaudeAvailability && now - cachedClaudeAvailability.checkedAt < CLAUDE_AVAILABILITY_CACHE_MS) {
-    return cachedClaudeAvailability.value;
-  }
-
-  const cache = (value: ClaudeAvailability): ClaudeAvailability => {
-    cachedClaudeAvailability = { checkedAt: Date.now(), value };
-    return value;
-  };
-
-  const info = getClaudeExecutableInfo();
-  if (!info.path) {
-    return cache({
-      available: false,
-      reason: info.reason || "No Claude executable is available.",
-    });
-  }
-
-  const probe = buildClaudeExecutableSpawn(["--version"], info);
-  if (!probe) {
-    return cache({
-      available: false,
-      reason: "No Claude executable is available.",
-    });
-  }
-
-  const result = spawnSync(probe.command, probe.args, {
-    encoding: "utf8",
-    timeout: 3000,
-    stdio: ["ignore", "pipe", "pipe"],
-    shell: probe.shell,
-    windowsHide: true,
-  });
-
-  if (result.error) {
-    const code = "code" in result.error ? result.error.code : undefined;
-    return cache({
-      available: false,
-      reason: code === "ENOENT"
-        ? "Claude executable was not found."
-        : `Claude executable probe failed: ${result.error.message}`,
-      detail: firstClaudeOutputLine(result.stdout, result.stderr),
-    });
-  }
-
-  if (result.status !== 0) {
-    const detail = firstClaudeOutputLine(result.stdout, result.stderr);
-    return cache({
-      available: false,
-      reason: detail
-        ? `Claude executable probe exited ${result.status}: ${detail}`
-        : `Claude executable probe exited ${result.status}`,
-      detail,
-    });
-  }
-
-  return cache({
-    available: true,
-    version: firstClaudeOutputLine(result.stdout, result.stderr),
-  });
-}
-
 function claudeExecutableQueryOptions(): Record<string, unknown> {
   if (!CLAUDE_BINARY_OVERRIDE) return {};
   return {
@@ -914,10 +839,10 @@ async function discoverClaudeSupportedModels(cwd: string): Promise<Array<Record<
   return claudeModelDiscoveryPromise;
 }
 
+/** Re-resolves the Claude executable. Callers also run invalidateBackendHealthCache so the next availability check probes it. */
 export function refreshClaudeExecutableInfo(): ClaudeExecutableInfo {
   CLAUDE_EXECUTABLE_INFO = resolveClaudeExecutable();
   CLAUDE_BINARY_OVERRIDE = CLAUDE_EXECUTABLE_INFO.path;
-  invalidateClaudeAvailabilityCache();
   logClaudeExecutableInfo();
   return getClaudeExecutableInfo();
 }

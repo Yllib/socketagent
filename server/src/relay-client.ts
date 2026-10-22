@@ -22,6 +22,58 @@ const PENDING_PEER_TTL_MS = 10 * 60 * 1000;
 const messagePeers = new WeakMap<ClientMessage, string>();
 const messagePeerKeys = new WeakMap<ClientMessage, string>();
 
+// A ping tick this much later than scheduled means the event loop stalled.
+const PING_STALL_SLACK_MS = 5_000;
+
+/**
+ * Pings a socket every interval and reports it dead when a ping goes a whole
+ * interval unanswered. After an event-loop stall, timers run before pending
+ * socket reads, so the verdict waits for those reads, and a tick that fired
+ * late pings again instead of judging a reply it could not have read yet.
+ */
+export class PingKeepalive {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private answered = true;
+  private lastPingAt = 0;
+
+  constructor(
+    private readonly socket: { readonly readyState: number; ping(): void },
+    private readonly intervalMs: number,
+    private readonly onDead: () => void,
+  ) {}
+
+  start(): void {
+    this.stop();
+    this.answered = true;
+    this.lastPingAt = Date.now();
+    this.timer = setInterval(() => this.tick(), this.intervalMs);
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  pong(): void {
+    this.answered = true;
+  }
+
+  private tick(): void {
+    if (this.socket.readyState !== WebSocket.OPEN) return;
+    const stalled = Date.now() - this.lastPingAt > this.intervalMs + PING_STALL_SLACK_MS;
+    setImmediate(() => {
+      if (!this.timer || this.socket.readyState !== WebSocket.OPEN) return;
+      if (!this.answered && !stalled) {
+        this.onDead();
+        return;
+      }
+      this.answered = false;
+      this.lastPingAt = Date.now();
+      this.socket.ping();
+    });
+  }
+}
+
 /** Routing metadata belongs to the authenticated transport, never the wire payload. */
 export function relayPeerForMessage(message: ClientMessage): string | undefined {
   return messagePeers.get(message);
@@ -200,11 +252,9 @@ export class RelayClient {
   private reconnectDelay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
-  private pingInterval: ReturnType<typeof setInterval> | null = null;
-  private pongReceived = true;
+  private keepalive: PingKeepalive | null = null;
   private outbox = new RelayMessageOutbox();
   private static PING_INTERVAL = 30_000;  // send ping every 30s
-  private static PING_TIMEOUT = 10_000;   // if no pong within 10s, connection is dead
 
   // Virtual WebSocket interface for ClaudeSession compatibility
   private virtualWs: VirtualRelaySocket;
@@ -249,7 +299,7 @@ export class RelayClient {
     });
 
     this.ws.on("pong", () => {
-      this.pongReceived = true;
+      this.keepalive?.pong();
     });
 
     this.ws.on("message", (data, isBinary) => {
@@ -865,25 +915,18 @@ export class RelayClient {
   /** Start periodic WebSocket ping/pong to detect dead connections */
   private startPingPong(): void {
     this.stopPingPong();
-    this.pongReceived = true;
-    this.pingInterval = setInterval(() => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      if (!this.pongReceived) {
-        // No pong received since last ping — connection is dead
-        console.warn(`[Relay] No pong received in ${RelayClient.PING_INTERVAL / 1000}s — forcing reconnect`);
-        this.ws.terminate(); // force-close, triggers 'close' event → scheduleReconnect
-        return;
-      }
-      this.pongReceived = false;
-      this.ws.ping();
-    }, RelayClient.PING_INTERVAL);
+    const ws = this.ws;
+    if (!ws) return;
+    this.keepalive = new PingKeepalive(ws, RelayClient.PING_INTERVAL, () => {
+      console.warn(`[Relay] No pong received in ${RelayClient.PING_INTERVAL / 1000}s — forcing reconnect`);
+      ws.terminate(); // force-close, triggers 'close' event → scheduleReconnect
+    });
+    this.keepalive.start();
   }
 
   private stopPingPong(): void {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
+    this.keepalive?.stop();
+    this.keepalive = null;
   }
 
   private scheduleReconnect(): void {

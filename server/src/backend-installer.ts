@@ -5,7 +5,8 @@ import { repairWindowsManagedShims } from "./windows-managed-shims";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { spawn, spawnSync } from "child_process";
+import { spawn } from "child_process";
+import { killProcessTree, runProbe } from "./async-probe";
 import type { Backend } from "./protocol";
 import { managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 
@@ -34,6 +35,10 @@ export interface BackendInstallOptions {
 }
 
 const CODEX_DEVICE_URL = "https://auth.openai.com/codex/device";
+// The first start of a freshly installed CLI can take tens of seconds while
+// antivirus scans it. Version probes wait that long rather than failing a good
+// install; they run off the event loop, so nothing else waits on them.
+const FIRST_START_TIMEOUT_MS = 120_000;
 
 function stripTerminalControl(text: string): string {
   return text
@@ -145,13 +150,12 @@ function buildBackendVersionProbe(backend: Backend, command: string, env: NodeJS
   };
 }
 
-export function isManagedBackendUsable(env: NodeJS.ProcessEnv, backend: Backend): boolean {
+export async function isManagedBackendUsable(env: NodeJS.ProcessEnv, backend: Backend): Promise<boolean> {
   const command = resolveManagedBackendCommand(env, backend);
   if (!command) return false;
   const probe = buildBackendVersionProbe(backend, command, env);
-  const result = spawnSync(probe.command, probe.args, {
-    env: probe.env, shell: probe.shell, timeout: 10000,
-    stdio: "pipe", windowsHide: true,
+  const result = await runProbe(probe.command, probe.args, {
+    env: probe.env, shell: probe.shell, timeoutMs: FIRST_START_TIMEOUT_MS,
   });
   return result.status === 0;
 }
@@ -280,18 +284,11 @@ function parseDeviceAuth(text: string): { authUrl?: string; authCode?: string } 
   };
 }
 
-function isCodexLoginValid(command: string, env: NodeJS.ProcessEnv, shell?: boolean): boolean {
+async function isCodexLoginValid(command: string, env: NodeJS.ProcessEnv, shell?: boolean): Promise<boolean> {
   if (!codexAuthFileExists()) return false;
-  const result = spawnSync(command, ["login", "status"], {
-    env,
-    shell,
-    encoding: "utf8",
-    timeout: 10000,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  const result = await runProbe(command, ["login", "status"], { env, shell, timeoutMs: FIRST_START_TIMEOUT_MS });
   if (result.status === 0) return true;
-  const text = `${result.stdout || ""}\n${result.stderr || ""}`;
+  const text = `${result.stdout}\n${result.stderr}`;
   return /(?:^|\n)\s*(?:Logged in|Authenticated)\b/im.test(text) || /ChatGPT/i.test(text);
 }
 
@@ -324,32 +321,18 @@ async function runProcess(options: {
     const timeout = options.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
-          child.kill("SIGTERM");
-          forceKill = setTimeout(() => {
-            if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
-          }, 3000);
-          forceKill.unref();
+          killProcessTree(child);
         }, options.timeoutMs)
       : null;
-    let forceKill: NodeJS.Timeout | undefined;
 
     const cleanup = () => {
       if (timeout) clearTimeout(timeout);
-      if (forceKill) clearTimeout(forceKill);
       options.signal?.removeEventListener("abort", handleAbort);
     };
 
     const handleAbort = () => {
       cancelled = true;
-      if (child.exitCode == null && !child.killed) {
-        child.kill("SIGTERM");
-        forceKill = setTimeout(() => {
-          if (child.exitCode == null && child.signalCode == null) {
-            child.kill("SIGKILL");
-          }
-        }, 3000);
-        forceKill.unref?.();
-      }
+      killProcessTree(child);
     };
     options.signal?.addEventListener("abort", handleAbort, { once: true });
     if (options.signal?.aborted) handleAbort();
@@ -555,7 +538,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
         await runProcess({
           ...probe,
           phase: "probe",
-          timeoutMs: 10000,
+          timeoutMs: FIRST_START_TIMEOUT_MS,
           signal: options.signal,
           onProgress: options.onProgress,
         });
@@ -586,7 +569,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
         throw new Error(`Managed Codex executable is missing in ${managedNpmBinDir(env)}. Reinstall Codex.`);
       }
       const codexShell = process.platform === "win32" && !/\.(?:exe|com)$/i.test(managedCodex);
-      if (!options.forceAuthenticate && isCodexLoginValid(managedCodex, env, codexShell)) {
+      if (!options.forceAuthenticate && await isCodexLoginValid(managedCodex, env, codexShell)) {
         options.onProgress({
           phase: "auth",
           status: "completed",
@@ -659,7 +642,7 @@ export async function runBackendInstall(options: BackendInstallOptions): Promise
     env: versionProbe.env,
     shell: versionProbe.shell,
     phase: "probe",
-    timeoutMs: 10 * 1000,
+    timeoutMs: FIRST_START_TIMEOUT_MS,
     signal: options.signal,
     onProgress: options.onProgress,
   });

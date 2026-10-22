@@ -1104,7 +1104,6 @@ export class ClaudeSession {
   private _autoCompactEnabled = true;
   private _autoCompactWindow: number | undefined;
   private _autoCompactWindowOverride: number | undefined;
-  private _forkFromSessionId?: string;
   private _suppressedToolResultIds: Set<string> = new Set();  // toolUseIds whose results should be hidden from client
   private _taskIdToToolUseId: Map<string, string> = new Map();  // agentId → toolUseId mapping
   private _sdkTaskIds: Set<string> = new Set();
@@ -1313,11 +1312,6 @@ export class ClaudeSession {
         ? { autoCompactWindow: this._autoCompactWindow }
         : {}),
     };
-  }
-
-  setForkSource(sessionId: string): void {
-    this._forkFromSessionId = sessionId;
-    console.log(`Fork source set to ${sessionId}`);
   }
 
   private _resumeSessionAt?: string;
@@ -4038,14 +4032,7 @@ export class ClaudeSession {
         monitorToolReference: "mcp__app__Monitor",
       })}${ttsInstruction}${pluginContext}`;
 
-      // Handle fork: use fork source as resume target + set forkSession flag
-      const shouldFork = !!this._forkFromSessionId;
-      const forkSourceId = this._forkFromSessionId;
-      this._forkFromSessionId = undefined;
-
-      const resumeTarget = shouldFork
-        ? forkSourceId
-        : (resumeSessionId || this.sessionId || undefined);
+      const resumeTarget = resumeSessionId || this.sessionId || undefined;
 
       // Consume resumeSessionAt (conversation rewind point)
       const resumeAt = this._resumeSessionAt;
@@ -4083,7 +4070,7 @@ export class ClaudeSession {
         promptLogged = true;
       }
 
-      console.log(`Starting query: resume=${resumeTarget || 'none'}${shouldFork ? ' (FORK)' : ''}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt=${prompt.slice(0, 80)}..., uuid=${userMsgUuid}, cwd=${this.cwd}`);
+      console.log(`Starting query: resume=${resumeTarget || 'none'}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt=${prompt.slice(0, 80)}..., uuid=${userMsgUuid}, cwd=${this.cwd}`);
 
       const initialPermissionMode = this._permissionMode || "bypassPermissions";
 
@@ -4102,7 +4089,6 @@ export class ClaudeSession {
           // of receiving only otherwise-contextless child tool cards.
           forwardSubagentText: true,
           resume: resumeTarget,
-          forkSession: shouldFork || undefined,
           resumeSessionAt: resumeAt,
           abortController: this.abortController,
           effort: this._effort,

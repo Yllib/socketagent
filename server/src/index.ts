@@ -9509,86 +9509,71 @@ function createConnectionHandler(
           sendJson({ type: "error", message: "Session not found" });
           break;
         }
-        if (sessionInfo.backend === "codex") {
-          try {
-            if (activeSession && activeSession.isRunning) {
-              activeSession.detachWebSocket();
-            }
-            const forked = new CodexSession(transport, sessionInfo.cwd, plugins);
-            await restorePersistedAgentSettings(forked, sessionInfo);
-            forked.setTtsEnabled(pendingTtsEnabled);
-            forked.setTtsEngine(pendingTtsEngine);
-            forked.setKokoroVoice(pendingKokoroVoice);
-            forked.setKokoroSpeed(pendingKokoroSpeed);
-            const { threadId: newSessionId } = await forked.forkAppServerThread(sourceId);
-            const sourceHistory = getHistory(sourceId);
-            appendHistoryBulk(newSessionId, sourceHistory.map((entry) => ({ ...entry })));
-            saveSession({
-              id: newSessionId,
-              title: `${sessionInfo.title || "Untitled"} (fork)`,
-              cwd: sessionInfo.cwd,
-              createdAt: new Date().toISOString(),
-              lastActive: new Date().toISOString(),
-              messagePreview: `Forked from ${sourceId.substring(0, 8)}...`,
-              backend: "codex",
-              codexDriver: "app-server",
-              agentSettings: forked.getAgentSettings(),
-            });
-            activeSession = forked;
-            activeSessionId = newSessionId;
-            sessionClients.set(newSessionId, {
-              ws: transport,
-              setActiveSession: (s: Session) => { activeSession = s; },
-            });
-            sendJson({
-              type: "session_forked",
-              originalSessionId: sourceId,
-              newSessionId,
-              cwd: sessionInfo.cwd,
-            });
-            const forkPage = getHistoryPage(newSessionId, 50);
-            sendJson({
-              type: "session_history",
-              sessionId: newSessionId,
-              messages: forkPage.entries,
-              total: forkPage.total,
-              offset: forkPage.offset,
-            });
-            broadcastSessionList();
-            console.log(`Forked Codex App Server session ${sourceId} → ${newSessionId}`);
-          } catch (e: unknown) {
-            console.error(`[Fork] Codex app-server fork failed: ${errorMessage(e) || e}`);
-            sendJson({ type: "error", message: `Codex fork failed: ${errorMessage(e) || String(e)}` });
+        // Both backends fork right away, so the new session has its own ID,
+        // a copy of the source's history and a place in the session list
+        // before the first prompt. The app then opens it like any session.
+        try {
+          if (activeSession && activeSession.isRunning) {
+            activeSession.detachWebSocket();
           }
-          break;
+          let forked: Session;
+          let newSessionId: string;
+          if (sessionInfo.backend === "codex") {
+            const codex = new CodexSession(transport, sessionInfo.cwd, plugins);
+            await restorePersistedAgentSettings(codex, sessionInfo);
+            newSessionId = (await codex.forkAppServerThread(sourceId)).threadId;
+            forked = codex;
+          } else {
+            const { forkSession: sdkFork } = await import("@anthropic-ai/claude-agent-sdk");
+            newSessionId = (await sdkFork(sourceId, { dir: sessionInfo.cwd })).sessionId;
+            forked = createSession(sessionInfo.backend, transport, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
+            forked._resumeSessionId = newSessionId;
+            await restorePersistedPermissionMode(forked, sessionInfo);
+            await restorePersistedAgentSettings(forked, sessionInfo);
+          }
+          forked.setTtsEnabled(pendingTtsEnabled);
+          forked.setTtsEngine(pendingTtsEngine);
+          forked.setKokoroVoice(pendingKokoroVoice);
+          forked.setKokoroSpeed(pendingKokoroSpeed);
+          appendHistoryBulk(newSessionId, getHistory(sourceId).map((entry) => ({ ...entry })));
+          saveSession({
+            id: newSessionId,
+            title: `${sessionInfo.title || "Untitled"} (fork)`,
+            cwd: sessionInfo.cwd,
+            createdAt: new Date().toISOString(),
+            lastActive: new Date().toISOString(),
+            messagePreview: `Forked from ${sourceId.substring(0, 8)}...`,
+            backend: sessionInfo.backend === "codex" ? "codex" : "claude",
+            ...(sessionInfo.backend === "codex" ? { codexDriver: "app-server" as const } : {}),
+            ...(sessionInfo.permissionMode ? { permissionMode: sessionInfo.permissionMode } : {}),
+            agentSettings: forked.getAgentSettings(),
+          });
+          activeSession = forked;
+          activeSessionId = newSessionId;
+          sessionClients.set(newSessionId, {
+            ws: transport,
+            setActiveSession: (s: Session) => { activeSession = s; },
+          });
+          sendJson({
+            type: "session_forked",
+            originalSessionId: sourceId,
+            newSessionId,
+            cwd: sessionInfo.cwd,
+          });
+          const forkPage = getHistoryPage(newSessionId, 50);
+          sendJson({
+            type: "session_history",
+            sessionId: newSessionId,
+            messages: forkPage.entries,
+            total: forkPage.total,
+            offset: forkPage.offset,
+          });
+          broadcastSessionList();
+          console.log(`Forked ${sessionInfo.backend || "claude"} session ${sourceId} → ${newSessionId}`);
+        } catch (e: unknown) {
+          console.error(`[Fork] Failed: ${errorMessage(e) || e}`);
+          sendJson({ type: "error", message: `Fork failed: ${errorMessage(e) || String(e)}` });
         }
-        if (activeSession && activeSession.isRunning) {
-          activeSession.detachWebSocket();
-        }
-        activeSession = createSession(sessionInfo.backend, transport, sessionInfo.cwd, plugins, getStoredCodexDriver(sessionInfo));
-        await restorePersistedPermissionMode(activeSession, sessionInfo);
-        await restorePersistedAgentSettings(activeSession, sessionInfo);
-        activeSession.setTtsEnabled(pendingTtsEnabled);
-        activeSession.setTtsEngine(pendingTtsEngine);
-        activeSession.setKokoroVoice(pendingKokoroVoice);
-        activeSession.setKokoroSpeed(pendingKokoroSpeed);
-        activeSession.setForkSource(sourceId);
-        sendJson({
-          type: "session_created",
-          sessionId: "",
-          cwd: sessionInfo.cwd,
-          title: "Untitled",
-          backend: sessionInfo.backend || "claude",
-        });
-        const forkPage = getHistoryPage(sourceId, 50);
-        sendJson({
-          type: "session_history",
-          sessionId: sourceId,
-          messages: forkPage.entries,
-          total: forkPage.total,
-          offset: forkPage.offset,
-        });
-        console.log(`Forking session ${sourceId} (cwd=${sessionInfo.cwd})`);
         break;
       }
 

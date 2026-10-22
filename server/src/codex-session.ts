@@ -1414,7 +1414,6 @@ export class CodexSession {
     const sid = this.sessionId || this._resumeSessionId;
     if (sid) updateSessionAgentSettings(sid, patch);
   }
-  setForkSource(_id: string): void {}
   setResumeSessionAt(_uuid: string): void {}
   setTtsEnabled(b: boolean): void { this._ttsEnabled = b; }
   setTtsEngine(e: string): void {

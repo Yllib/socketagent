@@ -1,3 +1,4 @@
+import { serviceState } from "./windows-service-env";
 import qrcode from "qrcode-terminal";
 import { z } from "zod";
 import type { WorkReviewAgentView, WorkReviewClientSnapshot, WorkReviewPublishedResult } from "./work-review-types";
@@ -10,6 +11,7 @@ import { SessionTransferJobs } from "./session-transfer-jobs";
 import { modelDownloadArchive } from "./model-download-archive";
 import { serveDownloadFile } from "./http-file-download";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
+import { captureWindowsServiceConfig, describeRuntime, windowsLauncherPath, windowsRecoveryBatContent, windowsRunServiceBatContent, windowsServiceConfigPath, writeWindowsServiceConfig, type WindowsServiceConfig } from "./windows-service-config";
 import * as dotenv from "dotenv";
 import * as bootstrapPath from "path";
 import * as bootstrapFs from "fs";
@@ -10702,7 +10704,7 @@ const httpServer = http.createServer((req, res) => {
     }
     if (req.method === "GET" && route === "/internal/restart/health") {
       res.writeHead(serverReady && !shuttingDown ? 200 : 503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ service: "socketagent", ready: serverReady && !shuttingDown, pid: process.pid }));
+      res.end(JSON.stringify({ service: "socketagent", ready: serverReady && !shuttingDown, pid: process.pid, identity: describeRuntime(serviceState, SERVER_DIR) }));
       return;
     }
     if (req.method === "GET" && route === "/internal/restart/status") {
@@ -12951,9 +12953,15 @@ function installSocketAgentCliUnix(gitRoot: string): void {
 }
 
 function installSocketAgentCliWindows(gitRoot: string): void {
-
+  // The commands belong to the install's owner. A service-identity server
+  // puts them in the owner's folder and leaves the owner's PATH to the owner.
+  const config = serviceState.config;
+  if (!config && serviceState.service) {
+    console.warn("[CLI] No Windows service config; not installing the socketagent command into a system profile");
+    return;
+  }
   const userHome = process.env.USERPROFILE || os.homedir();
-  const localAppData = process.env.LOCALAPPDATA || path.join(userHome, "AppData", "Local");
+  const localAppData = config?.localAppData || process.env.LOCALAPPDATA || path.join(userHome, "AppData", "Local");
   const binDir = path.join(localAppData, "SocketAgent", "bin");
   const ps1Path = path.join(gitRoot, "bin", "socketagent.ps1");
   if (!fs.existsSync(ps1Path)) {
@@ -12965,6 +12973,10 @@ function installSocketAgentCliWindows(gitRoot: string): void {
   const cmdBody = `@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "${ps1Path}" %*\r\n`;
   fs.writeFileSync(path.join(binDir, "socketagent.cmd"), cmdBody);
   fs.writeFileSync(path.join(binDir, "socketclaude.cmd"), cmdBody);
+  if (serviceState.service) {
+    console.log(`[CLI] Installed socketagent command in ${binDir}`);
+    return;
+  }
 
   const escapedBinDir = binDir.replace(/'/g, "''");
   const pathCommand = [
@@ -12994,152 +13006,31 @@ function installSocketAgentCliFromRepo(gitRoot: string): void {
   }
 }
 
-function batchSetValue(value: string | undefined): string {
-  return String(value || "").replace(/"/g, "");
-}
-
-function windowsRecoveryBatContent(): string {
-  const logFile = path.join(SERVER_DIR, "socketagent.log");
-  return [
-    "@echo off",
-    "setlocal EnableExtensions",
-    "rem SocketAgent Windows recovery guard",
-    `set "SERVER_DIR=${batchSetValue(SERVER_DIR)}"`,
-    `set "LOG_FILE=${batchSetValue(logFile)}"`,
-    `set "POWERSHELL_EXE=${batchSetValue(process.env.POWERSHELL_EXE || "powershell.exe")}"`,
-    'set "PORT=8085"',
-    'for /f "tokens=1,* delims==" %%A in (\'findstr /b "PORT=" "%SERVER_DIR%\\.env" 2^>nul\') do if /i "%%A"=="PORT" set "PORT=%%B"',
-    'set "PORT=%PORT:"=%"',
-    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=[int]$env:PORT; $c=New-Object Net.Sockets.TcpClient; try { $iar=$c.BeginConnect(\'127.0.0.1\',$p,$null,$null); if (-not $iar.AsyncWaitHandle.WaitOne(1500,$false)) { exit 1 }; $c.EndConnect($iar); exit 0 } catch { exit 1 } finally { $c.Close() }"',
-    "if not errorlevel 1 goto done",
-    'echo [recovery] SocketAgent is not listening on port %PORT%; restarting scheduled task. >> "%LOG_FILE%" 2>&1',
-    'set "TASK_NAME=SocketAgent"',
-    'schtasks /Query /TN SocketAgent >nul 2>&1 || set "TASK_NAME=SocketClaude"',
-    'schtasks /End /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1',
-    '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 2" >nul 2>&1',
-    'schtasks /Run /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1',
-    ":done",
-    "schtasks /Delete /TN SocketAgentRecovery /F >nul 2>&1",
-    "exit /b 0",
-    "",
-  ].join("\r\n");
-}
-
-function windowsRunServiceBatContent(): string {
-  const userHome = process.env.USERPROFILE || os.homedir();
-  const logFile = path.join(SERVER_DIR, "socketagent.log");
-  const serverScript = path.join(SERVER_DIR, "dist", "index.js");
-  const nodeExe = process.env.SOCKETAGENT_NODE || process.execPath;
-  const servicePath = batchSetValue(process.env.PATH);
-  const launcherHash = crypto.createHash("sha256").update(fs.readFileSync(path.join(SERVER_DIR, "scripts", "windows-launcher.cs"))).digest("hex").slice(0, 16);
-  const launcher = path.join(process.env.LOCALAPPDATA || path.join(userHome, "AppData", "Local"), "SocketAgent", "launchers", `socketagent-launcher-${launcherHash}.exe`);
-
-  return [
-    "@echo off",
-    "setlocal EnableExtensions",
-    "rem SocketAgent Windows service wrapper v2",
-    `set "HOME=${batchSetValue(userHome)}"`,
-    `set "PATH=${servicePath}"`,
-    `set "SERVER_DIR=${batchSetValue(SERVER_DIR)}"`,
-    `set "REPO_ROOT=${batchSetValue(GIT_ROOT)}"`,
-    `set "LOG_FILE=${batchSetValue(logFile)}"`,
-    `set "POWERSHELL_EXE=${batchSetValue(process.env.POWERSHELL_EXE || "powershell.exe")}"`,
-    `set "NODE_EXE=${batchSetValue(nodeExe)}"`,
-    `set "SERVER_SCRIPT=${batchSetValue(serverScript)}"`,
-    `set "RECOVERY_BAT=${batchSetValue(path.join(SERVER_DIR, "run-recovery.bat"))}"`,
-    `set "SOCKETAGENT_LAUNCHER=${batchSetValue(launcher)}"`,
-    'set "NPM_CMD=npm.cmd"',
-    'set "NPX_CMD=npx.cmd"',
-    'if exist "%ProgramFiles%\\nodejs\\npm.cmd" set "NPM_CMD=%ProgramFiles%\\nodejs\\npm.cmd"',
-    'if exist "%ProgramFiles%\\nodejs\\npx.cmd" set "NPX_CMD=%ProgramFiles%\\nodejs\\npx.cmd"',
-    "",
-    'if "%SOCKETAGENT_SUPERVISED%"=="1" goto loop',
-    '"%SOCKETAGENT_LAUNCHER%" --hide-parent-console "%~f0"',
-    "exit /b %ERRORLEVEL%",
-    "",
-    ":loop",
-    "call :arm_recovery",
-    'call :preflight >> "%LOG_FILE%" 2>&1',
-    'if errorlevel 1 echo [startup] Preflight update failed; launching existing build. >> "%LOG_FILE%" 2>&1',
-    'cd /d "%SERVER_DIR%"',
-    '"%NODE_EXE%" "%SERVER_SCRIPT%" >> "%LOG_FILE%" 2>&1',
-    'echo Server exited (%ERRORLEVEL%), restarting in 5s... >> "%LOG_FILE%" 2>&1',
-    '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 5" >nul 2>&1',
-    "goto loop",
-    "",
-    ":arm_recovery",
-    'if not exist "%RECOVERY_BAT%" exit /b 0',
-    '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%SERVER_DIR%\\scripts\\register-windows-recovery.ps1" >nul 2>&1',
-    "exit /b 0",
-    "",
-    // The loop above must stay byte-identical: cmd resumes a running batch
-    // file by offset after this server rewrites it.
-    ":preflight",
-    "call :update",
-    'set "UPDATE_RESULT=%ERRORLEVEL%"',
-    '"%NODE_EXE%" "%SERVER_DIR%\\scripts\\build-server.js"',
-    "if errorlevel 1 exit /b 1",
-    "exit /b %UPDATE_RESULT%",
-    "",
-    ":update",
-    'cd /d "%REPO_ROOT%"',
-    'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="0" exit /b 0',
-    'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="false" exit /b 0',
-    'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="off" exit /b 0',
-    "git rev-parse --is-inside-work-tree >nul 2>&1 || exit /b 0",
-    "git fetch origin",
-    "if errorlevel 1 exit /b 0",
-    "set \"BRANCH=\"",
-    "set \"LOCAL_HASH=\"",
-    "set \"REMOTE_HASH=\"",
-    "for /f %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set \"BRANCH=%%B\"",
-    "if not defined BRANCH exit /b 0",
-    "for /f %%H in ('git rev-parse HEAD 2^>nul') do set \"LOCAL_HASH=%%H\"",
-    "for /f %%H in ('git rev-parse origin/%BRANCH% 2^>nul') do set \"REMOTE_HASH=%%H\"",
-    "if not defined REMOTE_HASH exit /b 0",
-    'if "%LOCAL_HASH%"=="%REMOTE_HASH%" exit /b 0',
-    'call :verify_update "%REMOTE_HASH%"',
-    "if errorlevel 1 exit /b 1",
-    "echo [Auto-update] Applying %REMOTE_HASH:~0,7% from origin/%BRANCH%",
-    "git reset --hard origin/%BRANCH%",
-    "if errorlevel 1 exit /b 1",
-    'cd /d "%SERVER_DIR%"',
-    'call "%NPM_CMD%" ci --include=optional',
-    "if errorlevel 1 exit /b 1",
-    '> "%REPO_ROOT%\\.last-auto-update-hash" echo %REMOTE_HASH%',
-    "exit /b 0",
-    "",
-    ":verify_update",
-    'set "VERIFY_MODE=%SOCKETAGENT_AUTO_UPDATE_VERIFY%"',
-    'set "REQUIRE_SIGNED=%SOCKETAGENT_AUTO_UPDATE_REQUIRE_SIGNED_COMMITS%"',
-    'if not defined VERIFY_MODE set "VERIFY_MODE=commit"',
-    'if /I "%VERIFY_MODE%"=="none" exit /b 0',
-    'if /I "%VERIFY_MODE%"=="0" exit /b 0',
-    'if /I "%VERIFY_MODE%"=="false" exit /b 0',
-    'if /I "%VERIFY_MODE%"=="off" exit /b 0',
-    'if /I "%SOCKETAGENT_UPDATE_VERIFY%"=="commit" set "VERIFY_MODE=commit"',
-    'if /I "%SOCKETAGENT_UPDATE_VERIFY%"=="signed-commit" set "VERIFY_MODE=commit"',
-    'if /I "%SOCKETAGENT_UPDATE_REQUIRE_SIGNED_COMMITS%"=="1" set "REQUIRE_SIGNED=1"',
-    'if /I "%REQUIRE_SIGNED%"=="0" exit /b 0',
-    'if /I "%REQUIRE_SIGNED%"=="false" exit /b 0',
-    'if /I "%REQUIRE_SIGNED%"=="off" exit /b 0',
-    'if /I "%VERIFY_MODE%"=="signed" set "VERIFY_MODE=commit"',
-    'if /I "%VERIFY_MODE%"=="signed-commit" set "VERIFY_MODE=commit"',
-    'if /I "%REQUIRE_SIGNED%"=="true" set "VERIFY_MODE=commit"',
-    'if /I "%REQUIRE_SIGNED%"=="yes" set "VERIFY_MODE=commit"',
-    'if "%REQUIRE_SIGNED%"=="1" set "VERIFY_MODE=commit"',
-    'if /I not "%VERIFY_MODE%"=="commit" exit /b 0',
-    'set "SIGNERS=%REPO_ROOT%\\.github\\allowed_signers"',
-    'if not exist "%SIGNERS%" exit /b 1',
-    'git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=%SIGNERS%" verify-commit "%~1"',
-    "exit /b %ERRORLEVEL%",
-    "",
-  ].join("\r\n");
+/**
+ * The Windows service config, written from this process's own profile when
+ * the install has none yet. Undefined when no trustworthy config exists, as
+ * for SYSTEM without one; callers then leave wrappers and tasks alone.
+ */
+function windowsServiceConfig(): WindowsServiceConfig | undefined {
+  if (serviceState.config) return serviceState.config;
+  if (serviceState.service) return undefined;
+  const config = captureWindowsServiceConfig(process.env, serviceState.identity);
+  if (!config) return undefined;
+  writeWindowsServiceConfig(SERVER_DIR, config);
+  serviceState.config = config;
+  console.log(`[Startup] Recorded the Windows service config at ${windowsServiceConfigPath(SERVER_DIR)}`);
+  return config;
 }
 
 function ensureWindowsServiceWrapper(): void {
   if (process.platform !== "win32") return;
   try {
+    const config = windowsServiceConfig();
+    if (!config) {
+      const reason = serviceState.configProblem || "none recorded";
+      console.warn(`[Startup] Not repairing the Windows service wrapper as ${serviceState.identity.user}: no usable service config (${reason})`);
+      return;
+    }
     repairWindowsManagedShims(managedNpmPrefix(process.env));
     const script = path.join(SERVER_DIR, "scripts", "migrate-windows-service.ps1");
     const output = execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script], {
@@ -13149,8 +13040,17 @@ function ensureWindowsServiceWrapper(): void {
 
     const batFile = path.join(SERVER_DIR, "run-service.bat");
     const recoveryFile = path.join(SERVER_DIR, "run-recovery.bat");
-    const content = windowsRunServiceBatContent();
-    const recoveryContent = windowsRecoveryBatContent();
+    const powershellExe = process.env.POWERSHELL_EXE || "powershell.exe";
+    const content = windowsRunServiceBatContent({
+      serverDir: SERVER_DIR,
+      repoRoot: GIT_ROOT,
+      config,
+      path: process.env.PATH || "",
+      powershellExe,
+      nodeExe: process.env.SOCKETAGENT_NODE || process.execPath,
+      launcher: windowsLauncherPath(SERVER_DIR, config),
+    });
+    const recoveryContent = windowsRecoveryBatContent(SERVER_DIR, powershellExe);
     let current = "";
     try { current = fs.readFileSync(batFile, "utf-8"); } catch {}
     if (current.replace(/\r\n/g, "\n") !== content.replace(/\r\n/g, "\n")) {

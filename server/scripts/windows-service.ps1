@@ -1,8 +1,25 @@
 # Shared by installation, startup migration, and the CLI. Dot-source to use.
+
+# Local app data of the install's owner, from server\windows-service.json.
+# Paths written into tasks come from here, so a server running as SYSTEM
+# still points them at the owner's launcher rather than its own profile.
+function Get-SocketAgentOwnerLocalAppData {
+    $config = Join-Path (Split-Path $PSScriptRoot -Parent) 'windows-service.json'
+    if (Test-Path $config) {
+        $localAppData = (Get-Content $config -Raw | ConvertFrom-Json).localAppData
+        if ($localAppData) { return $localAppData }
+    }
+    $systemRoot = [IO.Path]::GetFullPath($env:SystemRoot).TrimEnd('\') + '\'
+    if (([IO.Path]::GetFullPath($env:LOCALAPPDATA) + '\').StartsWith($systemRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "No windows-service.json; refusing to place the SocketAgent launcher in the system profile $env:LOCALAPPDATA"
+    }
+    return $env:LOCALAPPDATA
+}
+
 function Get-SocketAgentLauncher {
     $source = Join-Path $PSScriptRoot 'windows-launcher.cs'
     $hash = (Get-FileHash $source -Algorithm SHA256).Hash.Substring(0, 16).ToLowerInvariant()
-    $directory = Join-Path $env:LOCALAPPDATA 'SocketAgent\launchers'
+    $directory = Join-Path (Get-SocketAgentOwnerLocalAppData) 'SocketAgent\launchers'
     $launcher = Join-Path $directory "socketagent-launcher-$hash.exe"
     if (-not (Test-Path $launcher)) {
         New-Item -ItemType Directory -Force $directory | Out-Null

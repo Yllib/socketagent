@@ -4,6 +4,9 @@ server/dist/
 server/dist.next/
 server/dist.prev/
 server/.env
+server/windows-service.json
+server/run-service.bat
+server/run-recovery.bat
 .last-auto-update-hash
 .last-managed-backends-update-hash
 server/socketagent.log

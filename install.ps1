@@ -762,7 +762,6 @@ Write-Phase "Phase 6: Register Windows Service"
 
 $nodeExe = (Get-Command node).Source
 $powerShellExe = Get-CurrentPowerShellExecutable
-$serverScript = Join-Path (Join-Path $SERVER_DIR "dist") "index.js"
 
 # Stop and remove existing task
 $existing = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
@@ -781,12 +780,11 @@ if ($existing) {
     Write-Host "  Removed existing task"
 }
 
-$launcherExe = Get-SocketAgentLauncher
-
-# Generate run-service.bat with restart loop
-# This ensures the server auto-restarts after updates (process.exit(1))
+# Generate run-service.bat (the restart loop the task runs) and
+# run-recovery.bat. The server writes the same files on every start, so both
+# come from one generator. It also records windows-service.json, which pins
+# this account's profile for a server that later runs as another account.
 $batFile = Join-Path $SERVER_DIR "run-service.bat"
-$recoveryBatFile = Join-Path $SERVER_DIR "run-recovery.bat"
 $servicePath = $env:PATH -replace '"', ''
 if (-not (Test-PathListContains $servicePath $NPM_BIN_DIR)) {
     $servicePath = "$NPM_BIN_DIR;$servicePath"
@@ -800,132 +798,18 @@ foreach ($commandName in @("claude", "codex")) {
         }
     }
 }
-$batContent = @"
-@echo off
-setlocal EnableExtensions
-rem SocketAgent Windows service wrapper v2
-set "HOME=$env:USERPROFILE"
-set "PATH=$servicePath"
-set "SERVER_DIR=$SERVER_DIR"
-set "REPO_ROOT=$REPO_ROOT"
-set "LOG_FILE=$LOG_FILE"
-set "NODE_EXE=$nodeExe"
-set "POWERSHELL_EXE=$powerShellExe"
-set "npm_config_script_shell=%ComSpec%"
-set "SERVER_SCRIPT=$serverScript"
-set "RECOVERY_BAT=$recoveryBatFile"
-set "NPM_CMD=npm.cmd"
-set "NPX_CMD=npx.cmd"
-set "SOCKETAGENT_LAUNCHER=$launcherExe"
-if exist "%ProgramFiles%\nodejs\npm.cmd" set "NPM_CMD=%ProgramFiles%\nodejs\npm.cmd"
-if exist "%ProgramFiles%\nodejs\npx.cmd" set "NPX_CMD=%ProgramFiles%\nodejs\npx.cmd"
-
-if "%SOCKETAGENT_SUPERVISED%"=="1" goto loop
-"%SOCKETAGENT_LAUNCHER%" --hide-parent-console "%~f0"
-exit /b %ERRORLEVEL%
-
-:loop
-call :arm_recovery
-call :preflight >> "%LOG_FILE%" 2>&1
-if errorlevel 1 echo [startup] Preflight update failed; launching existing build. >> "%LOG_FILE%" 2>&1
-cd /d "%SERVER_DIR%"
-"%NODE_EXE%" "%SERVER_SCRIPT%" >> "%LOG_FILE%" 2>&1
-echo Server exited (%ERRORLEVEL%), restarting in 5s... >> "%LOG_FILE%" 2>&1
-"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 5" >nul 2>&1
-goto loop
-
-:arm_recovery
-if not exist "%RECOVERY_BAT%" exit /b 0
-"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%SERVER_DIR%\scripts\register-windows-recovery.ps1" >nul 2>&1
-exit /b 0
-
-:preflight
-call :update
-set "UPDATE_RESULT=%ERRORLEVEL%"
-"%NODE_EXE%" "%SERVER_DIR%\scripts\build-server.js"
-if errorlevel 1 exit /b 1
-exit /b %UPDATE_RESULT%
-
-:update
-cd /d "%REPO_ROOT%"
-if /I "%SOCKETAGENT_AUTO_UPDATE%"=="0" exit /b 0
-if /I "%SOCKETAGENT_AUTO_UPDATE%"=="false" exit /b 0
-if /I "%SOCKETAGENT_AUTO_UPDATE%"=="off" exit /b 0
-git rev-parse --is-inside-work-tree >nul 2>&1 || exit /b 0
-git fetch origin
-if errorlevel 1 exit /b 0
-set "BRANCH="
-set "LOCAL_HASH="
-set "REMOTE_HASH="
-for /f %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "BRANCH=%%B"
-if not defined BRANCH exit /b 0
-for /f %%H in ('git rev-parse HEAD 2^>nul') do set "LOCAL_HASH=%%H"
-for /f %%H in ('git rev-parse origin/%BRANCH% 2^>nul') do set "REMOTE_HASH=%%H"
-if not defined REMOTE_HASH exit /b 0
-if "%LOCAL_HASH%"=="%REMOTE_HASH%" exit /b 0
-call :verify_update "%REMOTE_HASH%"
-if errorlevel 1 exit /b 1
-echo [Auto-update] Applying %REMOTE_HASH:~0,7% from origin/%BRANCH%
-git reset --hard origin/%BRANCH%
-if errorlevel 1 exit /b 1
-cd /d "%SERVER_DIR%"
-call "%NPM_CMD%" ci --include=optional
-if errorlevel 1 exit /b 1
-> "%REPO_ROOT%\.last-auto-update-hash" echo %REMOTE_HASH%
-exit /b 0
-
-:verify_update
-set "VERIFY_MODE=%SOCKETAGENT_AUTO_UPDATE_VERIFY%"
-set "REQUIRE_SIGNED=%SOCKETAGENT_AUTO_UPDATE_REQUIRE_SIGNED_COMMITS%"
-if not defined VERIFY_MODE set "VERIFY_MODE=commit"
-if /I "%VERIFY_MODE%"=="none" exit /b 0
-if /I "%VERIFY_MODE%"=="0" exit /b 0
-if /I "%VERIFY_MODE%"=="false" exit /b 0
-if /I "%VERIFY_MODE%"=="off" exit /b 0
-if /I "%SOCKETAGENT_UPDATE_VERIFY%"=="commit" set "VERIFY_MODE=commit"
-if /I "%SOCKETAGENT_UPDATE_VERIFY%"=="signed-commit" set "VERIFY_MODE=commit"
-if /I "%SOCKETAGENT_UPDATE_REQUIRE_SIGNED_COMMITS%"=="1" set "REQUIRE_SIGNED=1"
-if /I "%REQUIRE_SIGNED%"=="0" exit /b 0
-if /I "%REQUIRE_SIGNED%"=="false" exit /b 0
-if /I "%REQUIRE_SIGNED%"=="off" exit /b 0
-if /I "%VERIFY_MODE%"=="signed" set "VERIFY_MODE=commit"
-if /I "%VERIFY_MODE%"=="signed-commit" set "VERIFY_MODE=commit"
-if /I "%REQUIRE_SIGNED%"=="true" set "VERIFY_MODE=commit"
-if /I "%REQUIRE_SIGNED%"=="yes" set "VERIFY_MODE=commit"
-if "%REQUIRE_SIGNED%"=="1" set "VERIFY_MODE=commit"
-if /I not "%VERIFY_MODE%"=="commit" exit /b 0
-set "SIGNERS=%REPO_ROOT%\.github\allowed_signers"
-if not exist "%SIGNERS%" exit /b 1
-git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=%SIGNERS%" verify-commit "%~1"
-exit /b %ERRORLEVEL%
-"@
-Set-Content -Path $batFile -Value $batContent -Encoding ASCII
-Write-Ok "Generated run-service.bat"
-
-$recoveryContent = @"
-@echo off
-setlocal EnableExtensions
-rem SocketAgent Windows recovery guard
-set "SERVER_DIR=$SERVER_DIR"
-set "LOG_FILE=$LOG_FILE"
-set "POWERSHELL_EXE=$powerShellExe"
-set "PORT=8085"
-for /f "tokens=1,* delims==" %%A in ('findstr /b "PORT=" "%SERVER_DIR%\.env" 2^>nul') do if /i "%%A"=="PORT" set "PORT=%%B"
-set "PORT=%PORT:"=%"
-"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "`$p=[int]`$env:PORT; `$c=New-Object Net.Sockets.TcpClient; try { `$iar=`$c.BeginConnect('127.0.0.1',`$p,`$null,`$null); if (-not `$iar.AsyncWaitHandle.WaitOne(1500,`$false)) { exit 1 }; `$c.EndConnect(`$iar); exit 0 } catch { exit 1 } finally { `$c.Close() }"
-if not errorlevel 1 goto done
-echo [recovery] SocketAgent is not listening on port %PORT%; restarting scheduled task. >> "%LOG_FILE%" 2>&1
-set "TASK_NAME=SocketAgent"
-schtasks /Query /TN SocketAgent >nul 2>&1 || set "TASK_NAME=SocketClaude"
-schtasks /End /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1
-"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 2" >nul 2>&1
-schtasks /Run /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1
-:done
-schtasks /Delete /TN SocketAgentRecovery /F >nul 2>&1
-exit /b 0
-"@
-Set-Content -Path $recoveryBatFile -Value $recoveryContent -Encoding ASCII
-Write-Ok "Generated run-recovery.bat"
+$setupPath = $env:PATH
+try {
+    $env:PATH = $servicePath
+    $env:POWERSHELL_EXE = $powerShellExe
+    $env:SOCKETAGENT_NODE = $nodeExe
+    & $nodeExe (Join-Path (Join-Path $SERVER_DIR "dist") "windows-service-cli.js") wrapper
+    if ($LASTEXITCODE -ne 0) { throw "Could not generate the Windows service wrapper (exit code $LASTEXITCODE)" }
+} finally {
+    $env:PATH = $setupPath
+    Remove-Item Env:POWERSHELL_EXE, Env:SOCKETAGENT_NODE -ErrorAction SilentlyContinue
+}
+Write-Ok "Generated run-service.bat and run-recovery.bat"
 
 $action = New-SocketAgentTaskAction $batFile
 

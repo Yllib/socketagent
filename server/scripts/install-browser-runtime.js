@@ -132,7 +132,10 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
     let target;
     while (Date.now() < deadline) {
       if (launchError) throw launchError;
-      if (child.exitCode !== null) throw new Error(`Browser exited with code ${child.exitCode}`);
+      // Chrome started by an elevated server restarts itself without admin
+      // rights and the process we spawned exits 0, so only a failure exit
+      // ends the wait. The restarted browser still writes DevToolsActivePort.
+      if (child.exitCode !== null && child.exitCode !== 0) throw new Error(`Browser exited with code ${child.exitCode}`);
       try {
         const port = Number(fs.readFileSync(path.join(profileDir, "DevToolsActivePort"), "utf8").split(/\r?\n/)[0]);
         if (Number.isInteger(port) && port > 0 && port < 65536) {
@@ -151,21 +154,29 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
     const pageSocket = new WebSocket(target.webSocketDebuggerUrl);
     socket = pageSocket;
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Browser page validation timed out")), 10000);
-      const finish = (/** @type {unknown} */ error) => { clearTimeout(timer); error ? reject(error) : resolve(); };
-      pageSocket.once("error", finish);
-      pageSocket.once("close", () => finish(new Error("Browser closed before page validation")));
-      pageSocket.once("open", () => pageSocket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {
+      // A cold first launch can list the page before it commits the data URL,
+      // so an empty document means "not yet" until the deadline.
+      let lastId = 0;
+      let rendered = false;
+      /** @type {ReturnType<typeof setTimeout> | undefined} */
+      let retry;
+      const timer = setTimeout(() => finish(new Error("Browser could not render the validation page")), 10000);
+      const finish = (/** @type {unknown} */ error) => { clearTimeout(timer); clearTimeout(retry); error ? reject(error) : resolve(); };
+      const evaluate = () => pageSocket.send(JSON.stringify({ id: ++lastId, method: "Runtime.evaluate", params: {
         expression: "document.documentElement.outerHTML", returnByValue: true,
-      } })));
+      } }));
+      pageSocket.once("error", finish);
+      pageSocket.once("close", () => finish(new Error(rendered ? "Browser could not render the validation page" : "Browser closed before page validation")));
+      pageSocket.once("open", evaluate);
       pageSocket.on("message", data => {
         /** @type {unknown} */
         const message = JSON.parse(data.toString());
-        if (!isRecord(message)) return;
-        if (message.id !== 1) return;
+        if (!isRecord(message) || message.id !== lastId) return;
         const result = isRecord(message.result) && isRecord(message.result.result) ? message.result.result : {};
         const html = result.value;
-        finish(typeof html === "string" && html.includes("<p>ok</p>") ? undefined : new Error("Browser could not render the validation page"));
+        rendered = true;
+        if (typeof html === "string" && html.includes("<p>ok</p>")) finish(undefined);
+        else retry = setTimeout(evaluate, 250);
       });
     });
     // Graceful close releases profile handles before cleanup.

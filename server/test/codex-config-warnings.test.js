@@ -8,6 +8,7 @@ const {
   getComputerIssues,
   onBackendHealthChange,
   recordCodexConfigWarning,
+  setWindowsServiceWarning,
 } = require("#server/server-settings");
 
 test("a Codex config warning stays in the computer's issues until its file changes", (t) => {
@@ -34,4 +35,18 @@ test("a Codex config warning stays in the computer's issues until its file chang
   fs.writeFileSync(file, "");
   fs.utimesSync(file, new Date(), new Date(Date.now() + 5000));
   assert.ok(!getComputerIssues().some((issue) => issue.message === message));
+});
+
+test("a Windows install without SocketAgentService shows in the computer's issues", (t) => {
+  let changes = 0;
+  const unsubscribe = onBackendHealthChange(() => changes++);
+  t.after(unsubscribe);
+  const message = "Runs only while owner is signed in.";
+  setWindowsServiceWarning(message);
+  setWindowsServiceWarning(message);
+  assert.equal(changes, 1);
+  assert.deepEqual(getComputerIssues()[0], { severity: "warning", message });
+  setWindowsServiceWarning(undefined);
+  assert.ok(!getComputerIssues().some((issue) => issue.message === message));
+  assert.equal(changes, 2);
 });

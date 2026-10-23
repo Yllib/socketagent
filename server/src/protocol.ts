@@ -2436,7 +2436,8 @@ export interface BackendHealthInfo {
 
 /** A problem the computer's owner has to fix, shown in the computer's errors and warnings. */
 export interface ComputerIssue {
-  backend: Backend;
+  /** The backend it affects; absent for the computer itself. */
+  backend?: Backend;
   severity: "warning" | "error";
   message: string;
   /** The file to fix, when there is one. */

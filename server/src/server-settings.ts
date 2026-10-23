@@ -163,9 +163,24 @@ export function recordCodexConfigWarning(message: string, configPath?: string): 
   notifyBackendHealthChange();
 }
 
-/** The computer's problems: recorded Codex config problems whose file has not changed since. */
+let windowsServiceWarning: string | undefined;
+
+/**
+ * Shows, or with undefined clears, why this Windows install serves only
+ * while its owner is signed in. See addMachineServiceTask.
+ */
+export function setWindowsServiceWarning(message: string | undefined): void {
+  if (message === windowsServiceWarning) return;
+  windowsServiceWarning = message;
+  notifyBackendHealthChange();
+}
+
+/**
+ * The computer's problems: a Windows install without SocketAgentService, and
+ * recorded Codex config problems whose file has not changed since.
+ */
 export function getComputerIssues(): ComputerIssue[] {
-  const issues: ComputerIssue[] = [];
+  const issues: ComputerIssue[] = windowsServiceWarning ? [{ severity: "warning", message: windowsServiceWarning }] : [];
   for (const [message, seen] of codexConfigWarnings) {
     if (modifiedAt(seen.file) !== seen.mtimeMs) codexConfigWarnings.delete(message);
     else {

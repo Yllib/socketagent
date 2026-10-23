@@ -97,7 +97,7 @@ import { KeyPair, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, lo
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { isAuthFailureMessage } from "./backend-auth";
-import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays } from "./server-settings";
+import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setWindowsServiceWarning } from "./server-settings";
 import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
@@ -13553,6 +13553,8 @@ if (process.platform === "win32") {
   if (!serviceState.service && serviceState.config) {
     setTimeout(() => void addMachineServiceTask(SERVER_DIR, windowsElevated()).then(() => {
       machineServiceRegistered = taskExists(SERVICE_TASK);
+      setWindowsServiceWarning(machineServiceRegistered ? undefined
+        : `Runs only while ${os.userInfo().username} is signed in. Rerun setup as an administrator to keep it running for every account.`);
       writeMachineMarker();
     }), 15_000).unref();
   }

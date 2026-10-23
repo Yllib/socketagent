@@ -4495,7 +4495,6 @@
         }
       },
       "required": [
-        "backend",
         "severity",
         "message"
       ]

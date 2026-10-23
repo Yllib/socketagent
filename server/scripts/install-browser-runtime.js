@@ -136,6 +136,7 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
     const deadline = Date.now() + 30000;
     /** @type {Record<string, unknown> | undefined} */
     let target;
+    let port = 0;
     while (Date.now() < deadline) {
       if (launchError) throw launchError;
       // Chrome started by an elevated server restarts itself without admin
@@ -143,7 +144,7 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
       // ends the wait. The restarted browser still writes DevToolsActivePort.
       if (child.exitCode !== null && child.exitCode !== 0) throw new Error(`Browser exited with code ${child.exitCode}`);
       try {
-        const port = Number(fs.readFileSync(path.join(profileDir, "DevToolsActivePort"), "utf8").split(/\r?\n/)[0]);
+        port = Number(fs.readFileSync(path.join(profileDir, "DevToolsActivePort"), "utf8").split(/\r?\n/)[0]);
         if (Number.isInteger(port) && port > 0 && port < 65536) {
           const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) });
           /** @type {unknown} */
@@ -185,10 +186,7 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
         else retry = setTimeout(evaluate, 250);
       });
     });
-    // Graceful close releases profile handles before cleanup.
-    pageSocket.send(JSON.stringify({ id: 2, method: "Browser.close" }));
-    const closeDeadline = Date.now() + 5000;
-    while (child.exitCode === null && Date.now() < closeDeadline) await new Promise(resolve => setTimeout(resolve, 100));
+    await closeBrowserOnPort(port);
     return { status: 0 };
   } catch (error) {
     return { status: 1, error };
@@ -197,6 +195,57 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
     if (child.pid && child.exitCode === null) {
       spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore", timeout: 5000 });
     }
+  }
+}
+
+/** @param {number} pid */
+function processRunning(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/**
+ * Quits the browser answering on `port`, gracefully so it releases the
+ * profile, then by its exact process ID if it is still there. That browser
+ * may not be the process we spawned: Chrome started by an elevated server
+ * restarts itself without admin rights, and the spawned process exits.
+ * @param {number} port
+ */
+async function closeBrowserOnPort(port) {
+  const WebSocket = require("ws");
+  /** @type {unknown} */
+  const version = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2000) })
+    .then(response => response.json()).catch(() => undefined);
+  if (!isRecord(version) || typeof version.webSocketDebuggerUrl !== "string") return;
+  const socket = new WebSocket(version.webSocketDebuggerUrl);
+  try {
+    /** @type {number | undefined} */
+    const pid = await new Promise(resolve => {
+      const timer = setTimeout(() => resolve(undefined), 3000);
+      socket.once("error", () => { clearTimeout(timer); resolve(undefined); });
+      socket.once("open", () => socket.send(JSON.stringify({ id: 1, method: "SystemInfo.getProcessInfo" })));
+      socket.on("message", data => {
+        /** @type {unknown} */
+        const message = JSON.parse(data.toString());
+        if (!isRecord(message) || message.id !== 1) return;
+        clearTimeout(timer);
+        /** @type {unknown[]} */
+        const processes = isRecord(message.result) && Array.isArray(message.result.processInfo) ? message.result.processInfo : [];
+        const browser = processes.filter(isRecord).find(entry => entry.type === "browser");
+        resolve(browser && typeof browser.id === "number" ? browser.id : undefined);
+      });
+    });
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 2, method: "Browser.close" }));
+    if (!pid) return;
+    const deadline = Date.now() + 5000;
+    while (processRunning(pid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+    if (!processRunning(pid)) return;
+    if (process.platform === "win32") {
+      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore", timeout: 5000 });
+    } else {
+      process.kill(pid, "SIGKILL");
+    }
+  } finally {
+    socket.terminate();
   }
 }
 

@@ -867,6 +867,11 @@ Add-SocketAgentFirewallRules $Port $nodeExe 3>&1 | ForEach-Object {
     if ($_ -is [Management.Automation.WarningRecord]) { Write-Warn $_.Message } else { Write-Ok $_ }
 }
 
+# The server writes machine-server.json only while this folder exists, and
+# only at startup and once 15 seconds later, so it must exist before the
+# first start.
+if (-not $LIMITED_INSTALL) { Initialize-SocketAgentMachineFolder }
+
 # Start immediately
 try {
     Start-ScheduledTask -TaskName $TASK_NAME

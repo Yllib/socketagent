@@ -1533,8 +1533,11 @@ function directRouteInfo(holdsToken: boolean): { hosts: string[]; port: number; 
   return hosts.length > 0 ? { hosts, port: PORT, ...(holdsToken ? { token: AUTH_TOKEN } : {}) } : undefined;
 }
 
-/** Relay peers enrolled by the token, or before devices were tracked, hold it. */
-function relayKeyHoldsToken(publicKey: string | null): boolean {
+/**
+ * Devices enrolled by the token, or before devices were tracked, hold it, on
+ * the relay and on a direct socket that signed in with the device key.
+ */
+function keyHoldsToken(publicKey: string | null): boolean {
   const via = publicKey ? deviceRegistry.get(publicKey)?.via : undefined;
   return via === "token" || via === "migration";
 }
@@ -1642,7 +1645,7 @@ function broadcastServerCapabilities(): void {
   }
   if (!relayClient) return;
   for (const key of new Set(relayClient.openPeerKeys())) {
-    relayClient.sendToPeersWithKey(key, relayKeyHoldsToken(key) ? withToken : withoutToken);
+    relayClient.sendToPeersWithKey(key, keyHoldsToken(key) ? withToken : withoutToken);
   }
 }
 
@@ -12146,7 +12149,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(authMessage);
         transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(authMessage);
         console.log(
-          `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane}, ${holdsToken ? "token" : "device key"})`,
+          `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane}, ${authMessage.token === AUTH_TOKEN ? "token" : "device key"})`,
         );
         if (transportLane === "control") {
           connectedClients.add(transport);
@@ -12156,28 +12159,23 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
           serverCapabilitiesPayload(transport.usesBinaryEnvelope, transportLane, holdsToken),
         ));
       };
-      if (msg.token) {
-        if (msg.token !== AUTH_TOKEN) {
-          console.log("Rejected direct E2E auth: invalid token");
-          transport.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
-          ws.close(1008, "Unauthorized");
-          return;
-        }
+      if (msg.token && msg.token === AUTH_TOKEN) {
         open(true);
         return;
       }
-      // No token: the desktop app under a Windows account that cannot read
-      // .env. Its key gets in once enrolled, after a device approves it, as
-      // over the relay. The box already proved the key; only this computer
-      // may ask, so nobody on the network can raise approval prompts.
+      // Otherwise the device proves its key, such as a phone approved over
+      // the relay or the desktop app under a Windows account that cannot read
+      // .env; see DeviceAuthGate.directAuth. An enrolled device's wrong token
+      // is one a device removal rotated, so its key still lets it in.
       const publicKey = transport.peerKey;
-      const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "");
-      if (!publicKey || !local) {
+      if (!publicKey || (msg.token && deviceRegistry.get(publicKey)?.kind !== "device")) {
+        if (msg.token) console.log("Rejected direct E2E auth: invalid token");
         transport.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
         ws.close(1008, "Unauthorized");
         return;
       }
-      const outcome = deviceAuthGate.deviceAuth(publicKey, "control", { name: msg.name, platform: msg.platform });
+      const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "");
+      const outcome = deviceAuthGate.directAuth(publicKey, { name: msg.name, platform: msg.platform }, local);
       const peer: { publicKey: string; close: (reason: string) => void; open?: () => void } = {
         publicKey,
         close: (reason) => ws.close(1008, reason),
@@ -12186,7 +12184,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         keyedDirectPeers.add(peer);
         ws.once("close", () => keyedDirectPeers.delete(peer));
         transport.send(JSON.stringify({ type: "device_auth_result", ok: true }));
-        open(false);
+        open(keyHoldsToken(publicKey));
         return;
       }
       transport.send(JSON.stringify({ type: "device_auth_result", ok: false, reason: outcome.reason, ...(outcome.code ? { code: outcome.code } : {}) }));
@@ -12197,7 +12195,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       transport.holdForApproval();
       peer.open = () => {
         transport.send(JSON.stringify({ type: "device_auth_result", ok: true }));
-        open(false);
+        open(keyHoldsToken(publicKey));
       };
       keyedDirectPeers.add(peer);
       ws.once("close", () => {
@@ -12340,7 +12338,7 @@ function startRelayClient(): void {
     peerAuth: deviceAuthGate,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
-    serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, relayKeyHoldsToken(publicKey)),
+    serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey)),
     onMessage: (msg: ClientMessage) => {
       if (!relayConnectionHandler) {
         // Create handler on first message (phone just paired)
@@ -12421,7 +12419,7 @@ function startRelayClient(): void {
     peerAuth: deviceAuthGate,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
-    serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, relayKeyHoldsToken(publicKey)),
+    serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey)),
     onMessage: (msg: ClientMessage) => {
       if (!relayBulkConnectionHandler) {
         relayBulkConnectionHandler = createConnectionHandler(

@@ -104,6 +104,21 @@ export class DeviceAuthGate {
     return { ok: false, reason: "approval_required", code, notify };
   }
 
+  /**
+   * Handles a token-less direct_auth on a direct socket, where the key
+   * exchange already proved `publicKey`. From this computer it works like
+   * device_auth over the relay, so another Windows account's app can ask for
+   * approval. From the network only an enrolled device gets in, which gives
+   * phones approved over the relay their LAN route without the token and
+   * lets nobody there raise approval prompts.
+   */
+  directAuth(publicKey: string, request: DeviceAuthRequest, fromThisComputer: boolean): DeviceAuthOutcome {
+    if (!fromThisComputer && this.registry.get(publicKey)?.kind !== "device") {
+      return { ok: false, reason: "not_approved", close: true };
+    }
+    return this.deviceAuth(publicKey, "control", { name: request.name, platform: request.platform });
+  }
+
   /** Returns true once the key has used up its wrong-token budget. */
   private noteWrongToken(publicKey: string): boolean {
     const now = Date.now();

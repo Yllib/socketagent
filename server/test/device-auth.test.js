@@ -258,3 +258,22 @@ test("repeated wrong tokens close the peer", () => {
   assert.equal(h.frames.length, before);
   assert.equal(registry.get(toBase64(phone.publicKey)), undefined);
 });
+
+test("a token-less direct socket from the network gets in only with an enrolled device key", () => {
+  const registry = new DeviceRegistry(registryFile(), true);
+  const gate = new DeviceAuthGate(registry, () => AUTH_TOKEN);
+  const [approved, stranger, computer] = [generateKeyPair(), generateKeyPair(), generateKeyPair()].map((keys) => toBase64(keys.publicKey));
+  registry.enroll({ publicKey: approved, kind: "device", name: "Pixel", platform: "android", via: "approval" });
+  registry.enroll({ publicKey: computer, kind: "computer", name: "Desktop", platform: "computer", via: "link",
+    access: { read: true, agents: true, commands: true }, confirm: "never" });
+
+  assert.deepEqual(gate.directAuth(approved, { name: "Pixel", platform: "android" }, false), { ok: true, enrolled: false });
+  // Strangers on the network are closed without an approval prompt.
+  assert.deepEqual(gate.directAuth(stranger, { name: "Laptop" }, false), { ok: false, reason: "not_approved", close: true });
+  assert.deepEqual(gate.directAuth(computer, {}, false), { ok: false, reason: "not_approved", close: true });
+  assert.equal(registry.get(stranger), undefined);
+  // From this computer the same key asks for approval, as over the relay.
+  const local = gate.directAuth(stranger, { name: "kayla on Desktop", platform: "windows" }, true);
+  assert.equal(local.ok === false && local.reason, "approval_required");
+  assert.equal(local.ok === false && local.notify?.name, "kayla on Desktop");
+});

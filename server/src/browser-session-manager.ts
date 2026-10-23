@@ -1963,7 +1963,10 @@ export class BrowserSessionManager {
       "--disable-backgrounding-occluded-windows",
       "--disable-renderer-backgrounding",
       "--disable-background-timer-throttling",
-      "--disable-features=Translate,OptimizationHints,msEdgeFirstRunExperience",
+      // Under SYSTEM, Chrome's sandboxed network service crashes as it starts
+      // and its restart stalls the first navigations, so it runs unsandboxed
+      // there. Renderers keep their sandbox.
+      `--disable-features=Translate,OptimizationHints,msEdgeFirstRunExperience${process.platform === "win32" && serviceState.service ? ",NetworkServiceSandbox" : ""}`,
       "--password-store=basic",
       "about:blank",
     ], {

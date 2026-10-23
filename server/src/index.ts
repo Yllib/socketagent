@@ -222,7 +222,8 @@ let browserRuntimeInstallPromise: Promise<void> | null = null;
 function runBrowserRuntimeInstaller(): Promise<void> {
   const scriptPath = path.join(__dirname, "..", "scripts", "install-browser-runtime.js");
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(process.execPath, [scriptPath], {
+    const args = process.platform === "win32" && serviceState.service ? ["--unsandboxed-network-service"] : [];
+    const child = spawn(process.execPath, [scriptPath, ...args], {
       cwd: path.dirname(scriptPath),
       env: process.env,
       windowsHide: true,

@@ -108,6 +108,11 @@ function runBrowserCheck(executable, args, outputFd, errorFd) {
   });
 }
 
+// The server passes this while it runs as SYSTEM, where Chrome's sandboxed
+// network service crashes as it starts and stalls the first page load. The
+// browser sessions turn the same sandbox off there; see browser-session-manager.ts.
+const unsandboxedNetworkService = process.argv.includes("--unsandboxed-network-service");
+
 // Chrome's Windows GUI executable does not reliably return --dump-dom output
 // when started without a console. Validate the CDP page used by SocketAgent.
 /** @param {string} executable @param {string} profileDir
@@ -119,6 +124,7 @@ async function validateWindowsLaunch(executable, profileDir, outputFd, errorFd) 
     "--disable-background-networking", "--disable-background-mode",
     "--no-first-run", "--no-default-browser-check",
     `--user-data-dir=${profileDir}`,
+    ...(unsandboxedNetworkService ? ["--disable-features=NetworkServiceSandbox"] : []),
     "data:text/html,<title>SocketAgent</title><p>ok</p>",
   ], { windowsHide: true, stdio: ["ignore", outputFd, errorFd] });
   /** @type {unknown} */

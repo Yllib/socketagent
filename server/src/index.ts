@@ -6061,6 +6061,11 @@ function createConnectionHandler(
           broadcastSessionList();
         }).catch((err: unknown) => {
           bindClientConversation(sessionForRun);
+          // A restart or a Windows handoff ended the turn, and the recovery
+          // journal resumes it on the next server, which the session's
+          // server_recovery notices say. The client reconnects and sees it
+          // continue, so this is no failure to report.
+          if (shuttingDown && recoveryOwners.has(sessionForRun)) return;
           const sid = sessionForRun.getSessionId();
           sendJson({
             type: "prompt_failed",

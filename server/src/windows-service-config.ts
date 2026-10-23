@@ -157,27 +157,32 @@ export function windowsServiceState(serverDir: string, env: NodeJS.ProcessEnv, i
   };
 }
 
-/** Git compares safe.directory against a forward-slash path. */
-function gitPath(value: string): string {
-  return value.replace(/\\/g, "/");
-}
-
 /**
  * Environment changes that point a service-identity process at the owner's
- * profile. Values the environment already sets for Codex, Claude and git
- * config stay as they are.
+ * profile: home, app data, temp, Codex home and git config. Values the
+ * environment already sets for Codex, Claude and git config stay as they are.
  */
-export function pinnedServiceEnvironment(config: WindowsServiceConfig, repoRoot: string, env: NodeJS.ProcessEnv): Record<string, string> {
+export function pinnedServiceEnvironment(config: WindowsServiceConfig, env: NodeJS.ProcessEnv): Record<string, string> {
+  const temp = win.join(config.localAppData, "Temp");
+  const drive = win.parse(config.profile).root.replace(/\\$/, "");
   return {
     HOME: config.profile,
     USERPROFILE: config.profile,
+    HOMEDRIVE: drive,
+    HOMEPATH: config.profile.slice(drive.length) || "\\",
     APPDATA: config.appData,
     LOCALAPPDATA: config.localAppData,
+    TEMP: temp,
+    TMP: temp,
     ...(env.CODEX_HOME?.trim() ? {} : { CODEX_HOME: config.codexHome }),
     ...(config.claudeConfigDir && !env.CLAUDE_CONFIG_DIR?.trim() ? { CLAUDE_CONFIG_DIR: config.claudeConfigDir } : {}),
-    // The checkout belongs to the owner, so git refuses it as "dubious
-    // ownership" under another account unless it is marked safe.
-    ...(env.GIT_CONFIG_COUNT ? {} : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: gitPath(repoRoot) }),
+    // The owner's credentials live in the owner's Credential Manager, out of
+    // reach here, and nobody can answer a prompt in session 0.
+    GCM_INTERACTIVE: "never",
+    GIT_TERMINAL_PROMPT: "0",
+    // The owner's checkouts look like "dubious ownership" to git under
+    // another account unless they are marked safe.
+    ...(env.GIT_CONFIG_COUNT ? {} : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "*" }),
   };
 }
 
@@ -219,6 +224,11 @@ export function windowsRecoveryBatContent(serverDir: string, powershellExe: stri
     'echo [recovery] SocketAgent is not listening on port %PORT%; restarting scheduled task. >> "%LOG_FILE%" 2>&1',
     'set "TASK_NAME=SocketAgent"',
     'schtasks /Query /TN SocketAgent >nul 2>&1 || set "TASK_NAME=SocketClaude"',
+    // The owner's task serves while it runs, which is while the owner is
+    // signed in; otherwise the SYSTEM task does. See windows-machine-service.
+    'schtasks /Query /TN "%TASK_NAME%" /FO CSV /NH 2>nul | findstr /C:"Running" >nul && goto restart',
+    'schtasks /Query /TN SocketAgentService >nul 2>&1 && set "TASK_NAME=SocketAgentService"',
+    ":restart",
     'schtasks /End /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1',
     '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 2" >nul 2>&1',
     'schtasks /Run /TN "%TASK_NAME%" >> "%LOG_FILE%" 2>&1',
@@ -229,7 +239,16 @@ export function windowsRecoveryBatContent(serverDir: string, powershellExe: stri
   ].join("\r\n");
 }
 
-/** run-service.bat: the restart loop the SocketAgent task runs. */
+/**
+ * The PATH an existing run-service.bat sets. A server rewriting the wrapper
+ * keeps it, so the wrapper never changes with the account that wrote it;
+ * setup is what sets it.
+ */
+export function wrapperPathValue(batText: string): string | undefined {
+  return /^set "PATH=(.*)"\r?$/m.exec(batText)?.[1];
+}
+
+/** run-service.bat: the restart loop both Windows tasks run. */
 export function windowsRunServiceBatContent(inputs: WindowsWrapperInputs): string {
   const { config, serverDir } = inputs;
   const logFile = win.join(serverDir, "socketagent.log");
@@ -274,7 +293,12 @@ export function windowsRunServiceBatContent(inputs: WindowsWrapperInputs): strin
     // hang off it.
     ":arm_recovery",
     "call :pin_profile",
-    "call :single_server",
+    // Waits here until this copy should serve; see windows-machine-service.
+    // The wait can last hours, and the server may rewrite this file in that
+    // time, so the goto on the same line moves on by label instead of by
+    // offset. cmd parses a whole line before running any of it.
+    '"%NODE_EXE%" "%SERVER_DIR%\\dist\\windows-service-cli.js" arbitrate >nul 2>&1 & goto arbitrated',
+    ":arbitrated",
     'if not exist "%RECOVERY_BAT%" exit /b 0',
     '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%SERVER_DIR%\\scripts\\register-windows-recovery.ps1" >nul 2>&1',
     "exit /b 0",
@@ -283,26 +307,12 @@ export function windowsRunServiceBatContent(inputs: WindowsWrapperInputs): strin
     // and checkout, as the server does for itself in windows-service-env.
     ":pin_profile",
     `if /I "%USERPROFILE%"=="${batchSetValue(config.profile)}" exit /b 0`,
-    `set "USERPROFILE=${batchSetValue(config.profile)}"`,
-    `set "APPDATA=${batchSetValue(config.appData)}"`,
-    `set "LOCALAPPDATA=${batchSetValue(config.localAppData)}"`,
-    `if not defined CODEX_HOME set "CODEX_HOME=${batchSetValue(config.codexHome)}"`,
+    ...Object.entries(pinnedServiceEnvironment(config, {}))
+      .filter(([key]) => key !== "HOME")
+      .map(([key, value]) => `set "${key}=${batchSetValue(value)}"`),
     'if not exist "%CODEX_HOME%\\" mkdir "%CODEX_HOME%" >nul 2>&1',
-    ...(config.claudeConfigDir ? [`if not defined CLAUDE_CONFIG_DIR set "CLAUDE_CONFIG_DIR=${batchSetValue(config.claudeConfigDir)}"`] : []),
-    "if defined GIT_CONFIG_COUNT exit /b 0",
-    'set "GIT_CONFIG_COUNT=1"',
-    'set "GIT_CONFIG_KEY_0=safe.directory"',
-    `set "GIT_CONFIG_VALUE_0=${batchSetValue(gitPath(inputs.repoRoot))}"`,
+    'if not exist "%TEMP%\\" mkdir "%TEMP%" >nul 2>&1',
     "exit /b 0",
-    "",
-    // A copy started by a logon task stops here when the machine service
-    // already serves. `exit` without /b ends this whole cmd.exe. It writes
-    // no log line: the serving wrapper's redirect holds the log against
-    // other writers.
-    ":single_server",
-    '"%NODE_EXE%" "%SERVER_DIR%\\scripts\\check-machine-service.js" >nul 2>&1',
-    "if errorlevel 1 exit /b 0",
-    "exit 0",
     "",
     ":preflight",
     "call :update",

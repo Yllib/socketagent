@@ -1,3 +1,4 @@
+import { serviceState } from "./windows-service-env";
 import type { ComputersToolExecutor } from "./computers-tool";
 import type { ClientTransport } from "./client-transport";
 import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
@@ -2812,6 +2813,7 @@ export class CodexSession {
       });
       void completion.catch(() => {});
 
+      this.noteFullAccess(this.threadId);
       const collaborationMode = this.codexCollaborationMode();
       const turn = await this.appServer!.startTurn({
         threadId: this.threadId,
@@ -3308,6 +3310,36 @@ export class CodexSession {
     this.appServerAuthenticationInvalidated = false;
   }
 
+  /**
+   * The sandbox Codex gets. Codex's Windows sandbox creates its child on the
+   * signed-in desktop, which SYSTEM cannot reach, so while SocketAgent serves
+   * as SYSTEM (nobody it belongs to is signed in) a sandboxed mode runs with
+   * full access, says so once in the chat, and keeps asking approval.
+   */
+  /** The sandbox Codex gets. SYSTEM has no session for Codex's Windows sandbox, so it gets full access there. */
+  private effectiveSandbox(): SandboxMode {
+    if (process.platform !== "win32" || !serviceState.service) return this._sandbox;
+    return "danger-full-access";
+  }
+
+  /** Tells the chat once per thread when the SYSTEM server lifts a sandboxed mode to full access. */
+  private noteFullAccess(threadId: string): void {
+    if (this._sandbox === "danger-full-access" || this.effectiveSandbox() !== "danger-full-access") return;
+    if (this.fullAccessNotedFor === threadId) return;
+    this.fullAccessNotedFor = threadId;
+    const content = "This computer's owner is signed out, so SocketAgent runs as SYSTEM and Codex's sandbox can't start. This session runs with full access, still asking before commands, until the owner signs in.";
+    appendHistory(threadId, {
+      role: "notification",
+      content,
+      status: "info",
+      toolInput: { notificationKind: "windows_service_full_access" },
+      timestamp: now(),
+    });
+    this.send({ type: "task_notification", taskId: `windows_service_full_access_${threadId}`, status: "completed", summary: content, sessionId: threadId });
+  }
+
+  private fullAccessNotedFor: string | undefined;
+
   private buildAppServerThreadParams(): {
     cwd: string;
     developerInstructions: string;
@@ -3323,7 +3355,7 @@ export class CodexSession {
     return {
       cwd: this.cwd,
       developerInstructions: this.codexDeveloperInstructions() || "",
-      sandbox: this._sandbox,
+      sandbox: this.effectiveSandbox(),
       approvalPolicy: this._approvalPolicy,
       approvalsReviewer: this._approvalsReviewer,
       ...(model ? { model } : {}),

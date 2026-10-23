@@ -763,6 +763,16 @@ Write-Phase "Phase 6: Register Windows Service"
 $nodeExe = (Get-Command node).Source
 $powerShellExe = Get-CurrentPowerShellExecutable
 
+# SocketAgentService runs this checkout's wrapper as SYSTEM. Stop it while
+# setup rewrites the wrapper; it is registered and started again below.
+$machineTask = Get-ScheduledTask -TaskName 'SocketAgentService' -ErrorAction SilentlyContinue
+if ($machineTask) {
+    if ($LIMITED_INSTALL) { throw "This install also runs as the SocketAgentService task. Rerun setup from PowerShell opened with Run as administrator" }
+    Stop-ScheduledTask -TaskName 'SocketAgentService'
+    Start-Sleep -Seconds 2
+    Write-Host "  Stopped SocketAgentService"
+}
+
 # Stop and remove existing task
 $existing = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
 if ($existing) {
@@ -851,45 +861,10 @@ Grant-SocketAgentTaskOwnerAccess $TASK_NAME
 
 $runLabel = if ($LIMITED_INSTALL) { 'limited, no administrator rights' } else { 'administrator' }
 Write-Ok "Registered as scheduled task '$TASK_NAME' (interactive logon, $runLabel)"
-
-# Add Windows Firewall rule. A limited install cannot, and the catch says so.
-$fwRuleName = "SocketAgent Server (TCP $Port)"
-try {
-    $existingRule = Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
-    if (-not $existingRule) {
-        New-NetFirewallRule `
-            -DisplayName $fwRuleName `
-            -Direction Inbound `
-            -Action Allow `
-            -Protocol TCP `
-            -LocalPort $Port `
-            -Profile Private,Domain `
-            -Description "Allow inbound connections to SocketAgent server" | Out-Null
-        Write-Ok "Firewall rule added for port $Port (Private/Domain networks)"
-    } else {
-        Write-Ok "Firewall rule already exists for port $Port"
-    }
-} catch {
-    Write-Warn "Could not add firewall rule (requires admin). You may need to allow port $Port manually."
-}
-
-# mDNS lets the phone find this computer again after its LAN address changes.
-# The server adds the same rule itself, but only when it runs elevated.
-$mdnsRuleName = "SocketAgent mDNS (UDP 5353)"
-try {
-    if (-not (Get-NetFirewallRule -DisplayName $mdnsRuleName -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule `
-            -DisplayName $mdnsRuleName `
-            -Direction Inbound `
-            -Action Allow `
-            -Protocol UDP `
-            -LocalPort 5353 `
-            -Profile Private,Domain `
-            -Description "Allow LAN discovery of the SocketAgent server" | Out-Null
-        Write-Ok "Firewall rule added for LAN discovery (UDP 5353)"
-    }
-} catch {
-    Write-Warn "Could not add the LAN discovery firewall rule. The phone still connects through the relay or the saved address."
+# Inbound rules for the port, LAN discovery and node, so Windows never asks
+# whether node may listen. A limited install cannot add them and says so.
+Add-SocketAgentFirewallRules $Port $nodeExe 3>&1 | ForEach-Object {
+    if ($_ -is [Management.Automation.WarningRecord]) { Write-Warn $_.Message } else { Write-Ok $_ }
 }
 
 # Start immediately
@@ -904,6 +879,20 @@ try {
 & $nodeExe (Join-Path $SERVER_DIR 'scripts\check-health.js') 180
 if ($LASTEXITCODE -ne 0) { throw "Server did not become ready. Check $LOG_FILE" }
 Write-Ok "SocketAgent is ready"
+
+# The same wrapper as SYSTEM serves while this account is signed out, so the
+# computer stays reachable at the sign-in screen and for every other account.
+# It starts now and waits while the task above serves.
+if ($LIMITED_INSTALL) {
+    Write-Warn "Limited install: SocketAgent serves only while $env:USERNAME is signed in."
+} else {
+    try {
+        Register-SocketAgentMachineService $Port $nodeExe | ForEach-Object { Write-Ok $_ }
+    } catch {
+        # The server adds it on its next start; see windows-machine-service.ts.
+        Write-Warn "Could not register SocketAgentService yet: $($_.Exception.Message)"
+    }
+}
 $installStateDir = Join-Path $env:LOCALAPPDATA 'SocketAgent'
 New-Item -ItemType Directory -Force $installStateDir | Out-Null
 Set-Content -Path (Join-Path $installStateDir 'install-location.txt') -Value $REPO_ROOT -Encoding UTF8

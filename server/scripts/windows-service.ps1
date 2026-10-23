@@ -47,7 +47,7 @@ function New-SocketAgentTaskAction([string]$BatchFile) {
 
 function Update-SocketAgentTaskLauncher([string]$ServerDirectory) {
     $batch = Join-Path $ServerDirectory 'run-service.bat'
-    foreach ($name in @('SocketAgent', 'SocketClaude')) {
+    foreach ($name in @('SocketAgent', 'SocketClaude', 'SocketAgentService')) {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if (-not $task -or $task.Actions.Count -ne 1) { continue }
         $action = $task.Actions[0]
@@ -109,4 +109,94 @@ function Grant-SocketAgentTaskOwnerAccess([string]$TaskName) {
     $ace = New-Object Security.AccessControl.CommonAce ([Security.AccessControl.AceFlags]::None), ([Security.AccessControl.AceQualifier]::AccessAllowed), 0x10000000, $sid, $false, $null
     $descriptor.DiscretionaryAcl.InsertAce($descriptor.DiscretionaryAcl.Count, $ace)
     $task.SetSecurityDescriptor($descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Access), 0)
+}
+
+# The rest registers SocketAgentService, the SYSTEM task that serves while the
+# owner is signed out. See src\windows-machine-service.ts.
+
+$SocketAgentServerDir = Split-Path $PSScriptRoot -Parent
+
+# Registers a task that runs as SYSTEM in Session 0.
+function Register-SocketAgentSystemTask([string]$Name, $Action, $Trigger, $Settings) {
+    $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+    $parameters = @{ TaskName = $Name; Action = $Action; Principal = $principal; Settings = $Settings; Force = $true }
+    if ($Trigger) { $parameters.Trigger = $Trigger }
+    Register-ScheduledTask @parameters | Out-Null
+}
+
+# C:\ProgramData\SocketAgent holds machine-server.json, which tells the
+# desktop app under every account where this install answers and with which
+# key; the server writes it. Only SYSTEM and administrators may write there,
+# because ProgramData lets any user create files and the app trusts this one.
+function Initialize-SocketAgentMachineFolder {
+    $directory = Join-Path $env:ProgramData 'SocketAgent'
+    New-Item -ItemType Directory -Force $directory | Out-Null
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'))
+    $acl.SetAccessRuleProtection($true, $false)
+    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    foreach ($entry in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $sid = New-Object Security.Principal.SecurityIdentifier $entry[0]
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, $entry[1], $inherit, 'None', 'Allow'))
+    }
+    Set-Acl -LiteralPath $directory -AclObject $acl
+}
+
+# Lets every signed-in account see and start the task, so the desktop app
+# under any account can start the machine server. The task runs code only
+# administrators can change.
+function Grant-SocketAgentTaskStartAccess([string]$TaskName) {
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    $task = $scheduler.GetFolder('\').GetTask($TaskName)
+    $descriptor = New-Object Security.AccessControl.RawSecurityDescriptor ($task.GetSecurityDescriptor(4))
+    $sid = New-Object Security.Principal.SecurityIdentifier 'S-1-5-11'
+    # FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, which Task Scheduler reads as read and run.
+    $ace = New-Object Security.AccessControl.CommonAce ([Security.AccessControl.AceFlags]::None), ([Security.AccessControl.AceQualifier]::AccessAllowed), 0x1200a9, $sid, $false, $null
+    $descriptor.DiscretionaryAcl.InsertAce($descriptor.DiscretionaryAcl.Count, $ace)
+    $task.SetSecurityDescriptor($descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Access), 0)
+}
+
+# Inbound rules for the server's port, LAN discovery, and node itself. The
+# program rule is what keeps Windows from asking whether node may listen.
+# Returns warnings for the rules it could not add.
+function Add-SocketAgentFirewallRules([int]$Port, [string]$NodeExe) {
+    $rules = @(
+        @{ DisplayName = "SocketAgent Server (TCP $Port)"; Protocol = 'TCP'; LocalPort = $Port; Description = 'Allow inbound connections to SocketAgent server' },
+        @{ DisplayName = 'SocketAgent mDNS (UDP 5353)'; Protocol = 'UDP'; LocalPort = 5353; Description = 'Allow LAN discovery of the SocketAgent server' },
+        @{ DisplayName = 'SocketAgent Node.js'; Program = $NodeExe; Description = 'Allow the SocketAgent server to listen without a firewall prompt' }
+    )
+    foreach ($rule in $rules) {
+        try {
+            $existing = Get-NetFirewallRule -DisplayName $rule.DisplayName -ErrorAction SilentlyContinue
+            if ($existing -and $rule.Program) {
+                $filter = $existing | Get-NetFirewallApplicationFilter
+                if ($filter.Program -ieq $rule.Program) { continue }
+                $existing | Remove-NetFirewallRule
+            } elseif ($existing) { continue }
+            New-NetFirewallRule @rule -Direction Inbound -Action Allow -Profile Private,Domain | Out-Null
+            "Added firewall rule '$($rule.DisplayName)'"
+        } catch {
+            Write-Warning "Could not add firewall rule '$($rule.DisplayName)': $($_.Exception.Message)"
+        }
+    }
+}
+
+# SocketAgentService runs this checkout's run-service.bat as SYSTEM at
+# startup, at any logon and every 5 minutes. Its wrapper waits while the
+# owner's task serves, so it is started right away. Needs elevation.
+function Register-SocketAgentMachineService([int]$Port, [string]$NodeExe) {
+    $name = 'SocketAgentService'
+    $batch = Join-Path $SocketAgentServerDir 'run-service.bat'
+    if (-not (Test-Path $batch)) { throw "$batch is missing" }
+    $repeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+    $triggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogOn), $repeat)
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    Register-SocketAgentSystemTask $name (New-SocketAgentTaskAction $batch) $triggers $settings
+    Grant-SocketAgentTaskOwnerAccess $name
+    Grant-SocketAgentTaskStartAccess $name
+    Initialize-SocketAgentMachineFolder
+    Add-SocketAgentFirewallRules $Port $NodeExe
+    Start-ScheduledTask -TaskName $name
+    "Registered and started $name"
 }

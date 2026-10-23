@@ -122,7 +122,8 @@ minutes, along with its `device_pending` notice (send `device_pending_cleared`).
   environment. Anything that captured the value at spawn time must keep
   working.
 - A device can't remove itself through this message. Removing the last
-  `kind:"device"` entry is refused.
+  `kind:"device"` entry is refused unless the request comes from a direct
+  client holding the token, which keeps access without any device.
 
 Capability: `server_capabilities.deviceAuth = {version:1, mode}`. Changes to the
 registry broadcast a fresh capabilities payload so device lists stay current.

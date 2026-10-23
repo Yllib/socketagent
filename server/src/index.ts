@@ -11,7 +11,8 @@ import { SessionTransferJobs } from "./session-transfer-jobs";
 import { modelDownloadArchive } from "./model-download-archive";
 import { serveDownloadFile } from "./http-file-download";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
-import { captureWindowsServiceConfig, describeRuntime, windowsLauncherPath, windowsRecoveryBatContent, windowsRunServiceBatContent, windowsServiceConfigPath, writeWindowsServiceConfig, type WindowsServiceConfig } from "./windows-service-config";
+import { addMachineServiceTask, refreshMachineMarker, SERVICE_TASK, taskExists } from "./windows-machine-service";
+import { captureWindowsServiceConfig, describeRuntime, windowsLauncherPath, windowsRecoveryBatContent, windowsRunServiceBatContent, windowsServiceConfigPath, wrapperPathValue, writeWindowsServiceConfig, type WindowsServiceConfig } from "./windows-service-config";
 import * as dotenv from "dotenv";
 import * as bootstrapPath from "path";
 import * as bootstrapFs from "fs";
@@ -521,6 +522,9 @@ function rotateAuthToken(): void {
 // relay-keys.json didn't exist at boot) once that app is out.
 const deviceRegistry = new DeviceRegistry(socketAgentDataPath("devices.json"), false);
 const deviceAuthGate = new DeviceAuthGate(deviceRegistry, () => AUTH_TOKEN);
+
+/** Whether this install has SocketAgentService, so it serves every Windows account. */
+let machineServiceRegistered = process.platform === "win32" && (serviceState.service || taskExists(SERVICE_TASK));
 console.log(`[Devices] Registry mode: ${deviceRegistry.mode} (${deviceRegistry.list().length} enrolled)`);
 
 // Pairing token for relay — read from .env or generate and persist one
@@ -587,6 +591,7 @@ class DirectClientTransport implements ClientTransport {
     opts: { authenticated: boolean; requireEncryptedAuth: boolean },
   ) {
     this.authenticated = opts.authenticated && !opts.requireEncryptedAuth;
+    this.holdsAuthToken = this.authenticated;
     if (opts.requireEncryptedAuth) {
       this.authTimer = setTimeout(() => {
         if (this.authenticated || this.ws.readyState !== WebSocket.OPEN) return;
@@ -614,6 +619,26 @@ class DirectClientTransport implements ClientTransport {
 
   get hasPeerKey(): boolean {
     return this.peerPublicKey !== null;
+  }
+
+  get peerKey(): string | undefined {
+    return this.peerPublicKey ? toBase64(this.peerPublicKey) : undefined;
+  }
+
+  /** True when this client proved AUTH_TOKEN, so capabilities may repeat it. */
+  holdsAuthToken = false;
+
+  /** Set while the key waits for another device to approve it. */
+  heldForApproval = false;
+
+  /** Keeps the socket open past the auth timeout while approval is pending. */
+  holdForApproval(): void {
+    this.heldForApproval = true;
+    if (this.authTimer) clearTimeout(this.authTimer);
+    this.authTimer = setTimeout(() => {
+      if (this.authenticated || this.ws.readyState !== WebSocket.OPEN) return;
+      this.ws.close(1008, "Approval timed out");
+    }, 10 * 60 * 1000);
   }
 
   send(data: string): void {
@@ -659,6 +684,7 @@ class DirectClientTransport implements ClientTransport {
 
   authenticate(binaryEnvelope: boolean): void {
     this.authenticated = true;
+    this.heldForApproval = false;
     this.binaryEnabled = binaryEnvelope;
     if (this.authTimer) {
       clearTimeout(this.authTimer);
@@ -1496,13 +1522,20 @@ function relayPairingInfo(): { relayUrl: string; pairingToken: string; serverPub
 }
 
 /**
- * How to reach this server on its LAN. Only authenticated clients receive
- * capabilities, and the token is the one they could already use directly.
+ * How to reach this server on its LAN. The token goes only to a client that
+ * already holds it, so a device let in by approval, such as the desktop app
+ * under another Windows account, never learns it.
  */
-function directRouteInfo(): { hosts: string[]; port: number; token: string } | undefined {
+function directRouteInfo(holdsToken: boolean): { hosts: string[]; port: number; token?: string } | undefined {
   if (!ACCEPTS_LAN_CONNECTIONS) return undefined;
   const hosts = localIpv4Addresses();
-  return hosts.length > 0 ? { hosts, port: PORT, token: AUTH_TOKEN } : undefined;
+  return hosts.length > 0 ? { hosts, port: PORT, ...(holdsToken ? { token: AUTH_TOKEN } : {}) } : undefined;
+}
+
+/** Relay peers enrolled by the token, or before devices were tracked, hold it. */
+function relayKeyHoldsToken(publicKey: string | null): boolean {
+  const via = publicKey ? deviceRegistry.get(publicKey)?.via : undefined;
+  return via === "token" || via === "migration";
 }
 
 function publicRelayUrl(relayUrl: string): string {
@@ -1515,9 +1548,16 @@ function publicRelayUrl(relayUrl: string): string {
   return relayUrl;
 }
 
+/**
+ * `holdsToken` is true only for clients that already have AUTH_TOKEN. The
+ * others get neither the token nor the relay pairing: while the device
+ * registry is still learning, pairing through the relay enrolls a key as
+ * migrated, and migrated keys are sent the token.
+ */
 function serverCapabilitiesPayload(
   binaryEnvelope = true,
   transportLane: TransportLane = "control",
+  holdsToken = false,
 ): Record<string, unknown> {
   const settings = getAdvertisedServerSettings();
   const pushDelivery = getPushDeliveryCapabilities();
@@ -1574,8 +1614,8 @@ function serverCapabilitiesPayload(
     directE2e: {
       serverPubkey: toBase64(loadServerKeyPair().publicKey),
     },
-    relayPairing: relayPairingInfo(),
-    directRoute: directRouteInfo(),
+    relayPairing: holdsToken ? relayPairingInfo() : undefined,
+    directRoute: directRouteInfo(holdsToken),
     pushNotifications: {
       version: 3,
       directFcm: true,
@@ -1591,12 +1631,18 @@ function serverCapabilitiesPayload(
   };
 }
 
+/** Sends each client its own capabilities, since only some may see the token. */
 function broadcastServerCapabilities(): void {
-  const msg = JSON.stringify(serverCapabilitiesPayload(true));
+  const withToken = serverCapabilitiesPayload(true, "control", true);
+  const withoutToken = serverCapabilitiesPayload(true, "control", false);
   for (const client of connectedClients) {
-    if (client.readyState === WebSocket.OPEN) client.send(msg);
+    if (client.readyState !== WebSocket.OPEN) continue;
+    client.send(JSON.stringify(client instanceof DirectClientTransport && client.holdsAuthToken ? withToken : withoutToken));
   }
-  if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
+  if (!relayClient) return;
+  for (const key of new Set(relayClient.openPeerKeys())) {
+    relayClient.sendToPeersWithKey(key, relayKeyHoldsToken(key) ? withToken : withoutToken);
+  }
 }
 
 // A Codex config problem shows in the computer's errors and warnings as soon as Codex reports it.
@@ -3819,10 +3865,36 @@ function clearDevicePending(publicKey: string): void {
   broadcastControlMessage({ type: "device_pending_cleared", publicKey });
 }
 
+/**
+ * Direct sockets from this computer let in by their device key rather than
+ * the token. `open` is set while one waits for its key to be approved.
+ */
+const keyedDirectPeers = new Set<{ publicKey: string; close: (reason: string) => void; open?: () => void }>();
+
+function directPeerHeld(publicKey: string): boolean {
+  return [...keyedDirectPeers].some((peer) => peer.publicKey === publicKey && peer.open);
+}
+
 /** A lane dropped a held peer; the notice goes once no lane holds that key. */
 function onPendingPeerDropped(publicKey: string): void {
   if (relayClient?.isKeyPending(publicKey) || relayBulkClient?.isKeyPending(publicKey)) return;
+  if (directPeerHeld(publicKey)) return;
   clearDevicePending(publicKey);
+}
+
+/** Opens the held direct sockets for a key that was just approved. */
+function approveDirectPeersWithKey(publicKey: string): void {
+  for (const peer of keyedDirectPeers) {
+    if (peer.publicKey !== publicKey || !peer.open) continue;
+    const open = peer.open;
+    peer.open = undefined;
+    open();
+  }
+}
+
+/** Closes the direct sockets of a key that was denied or removed. */
+function dropDirectPeersWithKey(publicKey: string, reason: string): void {
+  for (const peer of [...keyedDirectPeers]) if (peer.publicKey === publicKey) peer.close(reason);
 }
 
 function onlineDeviceKeys(): Set<string> {
@@ -4797,7 +4869,7 @@ function createConnectionHandler(
       transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       transport.setClientCapabilities?.(msg);
       sendJson({
-        ...serverCapabilitiesPayload(true, transportLane),
+        ...serverCapabilitiesPayload(true, transportLane, transport instanceof DirectClientTransport && transport.holdsAuthToken),
         codexCollaborationMode: "default",
       });
       return;
@@ -10044,6 +10116,7 @@ function createConnectionHandler(
         });
         relayClient?.approvePeersWithKey(publicKey);
         relayBulkClient?.approvePeersWithKey(publicKey);
+        approveDirectPeersWithKey(publicKey);
         clearDevicePending(publicKey);
         sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });
         break;
@@ -10058,6 +10131,7 @@ function createConnectionHandler(
         const publicKey = normalizePublicKey(msg.publicKey);
         relayClient?.dropPeersWithKey(publicKey, "not_approved");
         relayBulkClient?.dropPeersWithKey(publicKey, "not_approved");
+        dropDirectPeersWithKey(publicKey, "Not approved");
         clearDevicePending(publicKey);
         sendJson({ type: "device_deny_result", requestId, ok: true, publicKey });
         break;
@@ -10080,7 +10154,11 @@ function createConnectionHandler(
           sendJson({ type: "device_remove_result", requestId, ok: false, publicKey, error: "A device can't remove itself. Use another device." });
           break;
         }
-        if (entry.kind === "device" && deviceRegistry.countDevices() <= 1) {
+        // The last device is refused so its owner keeps a way in, which a
+        // client holding the token already has. Another Windows account's
+        // app is often the only device the owner can remove.
+        const callerHoldsToken = transport instanceof DirectClientTransport && transport.holdsAuthToken;
+        if (entry.kind === "device" && deviceRegistry.countDevices() <= 1 && !callerHoldsToken) {
           sendJson({ type: "device_remove_result", requestId, ok: false, publicKey, error: "The last device can't be removed." });
           break;
         }
@@ -10092,6 +10170,7 @@ function createConnectionHandler(
         if (entry.kind === "device") {
           relayClient?.dropPeersWithKey(publicKey, "removed");
           relayBulkClient?.dropPeersWithKey(publicKey, "removed");
+          dropDirectPeersWithKey(publicKey, "Removed");
         } else {
           relayLinkClient?.dropPeersWithKey(publicKey, "removed");
         }
@@ -10671,6 +10750,29 @@ function recoverInterruptedSessions(): void {
 }
 
 const httpServer = http.createServer((req, res) => {
+  // Lets setup under any Windows account see that the machine-wide server is
+  // up. It needs no token, since only the owner can read .env, and returns
+  // nothing secret. `machine` is true for both of an install's tasks once it
+  // has SocketAgentService; `system` says the SYSTEM copy is the one serving.
+  if (req.method === "GET" && req.url?.split("?")[0] === "/internal/machine/health") {
+    const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "");
+    res.writeHead(local ? 200 : 404, { "Content-Type": "application/json" });
+    res.end(local ? JSON.stringify({ service: "socketagent", ready: serverReady && !shuttingDown, machine: machineServiceRegistered, system: serviceState.service }) : "{}");
+    return;
+  }
+  // The owner's wrapper calls this when the owner signs in while the SYSTEM
+  // copy serves; see windows-machine-service.
+  if (req.method === "POST" && req.url?.split("?")[0] === "/internal/machine/yield") {
+    const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "");
+    if (!local || getBearerToken(req) !== AUTH_TOKEN) { res.writeHead(401); res.end("Unauthorized"); return; }
+    if (!serviceState.service) { res.writeHead(409); res.end("This server already runs as the owner"); return; }
+    for (const [sid, session] of activeSessions) {
+      if (sessionIsBusy(session)) appendRecoveryNotice(sessionInstanceId(session) || sid, "The owner signed in, so their own server takes over. Interrupted work will resume there.");
+    }
+    res.writeHead(202, { "Content-Type": "application/json" });
+    res.end("{}", () => void shutdownGracefully("The owner's server is taking over"));
+    return;
+  }
   if (req.url?.startsWith("/internal/restart/")) {
     const remote = req.socket.remoteAddress || "";
     if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote)
@@ -10704,7 +10806,13 @@ const httpServer = http.createServer((req, res) => {
     }
     if (req.method === "GET" && route === "/internal/restart/health") {
       res.writeHead(serverReady && !shuttingDown ? 200 : 503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ service: "socketagent", ready: serverReady && !shuttingDown, pid: process.pid, identity: describeRuntime(serviceState, SERVER_DIR) }));
+      res.end(JSON.stringify({
+        service: "socketagent",
+        ready: serverReady && !shuttingDown,
+        pid: process.pid,
+        identity: describeRuntime(serviceState, SERVER_DIR),
+        relay: relayClient ? relayClient.currentStatus : "off",
+      }));
       return;
     }
     if (req.method === "GET" && route === "/internal/restart/status") {
@@ -12029,27 +12137,80 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
     }
 
     if (msg.type === "direct_auth") {
-      const token = msg.token;
-      if (token !== AUTH_TOKEN) {
-        console.log("Rejected direct E2E auth: invalid token");
+      const authMessage = msg;
+      const open = (holdsToken: boolean) => {
+        transport.holdsAuthToken = holdsToken;
+        transport.authenticate(authMessage.binaryEnvelope === true);
+        transport.setClientCapabilities(authMessage);
+        transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(authMessage);
+        transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(authMessage);
+        console.log(
+          `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane}, ${holdsToken ? "token" : "device key"})`,
+        );
+        if (transportLane === "control") {
+          connectedClients.add(transport);
+          sendStatusSyncTo(transport);
+        }
+        transport.send(JSON.stringify(
+          serverCapabilitiesPayload(transport.usesBinaryEnvelope, transportLane, holdsToken),
+        ));
+      };
+      if (msg.token) {
+        if (msg.token !== AUTH_TOKEN) {
+          console.log("Rejected direct E2E auth: invalid token");
+          transport.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
+          ws.close(1008, "Unauthorized");
+          return;
+        }
+        open(true);
+        return;
+      }
+      // No token: the desktop app under a Windows account that cannot read
+      // .env. Its key gets in once enrolled, after a device approves it, as
+      // over the relay. The box already proved the key; only this computer
+      // may ask, so nobody on the network can raise approval prompts.
+      const publicKey = transport.peerKey;
+      const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "");
+      if (!publicKey || !local) {
         transport.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
         ws.close(1008, "Unauthorized");
         return;
       }
-      transport.authenticate(msg.binaryEnvelope === true);
-      transport.setClientCapabilities(msg);
-      transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
-      transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
-      console.log(
-        `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane})`,
-      );
-      if (transportLane === "control") {
-        connectedClients.add(transport);
-        sendStatusSyncTo(transport);
+      const outcome = deviceAuthGate.deviceAuth(publicKey, "control", { name: msg.name, platform: msg.platform });
+      const peer: { publicKey: string; close: (reason: string) => void; open?: () => void } = {
+        publicKey,
+        close: (reason) => ws.close(1008, reason),
+      };
+      if (outcome.ok) {
+        keyedDirectPeers.add(peer);
+        ws.once("close", () => keyedDirectPeers.delete(peer));
+        transport.send(JSON.stringify({ type: "device_auth_result", ok: true }));
+        open(false);
+        return;
       }
-      transport.send(JSON.stringify(
-        serverCapabilitiesPayload(transport.usesBinaryEnvelope, transportLane),
-      ));
+      transport.send(JSON.stringify({ type: "device_auth_result", ok: false, reason: outcome.reason, ...(outcome.code ? { code: outcome.code } : {}) }));
+      if (outcome.close) {
+        ws.close(1008, "Not approved");
+        return;
+      }
+      transport.holdForApproval();
+      peer.open = () => {
+        transport.send(JSON.stringify({ type: "device_auth_result", ok: true }));
+        open(false);
+      };
+      keyedDirectPeers.add(peer);
+      ws.once("close", () => {
+        const wasHeld = peer.open !== undefined;
+        keyedDirectPeers.delete(peer);
+        if (wasHeld) onPendingPeerDropped(publicKey);
+      });
+      if (outcome.notify) noteDevicePending(outcome.notify);
+      return;
+    }
+
+    if (transport.heldForApproval) {
+      // As over the relay, a held peer hears only that it is still waiting.
+      transport.send(JSON.stringify({ type: "device_auth_result", ok: false, reason: "not_approved" }));
       return;
     }
 
@@ -12178,7 +12339,7 @@ function startRelayClient(): void {
     peerAuth: deviceAuthGate,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
-    serverCapabilities: serverCapabilitiesPayload,
+    serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, relayKeyHoldsToken(publicKey)),
     onMessage: (msg: ClientMessage) => {
       if (!relayConnectionHandler) {
         // Create handler on first message (phone just paired)
@@ -12259,7 +12420,7 @@ function startRelayClient(): void {
     peerAuth: deviceAuthGate,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
-    serverCapabilities: serverCapabilitiesPayload,
+    serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, relayKeyHoldsToken(publicKey)),
     onMessage: (msg: ClientMessage) => {
       if (!relayBulkConnectionHandler) {
         relayBulkConnectionHandler = createConnectionHandler(
@@ -13041,18 +13202,18 @@ function ensureWindowsServiceWrapper(): void {
     const batFile = path.join(SERVER_DIR, "run-service.bat");
     const recoveryFile = path.join(SERVER_DIR, "run-recovery.bat");
     const powershellExe = process.env.POWERSHELL_EXE || "powershell.exe";
+    let current = "";
+    try { current = fs.readFileSync(batFile, "utf-8"); } catch {}
     const content = windowsRunServiceBatContent({
       serverDir: SERVER_DIR,
       repoRoot: GIT_ROOT,
       config,
-      path: process.env.PATH || "",
+      path: wrapperPathValue(current) ?? process.env.PATH ?? "",
       powershellExe,
       nodeExe: process.env.SOCKETAGENT_NODE || process.execPath,
       launcher: windowsLauncherPath(SERVER_DIR, config),
     });
     const recoveryContent = windowsRecoveryBatContent(SERVER_DIR, powershellExe);
-    let current = "";
-    try { current = fs.readFileSync(batFile, "utf-8"); } catch {}
     if (current.replace(/\r\n/g, "\n") !== content.replace(/\r\n/g, "\n")) {
       fs.writeFileSync(batFile, content, "ascii");
       console.log(`[Startup] Updated Windows service wrapper at ${batFile}`);
@@ -13382,6 +13543,22 @@ if (managedBackendAutoUpdateEnabled()) {
   console.log("[Auto-update] Managed backend updates disabled by SOCKETAGENT_AUTO_UPDATE_MANAGED_BACKENDS");
 }
 
+if (process.platform === "win32") {
+  const writeMachineMarker = () => {
+    if (!serviceState.service && !windowsElevated()) return;
+    refreshMachineMarker({ directory: GIT_ROOT, port: PORT, publicKey: toBase64(loadServerKeyPair().publicKey) });
+  };
+  writeMachineMarker();
+  // After ensureWindowsServiceWrapper, so the SYSTEM task never starts an
+  // outdated wrapper.
+  if (!serviceState.service && serviceState.config) {
+    setTimeout(() => void addMachineServiceTask(SERVER_DIR, windowsElevated()).then(() => {
+      machineServiceRegistered = taskExists(SERVICE_TASK);
+      writeMachineMarker();
+    }), 15_000).unref();
+  }
+}
+
 if (autoUpdateEnabled()) {
   console.log(`[Auto-update] Watching git repo at ${GIT_ROOT} (every ${AUTO_UPDATE_INTERVAL / 1000}s, verify=${autoUpdateVerifyMode()})`);
   setInterval(checkForUpdates, AUTO_UPDATE_INTERVAL);
@@ -13389,37 +13566,43 @@ if (autoUpdateEnabled()) {
   console.log("[Auto-update] Disabled by SOCKETAGENT_AUTO_UPDATE");
 }
 
-// Graceful shutdown — clean up plugins, relay, and watchers
+/**
+ * Records running turns for the next server to resume, then cleans up
+ * plugins, relay and watchers and exits. Signals and a Windows hand-over to
+ * the owner's server both end here.
+ */
+async function shutdownGracefully(reason: string): Promise<void> {
+  if (shuttingDown) return;
+  restartPreparing = true;
+  for (const [sid, session] of activeSessions) {
+    if (sessionIsBusy(session)) trackRecoverableRun(session, sid);
+  }
+  flushSessionStore();
+  shuttingDown = true;
+  serverReady = false;
+  // Bound cleanup. The durable journal belongs to startup even if a backend
+  // never acknowledges interruption or the OS kills us during shutdown.
+  const shutdownDeadline = setTimeout(() => process.exit(1), 15_000);
+  shutdownDeadline.unref();
+  console.log(`${reason}, cleaning up...`);
+  httpServer.close();
+  await Promise.allSettled([...new Set(activeSessions.values())].map(async session => {
+    try { await session.abort(); } finally { if (session instanceof CodexSession) await session.dispose(); }
+  }));
+  flushSdkEventQueue();
+  flushSessionStore();
+  if (relayClient) relayClient.close();
+  for (const plugin of plugins) {
+    if (plugin.cleanup) {
+      try { await plugin.cleanup(); } catch {}
+    }
+  }
+  await browserSessionManager.closeAll();
+  process.exit(0);
+}
+
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
-  process.on(sig, async () => {
-    if (shuttingDown) return;
-    restartPreparing = true;
-    for (const [sid, session] of activeSessions) {
-      if (sessionIsBusy(session)) trackRecoverableRun(session, sid);
-    }
-    flushSessionStore();
-    shuttingDown = true;
-    serverReady = false;
-    // Bound cleanup. The durable journal belongs to startup even if a backend
-    // never acknowledges interruption or the OS kills us during shutdown.
-    const shutdownDeadline = setTimeout(() => process.exit(1), 15_000);
-    shutdownDeadline.unref();
-    console.log(`Received ${sig}, cleaning up...`);
-    httpServer.close();
-    await Promise.allSettled([...new Set(activeSessions.values())].map(async session => {
-      try { await session.abort(); } finally { if (session instanceof CodexSession) await session.dispose(); }
-    }));
-    flushSdkEventQueue();
-    flushSessionStore();
-    if (relayClient) relayClient.close();
-    for (const plugin of plugins) {
-      if (plugin.cleanup) {
-        try { await plugin.cleanup(); } catch {}
-      }
-    }
-    await browserSessionManager.closeAll();
-    process.exit(0);
-  });
+  process.on(sig, () => void shutdownGracefully(`Received ${sig}`));
 }
 
 // Start accepting connections only after every module-level runtime value has

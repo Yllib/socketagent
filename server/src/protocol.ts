@@ -970,10 +970,16 @@ export interface SetRawModeMessage {
   sessionId?: string;
 }
 
-/** Direct E2E auth token proof, sent only after the NaCl key exchange. */
+/**
+ * Direct E2E auth, sent only after the NaCl key exchange. Without a token,
+ * only a loopback client can ask, and its key has to be approved like a
+ * relay device; name and platform describe it for that approval.
+ */
 export interface DirectAuthMessage {
   type: "direct_auth";
-  token: string;
+  token?: string;
+  name?: string;
+  platform?: DevicePlatform;
   lane?: TransportLane;
   transportLaneVersion?: number;
   uploadAckVersion?: number;

@@ -14,6 +14,8 @@ import type {
   BrowserPromptServerMessage,
   BrowserTabsServerMessage,
 } from "./protocol";
+import { serviceState } from "./windows-service-env";
+import type { ProcessIdentity } from "./windows-service-config";
 import { PICKER_BINDING, PICKER_SCRIPT, PICKER_WORLD, applyPickerExpression, parsePickerReport } from "./browser-page-pickers";
 
 type JsonRecord = Record<string, unknown>;
@@ -455,12 +457,51 @@ function socketAgentDataDir(): string {
     || path.join(process.env.HOME || os.homedir(), ".socket-agent");
 }
 
-export function browserDataDir(browserExecutable = resolveBrowserBinary()): string {
+/**
+ * Where saved profiles live. A server running as another account than the
+ * install's owner, such as SYSTEM, keeps its own folder: see claimBrowserProfile.
+ */
+export function browserDataDir(browserExecutable = resolveBrowserBinary(), service = serviceState.service): string {
   if (process.platform === "linux"
     && (browserExecutable === "/usr/bin/chromium-browser" || browserExecutable === "/snap/bin/chromium")) {
     return path.join(process.env.HOME || os.homedir(), "snap", "chromium", "common", "socketagent-browser-sessions");
   }
-  return path.join(socketAgentDataDir(), "browser-sessions");
+  return path.join(socketAgentDataDir(), service ? "browser-sessions-system" : "browser-sessions");
+}
+
+const PROFILE_ACCOUNT_FILE = "socketagent-account.json";
+
+function sameAccountProfile(left: string, right: string): boolean {
+  const normalize = (value: string) => {
+    const resolved = path.resolve(value).replace(/[\\/]+$/, "");
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
+}
+
+/**
+ * Chrome encrypts a profile's cookies with a key only the account that made
+ * the profile can read. Opening the profile as another account replaces that
+ * key, which signs the original account out for good. Each profile records
+ * its account on first use, and no other account may open it.
+ */
+export function claimBrowserProfile(profileDir: string, identity: ProcessIdentity): void {
+  const marker = path.join(profileDir, PROFILE_ACCOUNT_FILE);
+  let text: string | undefined;
+  try {
+    text = fs.readFileSync(marker, "utf8");
+  } catch (error: unknown) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  if (text === undefined) {
+    fs.writeFileSync(marker, `${JSON.stringify({ user: identity.user, profile: identity.profile }, null, 2)}\n`);
+    return;
+  }
+  let recorded: unknown;
+  try { recorded = JSON.parse(text); } catch {}
+  if (isRecord(recorded) && typeof recorded.profile === "string" && sameAccountProfile(recorded.profile, identity.profile)) return;
+  const owner = isRecord(recorded) && typeof recorded.user === "string" ? recorded.user : "another account";
+  throw new Error(`Browser profile ${path.basename(profileDir)} belongs to ${owner}. This server runs as ${identity.user}, and opening it would erase that account's sign-ins.`);
 }
 
 function managedBrowserPath(): string {
@@ -1903,6 +1944,7 @@ export class BrowserSessionManager {
     restrictDirectory(root);
     restrictDirectory(profileDir);
     removeStaleBrowserControlFile(profileDir);
+    claimBrowserProfile(profileDir, serviceState.identity);
     const display = await startVirtualDisplay(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     const debuggingPort = await reserveLoopbackPort();
     const processHandle = spawn(browserExecutable, [

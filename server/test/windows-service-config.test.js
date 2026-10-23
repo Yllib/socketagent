@@ -1,16 +1,16 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
 const {
   captureWindowsServiceConfig,
   parseWindowsServiceConfig,
   pinnedServiceEnvironment,
+  windowsRecoveryBatContent,
   windowsRunServiceBatContent,
   windowsServiceState,
+  wrapperPathValue,
 } = require("#server/windows-service-config");
 
 const env = { SystemRoot: "C:\\Windows" };
@@ -78,16 +78,37 @@ function wrapper(overrides = {}) {
 test("run-service.bat keeps the 717dde4 header and loop byte for byte", () => {
   const content = wrapper();
   assert.equal(content.slice(0, FROZEN_HEADER.length), FROZEN_HEADER);
-  assert.match(content.slice(FROZEN_HEADER.length), /^\r\n:arm_recovery\r\ncall :pin_profile\r\ncall :single_server\r\n/);
+  assert.match(content.slice(FROZEN_HEADER.length), /^\r\n:arm_recovery\r\ncall :pin_profile\r\n/);
+});
+
+test("the arbitration wait moves on by label, so a rewrite during it is safe", () => {
+  const lines = wrapper().split("\r\n");
+  const wait = lines.findIndex((line) => line.includes("windows-service-cli.js\" arbitrate"));
+  assert.match(lines[wait], / & goto arbitrated$/);
+  assert.equal(lines[wait + 1], ":arbitrated");
 });
 
 test("run-service.bat pins the owner's paths only under another account", () => {
   const content = wrapper();
   assert.ok(content.includes('if /I "%USERPROFILE%"=="C:\\Users\\lanik" exit /b 0'));
-  assert.ok(content.includes('if not defined CODEX_HOME set "CODEX_HOME=C:\\Users\\lanik\\.codex"'));
-  assert.ok(content.includes('set "GIT_CONFIG_VALUE_0=C:/Users/lanik/socketagent"'));
+  assert.ok(content.includes('set "CODEX_HOME=C:\\Users\\lanik\\.codex"'));
+  assert.ok(content.includes('set "TEMP=C:\\Users\\lanik\\AppData\\Local\\Temp"'));
+  assert.ok(content.includes('set "GIT_CONFIG_VALUE_0=*"'));
   assert.ok(!content.includes("CLAUDE_CONFIG_DIR"));
-  assert.ok(wrapper({ claudeConfigDir: "D:\\claude" }).includes('if not defined CLAUDE_CONFIG_DIR set "CLAUDE_CONFIG_DIR=D:\\claude"'));
+  assert.ok(wrapper({ claudeConfigDir: "D:\\claude" }).includes('set "CLAUDE_CONFIG_DIR=D:\\claude"'));
+});
+
+test("the recovery guard restarts the owner's task while it runs, otherwise the SYSTEM task", () => {
+  const lines = windowsRecoveryBatContent("C:\\Users\\lanik\\socketagent\\server", "powershell.exe").split("\r\n");
+  const owner = lines.indexOf('schtasks /Query /TN "%TASK_NAME%" /FO CSV /NH 2>nul | findstr /C:"Running" >nul && goto restart');
+  const machine = lines.indexOf('schtasks /Query /TN SocketAgentService >nul 2>&1 && set "TASK_NAME=SocketAgentService"');
+  assert.ok(owner > 0 && machine === owner + 1);
+  assert.ok(lines.indexOf(":restart") === machine + 1);
+});
+
+test("a rewritten wrapper keeps the PATH setup gave it", () => {
+  assert.equal(wrapperPathValue(wrapper()), "C:\\Windows\\system32;C:\\Program Files\\nodejs");
+  assert.equal(wrapperPathValue("@echo off\r\n"), undefined);
 });
 
 test("config parsing rejects bad JSON, bad fields and system profiles", () => {
@@ -110,21 +131,27 @@ test("capture records the owner and refuses a system account", () => {
 });
 
 test("pins keep Codex, Claude and git settings the environment already has", () => {
-  assert.deepEqual(pinnedServiceEnvironment(config, "C:\\Users\\lanik\\socketagent", {}), {
+  assert.deepEqual(pinnedServiceEnvironment(config, {}), {
     HOME: "C:\\Users\\lanik",
     USERPROFILE: "C:\\Users\\lanik",
+    HOMEDRIVE: "C:",
+    HOMEPATH: "\\Users\\lanik",
     APPDATA: config.appData,
     LOCALAPPDATA: config.localAppData,
+    TEMP: "C:\\Users\\lanik\\AppData\\Local\\Temp",
+    TMP: "C:\\Users\\lanik\\AppData\\Local\\Temp",
     CODEX_HOME: config.codexHome,
+    GCM_INTERACTIVE: "never",
+    GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "safe.directory",
-    GIT_CONFIG_VALUE_0: "C:/Users/lanik/socketagent",
+    GIT_CONFIG_VALUE_0: "*",
   });
-  const kept = pinnedServiceEnvironment({ ...config, claudeConfigDir: "D:\\claude" }, "C:\\repo", { CODEX_HOME: "E:\\codex", GIT_CONFIG_COUNT: "2", CLAUDE_CONFIG_DIR: "F:\\claude" });
+  const kept = pinnedServiceEnvironment({ ...config, claudeConfigDir: "D:\\claude" }, { CODEX_HOME: "E:\\codex", GIT_CONFIG_COUNT: "2", CLAUDE_CONFIG_DIR: "F:\\claude" });
   assert.equal(kept.CODEX_HOME, undefined);
   assert.equal(kept.CLAUDE_CONFIG_DIR, undefined);
   assert.equal(kept.GIT_CONFIG_COUNT, undefined);
-  assert.equal(pinnedServiceEnvironment({ ...config, claudeConfigDir: "D:\\claude" }, "C:\\repo", {}).CLAUDE_CONFIG_DIR, "D:\\claude");
+  assert.equal(pinnedServiceEnvironment({ ...config, claudeConfigDir: "D:\\claude" }, {}).CLAUDE_CONFIG_DIR, "D:\\claude");
 });
 
 test("service state follows the account, not USERPROFILE", (t) => {
@@ -139,38 +166,4 @@ test("service state follows the account, not USERPROFILE", (t) => {
   assert.deepEqual(asSystem.config, config);
   fs.writeFileSync(path.join(serverDir, "windows-service.json"), "{}");
   assert.ok(windowsServiceState(serverDir, env, owner).configProblem);
-});
-
-test("the single-server check passes only for a ready machine service", async (t) => {
-  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "sa-single-server-"));
-  /** @type {Record<string, unknown>} */
-  let body = {};
-  const server = http.createServer((request, response) => {
-    response.statusCode = request.headers.authorization === "Bearer lab-token" ? 200 : 401;
-    response.end(JSON.stringify(body));
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
-  t.after(() => {
-    server.close();
-    fs.rmSync(fixture, { recursive: true, force: true });
-  });
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  fs.mkdirSync(path.join(fixture, "scripts"));
-  fs.symlinkSync(path.resolve(__dirname, "../node_modules"), path.join(fixture, "node_modules"), "junction");
-  fs.copyFileSync(path.resolve(__dirname, "../scripts/check-machine-service.js"), path.join(fixture, "scripts/check-machine-service.js"));
-  fs.writeFileSync(path.join(fixture, ".env"), `PORT=${address.port}\nAUTH_TOKEN=lab-token\n`);
-  /** @returns {Promise<number | null>} */
-  const check = () => new Promise((resolve) => {
-    spawn(process.execPath, [path.join(fixture, "scripts/check-machine-service.js")]).on("exit", resolve);
-  });
-  const ready = { service: "socketagent", ready: true };
-  body = { ...ready, identity: { service: true } };
-  assert.equal(await check(), 0);
-  body = { ...ready, identity: { service: false } };
-  assert.equal(await check(), 1);
-  body = { ...ready, ready: false, identity: { service: true } };
-  assert.equal(await check(), 1);
-  body = ready;
-  assert.equal(await check(), 1);
 });

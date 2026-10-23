@@ -234,6 +234,7 @@ export interface RelayClientOptions {
   serverCapabilities?: (
     binaryEnvelope: boolean,
     lane: TransportLane,
+    publicKey: string | null,
   ) => Record<string, unknown>;
   onMessage?: (msg: ClientMessage) => void;
   onStatusChange: (status: RelayStatus) => void;
@@ -874,7 +875,7 @@ export class RelayClient {
       // fully updated relay-connected servers appear too old to teleport.
       const lane: TransportLane = this.opts.lane === "bulk" ? "bulk" : "control";
       if (this.opts.serverCapabilities) {
-        this.sendToPeer(peerId, this.opts.serverCapabilities(peer.binaryEnabled, lane), peer);
+        this.sendToPeer(peerId, this.opts.serverCapabilities(peer.binaryEnabled, lane, peer.publicKeyBase64), peer);
       }
       return;
     }

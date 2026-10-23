@@ -10,10 +10,12 @@ $serviceName = "SocketAgent"
 
 function Get-SocketAgentTaskName {
     $task = Get-ScheduledTask -TaskName $serviceName -ErrorAction SilentlyContinue
-    if ($task) { return $serviceName }
-    $legacy = Get-ScheduledTask -TaskName "SocketClaude" -ErrorAction SilentlyContinue
-    if ($legacy) { return "SocketClaude" }
-    return $serviceName
+    $name = if ($task) { $serviceName } elseif (Get-ScheduledTask -TaskName "SocketClaude" -ErrorAction SilentlyContinue) { "SocketClaude" } else { $serviceName }
+    # The owner's task serves while it runs; otherwise the SYSTEM task does.
+    $owner = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if ($owner -and $owner.State -eq "Running") { return $name }
+    if (Get-ScheduledTask -TaskName "SocketAgentService" -ErrorAction SilentlyContinue) { return "SocketAgentService" }
+    return $name
 }
 
 function Show-Usage {

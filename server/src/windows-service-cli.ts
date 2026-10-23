@@ -21,6 +21,7 @@ import {
   writeWindowsServiceConfig,
   type WindowsServiceState,
 } from "./windows-service-config";
+import { arbitrate } from "./windows-machine-service";
 
 // Windows service commands that run without the server.
 //
@@ -34,6 +35,12 @@ import {
 //     server: node, the build, .env, data, git, Codex, Claude and their logins.
 //     Answers GET /health on 127.0.0.1:N with the report once, prints it, and
 //     exits 0 when nothing failed. It starts no relay and writes no files.
+//
+//   node dist/windows-service-cli.js arbitrate
+//     run-service.bat runs this before each server start and serves once it
+//     returns. Under SYSTEM it waits while the owner's copy runs; under the
+//     owner it moves a serving SYSTEM server out of the way. See
+//     windows-machine-service.ts.
 
 const SERVER_DIR = path.resolve(__dirname, "..");
 const REPO_ROOT = path.resolve(SERVER_DIR, "..");
@@ -192,7 +199,7 @@ function probe(args: string[]): void {
   const state = windowsServiceState(SERVER_DIR, process.env, currentProcessIdentity());
   // The same pins the server applies in windows-service-env, minus creating
   // CODEX_HOME, so every check below sees what the real server would.
-  if (state.service && state.config) Object.assign(process.env, pinnedServiceEnvironment(state.config, REPO_ROOT, process.env));
+  if (state.service && state.config) Object.assign(process.env, pinnedServiceEnvironment(state.config, process.env));
   let env: Record<string, string> = {};
   try { env = dotenv.parse(fs.readFileSync(path.join(SERVER_DIR, ".env"))); } catch {}
   for (const [key, value] of Object.entries(env)) if (process.env[key] === undefined) process.env[key] = value;
@@ -233,4 +240,5 @@ function probe(args: string[]): void {
 const [command, ...rest] = process.argv.slice(2);
 if (command === "wrapper") writeWrapper();
 else if (command === "probe") probe(rest);
-else fail("usage: windows-service-cli.js wrapper | probe --port N [--timeout S]");
+else if (command === "arbitrate") void arbitrate(SERVER_DIR, windowsServiceState(SERVER_DIR, process.env, currentProcessIdentity()).service);
+else fail("usage: windows-service-cli.js wrapper | probe --port N [--timeout S] | arbitrate");

@@ -3,31 +3,37 @@
 .SYNOPSIS
     SocketAgent Windows Uninstaller
 .DESCRIPTION
-    Stops and removes the SocketAgent scheduled task.
+    Stops and removes the SocketAgent scheduled tasks.
     Optionally removes session data.
     Does NOT uninstall Node.js, Claude Code CLI, or OpenAI Codex CLI.
 #>
 
 $ErrorActionPreference = "Stop"
-$TASK_NAME = "SocketAgent"
+# The SYSTEM task first, so it cannot take over once the owner's task stops.
+$TASK_NAMES = @("SocketAgentService", "SocketAgent", "SocketAgentRecovery")
 
 Write-Host ""
 Write-Host "  SocketAgent Uninstaller" -ForegroundColor Cyan
 Write-Host ""
 
-# Stop and remove scheduled task
-$task = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
-if ($task) {
+# Stop and remove scheduled tasks
+$removed = 0
+foreach ($taskName in $TASK_NAMES) {
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if (-not $task) { continue }
     if ($task.State -eq "Running") {
-        Write-Host "  Stopping server..."
-        Stop-ScheduledTask -TaskName $TASK_NAME
+        Write-Host "  Stopping $taskName..."
+        Stop-ScheduledTask -TaskName $taskName
         Start-Sleep -Seconds 2
     }
-    Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false
-    Write-Host "  [OK] Removed scheduled task '$TASK_NAME'" -ForegroundColor Green
-} else {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    Write-Host "  [OK] Removed scheduled task '$taskName'" -ForegroundColor Green
+    $removed++
+}
+if ($removed -eq 0) {
     Write-Host "  No scheduled task found." -ForegroundColor Yellow
 }
+Remove-Item -LiteralPath (Join-Path $env:ProgramData "SocketAgent\machine-server.json") -Force -ErrorAction SilentlyContinue
 
 # Remove log file
 $logFile = Join-Path $PSScriptRoot "server" "socketagent.log"

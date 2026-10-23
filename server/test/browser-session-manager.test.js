@@ -6,6 +6,7 @@ const test = require("node:test");
 
 const {
   browserDataDir,
+  claimBrowserProfile,
   normalizeBrowserProfile,
   normalizeBrowserUrl,
   removeStaleBrowserControlFile,
@@ -54,6 +55,28 @@ test("Ubuntu snap Chromium stores persistent profiles in its confined writable h
     browserDataDir("/usr/bin/chromium-browser"),
     path.join(process.env.HOME || os.homedir(), "snap", "chromium", "common", "socketagent-browser-sessions"),
   );
+});
+
+test("a SYSTEM server keeps its browser profiles apart from the owner's", () => {
+  const owner = browserDataDir("/opt/chrome/chrome", false);
+  const system = browserDataDir("/opt/chrome/chrome", true);
+  assert.equal(path.basename(owner), "browser-sessions");
+  assert.equal(path.basename(system), "browser-sessions-system");
+  assert.equal(path.dirname(owner), path.dirname(system));
+});
+
+test("a browser profile opens only for the account that made it", () => {
+  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-browser-claim-"));
+  try {
+    claimBrowserProfile(profileDir, { user: "lanik", profile: "/home/lanik" });
+    claimBrowserProfile(profileDir, { user: "lanik", profile: "/home/lanik/" });
+    assert.throws(
+      () => claimBrowserProfile(profileDir, { user: "SYSTEM", profile: "/windows/systemprofile" }),
+      /belongs to lanik\. This server runs as SYSTEM/,
+    );
+  } finally {
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  }
 });
 
 test("browser launch discards stale Chromium control files", () => {

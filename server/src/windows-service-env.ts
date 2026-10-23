@@ -16,7 +16,7 @@ export const serviceState: WindowsServiceState = process.platform === "win32"
   : { identity: currentProcessIdentity(), service: false };
 
 if (serviceState.service && serviceState.config) {
-  Object.assign(process.env, pinnedServiceEnvironment(serviceState.config, path.resolve(SERVER_DIR, ".."), process.env));
+  Object.assign(process.env, pinnedServiceEnvironment(serviceState.config, process.env));
   // Codex refuses a CODEX_HOME that does not exist yet.
   const codexHome = process.env.CODEX_HOME;
   if (codexHome) {

@@ -3636,6 +3636,12 @@
             "token": {
               "type": "string"
             },
+            "name": {
+              "type": "string"
+            },
+            "platform": {
+              "$ref": "#/definitions/DevicePlatform"
+            },
             "lane": {
               "$ref": "#/definitions/TransportLane"
             },
@@ -3662,7 +3668,6 @@
             }
           },
           "required": [
-            "token",
             "type"
           ]
         },

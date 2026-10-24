@@ -316,6 +316,9 @@
           "$ref": "#/definitions/DeviceRemoveResultServerMessage"
         },
         {
+          "$ref": "#/definitions/PairingResetResultServerMessage"
+        },
+        {
           "$ref": "#/definitions/LinkRoomInfoResultServerMessage"
         },
         {
@@ -6538,6 +6541,28 @@
         "ok",
         "publicKey",
         "type"
+      ]
+    },
+    "PairingResetResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pairing_reset_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok"
       ]
     },
     "LinkRoomInfoResultServerMessage": {

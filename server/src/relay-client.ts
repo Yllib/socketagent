@@ -427,6 +427,16 @@ export class RelayClient {
     return this.ws?.bufferedAmount ?? 0;
   }
 
+  /**
+   * Moves to another relay room. Peers in the old room are dropped, and the
+   * client reconnects with `pairingToken` right away.
+   */
+  moveRoom(pairingToken: string): void {
+    this.opts = { ...this.opts, pairingToken };
+    this.reconnectDelay = 1000;
+    if (this.ws) this.ws.close();
+  }
+
   /** Disconnect and stop reconnecting */
   close(): void {
     this.closed = true;

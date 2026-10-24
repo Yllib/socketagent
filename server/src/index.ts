@@ -1542,6 +1542,24 @@ function keyHoldsToken(publicKey: string | null): boolean {
   return via === "token" || via === "migration";
 }
 
+/**
+ * Replaces the relay pairing token so the old QR has no room to join. The
+ * capabilities broadcast hands the new token to connected phones that hold
+ * the old one, then both phone lanes move to the new room.
+ */
+function resetPairingToken(): void {
+  PAIRING_TOKEN = crypto.randomUUID();
+  process.env.PAIRING_TOKEN = PAIRING_TOKEN;
+  writeEnvValue(ENV_PATH, "PAIRING_TOKEN", PAIRING_TOKEN);
+  console.log("[Relay] Pairing token reset");
+  broadcastServerCapabilities();
+  // Leave the old room only after the broadcast has had time to arrive.
+  setTimeout(() => {
+    relayClient?.moveRoom(PAIRING_TOKEN);
+    relayBulkClient?.moveRoom(`${PAIRING_TOKEN}${BULK_RELAY_PAIRING_SUFFIX}`);
+  }, 2000);
+}
+
 function publicRelayUrl(relayUrl: string): string {
   try {
     const url = new URL(relayUrl);
@@ -1619,6 +1637,7 @@ function serverCapabilitiesPayload(
       serverPubkey: toBase64(loadServerKeyPair().publicKey),
     },
     relayPairing: holdsToken ? relayPairingInfo() : undefined,
+    pairingReset: holdsToken && RELAY_URL ? { version: 1 } : undefined,
     directRoute: directRouteInfo(holdsToken),
     pushNotifications: {
       version: 3,
@@ -10094,6 +10113,22 @@ function createConnectionHandler(
 
       case "device_list": {
         sendJson(deviceListResult(msg.requestId, relayPeerKeyForMessage(msg)));
+        break;
+      }
+
+      case "pairing_reset": {
+        // The same clients that are sent the pairing token may replace it.
+        const holdsToken = transport instanceof DirectClientTransport
+          ? transport.holdsAuthToken
+          : keyHoldsToken(relayPeerKeyForMessage(msg) ?? null);
+        if (!RELAY_URL) {
+          sendJson({ type: "pairing_reset_result", requestId: msg.requestId, ok: false, error: "Relay is off on this computer" });
+        } else if (!holdsToken) {
+          sendJson({ type: "pairing_reset_result", requestId: msg.requestId, ok: false, error: "Only a device paired with this computer's code can reset it" });
+        } else {
+          resetPairingToken();
+          sendJson({ type: "pairing_reset_result", requestId: msg.requestId, ok: true });
+        }
         break;
       }
 

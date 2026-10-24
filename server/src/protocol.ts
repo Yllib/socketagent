@@ -1385,6 +1385,16 @@ export interface DeviceRemoveMessage {
   keepToken?: boolean;
 }
 
+/**
+ * Replaces the relay pairing token, so the old QR stops working. Connected
+ * phones that hold the token get the new one in the capabilities broadcast
+ * that follows; other paired phones scan the new QR.
+ */
+export interface PairingResetMessage {
+  type: "pairing_reset";
+  requestId?: string;
+}
+
 /** Learning mode becomes enforced. Replies with device_list_result. */
 export interface DeviceLockMessage {
   type: "device_lock";
@@ -1595,6 +1605,7 @@ export type ClientMessage = { commandId?: string } & (
   | DeviceDenyMessage
   | DeviceRemoveMessage
   | DeviceLockMessage
+  | PairingResetMessage
   | DeviceAuthorizeMessage
   | LinkRoomInfoMessage
   | ComputerLinkSetMessage
@@ -3048,6 +3059,13 @@ export interface DeviceRemoveResultServerMessage extends DeviceOperationOutcome 
   type: "device_remove_result";
 }
 
+export interface PairingResetResultServerMessage {
+  type: "pairing_reset_result";
+  requestId?: string;
+  ok: boolean;
+  error?: string;
+}
+
 export interface LinkRoomInfoResultServerMessage {
   type: "link_room_info_result";
   requestId?: string;
@@ -3889,6 +3907,7 @@ export type ServerMessage =
   | DeviceApproveResultServerMessage
   | DeviceDenyResultServerMessage
   | DeviceRemoveResultServerMessage
+  | PairingResetResultServerMessage
   | LinkRoomInfoResultServerMessage
   | ComputerLinkListResultServerMessage
   | ComputerLinkOperationResultServerMessage

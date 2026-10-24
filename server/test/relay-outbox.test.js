@@ -132,7 +132,7 @@ test('request replies target one peer; live events still broadcast', () => {
   const client = new RelayClient({ relayUrl:'wss://relay.invalid', pairingToken:'test',
     keyPair:crypto.generateKeyPair(), serverCapabilities:()=>({}), onMessage(){}, onStatusChange(){} });
   client.ws = {readyState: WebSocket.OPEN};
-  for (const id of ['phone','desktop']) client.getPeer(id).publicKey = crypto.generateKeyPair().publicKey;
+  for (const id of ['phone','desktop']) Object.assign(client.getPeer(id), { publicKey: crypto.generateKeyPair().publicKey, auth: 'approved' });
   /** @type {[string,unknown][]} */
   const sends = [];
   client.sendToPeer = (id,msg) => sends.push([id,msg.type]);

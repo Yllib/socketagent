@@ -176,6 +176,40 @@ test("the relay client acts on a captured phone frame once, on its own connectio
   assert.equal(delivered.length, 1);
 });
 
+test("a key exchange alone opens nothing; the peer's first frame does", () => {
+  const { client, server, framesFor, fromPeer } = relayHarness();
+  const phone = generateKeyPair();
+  const peers = new SessionKeyedPeerStore();
+  client.send({ type: "tool_call", toolUseId: "queued-while-away" });
+  assert.equal(client.outbox.length, 1);
+
+  // Anyone in the room can name an enrolled key in a static-box exchange.
+  fromPeer("claim", { type: "key_exchange", pubkey: toBase64(phone.publicKey) });
+  assert.equal(framesFor("claim").length, 1, "only the plaintext ack");
+  assert.equal(client.isPaired, false);
+  assert.equal(client.isKeyOnline(toBase64(phone.publicKey)), false);
+  assert.equal(client.outbox.length, 1, "the queue waits for a peer that can open frames");
+
+  // A recorded session offer verifies too, but its sender cannot open the session.
+  const offer = new SessionOffer(phone, server.publicKey);
+  const message = offer.message();
+  fromPeer("replay", message);
+  assert.equal(framesFor("replay").length, 1);
+  assert.equal(client.isPaired, false);
+  assert.equal(client.outbox.length, 1);
+
+  // The phone's first frame opens its peer and gets the queue, and only its peer.
+  fromPeer("phone", message);
+  const channel = offer.accept(framesFor("phone")[0], peers);
+  fromPeer("phone", channel.sealText(JSON.stringify({ type: "client_capabilities", sessionKeyVersion: 1 })));
+  assert.equal(client.isPaired, true);
+  assert.equal(client.outbox.length, 0);
+  const opened = framesFor("phone").slice(1).map((frame) => parseJsonObject(channel.openText({ n: String(frame.n), c: String(frame.c) })).type);
+  assert.deepEqual(opened, ["tool_call", "server_capabilities"]);
+  assert.equal(framesFor("claim").length, 1);
+  assert.equal(framesFor("replay").length, 1);
+});
+
 test("the relay client still serves phones that predate session keys", () => {
   const { client, server, delivered, frames, fromPeer } = relayHarness();
   const phone = generateKeyPair();

@@ -93,10 +93,14 @@ export function relayPeerKeyForMessage(message: ClientMessage): string | undefin
 }
 
 /**
- * approved: fully open. pending: held until device_auth or an approval; it
- * receives nothing but device_auth replies. dropped: ignored until it leaves.
+ * approved: fully open. admitted: its key may use this lane, but nothing has
+ * proven it holds the channel yet; the first frame that opens does, and until
+ * then it gets nothing and counts as absent, so a key exchange that only names
+ * an enrolled key (or replays a recorded one) cannot drain the outbox or pass
+ * for the phone. pending: held until device_auth or an approval; it receives
+ * nothing but device_auth replies. dropped: ignored until it leaves.
  */
-type RelayPeerAuth = "approved" | "pending" | "dropped";
+type RelayPeerAuth = "approved" | "admitted" | "pending" | "dropped";
 
 interface RelayPeer {
   publicKey: Uint8Array | null;
@@ -411,7 +415,7 @@ export class RelayClient {
     for (const [peerId, peer] of this.peers) {
       if (peer.auth !== "pending" || peer.publicKeyBase64 !== publicKey) continue;
       this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
-      this.openHeldPeer(peerId, peer);
+      this.openPeer(peerId, peer);
       opened++;
     }
     return opened;
@@ -478,9 +482,9 @@ export class RelayClient {
         publicKey: null,
         publicKeyBase64: null,
         channel: null,
-        // Without a gate every peer is admitted at key exchange, as before.
-        // With one, a peer stays held until the gate approves it.
-        auth: this.opts.peerAuth ? "pending" : "approved",
+        // Admitted at key exchange when the gate (or its absence) allows the
+        // key; open once its first frame proves it holds the channel.
+        auth: "pending",
         pendingTimer: null,
         binaryEnabled: false,
         supportsSessionEventAck: false,
@@ -538,13 +542,13 @@ export class RelayClient {
     this.virtualWs.supportsMonitorOutputAck = open.length > 0 && open.every((peer) => peer.supportsMonitorOutputAck);
   }
 
-  /** A held peer becomes a normal peer: open the lane, replay the outbox. */
-  private openHeldPeer(peerId: string, peer: RelayPeer): void {
+  /** An admitted or held peer becomes a normal peer: open the lane, replay the outbox. */
+  private openPeer(peerId: string, peer: RelayPeer): void {
     this.clearPendingTimer(peer);
     peer.auth = "approved";
     this.virtualWs._setOpen(true);
     this.setStatus("paired");
-    console.log(`[Relay${this.laneTag()}] Peer ${peerId} approved`);
+    console.log(`[Relay${this.laneTag()}] Peer ${peerId} open`);
     this.flushOutboxToPeer(peerId, peer);
     if (peer.publicKeyBase64) this.opts.onPeerOpened?.(peerId, peer.publicKeyBase64);
   }
@@ -557,7 +561,7 @@ export class RelayClient {
     if (!peer.publicKeyBase64) return;
     if (!this.opts.peerAuth) {
       this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
-      if (peer.auth === "pending") this.openHeldPeer(peerId, peer);
+      if (peer.auth === "pending") this.openPeer(peerId, peer);
       return;
     }
     const outcome = this.opts.peerAuth.deviceAuth(peer.publicKeyBase64, this.opts.lane || "control", {
@@ -565,7 +569,7 @@ export class RelayClient {
     });
     if (outcome.ok) {
       this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
-      if (peer.auth === "pending") this.openHeldPeer(peerId, peer);
+      if (peer.auth === "pending") this.openPeer(peerId, peer);
       return;
     }
     this.sendToPeer(peerId, {
@@ -743,15 +747,14 @@ export class RelayClient {
       const sessionNote = exchange.channel.sessionKeyed ? "session key" : "static key";
 
       if (admission === "approved") {
-        peer.auth = "approved";
-        this.virtualWs._setOpen(true);
-        this.setStatus("paired");
         // Send ack PLAINTEXT. The phone needs this to confirm the handshake
-        // before encrypted mode begins. Its session key is public.
+        // before encrypted mode begins. Its session key is public. The peer
+        // opens on its first frame: a session offer can be replayed and a
+        // static-box exchange is only a claim, so the exchange alone proves
+        // nothing about who is on the other end.
+        if (peer.auth !== "approved") peer.auth = "admitted";
         this.sendPlainToPeer(peerId, { type: "key_exchange_ack", device: "approved", ...exchange.ack });
-        console.log(`[Relay${this.laneTag()}] Key exchange complete, encrypted channel established (${sessionNote})`);
-        this.flushOutboxToPeer(peerId, peer);
-        this.opts.onPeerOpened?.(peerId, nextKeyBase64);
+        console.log(`[Relay${this.laneTag()}] Key exchange complete (${sessionNote}); waiting for the peer's first frame`);
         return;
       }
 
@@ -809,6 +812,7 @@ export class RelayClient {
    */
   private routeDecryptedJson(parsed: unknown, peerId: string, peer: RelayPeer): void {
     if (peer.auth === "dropped") return;
+    if (peer.auth === "admitted") this.openPeer(peerId, peer);
     if (this.opts.onPeerJson) {
       if (peer.auth !== "approved" || !peer.publicKeyBase64) return;
       if (!isRecord(parsed)) throw new Error("Invalid peer message");
@@ -846,6 +850,7 @@ export class RelayClient {
       console.error(`[Relay] Binary decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${errorMessage(err)}`);
       return;
     }
+    if (peer.auth === "admitted") this.openPeer(peerId, peer);
     if (plaintext.length === 0) return;
     const marker = plaintext[0];
 

@@ -175,12 +175,27 @@ export function setWindowsServiceWarning(message: string | undefined): void {
   notifyBackendHealthChange();
 }
 
+let installRepairWarning: string | undefined;
+
 /**
- * The computer's problems: a Windows install without SocketAgentService, and
- * recorded Codex config problems whose file has not changed since.
+ * Shows, or with undefined clears, what the repair of an interrupted Windows
+ * install move could not do by itself. See windows-install-repair.
+ */
+export function setInstallRepairWarning(message: string | undefined): void {
+  if (message === installRepairWarning) return;
+  installRepairWarning = message;
+  notifyBackendHealthChange();
+}
+
+/**
+ * The computer's problems: a Windows install without SocketAgentService, one
+ * left half-moved, and recorded Codex config problems whose file has not
+ * changed since.
  */
 export function getComputerIssues(): ComputerIssue[] {
-  const issues: ComputerIssue[] = windowsServiceWarning ? [{ severity: "warning", message: windowsServiceWarning }] : [];
+  const issues: ComputerIssue[] = [windowsServiceWarning, installRepairWarning]
+    .filter((message): message is string => message !== undefined)
+    .map((message) => ({ severity: "warning", message }));
   for (const [message, seen] of codexConfigWarnings) {
     if (modifiedAt(seen.file) !== seen.mtimeMs) codexConfigWarnings.delete(message);
     else {

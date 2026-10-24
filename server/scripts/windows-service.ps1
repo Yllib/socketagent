@@ -45,8 +45,12 @@ function New-SocketAgentTaskAction([string]$BatchFile) {
     New-ScheduledTaskAction -Execute (Get-SocketAgentLauncher) -Argument ('"' + $BatchFile + '"') -WorkingDirectory (Split-Path $BatchFile -Parent)
 }
 
-function Update-SocketAgentTaskLauncher([string]$ServerDirectory) {
+# Points this checkout's tasks at its current launcher. With
+# $PreviousServerDirectory, also moves the tasks that run that checkout's
+# wrapper over to this one; see src\windows-install-repair.ts.
+function Update-SocketAgentTaskLauncher([string]$ServerDirectory, [string]$PreviousServerDirectory) {
     $batch = Join-Path $ServerDirectory 'run-service.bat'
+    $directories = @($ServerDirectory) + @($PreviousServerDirectory | Where-Object { $_ })
     foreach ($name in @('SocketAgent', 'SocketClaude', 'SocketAgentService')) {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if (-not $task -or $task.Actions.Count -ne 1) { continue }
@@ -54,11 +58,15 @@ function Update-SocketAgentTaskLauncher([string]$ServerDirectory) {
         $exe = [IO.Path]::GetFileName($action.Execute)
         # Only migrate this checkout's known service action. Preserve custom tasks.
         $arguments = ([string]$action.Arguments).Trim()
-        $quotedBatch = '"' + $batch + '"'
-        $knownBatch = if ($exe -ieq 'cmd.exe') {
-            $arguments -match ('^(?:/[ds]\s+)*/c\s+"?' + [regex]::Escape($quotedBatch) + '"?\s*$')
-        } else { $arguments -ieq $quotedBatch }
-        $knownVbs = $exe -ieq 'wscript.exe' -and $arguments.Trim('"') -ieq (Join-Path $ServerDirectory 'run-service-hidden.vbs')
+        $knownBatch = $false
+        $knownVbs = $false
+        foreach ($directory in $directories) {
+            $quotedBatch = '"' + (Join-Path $directory 'run-service.bat') + '"'
+            if ($exe -ieq 'cmd.exe') {
+                if ($arguments -match ('^(?:/[ds]\s+)*/c\s+"?' + [regex]::Escape($quotedBatch) + '"?\s*$')) { $knownBatch = $true }
+            } elseif ($arguments -ieq $quotedBatch) { $knownBatch = $true }
+            if ($exe -ieq 'wscript.exe' -and $arguments.Trim('"') -ieq (Join-Path $directory 'run-service-hidden.vbs')) { $knownVbs = $true }
+        }
         if (-not (($knownBatch -and ($exe -ieq 'cmd.exe' -or $exe -like 'socketagent-launcher-*.exe')) -or $knownVbs)) { continue }
         $replacement = New-SocketAgentTaskAction $batch
         if ($action.Execute -eq $replacement.Execute -and $action.Arguments -eq $replacement.Arguments) { continue }

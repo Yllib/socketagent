@@ -174,7 +174,7 @@ export async function arbitrate(serverDir: string, service: boolean): Promise<vo
   else await takeOverFromSystem(serverDir);
 }
 
-function runPowerShell(serverDir: string, script: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; output: string }> {
+export function runPowerShell(serverDir: string, script: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
     execFile("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(serverDir, "scripts", script), ...args], {
       cwd: serverDir, encoding: "utf8", timeout: timeoutMs, windowsHide: true,
@@ -200,7 +200,9 @@ export async function addMachineServiceTask(serverDir: string, elevated: boolean
   logWindowsService(serverDir, result.ok ? `Added ${SERVICE_TASK}` : `Could not add ${SERVICE_TASK}: ${result.output}`);
 }
 
-const MACHINE_MARKER = path.join(process.env.ProgramData || "C:\\ProgramData", "SocketAgent", "machine-server.json");
+/** %ProgramData%\SocketAgent: the machine marker, and whatever 384e156 left there; see windows-install-repair. */
+export const MACHINE_FOLDER = path.join(process.env.ProgramData || "C:\\ProgramData", "SocketAgent");
+const MACHINE_MARKER = path.join(MACHINE_FOLDER, "machine-server.json");
 
 /**
  * C:\ProgramData\SocketAgent\machine-server.json tells the desktop app under

@@ -12,6 +12,7 @@ import { modelDownloadArchive } from "./model-download-archive";
 import { serveDownloadFile } from "./http-file-download";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
 import { addMachineServiceTask, refreshMachineMarker, SERVICE_TASK, taskExists } from "./windows-machine-service";
+import { runInstallRepair } from "./windows-install-repair";
 import { captureWindowsServiceConfig, describeRuntime, windowsLauncherPath, windowsRecoveryBatContent, windowsRunServiceBatContent, windowsServiceConfigPath, wrapperPathValue, writeWindowsServiceConfig, type WindowsServiceConfig } from "./windows-service-config";
 import * as dotenv from "dotenv";
 import * as bootstrapPath from "path";
@@ -106,7 +107,7 @@ import {
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { isAuthFailureMessage } from "./backend-auth";
-import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setWindowsServiceWarning } from "./server-settings";
+import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
 import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
@@ -13623,6 +13624,28 @@ if (process.platform === "win32") {
     refreshMachineMarker({ directory: GIT_ROOT, port: PORT, publicKey: toBase64(loadServerKeyPair().publicKey) });
   };
   writeMachineMarker();
+  // Undoes what the interrupted move from 384e156 left; see windows-install-repair.
+  const repairInstall = async () => {
+    const config = serviceState.config;
+    if (!config || (!serviceState.service && windowsElevated() !== true)) return;
+    const result = await runInstallRepair(SERVER_DIR, {
+      repoRoot: GIT_ROOT,
+      localAppData: config.localAppData,
+      service: serviceState.service,
+      idleBlocker: autoUpdateBlockReason,
+      armRecoveryGuard: () => {
+        try {
+          armRestartRecoveryGuard("install-repair", 300);
+          return true;
+        } catch (error: unknown) {
+          console.error(`[Service] Install repair: recovery guard could not be armed: ${errorMessage(error)}`);
+          return false;
+        }
+      },
+      exit: () => process.exit(1),
+    });
+    setInstallRepairWarning(result.status === "blocked" ? result.warning : undefined);
+  };
   // After ensureWindowsServiceWrapper, so the SYSTEM task never starts an
   // outdated wrapper.
   if (!serviceState.service && serviceState.config) {
@@ -13631,7 +13654,9 @@ if (process.platform === "win32") {
       setWindowsServiceWarning(machineServiceRegistered ? undefined
         : `Runs only while ${os.userInfo().username} is signed in. Rerun setup as an administrator to keep it running for every account.`);
       writeMachineMarker();
-    }), 15_000).unref();
+    }).then(repairInstall), 15_000).unref();
+  } else if (serviceState.service) {
+    setTimeout(() => void repairInstall(), 15_000).unref();
   }
 }
 

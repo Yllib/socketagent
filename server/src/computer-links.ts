@@ -3,7 +3,14 @@ import * as path from "path";
 import WebSocket from "ws";
 import { z } from "zod";
 import { computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey } from "./device-registry";
-import { decrypt, encrypt, fromBase64, toBase64, type KeyPair } from "./relay-crypto";
+import {
+  PeerChannel,
+  SessionKeyedPeerStore,
+  SessionOffer,
+  fromBase64,
+  type KeyPair,
+  type SessionKeyedPeers,
+} from "./relay-crypto";
 import { peerEventSchema, peerResponseSchema, type PeerAction, type PeerEvent, type PeerResponse } from "./computer-link-peer";
 import type { ComputerApprovalToken, ComputerLinkSummary } from "./protocol";
 import { errorMessage, isRecord } from "./value-guards";
@@ -91,8 +98,17 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 /**
  * One outgoing connection to a target's link room. This computer joins as a
  * phone with a link ticket, then speaks the same NaCl box envelope the phone
- * lanes use, pinned to the target's server key.
+ * lanes use, pinned to the target's server key, with a session key per
+ * connection once the target answers with one.
  */
+interface LinkHooks {
+  onEvent: (event: PeerEvent, record: ComputerLinkRecord) => void;
+  onOnline: (record: ComputerLinkRecord) => void;
+  onStatusChange?: () => void;
+  /** Targets that answered with session keys and may not fall back. Defaults to memory. */
+  sessionKeyedPeers?: SessionKeyedPeers;
+}
+
 export class LinkConnection {
   private ws: WebSocket | null = null;
   private closed = false;
@@ -103,6 +119,9 @@ export class LinkConnection {
   private peerPresent = false;
   private approved = false;
   private requestCounter = 0;
+  private offer: SessionOffer | null = null;
+  private channel: PeerChannel | null = null;
+  private readonly sessionKeyedPeers: SessionKeyedPeers;
   offlineReason: string | undefined = "Connecting";
   /** Set once the relay refuses the ticket; only a new ticket clears it. */
   ticketRejected = false;
@@ -110,12 +129,10 @@ export class LinkConnection {
   constructor(
     public record: ComputerLinkRecord,
     private readonly keyPair: KeyPair,
-    private readonly hooks: {
-      onEvent: (event: PeerEvent, record: ComputerLinkRecord) => void;
-      onOnline: (record: ComputerLinkRecord) => void;
-      onStatusChange?: () => void;
-    },
-  ) {}
+    private readonly hooks: LinkHooks,
+  ) {
+    this.sessionKeyedPeers = hooks.sessionKeyedPeers ?? new SessionKeyedPeerStore();
+  }
 
   get status(): LinkStatus {
     if (this.peerPresent && this.approved && this.ws?.readyState === WebSocket.OPEN) return "online";
@@ -142,6 +159,9 @@ export class LinkConnection {
       return;
     }
     this.ws = ws;
+    // A session belongs to one socket. Frames from an older one never open here.
+    this.channel = null;
+    this.offer = null;
     this.offlineReason = "Connecting";
     // update() replaces the socket; events from the one it closed are ignored.
     const current = () => this.ws === ws;
@@ -234,12 +254,15 @@ export class LinkConnection {
     if (parsed.type === "peer_connected") {
       this.peerPresent = true;
       this.approved = false;
-      this.sendPlain({ type: "key_exchange", pubkey: toBase64(this.keyPair.publicKey) });
+      this.channel = null;
+      this.offer = new SessionOffer(this.keyPair, fromBase64(this.record.targetPubkey));
+      this.sendPlain(this.offer.message());
       return;
     }
     if (parsed.type === "peer_disconnected") {
       this.peerPresent = false;
       this.approved = false;
+      this.channel = null;
       this.offlineReason = `${this.record.name} is offline`;
       this.failPending(new Error(`${this.record.name} went offline`));
       this.hooks.onStatusChange?.();
@@ -251,6 +274,21 @@ export class LinkConnection {
       return;
     }
     if (parsed.type === "key_exchange_ack") {
+      if (!this.offer) return;
+      try {
+        this.channel = this.offer.accept(parsed, this.sessionKeyedPeers);
+      } catch (err: unknown) {
+        // Either a bad answer or a downgrade to the static box; both mean
+        // the frames that follow cannot be trusted.
+        this.channel = null;
+        this.offlineReason = `${this.record.name} answered with an unusable key exchange`;
+        console.warn(`[ComputerLinks] ${this.record.name}: key exchange refused: ${errorMessage(err)}`);
+        this.hooks.onStatusChange?.();
+        this.ws?.close();
+        return;
+      } finally {
+        this.offer = null;
+      }
       if (parsed.device === "pending") {
         // A device_auth_result follows with the reason. Computers never token-enroll.
         this.offlineReason = `${this.record.name} has not authorized this computer`;
@@ -260,11 +298,12 @@ export class LinkConnection {
       return;
     }
     if (typeof parsed.n === "string" && typeof parsed.c === "string") {
+      if (!this.channel) return;
       let plaintext: string;
       try {
-        plaintext = decrypt({ n: parsed.n, c: parsed.c }, fromBase64(this.record.targetPubkey), this.keyPair.secretKey);
-      } catch {
-        console.warn(`[ComputerLinks] ${this.record.name}: could not decrypt a frame; is the target key right?`);
+        plaintext = this.channel.openText({ n: parsed.n, c: parsed.c });
+      } catch (err: unknown) {
+        console.warn(`[ComputerLinks] ${this.record.name}: frame refused: ${errorMessage(err)}`);
         return;
       }
       this.handleEncrypted(JSON.parse(plaintext));
@@ -320,9 +359,8 @@ export class LinkConnection {
   }
 
   private sendEncrypted(message: Record<string, unknown>): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) throw new Error(`${this.record.name} is offline`);
-    const envelope = encrypt(JSON.stringify(message), fromBase64(this.record.targetPubkey), this.keyPair.secretKey);
-    this.ws.send(JSON.stringify(envelope));
+    if (this.ws?.readyState !== WebSocket.OPEN || !this.channel) throw new Error(`${this.record.name} is offline`);
+    this.ws.send(JSON.stringify(this.channel.sealText(JSON.stringify(message))));
   }
 
   /** Sends one peer_request and waits for its peer_response. */
@@ -394,11 +432,7 @@ export class ComputerLinkManager {
   constructor(
     private readonly store: ComputerLinkStore,
     private readonly keyPair: KeyPair,
-    private readonly hooks: {
-      onEvent: (event: PeerEvent, record: ComputerLinkRecord) => void;
-      onOnline: (record: ComputerLinkRecord) => void;
-      onStatusChange?: () => void;
-    },
+    private readonly hooks: LinkHooks,
   ) {}
 
   start(): void {

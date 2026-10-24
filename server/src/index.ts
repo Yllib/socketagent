@@ -93,7 +93,16 @@ import { parseStoredData } from "./stored-data";
 import { rotateAuthTokenInEnv, writeEnvValue } from "./env-file";
 import { parseClientMessage } from "./client-message";
 import { listBackendConfigFiles, readBackendConfigFile, writeBackendConfigFile } from "./backend-config-files";
-import { KeyPair, encrypt, decrypt, encryptBinary, decryptBinary, fromBase64, loadOrCreateKeyPair, toBase64 } from "./relay-crypto";
+import {
+  KeyPair,
+  PeerChannel,
+  SESSION_KEY_VERSION,
+  SessionKeyedPeerStore,
+  acceptKeyExchange,
+  isSessionKeyDowngrade,
+  loadOrCreateKeyPair,
+  toBase64,
+} from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { isAuthFailureMessage } from "./backend-auth";
@@ -577,6 +586,7 @@ const BIN_MARKER_UPLOAD_CHUNK = 0x42;  // 'B' — upload chunk: [1 idLen][idByte
 
 class DirectClientTransport implements ClientTransport {
   private peerPublicKey: Uint8Array | null = null;
+  private channel: PeerChannel | null = null;
   private binaryEnabled = false;
   private authenticated: boolean;
   private binaryFileDownloadEnabled = false;
@@ -619,7 +629,7 @@ class DirectClientTransport implements ClientTransport {
   }
 
   get hasPeerKey(): boolean {
-    return this.peerPublicKey !== null;
+    return this.channel !== null;
   }
 
   get peerKey(): string | undefined {
@@ -644,7 +654,7 @@ class DirectClientTransport implements ClientTransport {
 
   send(data: string): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
-    if (!this.peerPublicKey) {
+    if (!this.channel) {
       this.ws.send(data);
       return;
     }
@@ -654,11 +664,11 @@ class DirectClientTransport implements ClientTransport {
       const plaintext = new Uint8Array(jsonBytes.length + 1);
       plaintext[0] = BIN_MARKER_JSON;
       plaintext.set(jsonBytes, 1);
-      this.ws.send(encryptBinary(plaintext, this.peerPublicKey, this.keyPair.secretKey), { binary: true });
+      this.ws.send(this.channel.sealBinary(plaintext), { binary: true });
       return;
     }
 
-    this.ws.send(JSON.stringify(encrypt(data, this.peerPublicKey, this.keyPair.secretKey)));
+    this.ws.send(JSON.stringify(this.channel.sealText(data)));
   }
 
   sendPlain(msg: Record<string, unknown>): void {
@@ -667,20 +677,26 @@ class DirectClientTransport implements ClientTransport {
     }
   }
 
-  handleKeyExchange(pubkey: unknown): void {
-    if (typeof pubkey !== "string" || !pubkey) {
-      throw new Error("Missing direct key exchange public key");
-    }
-    const nextPublicKey = fromBase64(pubkey);
-    if (nextPublicKey.length !== 32) {
-      throw new Error("Invalid direct key exchange public key");
-    }
-    if (this.peerPublicKey && toBase64(this.peerPublicKey) !== toBase64(nextPublicKey)) {
+  /** Throws on a bad exchange, or a static-box one from a key that used session keys. */
+  handleKeyExchange(message: Record<string, unknown>): void {
+    const exchange = acceptKeyExchange(message, this.keyPair, sessionKeyedPeers);
+    if (this.peerPublicKey && toBase64(this.peerPublicKey) !== exchange.peerPublicKeyBase64) {
       console.warn("[Direct E2E] Phone public key changed; replacing peer crypto state");
     }
-    this.peerPublicKey = nextPublicKey;
-    this.sendPlain({ type: "key_exchange_ack" });
-    console.log("[Direct E2E] Key exchange complete — waiting for encrypted auth");
+    this.peerPublicKey = exchange.peerPublicKey;
+    this.channel = exchange.channel;
+    this.sendPlain({ type: "key_exchange_ack", ...exchange.ack });
+    console.log(`[Direct E2E] Key exchange complete (${exchange.channel.sessionKeyed ? "session key" : "static key"}) — waiting for encrypted auth`);
+  }
+
+  /**
+   * Whether the client speaks session keys although this socket's handshake
+   * had none, which means someone stripped them. Holds its key to them.
+   */
+  isSessionKeyDowngrade(message: unknown): boolean {
+    if (!this.channel || !isSessionKeyDowngrade(message, this.channel)) return false;
+    if (this.peerPublicKey) sessionKeyedPeers.add(toBase64(this.peerPublicKey));
+    return true;
   }
 
   authenticate(binaryEnvelope: boolean): void {
@@ -702,7 +718,7 @@ class DirectClientTransport implements ClientTransport {
     if (!this.binaryBrowserFramesEnabled) return false;
     if (this.ws.readyState !== WebSocket.OPEN) return true;
     this.ws.send(
-      this.peerPublicKey ? encryptBinary(encoded, this.peerPublicKey, this.keyPair.secretKey) : encoded,
+      this.channel ? this.channel.sealBinary(encoded) : encoded,
       { binary: true },
     );
     return true;
@@ -718,11 +734,8 @@ class DirectClientTransport implements ClientTransport {
   ): boolean {
     if (!this.binaryFileDownloadEnabled || this.ws.readyState !== WebSocket.OPEN) return false;
     const plaintext = encodeBinaryFileDownloadChunk(metadata, bytes);
-    if (this.peerPublicKey) {
-      this.ws.send(
-        encryptBinary(plaintext, this.peerPublicKey, this.keyPair.secretKey),
-        { binary: true },
-      );
+    if (this.channel) {
+      this.ws.send(this.channel.sealBinary(plaintext), { binary: true });
     } else {
       this.ws.send(plaintext, { binary: true });
     }
@@ -730,21 +743,21 @@ class DirectClientTransport implements ClientTransport {
   }
 
   decryptTextEnvelope(parsed: unknown): ClientMessage {
-    if (!this.peerPublicKey) {
+    if (!this.channel) {
       throw new Error("Encrypted direct message before key exchange");
     }
     if (!isRecord(parsed) || typeof parsed.n !== "string" || typeof parsed.c !== "string") {
       throw new Error("Invalid encrypted envelope");
     }
-    const plaintext = decrypt({ n: parsed.n, c: parsed.c }, this.peerPublicKey, this.keyPair.secretKey);
+    const plaintext = this.channel.openText({ n: parsed.n, c: parsed.c });
     return parseClientMessage(JSON.parse(plaintext));
   }
 
   decryptBinaryFrame(buf: Buffer): ClientMessage {
-    if (!this.peerPublicKey) {
+    if (!this.channel) {
       throw new Error("Encrypted direct binary frame before key exchange");
     }
-    const plaintext = decryptBinary(buf, this.peerPublicKey, this.keyPair.secretKey);
+    const plaintext = this.channel.openBinary(buf);
     if (plaintext.length === 0) {
       throw new Error("Empty direct binary frame");
     }
@@ -789,6 +802,10 @@ const connectedClients = new Set<ClientTransport>();
 function loadServerKeyPair(): KeyPair {
   return loadOrCreateKeyPair(socketAgentDataPath("relay-keys.json"));
 }
+
+// Device and computer keys that have used per-connection session keys. Every
+// transport refuses them the replayable static box from then on.
+const sessionKeyedPeers = new SessionKeyedPeerStore(socketAgentDataPath("session-keyed-peers.json"));
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
@@ -1594,6 +1611,8 @@ function serverCapabilitiesPayload(
     windowsElevated: windowsElevated(),
     binaryEnvelope,
     binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
+    // Clients that see this over the static box know their handshake was stripped.
+    sessionKeyVersion: SESSION_KEY_VERSION,
     transportLane,
     transportLanes: {
       version: TRANSPORT_LANE_VERSION,
@@ -3485,6 +3504,7 @@ const computerLinks = new ComputerLinkManager(
   new ComputerLinkStore(socketAgentDataPath("computer-links.json")),
   loadServerKeyPair(),
   {
+    sessionKeyedPeers,
     onEvent: (event, link) => handleRemoteAgentReport(event, link),
     // hello also lets the target flush reports that finished while this computer was away.
     onOnline: (link) => {
@@ -12162,7 +12182,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         const parsed: unknown = JSON.parse(buf.toString());
         if (isRecord(parsed) && parsed.type === "key_exchange") {
           try {
-            transport.handleKeyExchange(parsed.pubkey);
+            transport.handleKeyExchange(parsed);
           } catch (err) {
             console.warn(`[Direct E2E] Key exchange rejected: ${errorMessage(err)}`);
             ws.close(1008, "Invalid key exchange");
@@ -12188,6 +12208,11 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
     }
 
     if (msg.type === "direct_auth") {
+      if (transport.isSessionKeyDowngrade(msg)) {
+        console.warn("[Direct E2E] Client supports session keys but its handshake had none; closing");
+        ws.close(1008, "Session key required");
+        return;
+      }
       const authMessage = msg;
       const open = (holdsToken: boolean) => {
         transport.holdsAuthToken = holdsToken;
@@ -12383,6 +12408,7 @@ function startRelayClient(): void {
     keyPair,
     lane: "control",
     peerAuth: deviceAuthGate,
+    sessionKeyedPeers,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
     serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey)),
@@ -12464,6 +12490,7 @@ function startRelayClient(): void {
     keyPair,
     lane: "bulk",
     peerAuth: deviceAuthGate,
+    sessionKeyedPeers,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
     serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey)),
@@ -12526,6 +12553,7 @@ function startRelayClient(): void {
       keyPair,
       lane: "link",
       peerAuth: deviceAuthGate,
+      sessionKeyedPeers,
       onPeerJson: (message, peerId, publicKey) => {
         void computerLinkPeerApi.handle(message, publicKey).then((response) => {
           if (response) relayLinkClient?.sendReply(peerId, response);

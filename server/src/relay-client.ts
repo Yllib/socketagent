@@ -1,5 +1,13 @@
 import WebSocket from "ws";
-import { KeyPair, encrypt, decrypt, encryptBinary, decryptBinary, toBase64, fromBase64 } from "./relay-crypto";
+import {
+  KeyPair,
+  PeerChannel,
+  SessionKeyRequiredError,
+  SessionKeyedPeerStore,
+  acceptKeyExchange,
+  isSessionKeyDowngrade,
+  type SessionKeyedPeers,
+} from "./relay-crypto";
 import { parseClientMessage } from "./client-message";
 import { errorMessage, isRecord, parseJsonObject } from "./value-guards";
 import {
@@ -93,6 +101,8 @@ type RelayPeerAuth = "approved" | "pending" | "dropped";
 interface RelayPeer {
   publicKey: Uint8Array | null;
   publicKeyBase64: string | null;
+  /** Set by the key exchange; session-keyed unless the phone predates it. */
+  channel: PeerChannel | null;
   auth: RelayPeerAuth;
   pendingTimer: ReturnType<typeof setTimeout> | null;
   binaryEnabled: boolean;
@@ -213,6 +223,12 @@ export interface RelayClientOptions {
    * tests. Index.ts always passes the device registry gate.
    */
   peerAuth?: RelayPeerAuthorizer;
+  /**
+   * Keys that have used session keys and may no longer fall back to the
+   * static box. Shared with the direct socket and the link client so a key
+   * proven on one transport is held to it on all. Defaults to memory only.
+   */
+  sessionKeyedPeers?: SessionKeyedPeers;
   /** A pending key needs approval from an enrolled device. */
   onDevicePending?: (notice: { publicKey: string; name: string; platform: DevicePlatform; code: string }) => void;
   /** A held peer expired or was dropped before approval. */
@@ -255,6 +271,7 @@ export class RelayClient {
   private closed = false;
   private keepalive: PingKeepalive | null = null;
   private outbox = new RelayMessageOutbox();
+  private readonly sessionKeyedPeers: SessionKeyedPeers;
   private static PING_INTERVAL = 30_000;  // send ping every 30s
 
   // Virtual WebSocket interface for ClaudeSession compatibility
@@ -262,6 +279,7 @@ export class RelayClient {
 
   constructor(private opts: RelayClientOptions) {
     this.virtualWs = new VirtualRelaySocket(this);
+    this.sessionKeyedPeers = opts.sessionKeyedPeers ?? new SessionKeyedPeerStore();
   }
 
   /** Get a WebSocket-like object that ClaudeSession can use */
@@ -459,6 +477,7 @@ export class RelayClient {
       peer = {
         publicKey: null,
         publicKeyBase64: null,
+        channel: null,
         // Without a gate every peer is admitted at key exchange, as before.
         // With one, a peer stays held until the gate approves it.
         auth: this.opts.peerAuth ? "pending" : "approved",
@@ -578,9 +597,12 @@ export class RelayClient {
   }
 
   private sendToPeer(peerId: string, msg: Record<string, unknown>, peer = this.getPeer(peerId), allowHeld = false): void {
-    if (!peer.publicKey) return;
+    const channel = peer.channel;
+    if (!channel) return;
     // A held peer gets device_auth replies and nothing else.
     if (peer.auth !== "approved" && !allowHeld) return;
+    // A session nonce is spent once sealed, so seal only what will be sent.
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
 
     const json = JSON.stringify(msg);
     if (peer.binaryEnabled) {
@@ -588,11 +610,9 @@ export class RelayClient {
       const plaintext = new Uint8Array(jsonBytes.length + 1);
       plaintext[0] = BIN_MARKER_JSON;
       plaintext.set(jsonBytes, 1);
-      const envelope = encryptBinary(plaintext, peer.publicKey, this.opts.keyPair.secretKey);
-      this.sendRawFrameToPeer(peerId, envelope, true);
+      this.sendRawFrameToPeer(peerId, channel.sealBinary(plaintext), true);
     } else {
-      const envelope = encrypt(json, peer.publicKey, this.opts.keyPair.secretKey);
-      this.sendRawFrameToPeer(peerId, JSON.stringify(envelope), false);
+      this.sendRawFrameToPeer(peerId, JSON.stringify(channel.sealText(json)), false);
     }
   }
 
@@ -610,14 +630,14 @@ export class RelayClient {
       ? [[peerId, this.getPeer(peerId)] as const]
       : Array.from(this.peers.entries());
     if (targets.length === 0 || targets.some(([, peer]) =>
-      peer.auth !== "approved" || !peer.publicKey || !peer.binaryEnabled || !peer.supportsBinaryFileDownload
+      peer.auth !== "approved" || !peer.channel || !peer.binaryEnabled || !peer.supportsBinaryFileDownload
     )) {
       return false;
     }
+    if (this.ws?.readyState !== WebSocket.OPEN) return true;
+    const plaintext = encodeBinaryFileDownloadChunk(metadata, bytes);
     for (const [targetPeerId, peer] of targets) {
-      const plaintext = encodeBinaryFileDownloadChunk(metadata, bytes);
-      const envelope = encryptBinary(plaintext, peer.publicKey!, this.opts.keyPair.secretKey);
-      this.sendRawFrameToPeer(targetPeerId, envelope, true);
+      if (peer.channel) this.sendRawFrameToPeer(targetPeerId, peer.channel.sealBinary(plaintext), true);
     }
     return true;
   }
@@ -625,9 +645,9 @@ export class RelayClient {
   /** Send an encoded browser frame to one phone, if it reads binary frames. */
   sendBinaryBrowserFrame(encoded: Buffer, peerId: string): boolean {
     const peer = this.peers.get(peerId);
-    if (!peer?.publicKey || peer.auth !== "approved" || !peer.binaryEnabled || !peer.supportsBinaryBrowserFrames) return false;
+    if (!peer?.channel || peer.auth !== "approved" || !peer.binaryEnabled || !peer.supportsBinaryBrowserFrames) return false;
     if (this.ws?.readyState !== WebSocket.OPEN) return true;
-    this.sendRawFrameToPeer(peerId, encryptBinary(encoded, peer.publicKey, this.opts.keyPair.secretKey), true);
+    this.sendRawFrameToPeer(peerId, peer.channel.sealBinary(encoded), true);
     return true;
   }
 
@@ -695,28 +715,41 @@ export class RelayClient {
     // Key exchange (plaintext from phone)
     if (parsed.type === "key_exchange") {
       console.log(`[Relay${this.laneTag()}] Received peer public key${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
-      if (typeof parsed.pubkey !== "string") throw new Error("Missing relay public key");
-      const nextPhonePublicKey = fromBase64(parsed.pubkey);
-      if (nextPhonePublicKey.length !== 32) throw new Error("Invalid relay public key");
-      const nextKeyBase64 = toBase64(nextPhonePublicKey);
+      let exchange: ReturnType<typeof acceptKeyExchange>;
+      try {
+        exchange = acceptKeyExchange(parsed, this.opts.keyPair, this.sessionKeyedPeers);
+      } catch (err) {
+        // A refused exchange leaves the peer unable to send or receive
+        // anything until it leaves or tries again.
+        if (peer.auth === "approved") this.dropPeer(peerId, peer, true);
+        peer.channel = null;
+        if (err instanceof SessionKeyRequiredError) {
+          console.warn(`[Relay${this.laneTag()}] Refused peer ${peerId}: its key used session keys before, this exchange has none`);
+          return;
+        }
+        throw err;
+      }
+      const nextKeyBase64 = exchange.peerPublicKeyBase64;
       if (peer.publicKey && peer.publicKeyBase64 !== nextKeyBase64) {
         console.warn(`[Relay] Phone ${peerId} changed public key; replacing peer crypto state`);
         if (peer.auth === "approved") this.dropPeer(peerId, peer, true);
       }
       this.clearPendingTimer(peer);
-      peer.publicKey = nextPhonePublicKey;
+      peer.publicKey = exchange.peerPublicKey;
       peer.publicKeyBase64 = nextKeyBase64;
+      peer.channel = exchange.channel;
       const lane = this.opts.lane || "control";
       const admission = this.opts.peerAuth ? this.opts.peerAuth.authorize(nextKeyBase64, lane) : "approved";
+      const sessionNote = exchange.channel.sessionKeyed ? "session key" : "static key";
 
       if (admission === "approved") {
         peer.auth = "approved";
         this.virtualWs._setOpen(true);
         this.setStatus("paired");
         // Send ack PLAINTEXT. The phone needs this to confirm the handshake
-        // before encrypted mode begins. It contains no sensitive data.
-        this.sendPlainToPeer(peerId, { type: "key_exchange_ack", device: "approved" });
-        console.log(`[Relay${this.laneTag()}] Key exchange complete, encrypted channel established`);
+        // before encrypted mode begins. Its session key is public.
+        this.sendPlainToPeer(peerId, { type: "key_exchange_ack", device: "approved", ...exchange.ack });
+        console.log(`[Relay${this.laneTag()}] Key exchange complete, encrypted channel established (${sessionNote})`);
         this.flushOutboxToPeer(peerId, peer);
         this.opts.onPeerOpened?.(peerId, nextKeyBase64);
         return;
@@ -724,7 +757,7 @@ export class RelayClient {
 
       // Held or refused peers get the same plaintext ack so the app knows to
       // authenticate, then an encrypted reason when there is nothing to wait for.
-      this.sendPlainToPeer(peerId, { type: "key_exchange_ack", device: "pending" });
+      this.sendPlainToPeer(peerId, { type: "key_exchange_ack", device: "pending", ...exchange.ack });
       if (admission === "refused") {
         peer.auth = "pending";
         this.sendToPeer(peerId, { type: "device_auth_result", ok: false, reason: "wrong_lane" }, peer, true);
@@ -753,17 +786,13 @@ export class RelayClient {
 
     // Encrypted message from phone
     if (typeof parsed.n === "string" && typeof parsed.c === "string") {
-      if (!peer.publicKey) {
+      if (!peer.channel) {
         console.error(`[Relay] Received encrypted message before key exchange${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
         return;
       }
       if (peer.auth === "dropped") return;
       try {
-        const plaintext = decrypt(
-          { n: parsed.n, c: parsed.c },
-          peer.publicKey,
-          this.opts.keyPair.secretKey
-        );
+        const plaintext = peer.channel.openText({ n: parsed.n, c: parsed.c });
         this.routeDecryptedJson(JSON.parse(plaintext), peerId, peer);
       } catch (err) {
         console.error(`[Relay] Decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${errorMessage(err)}`);
@@ -805,14 +834,14 @@ export class RelayClient {
    */
   private handleBinaryFrame(buf: Buffer, peerId = LEGACY_PEER_ID): void {
     const peer = this.getPeer(peerId);
-    if (!peer.publicKey) {
+    if (!peer.channel) {
       console.error(`[Relay] Binary frame received before key exchange — dropping${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
       return;
     }
     if (peer.auth === "dropped") return;
     let plaintext: Uint8Array;
     try {
-      plaintext = decryptBinary(buf, peer.publicKey, this.opts.keyPair.secretKey);
+      plaintext = peer.channel.openBinary(buf);
     } catch (err) {
       console.error(`[Relay] Binary decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${errorMessage(err)}`);
       return;
@@ -870,6 +899,15 @@ export class RelayClient {
     if (msg.type === "client_capabilities") {
       const wantsBinary = msg.binaryEnvelope === true;
       const peer = this.getPeer(peerId);
+      if (peer.channel && isSessionKeyDowngrade(msg, peer.channel)) {
+        // Both sides speak session keys but the handshake carried none, so
+        // something between them removed it. Hold the key to session keys
+        // from now on and stop talking on this channel.
+        console.warn(`[Relay${this.laneTag()}] Peer ${peerId} supports session keys but its handshake had none; dropping it`);
+        if (peer.publicKeyBase64) this.sessionKeyedPeers.add(peer.publicKeyBase64);
+        this.dropPeer(peerId, peer, true);
+        return;
+      }
       peer.supportsSessionEventAck = supportsSessionEventAcknowledgement(msg);
       peer.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       peer.supportsBinaryFileDownload = supportsBinaryFileDownload(msg);

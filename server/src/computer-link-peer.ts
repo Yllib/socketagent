@@ -360,7 +360,9 @@ export class ComputerLinkPeerApi {
   /** Returns "approved" or the response that asks the source for an approval. */
   private checkApproval(request: PeerRequest, publicKey: string): "approved" | PeerResponse {
     this.expire();
-    const grantKey = `${publicKey}\n${request.sourceSessionId}`;
+    // A chat grant covers one kind of access, so allowing a transcript read
+    // for a chat doesn't also allow commands or agents in it.
+    const grantKey = `${publicKey}\n${request.sourceSessionId}\n${accessFor(request.action)}`;
     if (request.sourceSessionId && (this.chatGrants.get(grantKey) ?? 0) > this.now()) {
       return "approved";
     }

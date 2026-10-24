@@ -167,6 +167,8 @@ test("a once approval covers one request and a chat approval covers that chat", 
   assert.equal(second?.ok, true);
   const otherChat = await chatEnv.api.handle({ ...request, id: "r3", sourceSessionId: "chat-9" }, chatEnv.sourceKey);
   assert.ok(otherChat?.approvalRequired);
+  const otherKind = await chatEnv.api.handle({ ...request, id: "r4", action: "agent_start", args: { prompt: "hi" } }, chatEnv.sourceKey);
+  assert.ok(otherKind?.approvalRequired, "a chat grant for commands must not cover agents");
   assert.deepEqual(chatEnv.ran, ["echo hi", "echo two"]);
 });
 

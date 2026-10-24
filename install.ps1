@@ -48,11 +48,6 @@ $NPM_GLOBAL_DIR = if ($env:SOCKETAGENT_NPM_GLOBAL_DIR) {
     $env:SOCKETAGENT_NPM_GLOBAL_DIR
 } elseif ($env:SOCKET_AGENT_NPM_PREFIX) {
     $env:SOCKET_AGENT_NPM_PREFIX
-} elseif (Test-SocketAgentMachineInstall $REPO_ROOT) {
-    # SocketAgentService runs the agent CLIs as SYSTEM, so a machine install
-    # keeps them where only administrators can change them, as the server
-    # does; see managedNpmPrefix in server\src\socket-agent-paths.ts.
-    Join-Path $env:ProgramData 'SocketAgent\toolchains\npm-global'
 } else {
     Join-Path (Join-Path $SOCKET_AGENT_HOME "toolchains") "npm-global"
 }
@@ -451,27 +446,6 @@ if (-not (Test-Path (Join-Path $SERVER_DIR "package.json"))) {
 try {
 
 $LIMITED_INSTALL = Resolve-SocketAgentLimitedInstall
-
-# SocketAgentService runs a machine install as SYSTEM, so its checkout lives
-# where only administrators can change it; see Get-SocketAgentMachineInstallDir.
-# Setup started from any other checkout copies it there and continues from
-# the copy, whose server later renames this one out of the way.
-if (-not $LIMITED_INSTALL -and -not (Test-SocketAgentMachineInstall $REPO_ROOT)) {
-    $machineDir = Get-SocketAgentMachineInstallDir
-    Initialize-SocketAgentMachineFolder
-    if ((Test-Path -LiteralPath $machineDir) -and -not (Test-SocketAgentTasksUse (Join-Path $machineDir 'server'))) {
-        Remove-Item -LiteralPath $machineDir -Recurse -Force
-    }
-    if (-not (Test-Path -LiteralPath $machineDir)) {
-        Write-Host "  Copying SocketAgent to $machineDir, where only administrators can change it..."
-        Copy-SocketAgentInstall $REPO_ROOT $machineDir ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
-        New-Item -ItemType Directory -Force (Join-Path $machineDir 'server\windows-service') | Out-Null
-        Set-Content -LiteralPath (Join-Path $machineDir 'server\windows-service\moved-from.txt') -Value $REPO_ROOT -Encoding UTF8
-    }
-    $script:continuedInMachineInstall = $true
-    & (Join-Path $machineDir 'install.ps1') @PSBoundParameters
-    return
-}
 
 # Keep the legacy task name when repairing an older installation, so setup
 # replaces its supervisor instead of leaving two tasks competing for the port.
@@ -974,8 +948,6 @@ if ($LIMITED_INSTALL) {
 }
 
 } catch {
-    # The copy in the machine install already reported its failure.
-    if ($script:continuedInMachineInstall) { throw }
     Write-Host ""
     Write-Host "  ===========================================" -ForegroundColor Red
     Write-Host "   Installation failed!" -ForegroundColor Red

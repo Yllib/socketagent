@@ -8,7 +8,7 @@ import * as path from "path";
 import { spawn } from "child_process";
 import { killProcessTree, runProbe } from "./async-probe";
 import type { Backend } from "./protocol";
-import { managedNpmBinDir, managedNpmPrefix, windowsMachineRoot } from "./socket-agent-paths";
+import { managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 
 export type BackendInstallPhase = "install" | "auth" | "probe";
 export type BackendInstallStatus = "running" | "completed" | "failed" | "cancelled";
@@ -166,14 +166,6 @@ function installEnv(): NodeJS.ProcessEnv {
   const binDir = managedNpmBinDir(env);
   fs.mkdirSync(binDir, { recursive: true });
   env.NPM_CONFIG_PREFIX = prefix;
-  const machineRoot = windowsMachineRoot(env);
-  if (machineRoot) {
-    // npm runs here as SYSTEM or the elevated owner, and the owner's .npmrc
-    // can name a shell or node options to run, so it reads no per-user config.
-    const none = path.join(machineRoot, "toolchains", "no-user-npmrc");
-    env.NPM_CONFIG_USERCONFIG = none;
-    env.NPM_CONFIG_GLOBALCONFIG = none;
-  }
   const key = pathKey(env);
   const currentPath = env[key] || env.PATH || "";
   env[key] = currentPath ? `${binDir}${path.delimiter}${currentPath}` : binDir;

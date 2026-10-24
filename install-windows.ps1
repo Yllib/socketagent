@@ -10,13 +10,9 @@ $ErrorActionPreference = "Stop"
 
 $RepoUrl = if ($env:SOCKETAGENT_REPO_URL) { $env:SOCKETAGENT_REPO_URL } else { "https://github.com/Yllib/socketagent.git" }
 $Branch = if ($env:SOCKETAGENT_BRANCH) { $env:SOCKETAGENT_BRANCH } else { "master" }
-$MachineInstallDir = Join-Path $env:ProgramData 'SocketAgent\socketagent'
-
 # Finds this Windows user's existing SocketAgent checkout, or returns nothing.
-# The machine install comes first: the location file is the user's to edit,
-# and setup runs what it finds with administrator rights.
 function Find-SocketAgentInstall {
-    $candidates = @($MachineInstallDir)
+    $candidates = @()
     $locationFile = Join-Path $env:LOCALAPPDATA 'SocketAgent\install-location.txt'
     if (Test-Path $locationFile) { $candidates += (Get-Content $locationFile -Raw).Trim() }
     foreach ($taskName in @('SocketAgent', 'SocketClaude')) {
@@ -164,11 +160,6 @@ Write-Host "Install dir: $InstallDir"
 Write-Host ""
 
 Ensure-Git
-
-$elevated = (New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if ([IO.Path]::GetFullPath($InstallDir).TrimEnd('\') -ieq $MachineInstallDir -and -not $elevated) {
-    throw "SocketAgent is installed in $MachineInstallDir, which only administrators can change. Rerun setup from PowerShell opened with Run as administrator."
-}
 
 if (Test-Path (Join-Path $InstallDir ".git")) {
     Write-Host "Updating existing SocketAgent checkout..."

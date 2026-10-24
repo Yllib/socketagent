@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { isRecord } from "./value-guards";
-import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix, windowsMachineRoot } from "./socket-agent-paths";
+import { legacyManagedNpmBinDir, legacyManagedNpmPrefix, managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
 
 // Finds the Claude Code executable the server runs. Kept apart from
 // claude-session so the Windows service probe can use the same resolution
@@ -114,9 +114,6 @@ function resolveManagedClaudeCli(): { path?: string; source?: ClaudeExecutableSo
     if (managed) return { path: managed, source: "managed" };
   }
 
-  // The legacy prefix and PATH sit in the owner's profile, which a machine
-  // install, run as SYSTEM, must not execute from.
-  if (windowsMachineRoot()) return {};
   const legacyPackageBin = resolveClaudePackageBin(legacyManagedNpmPrefix());
   if (legacyPackageBin) return { path: legacyPackageBin, source: "legacy" };
 
@@ -139,7 +136,7 @@ export function resolveClaudeExecutable(): ClaudeExecutableInfo {
   const sdk = resolveSdkClaudeBinary();
   if (sdk) return { path: sdk, source: "sdk" };
 
-  const installed = windowsMachineRoot() ? undefined : resolveInstalledClaudeCli();
+  const installed = resolveInstalledClaudeCli();
   if (installed) return { path: installed, source: "system" };
 
   return {

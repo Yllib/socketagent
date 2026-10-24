@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { legacyManagedNpmBinDir, managedNpmBinDir, windowsMachineRoot } from "./socket-agent-paths";
+import { legacyManagedNpmBinDir, managedNpmBinDir } from "./socket-agent-paths";
 
 function pathKey(env: NodeJS.ProcessEnv): string {
   return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
@@ -67,16 +67,10 @@ export function resolveCodexCommand(env: NodeJS.ProcessEnv = buildCodexProcessEn
   if (explicit && fs.existsSync(explicit)) return explicit;
 
   const key = pathKey(env);
+  const pathValue = env[key] || env.PATH || "";
   const names = process.platform === "win32"
     ? ["codex.exe", "codex.cmd", "codex.bat", "codex"]
     : ["codex"];
-  // A machine install runs Codex as SYSTEM, so only its own toolchain counts;
-  // the rest of PATH includes folders in the owner's profile.
-  if (windowsMachineRoot(env)) {
-    const managed = managedNpmBinDir(env);
-    return names.map((name) => path.join(managed, name)).find((candidate) => fs.existsSync(candidate)) || path.join(managed, "codex.cmd");
-  }
-  const pathValue = env[key] || env.PATH || "";
 
   for (const dir of pathValue.split(path.delimiter).filter(Boolean)) {
     for (const name of names) {

@@ -11,8 +11,8 @@ import { SessionTransferJobs } from "./session-transfer-jobs";
 import { modelDownloadArchive } from "./model-download-archive";
 import { serveDownloadFile } from "./http-file-download";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
-import { addMachineServiceTask, moveToMachineInstall, refreshMachineMarker, retireMovedInstall, SERVICE_TASK, taskExists } from "./windows-machine-service";
-import { captureWindowsServiceConfig, describeRuntime, selfUpdateGitEnv, windowsLauncherPath, windowsRecoveryBatContent, windowsRunServiceBatContent, windowsServiceConfigPath, wrapperPathValue, writeWindowsServiceConfig, type WindowsServiceConfig } from "./windows-service-config";
+import { addMachineServiceTask, refreshMachineMarker, SERVICE_TASK, taskExists } from "./windows-machine-service";
+import { captureWindowsServiceConfig, describeRuntime, windowsLauncherPath, windowsRecoveryBatContent, windowsRunServiceBatContent, windowsServiceConfigPath, wrapperPathValue, writeWindowsServiceConfig, type WindowsServiceConfig } from "./windows-service-config";
 import * as dotenv from "dotenv";
 import * as bootstrapPath from "path";
 import * as bootstrapFs from "fs";
@@ -12606,7 +12606,6 @@ const MANAGED_BACKENDS_UPDATE_INTERVAL_MS = Math.max(
 function gitOutput(args: string[], options: { timeout?: number } = {}): string {
   return execFileSync("git", args, {
     cwd: GIT_ROOT,
-    env: selfUpdateGitEnv(),
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: options.timeout,
@@ -12617,7 +12616,6 @@ function gitOutput(args: string[], options: { timeout?: number } = {}): string {
 function gitRun(args: string[], options: { timeout?: number } = {}): void {
   execFileSync("git", args, {
     cwd: GIT_ROOT,
-    env: selfUpdateGitEnv(),
     stdio: ["ignore", "pipe", "pipe"],
     timeout: options.timeout,
     windowsHide: true,
@@ -12629,7 +12627,6 @@ function gitOutputAsync(args: string[], options: { timeout?: number } = {}): Pro
   return new Promise((resolve, reject) => {
     execFile("git", args, {
       cwd: GIT_ROOT,
-      env: selfUpdateGitEnv(),
       encoding: "utf-8",
       timeout: options.timeout,
       windowsHide: true,
@@ -13628,22 +13625,13 @@ if (process.platform === "win32") {
   writeMachineMarker();
   // After ensureWindowsServiceWrapper, so the SYSTEM task never starts an
   // outdated wrapper.
-  // Then out of the owner's profile; the wrapper loop restarts into the copy.
-  const moveInstall = () => moveToMachineInstall(SERVER_DIR, windowsElevated(), {
-    idleBlocker: autoUpdateBlockReason,
-    restart: () => process.exit(1),
-    service: serviceState.service,
-  });
-  retireMovedInstall(SERVER_DIR);
   if (!serviceState.service && serviceState.config) {
     setTimeout(() => void addMachineServiceTask(SERVER_DIR, windowsElevated()).then(() => {
       machineServiceRegistered = taskExists(SERVICE_TASK);
       setWindowsServiceWarning(machineServiceRegistered ? undefined
         : `Runs only while ${os.userInfo().username} is signed in. Rerun setup as an administrator to keep it running for every account.`);
       writeMachineMarker();
-    }).then(moveInstall), 15_000).unref();
-  } else if (serviceState.service) {
-    setTimeout(() => void moveInstall(), 15_000).unref();
+    }), 15_000).unref();
   }
 }
 

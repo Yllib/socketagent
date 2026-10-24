@@ -12136,6 +12136,13 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         }
         if (isRecord(parsed) && parsed.n && parsed.c) {
           msg = transport.decryptTextEnvelope(parsed);
+        } else if (transport.hasPeerKey) {
+          // After the key exchange only encrypted frames count. The exchange
+          // proves nothing by itself, so a plaintext direct_auth here would
+          // let anyone who knows an enrolled device's public key sign in as it.
+          console.warn("[Direct E2E] Plaintext message rejected after key exchange");
+          ws.close(1008, "Encryption required");
+          return;
         } else {
           msg = parseClientMessage(parsed);
         }

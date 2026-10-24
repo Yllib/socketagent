@@ -13,22 +13,26 @@ import {
   currentProcessIdentity,
   describeRuntime,
   pinnedServiceEnvironment,
+  readWindowsServiceConfig,
   windowsLauncherPath,
   windowsRecoveryBatContent,
   windowsRunServiceBatContent,
   windowsServiceConfigPath,
   windowsServiceState,
   writeWindowsServiceConfig,
+  type WindowsServiceConfig,
   type WindowsServiceState,
 } from "./windows-service-config";
 import { arbitrate } from "./windows-machine-service";
 
 // Windows service commands that run without the server.
 //
-//   node dist/windows-service-cli.js wrapper
+//   node dist/windows-service-cli.js wrapper [--keep-config]
 //     Used by install.ps1. Records windows-service.json for the account running
 //     setup and writes run-service.bat and run-recovery.bat from it. PATH,
-//     POWERSHELL_EXE and SOCKETAGENT_NODE come from the environment.
+//     POWERSHELL_EXE and SOCKETAGENT_NODE come from the environment. With
+//     --keep-config it uses the recorded config instead, as
+//     move-windows-install.ps1 does under any account.
 //
 //   node dist/windows-service-cli.js probe --port N [--timeout S]
 //     Checks that this account, with the install's pinned paths, can run the
@@ -68,11 +72,21 @@ function writeIfChanged(file: string, content: string): void {
   console.log(`Wrote ${file}`);
 }
 
-function writeWrapper(): void {
+function wrapperConfig(keep: boolean): WindowsServiceConfig {
+  if (keep) {
+    const read = readWindowsServiceConfig(SERVER_DIR);
+    if (read.status !== "ok") fail(`No usable ${windowsServiceConfigPath(SERVER_DIR)}: ${read.status === "invalid" ? read.reason : "missing"}`);
+    return read.config;
+  }
   const config = captureWindowsServiceConfig(process.env, currentProcessIdentity());
   if (!config) fail("Refusing to record a system profile as the install's owner. Run setup as the account that owns this install.");
   writeWindowsServiceConfig(SERVER_DIR, config);
   console.log(`Wrote ${windowsServiceConfigPath(SERVER_DIR)}`);
+  return config;
+}
+
+function writeWrapper(args: string[]): void {
+  const config = wrapperConfig(args.includes("--keep-config"));
   const powershellExe = process.env.POWERSHELL_EXE || "powershell.exe";
   writeIfChanged(path.join(SERVER_DIR, "run-service.bat"), windowsRunServiceBatContent({
     serverDir: SERVER_DIR,
@@ -238,7 +252,7 @@ function probe(args: string[]): void {
 }
 
 const [command, ...rest] = process.argv.slice(2);
-if (command === "wrapper") writeWrapper();
+if (command === "wrapper") writeWrapper(rest);
 else if (command === "probe") probe(rest);
 else if (command === "arbitrate") void arbitrate(SERVER_DIR, windowsServiceState(SERVER_DIR, process.env, currentProcessIdentity()).service);
-else fail("usage: windows-service-cli.js wrapper | probe --port N [--timeout S] | arbitrate");
+else fail("usage: windows-service-cli.js wrapper [--keep-config] | probe --port N [--timeout S] | arbitrate");

@@ -23,8 +23,21 @@ function dataDir() {
     || path.join(process.env.HOME || os.homedir(), ".socket-agent");
 }
 
+/**
+ * A Windows machine install runs its browser as SYSTEM, so the runtime lives
+ * in %ProgramData%\SocketAgent, which only administrators can write. Matches
+ * browserRuntimeDir in src/socket-agent-paths.ts.
+ */
+function machineRoot() {
+  if (process.platform !== "win32") return undefined;
+  const root = path.win32.join(process.env.ProgramData || process.env.PROGRAMDATA || "C:\\ProgramData", "SocketAgent");
+  const normalize = (/** @type {string} */ value) => path.win32.resolve(value).replace(/[\\/]+$/, "").toLowerCase();
+  return normalize(path.resolve(__dirname, "..", "..")) === normalize(path.win32.join(root, "socketagent")) ? root : undefined;
+}
+
 function runtimeDir() {
-  return path.join(dataDir(), "browser-runtime");
+  const root = machineRoot();
+  return root ? path.join(root, "browser-runtime") : path.join(dataDir(), "browser-runtime");
 }
 
 function markerPath() {
@@ -35,7 +48,10 @@ function systemCandidates() {
   const configured = process.env.SOCKETAGENT_BROWSER_BINARY?.trim();
   const candidates = configured ? [configured] : [];
   if (process.platform === "win32") {
-    for (const root of [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA]) {
+    // A Chrome installed for one user lives in that user's profile, which a
+    // machine install must not run as SYSTEM.
+    const roots = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], machineRoot() ? undefined : process.env.LOCALAPPDATA];
+    for (const root of roots) {
       if (!root) continue;
       candidates.push(
         path.join(root, "Google", "Chrome", "Application", "chrome.exe"),

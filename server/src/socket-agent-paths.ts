@@ -32,9 +32,38 @@ export function socketAgentDataDir(env: NodeJS.ProcessEnv = process.env): string
     || socketAgentHome(env);
 }
 
+/** Where a Windows machine install keeps its checkout. */
+export function windowsMachineInstallDir(env: NodeJS.ProcessEnv = process.env): string {
+  return path.win32.join(env.ProgramData || env.PROGRAMDATA || "C:\\ProgramData", "SocketAgent", "socketagent");
+}
+
+/**
+ * %ProgramData%\SocketAgent when this server is a Windows machine install,
+ * otherwise undefined. SocketAgentService runs a machine install as SYSTEM,
+ * and only SYSTEM and administrators can write there, so the agent CLIs and
+ * browser it starts live there too rather than in the owner's profile.
+ */
+export function windowsMachineRoot(
+  env: NodeJS.ProcessEnv = process.env,
+  repoRoot = path.resolve(__dirname, "..", ".."),
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (platform !== "win32") return undefined;
+  const installDir = windowsMachineInstallDir(env);
+  const normalize = (value: string) => path.win32.resolve(value).replace(/[\\/]+$/, "").toLowerCase();
+  return normalize(repoRoot) === normalize(installDir) ? path.win32.dirname(installDir) : undefined;
+}
+
 export function managedNpmPrefix(env: NodeJS.ProcessEnv = process.env): string {
+  const machineRoot = windowsMachineRoot(env);
   return envValue(env, "SOCKET_AGENT_NPM_PREFIX", "SOCKETAGENT_NPM_PREFIX")
-    || path.join(socketAgentHome(env), "toolchains", "npm-global");
+    || (machineRoot ? path.join(machineRoot, "toolchains", "npm-global") : path.join(socketAgentHome(env), "toolchains", "npm-global"));
+}
+
+/** The managed browser runtime: downloaded Chrome and the marker naming it. */
+export function browserRuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
+  const machineRoot = windowsMachineRoot(env);
+  return machineRoot ? path.join(machineRoot, "browser-runtime") : path.join(socketAgentDataDir(env), "browser-runtime");
 }
 
 export function managedNpmBinDir(env: NodeJS.ProcessEnv = process.env): string {

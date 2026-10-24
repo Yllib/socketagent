@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as http from "http";
 import * as path from "path";
 import { z } from "zod";
+import { browserRuntimeDir, managedNpmPrefix, windowsMachineInstallDir, windowsMachineRoot } from "./socket-agent-paths";
 import { errorMessage } from "./value-guards";
 
 // Every Windows install has two tasks that run the same run-service.bat:
@@ -198,6 +199,124 @@ export async function addMachineServiceTask(serverDir: string, elevated: boolean
   logWindowsService(serverDir, `Adding ${SERVICE_TASK} so this computer keeps serving while its owner is signed out`);
   const result = await runPowerShell(serverDir, "register-machine-service.ps1", [], 120_000);
   logWindowsService(serverDir, result.ok ? `Added ${SERVICE_TASK}` : `Could not add ${SERVICE_TASK}: ${result.output}`);
+}
+
+const sleepUntilIdle = async (idleBlocker: () => string | null): Promise<void> => {
+  while (idleBlocker()) await sleep(30_000);
+};
+
+/**
+ * The old wrapper, still running, continues in the new one at its next pass:
+ * :arm_recovery starts every pass, and cmd reads a batch file as it goes, so
+ * only lines after the running one may change.
+ */
+export function wrapperWithHandoff(batText: string, movedTo: string): string | undefined {
+  const eol = batText.includes("\r\n") ? "\r\n" : "\n";
+  const lines = batText.split(/\r?\n/);
+  const at = lines.indexOf(":arm_recovery");
+  if (at < 0) return undefined;
+  const target = movedTo.replace(/"/g, "");
+  if (lines[at + 1] === `if exist "${target}" goto moved`) return batText;
+  lines.splice(at + 1, 0, `if exist "${target}" goto moved`);
+  while (lines.length && lines[lines.length - 1] === "") lines.pop();
+  lines.push(
+    "",
+    ":moved",
+    `echo [startup] SocketAgent moved to ${target}; continuing there. >> "%LOG_FILE%" 2>&1`,
+    // Without call, cmd runs the new wrapper in place of this one.
+    `"${target}"`,
+    "",
+  );
+  return lines.join(eol);
+}
+
+export interface InstallMoveHooks {
+  /** Why the server should not restart now, or null when it is idle. */
+  idleBlocker: () => string | null;
+  /** Restarts the server; the wrapper loop then continues in the new install. */
+  restart: () => void;
+  /** True when this server runs as SYSTEM. */
+  service: boolean;
+}
+
+/**
+ * One-time migration for machine installs from before their checkout lived
+ * in %ProgramData%\SocketAgent. SocketAgentService runs the checkout as
+ * SYSTEM, and in the owner's profile any of the owner's unelevated programs
+ * could change it. The serving server copies itself there once it is idle,
+ * points the tasks at the copy, and restarts into it. Delete this once every
+ * install has run it.
+ */
+export async function moveToMachineInstall(serverDir: string, elevated: boolean | undefined, hooks: InstallMoveHooks): Promise<void> {
+  if (process.platform !== "win32" || windowsMachineRoot()) return;
+  if (!hooks.service && elevated !== true) return;
+  if (!taskExists(SERVICE_TASK)) return;
+  try {
+    await moveWhenIdle(serverDir, hooks);
+  } catch (error: unknown) {
+    logWindowsService(serverDir, `Could not move the install: ${errorMessage(error)}`);
+  }
+}
+
+async function moveWhenIdle(serverDir: string, hooks: InstallMoveHooks): Promise<void> {
+  await sleepUntilIdle(hooks.idleBlocker);
+  logWindowsService(serverDir, `Moving this install to ${windowsMachineInstallDir()}, where only administrators can change it`);
+  const result = await runPowerShell(serverDir, "move-windows-install.ps1", [
+    "-Toolchain", managedNpmPrefix(),
+    "-BrowserRuntime", browserRuntimeDir(),
+    // The owner's server moves a standing-by SYSTEM wrapper right away. A
+    // SYSTEM server is the wrapper, and hands itself over below.
+    ...(hooks.service ? [] : ["-RestartServiceTask"]),
+  ], 30 * 60_000);
+  const destination = result.output.split(/\r?\n/).at(-1)?.trim() || "";
+  if (!result.ok || !destination) {
+    logWindowsService(serverDir, `Could not move the install: ${result.output}`);
+    return;
+  }
+  const batFile = path.join(serverDir, "run-service.bat");
+  const handoff = wrapperWithHandoff(fs.readFileSync(batFile, "utf8"), path.win32.join(destination, "server", "run-service.bat"));
+  if (!handoff) {
+    logWindowsService(serverDir, `Moved to ${destination}, but ${batFile} has no :arm_recovery; it continues there at the next start`);
+    return;
+  }
+  fs.writeFileSync(batFile, handoff, "ascii");
+  await sleepUntilIdle(hooks.idleBlocker);
+  // Settings saved since the copy.
+  fs.copyFileSync(path.join(serverDir, ".env"), path.win32.join(destination, "server", ".env"));
+  logWindowsService(serverDir, `Moved to ${destination}; restarting there`);
+  hooks.restart();
+}
+
+/**
+ * Clears away the checkout a machine install was copied from, once nothing
+ * runs it, so neither setup nor the desktop app finds it and its stale .env.
+ * A fresh clone that setup copied before configuring it goes; a checkout that
+ * served is renamed, to delete by hand.
+ */
+export function retireMovedInstall(serverDir: string): void {
+  if (process.platform !== "win32" || !windowsMachineRoot()) return;
+  const record = path.join(windowsServiceDir(serverDir), "moved-from.txt");
+  let old: string;
+  try { old = fs.readFileSync(record, "utf8").replace(/^\uFEFF/, "").trim(); } catch { return; }
+  // Only ever a SocketAgent checkout, whatever the record says.
+  if (!old || !fs.existsSync(path.join(old, ".git")) || !fs.existsSync(path.join(old, "server", "package.json"))) {
+    fs.rmSync(record, { force: true });
+    return;
+  }
+  const retired = `${old}-moved-${new Date().toISOString().slice(0, 10)}`;
+  try {
+    if (!fs.existsSync(path.join(old, "server", ".env"))) {
+      fs.rmSync(old, { recursive: true, force: true, maxRetries: 3 });
+      fs.rmSync(record, { force: true });
+      logWindowsService(serverDir, `Removed ${old}, the clone setup copied here`);
+      return;
+    }
+    fs.renameSync(old, retired);
+    fs.rmSync(record, { force: true });
+    logWindowsService(serverDir, `Renamed the old install ${old} to ${retired}`);
+  } catch (error: unknown) {
+    logWindowsService(serverDir, `Could not rename the old install ${old} yet: ${errorMessage(error)}`);
+  }
 }
 
 const MACHINE_MARKER = path.join(process.env.ProgramData || "C:\\ProgramData", "SocketAgent", "machine-server.json");

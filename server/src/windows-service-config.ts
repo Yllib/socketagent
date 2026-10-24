@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { z } from "zod";
-import { socketAgentDataDir } from "./socket-agent-paths";
+import { socketAgentDataDir, windowsMachineRoot } from "./socket-agent-paths";
 import { errorMessage } from "./value-guards";
 
 // The Windows service config pins the account profile an install belongs to.
@@ -186,10 +186,28 @@ export function pinnedServiceEnvironment(config: WindowsServiceConfig, env: Node
   };
 }
 
-/** The launcher the task runs, compiled into the owner's local app data. */
-export function windowsLauncherPath(serverDir: string, config: WindowsServiceConfig): string {
+/**
+ * The launcher the tasks run. A machine install compiles it inside its own
+ * folder, which only administrators can write, because SocketAgentService
+ * runs it as SYSTEM; a limited install uses the owner's local app data.
+ * Matches Get-SocketAgentLauncher in scripts/windows-service.ps1.
+ */
+export function windowsLauncherPath(serverDir: string, config: WindowsServiceConfig, env: NodeJS.ProcessEnv = process.env): string {
   const hash = createHash("sha256").update(fs.readFileSync(path.join(serverDir, "scripts", "windows-launcher.cs"))).digest("hex").slice(0, 16);
-  return win.join(config.localAppData, "SocketAgent", "launchers", `socketagent-launcher-${hash}.exe`);
+  const directory = windowsMachineRoot(env, path.resolve(serverDir, ".."))
+    ? win.join(serverDir, "windows-service", "launchers")
+    : win.join(config.localAppData, "SocketAgent", "launchers");
+  return win.join(directory, `socketagent-launcher-${hash}.exe`);
+}
+
+/**
+ * Environment for the server's own git commands on its checkout. The global
+ * git config sits in the owner's profile, where any unelevated program can
+ * add a hook or helper that git would then run as SYSTEM or the elevated
+ * owner, so these commands read none. The checkout's own config is enough.
+ */
+export function selfUpdateGitEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return process.platform === "win32" ? { ...env, GIT_CONFIG_GLOBAL: "NUL" } : env;
 }
 
 function batchSetValue(value: string | undefined): string {
@@ -293,6 +311,10 @@ export function windowsRunServiceBatContent(inputs: WindowsWrapperInputs): strin
     // hang off it.
     ":arm_recovery",
     "call :pin_profile",
+    // Node reads these from the environment, and an owner's task inherits the
+    // owner's own variables, which unelevated programs can set.
+    'set "NODE_OPTIONS="',
+    'set "NODE_PATH="',
     // Waits here until this copy should serve; see windows-machine-service.
     // The wait can last hours, and the server may rewrite this file in that
     // time, so the goto on the same line moves on by label instead of by
@@ -322,6 +344,23 @@ export function windowsRunServiceBatContent(inputs: WindowsWrapperInputs): strin
     "exit /b %UPDATE_RESULT%",
     "",
     ":update",
+    // Git and npm run here as SYSTEM or the elevated owner. Their per-user
+    // config sits in the owner's profile, which unelevated programs can edit
+    // to name a program to run, so the update reads none of it. setlocal
+    // keeps these to the update; exit /b ends its scope.
+    "setlocal",
+    'for /f "delims==" %%V in (\'set GIT_ 2^>nul\') do set "%%V="',
+    'set "HOME=%SERVER_DIR%\\windows-service"',
+    'set "GIT_CONFIG_GLOBAL=NUL"',
+    'set "GIT_TERMINAL_PROMPT=0"',
+    // Only this checkout is touched here, so marking every folder safe
+    // reaches no other repository.
+    'set "GIT_CONFIG_COUNT=1"',
+    'set "GIT_CONFIG_KEY_0=safe.directory"',
+    'set "GIT_CONFIG_VALUE_0=*"',
+    'set "NPM_CONFIG_USERCONFIG=%SERVER_DIR%\\windows-service\\no-user-npmrc"',
+    'set "NPM_CONFIG_GLOBALCONFIG=%SERVER_DIR%\\windows-service\\no-user-npmrc"',
+    'for /f "delims==" %%V in (\'set npm_config_ 2^>nul\') do if /I not "%%V"=="NPM_CONFIG_USERCONFIG" if /I not "%%V"=="NPM_CONFIG_GLOBALCONFIG" set "%%V="',
     'cd /d "%REPO_ROOT%"',
     'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="0" exit /b 0',
     'if /I "%SOCKETAGENT_AUTO_UPDATE%"=="false" exit /b 0',

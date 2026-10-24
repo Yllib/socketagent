@@ -167,3 +167,18 @@ test("service state follows the account, not USERPROFILE", (t) => {
   fs.writeFileSync(path.join(serverDir, "windows-service.json"), "{}");
   assert.ok(windowsServiceState(serverDir, env, owner).configProblem);
 });
+
+test("the update reads no per-user git or npm config", () => {
+  const lines = wrapper().split("\r\n");
+  const update = lines.indexOf(":update");
+  const firstGit = lines.findIndex((line, index) => index > update && /^git /.test(line));
+  const setup = lines.slice(update, firstGit);
+  assert.equal(setup[1], "setlocal");
+  for (const line of [
+    'set "GIT_CONFIG_GLOBAL=NUL"',
+    'set "NPM_CONFIG_USERCONFIG=%SERVER_DIR%\\windows-service\\no-user-npmrc"',
+    'set "NPM_CONFIG_GLOBALCONFIG=%SERVER_DIR%\\windows-service\\no-user-npmrc"',
+  ]) assert.ok(setup.includes(line), line);
+  // Inherited GIT_ variables go before the update sets its own.
+  assert.ok(setup.findIndex((line) => line.includes("'set GIT_ 2^>nul'")) < setup.indexOf('set "GIT_CONFIG_GLOBAL=NUL"'));
+});

@@ -15,6 +15,7 @@ import type {
   BrowserTabsServerMessage,
 } from "./protocol";
 import { serviceState } from "./windows-service-env";
+import { browserRuntimeDir, windowsMachineRoot } from "./socket-agent-paths";
 import type { ProcessIdentity } from "./windows-service-config";
 import { PICKER_BINDING, PICKER_SCRIPT, PICKER_WORLD, applyPickerExpression, parsePickerReport } from "./browser-page-pickers";
 
@@ -506,13 +507,21 @@ export function claimBrowserProfile(profileDir: string, identity: ProcessIdentit
 
 function managedBrowserPath(): string {
   try {
-    return fs.readFileSync(
-      path.join(socketAgentDataDir(), "browser-runtime", "executable-path"),
-      "utf8",
-    ).trim();
+    return fs.readFileSync(path.join(browserRuntimeDir(), "executable-path"), "utf8").trim();
   } catch {
     return "";
   }
+}
+
+/**
+ * A machine install runs its browser as SYSTEM, so it only starts one that
+ * administrators control: under Program Files or its own runtime folder.
+ */
+export function machineInstallMayRunBrowser(executable: string, machineRoot: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const target = path.win32.resolve(executable).toLowerCase();
+  return [env.PROGRAMFILES, env["PROGRAMFILES(X86)"], path.win32.join(machineRoot, "browser-runtime")]
+    .filter((root): root is string => Boolean(root))
+    .some((root) => target.startsWith(`${path.win32.resolve(root).replace(/[\\/]+$/, "").toLowerCase()}\\`));
 }
 
 function restrictDirectory(target: string): void {
@@ -604,7 +613,10 @@ function browserCandidates(): string[] {
 }
 
 export function resolveBrowserBinary(): string {
-  const candidate = browserCandidates().find((item) => item && fs.existsSync(item));
+  const machineRoot = windowsMachineRoot();
+  const candidate = browserCandidates()
+    .filter((item) => !machineRoot || machineInstallMayRunBrowser(item, machineRoot))
+    .find((item) => item && fs.existsSync(item));
   if (!candidate) {
     throw new Error(
       "No supported Chrome, Chromium, or Edge installation was found. Install one or set SOCKETAGENT_BROWSER_BINARY.",

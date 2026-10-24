@@ -93,13 +93,13 @@ test("applies Codex-only settings and rejects invalid client values", async () =
 });
 
 
-test("normalizes legacy Claude permission mode and rejects unsupported effort", async () => {
+test("passes Claude super yolo through and rejects unsupported effort", async () => {
   const session = fakeSession();
   const applied = await applyInitialSessionSettings(session, "claude", {
     permissionMode: "superYolo", effort: "ultra",
   });
-  assert.deepEqual(applied, { permissionMode: "bypassPermissions" });
-  assert.deepEqual(session.calls, [["permissionMode", "bypassPermissions"]]);
+  assert.deepEqual(applied, { permissionMode: "superYolo" });
+  assert.deepEqual(session.calls, [["permissionMode", "superYolo"]]);
   assert.equal(isClaudeEffort("xhigh"), true);
   assert.equal(isClaudeEffort("ultra"), false);
   assert.equal(isClaudeEffort({ effort: "high" }), false);

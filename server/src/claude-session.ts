@@ -915,7 +915,11 @@ export class ClaudeSession {
   private _isCompacting = false;  // whether context compaction is in progress
   private _compactStartedAt: string | null = null;
   public _delegationSupervisorSessionId?: string;
-  private _permissionMode: PermissionMode | null = null;  // current permission mode (e.g., "plan")
+  private _permissionMode: PermissionMode | null = null;  // the SDK's mode (e.g., "plan")
+  // Super yolo: the SDK runs in bypassPermissions and every escalation that
+  // still reaches canUseTool (Claude Code's own safety checks, explicit ask
+  // rules) is allowed without a card. Survives a plan excursion.
+  private _superYolo = false;
   private _authErrorSent = false;  // suppress duplicate exit-code error after auth failure
   private _authRequest: ClaudeAuthRequest | null = null;
   private _lastContextWindow = 0;  // last known context window size from modelUsage
@@ -1597,8 +1601,13 @@ export class ClaudeSession {
       });
   }
 
+  /**
+   * The mode the app sees. Super yolo runs the SDK in bypassPermissions and
+   * answers every escalation itself, so it is "superYolo" only while the SDK
+   * mode is still bypassPermissions; a plan excursion shows as "plan".
+   */
   get permissionMode(): string | null {
-    return this._permissionMode;
+    return this._superYolo && this._permissionMode === "bypassPermissions" ? "superYolo" : this._permissionMode;
   }
 
   private _clearWarmIdleTimer(): void {
@@ -2559,7 +2568,12 @@ export class ClaudeSession {
   private async _requestClaudeToolApproval(toolName: string, input: Record<string, unknown>, signal?: AbortSignal, reason?: string) {
     if (signal?.aborted) return { behavior: "deny" as const, message: "Request cancelled" };
     // Reaching canUseTool means the SDK requires a decision, including explicit
-    // ask rules in bypass mode. Never silently override those requests.
+    // ask rules and Claude Code's own safety checks in bypass mode. Only super
+    // yolo answers those itself; every other mode asks the user.
+    if (this.permissionMode === "superYolo") {
+      console.log(`[SuperYolo] Allowed ${toolName} without asking${reason ? `: ${reason}` : ""}`);
+      return { behavior: "allow" as const, updatedInput: input };
+    }
     const questionId = createInteractiveRequestId("approval");
     // The hook already rewrote a Bash command for capture; show the one the agent wrote.
     const shown = toolName === "Bash" && typeof input.command === "string"
@@ -3073,33 +3087,53 @@ export class ClaudeSession {
     if (sid) updateSessionAgentSettings(sid, patch);
   }
 
-  /** Switch permission mode mid-session (e.g., 'plan', 'default', 'acceptEdits'). */
-  async setPermissionMode(mode: string): Promise<void> {
+  /**
+   * Switch permission mode mid-session (e.g., 'plan', 'default', 'superYolo').
+   * `recordHistory: false` restores a persisted mode without a transcript card.
+   */
+  async setPermissionMode(mode: string, options: { recordHistory?: boolean } = {}): Promise<void> {
     if (mode !== "default" && mode !== "acceptEdits" && mode !== "bypassPermissions"
-      && mode !== "plan" && mode !== "dontAsk" && mode !== "auto") {
+      && mode !== "plan" && mode !== "dontAsk" && mode !== "auto" && mode !== "superYolo") {
       throw new Error(`Unsupported Claude permission mode: ${mode}`);
     }
-    this._permissionMode = mode;
-    this.persistPermissionMode(mode);
+    this._superYolo = mode === "superYolo";
+    const sdkMode = mode === "superYolo" ? "bypassPermissions" : mode;
+    this._permissionMode = sdkMode;
+    this.persistPermissionMode(mode, options.recordHistory !== false);
     if (this.activeQuery) {
-      await this.activeQuery.setPermissionMode(mode);
+      await this.activeQuery.setPermissionMode(sdkMode);
       console.log(`[PermissionMode] Set to ${mode} for session ${this.sessionId || '(pending)'}`);
     }
+    if (this._superYolo) this._approvePendingToolApprovals();
   }
 
-  private persistPermissionMode(mode: string): void {
+  private persistPermissionMode(mode: string, recordHistory = true): void {
     if (!this.sessionId) return;
     const session = getSession(this.sessionId);
     if (session) {
       session.permissionMode = mode;
       saveSession(session);
     }
+    if (!recordHistory) return;
     appendHistory(this.sessionId, {
       role: "permission_mode",
       content: "",
       permissionMode: mode,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /** Switching to super yolo approves the tool cards still waiting on the phone. */
+  private _approvePendingToolApprovals(): void {
+    for (const pending of [...this.pendingQuestions.values()]) {
+      const data = pending.questionData;
+      if (!pending.questionId.startsWith("approval_") || data?.type !== "question") continue;
+      const question = data.questions[0]?.question;
+      if (!question) continue;
+      const answers = { [question]: "Approve" };
+      this.resolveQuestion(pending.questionId, answers);
+      this.send({ type: "question_answered", questionId: pending.questionId, sessionId: this.sessionId || "", answers });
+    }
   }
 
   /** Get MCP server health status */
@@ -4581,9 +4615,11 @@ export class ClaudeSession {
               .map((command: unknown) => String(command).replace(/^\//, "").trim())
               .filter(Boolean),
           );
-          const initPermissionMode = initMsg.permissionMode;
+          // The SDK reports its own mode; super yolo shows through as "superYolo".
+          const sdkInitMode = initMsg.permissionMode;
+          if (sdkInitMode) this._permissionMode = sdkInitMode;
+          const initPermissionMode = sdkInitMode ? this.permissionMode : null;
           if (initPermissionMode) {
-            this._permissionMode = initPermissionMode;
             const session = getSession(this.sessionId || "");
             if (session) {
               session.permissionMode = initPermissionMode;
@@ -4810,16 +4846,18 @@ export class ClaudeSession {
             active: this._isCompacting,
             sessionId: this.sessionId || "",
           });
-          // Forward permission mode changes (e.g., entering/exiting plan mode)
+          // Forward permission mode changes (e.g., entering/exiting plan mode).
+          // Compare the modes the app sees, so super yolo is not reported as yolo.
           if (permMode) {
-            const previousMode = this._permissionMode;
+            const previousMode = this.permissionMode;
             this._permissionMode = permMode;
-            if (previousMode !== permMode) {
-              this.persistPermissionMode(permMode);
+            const shownMode = this.permissionMode ?? permMode;
+            if (previousMode !== shownMode) {
+              this.persistPermissionMode(shownMode);
             }
             this.send({
               type: "permission_mode_changed",
-              permissionMode: permMode,
+              permissionMode: shownMode,
               sessionId: this.sessionId || "",
             });
           }

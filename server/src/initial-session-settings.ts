@@ -121,9 +121,8 @@ export async function applyInitialSessionSettings(
     ? CLAUDE_PERMISSION_MODES
     : CODEX_PERMISSION_MODES;
   if (permissionMode && allowedPermissionModes.has(permissionMode)) {
-    const effectiveMode = backend === "claude" && permissionMode === "superYolo" ? "bypassPermissions" : permissionMode;
-    await session.setPermissionMode(effectiveMode);
-    applied.permissionMode = effectiveMode;
+    await session.setPermissionMode(permissionMode);
+    applied.permissionMode = permissionMode;
   }
 
   return applied;

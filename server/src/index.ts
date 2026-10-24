@@ -4226,13 +4226,20 @@ function normalizeCodexPermissionMode(mode: unknown): string | null {
 }
 
 async function restorePersistedPermissionMode(session: Session, sessionInfo?: SessionInfo): Promise<void> {
-  if (sessionInfo?.backend !== "codex" || !(session instanceof CodexSession)) return;
+  if (!sessionInfo) return;
   const historyMode = sessionInfo.id && !sessionInfo.permissionMode
     ? getLastPermissionMode(sessionInfo.id)
     : undefined;
-  const mode = normalizeCodexPermissionMode(sessionInfo.permissionMode || historyMode);
-  if (mode) {
-    await session.setPermissionMode(mode, { recordHistory: false });
+  const persisted = sessionInfo.permissionMode || historyMode;
+  if (sessionInfo.backend === "codex") {
+    const mode = session instanceof CodexSession ? normalizeCodexPermissionMode(persisted) : null;
+    if (mode) await session.setPermissionMode(mode, { recordHistory: false });
+    return;
+  }
+  // A Claude session otherwise starts the SDK in bypassPermissions. Super yolo
+  // is the one mode the server itself must carry across resume and recovery.
+  if (session instanceof ClaudeSession && persisted === "superYolo") {
+    await session.setPermissionMode("superYolo", { recordHistory: false });
   }
 }
 
@@ -11844,11 +11851,8 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     await restorePersistedPermissionMode(session, previousSessionInfo || undefined);
     await restorePersistedAgentSettings(session, previousSessionInfo || undefined);
     if (task.permissionMode) {
-      const permissionMode = backend === "claude" && task.permissionMode === "superYolo"
-        ? "bypassPermissions"
-        : task.permissionMode;
-      if (session instanceof CodexSession) await session.setPermissionMode(permissionMode, { recordHistory: false });
-      else await session.setPermissionMode(permissionMode);
+      if (session instanceof CodexSession) await session.setPermissionMode(task.permissionMode, { recordHistory: false });
+      else await session.setPermissionMode(task.permissionMode);
     }
     if (task.model) await session.setModel(task.model);
     if (task.effort) {

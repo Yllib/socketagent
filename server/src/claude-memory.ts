@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { claudeConfigDir } from "./backend-config-files";
-import type { MemoryCard, MemoryChange } from "./protocol";
+import type { MemoryCard, MemoryChange, MemoryVersion } from "./protocol";
 
 /**
  * Claude Code's auto-memory: one Markdown file per memory under
@@ -86,6 +86,38 @@ export function parseMemoryFile(fileName: string, text: string): ParsedMemory {
 export function memoryCardFor(filePath: string, text: string, change: MemoryChange): MemoryCard {
   const parsed = parseMemoryFile(path.basename(filePath), text);
   return { path: filePath, ...parsed, change };
+}
+
+/** The parsed fields alone, for a card's `previous` snapshot. */
+export function memoryVersionOf(card: MemoryVersion): MemoryVersion {
+  const { name, description, memoryType, body } = card;
+  return { name, description, memoryType, body };
+}
+
+/** The card after the user saved `saved` over it. The agent's text survives as `previous`. */
+export function applyUserEdit(card: MemoryCard, saved: MemoryVersion): MemoryCard {
+  return { ...card, ...memoryVersionOf(saved), userChange: "edited", previous: card.previous ?? memoryVersionOf(card) };
+}
+
+/** A memory file rebuilt from its parsed fields, in the frontmatter shape Claude writes. */
+export function memoryFileText(version: MemoryVersion): string {
+  const lines = ["---", `name: ${version.name}`];
+  if (version.description) lines.push(`description: ${version.description}`);
+  if (version.memoryType) lines.push("metadata:", `  type: ${version.memoryType}`);
+  lines.push("---", "", version.body.trim(), "");
+  return lines.join("\n");
+}
+
+/** The MEMORY.md line Claude writes for a memory. */
+export function memoryIndexLine(fileName: string, version: MemoryVersion): string {
+  const label = version.name || fileName.replace(/\.md$/i, "");
+  return version.description
+    ? `- [${label}](${fileName}) — ${version.description}`
+    : `- [${label}](${fileName})`;
+}
+
+function indexLinksTo(indexText: string, fileName: string): boolean {
+  return memoryIndexWithout(indexText, fileName) !== indexText;
 }
 
 /** Memory file names and contents, without the index. Missing folder means no memories. */
@@ -217,6 +249,31 @@ export function memoryIndexWithout(indexText: string, fileName: string): string 
       return !link || decodeURIComponent(link[1]).toLowerCase() !== target;
     })
     .join("\n");
+}
+
+/**
+ * Writes a deleted memory back and re-adds its `MEMORY.md` line. A file
+ * already at that path is left alone and reported, never overwritten.
+ */
+export function restoreMemoryFile(input: unknown, version: MemoryVersion): { path: string; card: MemoryCard } {
+  const filePath = resolveMemoryFilePath(input);
+  if (fs.existsSync(filePath)) throw new Error(`A memory already exists at ${path.basename(filePath)}`);
+  const text = memoryFileText(version);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, text, { encoding: "utf8", flag: "wx" });
+  const indexPath = path.join(path.dirname(filePath), MEMORY_INDEX_FILE);
+  let index = "";
+  try {
+    index = fs.readFileSync(indexPath, "utf8");
+  } catch (error: unknown) {
+    if (!(isErrnoException(error) && error.code === "ENOENT")) throw error;
+  }
+  const fileName = path.basename(filePath);
+  if (!indexLinksTo(index, fileName)) {
+    const separator = index === "" || index.endsWith("\n") ? "" : "\n";
+    fs.writeFileSync(indexPath, `${index}${separator}${memoryIndexLine(fileName, version)}\n`, "utf8");
+  }
+  return { path: filePath, card: memoryCardFor(filePath, text, "created") };
 }
 
 /** Removes the memory and its `MEMORY.md` line in one step. */

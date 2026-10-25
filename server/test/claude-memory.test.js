@@ -11,16 +11,19 @@ process.env.SOCKET_AGENT_DATA_DIR = path.join(root, "data");
 
 const {
   ClaudeMemoryWatcher,
+  applyUserEdit,
   claudeMemoryDir,
   claudeProjectSlug,
   deleteMemoryFile,
+  memoryFileText,
   memoryIndexWithout,
   parseMemoryFile,
   readMemoryFile,
   resolveMemoryFilePath,
+  restoreMemoryFile,
   writeMemoryFile,
 } = require("#server/claude-memory");
-const { appendHistory, getHistory, updateMemoryCards } = require("#server/session-store");
+const { appendHistory, getHistory, getMemoryCardEntry, updateMemoryCards } = require("#server/session-store");
 
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -226,4 +229,74 @@ test("a card action rewrites every card for that file in the chat and bumps thei
   assert.equal(stored[1].memory.body, "Second body.", "each card keeps its own body");
 
   assert.deepEqual(updateMemoryCards(sessionId, memoryPath, (memory) => memory), [], "no change, no rewrite");
+});
+
+test("a user edit keeps the agent's text as previous, once", () => {
+  const card = { path: "/p/keep-me.md", name: "keep-me", description: "Agent description", memoryType: "project", body: "Agent body.", change: "created" };
+  const first = applyUserEdit(card, { name: "keep-me", description: "User description", memoryType: "feedback", body: "User body." });
+  assert.deepEqual(first, {
+    ...card,
+    description: "User description", memoryType: "feedback", body: "User body.", userChange: "edited",
+    previous: { name: "keep-me", description: "Agent description", memoryType: "project", body: "Agent body." },
+  });
+  const second = applyUserEdit(first, { name: "keep-me", description: "User description", memoryType: "feedback", body: "User body, take two." });
+  assert.equal(second.body, "User body, take two.");
+  assert.deepEqual(second.previous, first.previous, "the agent's version is what previous keeps");
+});
+
+test("a rebuilt memory file parses back to the same fields", () => {
+  const version = { name: "rebuilt", description: "Rebuilt from a card", memoryType: "reference", body: "Line one.\n\n**Why:** reasons." };
+  assert.deepEqual(parseMemoryFile("rebuilt.md", memoryFileText(version)), version);
+  assert.equal(memoryFileText({ name: "bare", description: "", memoryType: "", body: "Body." }), "---\nname: bare\n---\n\nBody.\n");
+});
+
+test("restore writes the deleted memory back and re-adds its index line", () => {
+  freshMemoryDir();
+  fs.writeFileSync(path.join(memoryDir, "MEMORY.md"), "- [Keep me](keep-me.md) — stays\n- [Gone](gone.md) — will be deleted");
+  fs.writeFileSync(path.join(memoryDir, "gone.md"), memoryText("gone", "Will be deleted", "feedback", "Gone body."));
+  const file = path.join(memoryDir, "gone.md");
+  const version = { name: "gone", description: "Will be deleted", memoryType: "feedback", body: "Gone body." };
+  deleteMemoryFile(file);
+  // The dropped line was the last one, so the index is left without a trailing newline.
+  assert.equal(fs.readFileSync(path.join(memoryDir, "MEMORY.md"), "utf8"), "- [Keep me](keep-me.md) — stays");
+
+  const restored = restoreMemoryFile(file, version);
+  assert.equal(restored.path, file);
+  assert.deepEqual(restored.card, { path: file, ...version, change: "created" });
+  assert.equal(fs.readFileSync(file, "utf8"), memoryFileText(version));
+  assert.equal(
+    fs.readFileSync(path.join(memoryDir, "MEMORY.md"), "utf8"),
+    "- [Keep me](keep-me.md) — stays\n- [gone](gone.md) — Will be deleted\n",
+  );
+
+  // Never over an existing file.
+  assert.throws(() => restoreMemoryFile(file, version), /already exists/);
+  assert.equal(fs.readFileSync(file, "utf8"), memoryFileText(version));
+
+  // An index that already links the file is left alone; a missing index is created.
+  fs.unlinkSync(file);
+  restoreMemoryFile(file, version);
+  assert.equal(
+    fs.readFileSync(path.join(memoryDir, "MEMORY.md"), "utf8"),
+    "- [Keep me](keep-me.md) — stays\n- [gone](gone.md) — Will be deleted\n",
+  );
+  fs.unlinkSync(file);
+  fs.unlinkSync(path.join(memoryDir, "MEMORY.md"));
+  restoreMemoryFile(file, version);
+  assert.equal(fs.readFileSync(path.join(memoryDir, "MEMORY.md"), "utf8"), "- [gone](gone.md) — Will be deleted\n");
+
+  // The same path check as edit and delete.
+  assert.throws(() => restoreMemoryFile(path.join(memoryDir, "MEMORY.md"), version));
+  assert.throws(() => restoreMemoryFile(path.join(root, "outside.md"), version));
+});
+
+test("a card's history entry is found by id, and only memory cards count", () => {
+  const sessionId = "memory-restore-session";
+  const card = { path: path.join(memoryDir, "gone.md"), name: "gone", description: "", memoryType: "", body: "Gone body.", change: "deleted" };
+  const memoryEntry = appendHistory(sessionId, { role: "memory", content: "Deleted memory: gone", questionId: "memory_r1", memory: card, timestamp: new Date().toISOString() });
+  const textEntry = appendHistory(sessionId, { role: "assistant", content: "hello", timestamp: new Date().toISOString() });
+  assert.deepEqual(getMemoryCardEntry(sessionId, memoryEntry.entryId).memory, card);
+  assert.equal(getMemoryCardEntry(sessionId, textEntry.entryId), undefined);
+  assert.equal(getMemoryCardEntry(sessionId, "no-such-entry"), undefined);
+  assert.equal(getMemoryCardEntry("no-such-session", memoryEntry.entryId), undefined);
 });

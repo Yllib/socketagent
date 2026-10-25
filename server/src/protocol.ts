@@ -745,6 +745,17 @@ export interface MemoryDeleteMessage {
   path: string;
 }
 
+/**
+ * Puts a deleted memory back from the card's own history entry. The server
+ * takes the path and text from that entry, never from the app.
+ */
+export interface MemoryRestoreMessage {
+  type: "memory_restore";
+  requestId?: string;
+  sessionId: string;
+  entryId: string;
+}
+
 /** Asks for every Codex and Claude config file the computer lets the app edit. */
 export interface BackendConfigListMessage {
   type: "backend_config_list";
@@ -1643,6 +1654,7 @@ export type ClientMessage = { commandId?: string } & (
   | MemoryReadMessage
   | MemoryWriteMessage
   | MemoryDeleteMessage
+  | MemoryRestoreMessage
   | FileManagerMkdirMessage
   | FileManagerRenameMessage
   | FileManagerDeleteMessage
@@ -3174,20 +3186,26 @@ export interface ComputerAccessResolvedServerMessage {
 
 export type MemoryChange = "created" | "edited" | "deleted";
 
-/** One Claude Code auto-memory file as the agent left it after a tool call. */
-export interface MemoryCard {
-  /** Absolute path of the memory file. */
-  path: string;
+/** The parsed fields of one memory file. */
+export interface MemoryVersion {
   name: string;
   description: string;
   /** Frontmatter metadata.type: user, feedback, project or reference. */
   memoryType: string;
-  /** Markdown body without the frontmatter. After a delete, the last body. */
+  /** Markdown body without the frontmatter. */
   body: string;
+}
+
+/** One Claude Code auto-memory file as the agent left it after a tool call. */
+export interface MemoryCard extends MemoryVersion {
+  /** Absolute path of the memory file. */
+  path: string;
   /** What the agent did. */
   change: MemoryChange;
-  /** Set once the user edited or deleted the memory from the card. */
-  userChange?: "edited" | "deleted";
+  /** Set once the user edited, deleted or restored the memory from the card. */
+  userChange?: "edited" | "deleted" | "restored";
+  /** The text the agent wrote, kept from the user's first edit on. */
+  previous?: MemoryVersion;
 }
 
 /** Shows a memory card, or replaces one with the same entryId after a card action. */
@@ -3213,7 +3231,7 @@ export interface MemoryReadResultServerMessage {
 export interface MemoryActionResultServerMessage {
   type: "memory_action_result";
   requestId?: string;
-  operation: "write" | "delete";
+  operation: "write" | "delete" | "restore";
   ok: boolean;
   path: string;
   error?: string;

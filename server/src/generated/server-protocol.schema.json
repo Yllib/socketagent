@@ -5191,9 +5191,6 @@
     "MemoryCard": {
       "type": "object",
       "properties": {
-        "path": {
-          "type": "string"
-        },
         "name": {
           "type": "string"
         },
@@ -5206,6 +5203,9 @@
         "body": {
           "type": "string"
         },
+        "path": {
+          "type": "string"
+        },
         "change": {
           "$ref": "#/definitions/MemoryChange"
         },
@@ -5213,17 +5213,21 @@
           "type": "string",
           "enum": [
             "edited",
-            "deleted"
+            "deleted",
+            "restored"
           ]
+        },
+        "previous": {
+          "$ref": "#/definitions/MemoryVersion"
         }
       },
       "required": [
-        "path",
-        "name",
+        "body",
+        "change",
         "description",
         "memoryType",
-        "body",
-        "change"
+        "name",
+        "path"
       ]
     },
     "MemoryChange": {
@@ -5232,6 +5236,29 @@
         "created",
         "edited",
         "deleted"
+      ]
+    },
+    "MemoryVersion": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "memoryType": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "memoryType",
+        "body"
       ]
     },
     "WorkflowStatePayload": {
@@ -6914,7 +6941,8 @@
           "type": "string",
           "enum": [
             "write",
-            "delete"
+            "delete",
+            "restore"
           ]
         },
         "ok": {

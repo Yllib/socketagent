@@ -49,7 +49,7 @@ import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { startBashCapturePruning } from "./bash-capture";
 import { readFullOutput, startFullOutputTrimming } from "./full-output-store";
-import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, updateMemoryCards, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, updateMemoryCards, getMemoryCardEntry, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummary } from "./session-list-snapshot";
 import { watchNativeSessionFolders } from "./native-session-watcher";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
@@ -111,7 +111,7 @@ import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealt
 import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
-import { deleteMemoryFile, readMemoryFile, writeMemoryFile } from "./claude-memory";
+import { applyUserEdit, deleteMemoryFile, memoryVersionOf, readMemoryFile, restoreMemoryFile, writeMemoryFile } from "./claude-memory";
 import { checkMacosFileAccess, isMacosProtectedUserPath, macosPrivacyErrorDetails, performMacosPermissionAction } from "./macos-permissions";
 import { readProtectedFiles, removeMatchingProtection, setProtectedFile, writeProtectedFiles } from "./protected-files";
 import { runBackendInstall, isManagedBackendUsable } from "./backend-installer";
@@ -10403,10 +10403,7 @@ function createConnectionHandler(
         const requestId = msg.requestId;
         try {
           const saved = writeMemoryFile(msg.path, typeof msg.content === "string" ? msg.content : "");
-          const { name, description, memoryType, body } = saved.card;
-          publishUserMemoryChange(msg.sessionId, saved.path, (card) => ({
-            ...card, name, description, memoryType, body, userChange: "edited",
-          }));
+          publishUserMemoryChange(msg.sessionId, saved.path, (card) => applyUserEdit(card, saved.card));
           sendJson({ type: "memory_action_result", requestId, operation: "write", ok: true, path: saved.path });
         } catch (e: unknown) {
           sendJson({ type: "memory_action_result", requestId, operation: "write", ok: false, path: String(msg.path || ""), error: errorMessage(e) });
@@ -10422,6 +10419,24 @@ function createConnectionHandler(
           sendJson({ type: "memory_action_result", requestId, operation: "delete", ok: true, path: removed.path });
         } catch (e: unknown) {
           sendJson({ type: "memory_action_result", requestId, operation: "delete", ok: false, path: String(msg.path || ""), error: errorMessage(e) });
+        }
+        break;
+      }
+
+      case "memory_restore": {
+        const requestId = msg.requestId;
+        let memoryPath = "";
+        try {
+          const entry = getMemoryCardEntry(msg.sessionId, msg.entryId);
+          const memory = entry?.memory;
+          if (!memory) throw new Error("That card is not in this chat's history");
+          memoryPath = memory.path;
+          if (memory.change !== "deleted" && memory.userChange !== "deleted") throw new Error("That memory was not deleted");
+          const restored = restoreMemoryFile(memory.path, memoryVersionOf(memory));
+          publishUserMemoryChange(msg.sessionId, restored.path, (card) => ({ ...card, userChange: "restored" }));
+          sendJson({ type: "memory_action_result", requestId, operation: "restore", ok: true, path: restored.path });
+        } catch (e: unknown) {
+          sendJson({ type: "memory_action_result", requestId, operation: "restore", ok: false, path: memoryPath, error: errorMessage(e) });
         }
         break;
       }

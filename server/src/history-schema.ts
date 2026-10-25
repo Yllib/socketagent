@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type {
-  ComputerAccessRequestCard, EmailPreview, HistoryEntry, MemoryCard, QuestionItem, SessionRunOutcome,
+  ComputerAccessRequestCard, EmailPreview, HistoryEntry, MemoryCard, MemoryVersion, QuestionItem, SessionRunOutcome,
   WorkflowPhaseState, WorkflowProgressState, WorkflowStatePayload,
 } from "./protocol";
 
@@ -86,7 +86,10 @@ export const historyEntrySchema = z.object({
   memory: z.object({
     path: z.string(), name: z.string(), description: z.string(), memoryType: z.string(),
     body: z.string(), change: z.enum(["created", "edited", "deleted"]),
-    userChange: z.enum(["edited", "deleted"]).optional(),
+    userChange: z.enum(["edited", "deleted", "restored"]).optional(),
+    previous: z.object({
+      name: z.string(), description: z.string(), memoryType: z.string(), body: z.string(),
+    } satisfies Shape<MemoryVersion>).passthrough().optional(),
   } satisfies Shape<MemoryCard>).passthrough().optional(),
   authRequest: z.object({
     kind: z.string(), requestId: z.string(), startUrl: z.string(),

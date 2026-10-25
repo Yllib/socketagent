@@ -3448,6 +3448,32 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "memory_restore"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "entryId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "entryId",
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "file_manager_mkdir"
             },
             "requestId": {

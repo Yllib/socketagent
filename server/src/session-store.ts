@@ -2036,8 +2036,10 @@ export function updateMemoryCards(
   try {
     ensureHistoryDatabaseSession(sessionId);
     const changedEntries: HistoryEntry[] = [];
-    for (const entry of getHistory(sessionId)) {
-      if (entry.role !== "memory" || !entry.memory || entry.memory.path !== memoryPath) continue;
+    // Memory rows only. Reading the whole transcript here cost 850 ms on a
+    // 30k-entry chat, which the phone felt as a slow save.
+    for (const entry of historyDatabase().getByRole(sessionId, "memory")) {
+      if (!entry.memory || entry.memory.path !== memoryPath) continue;
       const next = update(entry.memory);
       if (JSON.stringify(next) === JSON.stringify(entry.memory)) continue;
       entry.memory = next;
@@ -2050,6 +2052,13 @@ export function updateMemoryCards(
     console.error(`[History] Error updating memory cards for ${memoryPath}: ${error}`);
     return [];
   }
+}
+
+/** The memory card behind one transcript entry, or undefined when it is not one. */
+export function getMemoryCardEntry(sessionId: string, entryId: string): HistoryEntry | undefined {
+  ensureHistoryDatabaseSession(sessionId);
+  const entry = historyDatabase().getByEntryId(sessionId, entryId);
+  return entry?.role === "memory" && entry.memory ? entry : undefined;
 }
 
 export function getHistory(sessionId: string): HistoryEntry[] {

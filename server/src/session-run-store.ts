@@ -82,6 +82,19 @@ export function getSessionRunStats(sessionId: string): SessionRunStats | undefin
   return stats ? normalizedStats(stats) : undefined;
 }
 
+/** How many finished runs a client gets with its stats; the analytics screen says it shows the newest N. */
+export const CLIENT_RECENT_RUN_LIMIT = 50;
+
+/**
+ * The stats as sent to the app. The store keeps up to 500 runs so backfill and
+ * de-duplication can see them, but shipping all of them put ~100 KB on every
+ * session_history frame, including deltas with no entries.
+ */
+export function clientRunStats(stats: SessionRunStats | undefined): SessionRunStats | undefined {
+  if (!stats?.recentRuns || stats.recentRuns.length <= CLIENT_RECENT_RUN_LIMIT) return stats;
+  return { ...stats, recentRuns: stats.recentRuns.slice(-CLIENT_RECENT_RUN_LIMIT) };
+}
+
 function recordTime(value: string): number {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;

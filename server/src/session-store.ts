@@ -2079,6 +2079,16 @@ export function getTaskStates(sessionId: string): HistoryEntry[] {
   return historyDatabase().getByRole(sessionId, "task_state").map(cloneHistoryEntry);
 }
 
+/**
+ * Task states that are pending, running or paused. Finished states already
+ * sit in the transcript at their own position; a resume needs only the ones
+ * whose cards can still change.
+ */
+export function getActiveTaskStates(sessionId: string): HistoryEntry[] {
+  ensureHistoryDatabaseSession(sessionId);
+  return historyDatabase().getActiveTaskStates(sessionId).map(cloneHistoryEntry);
+}
+
 export function getHistoryCount(sessionId: string): number {
   ensureHistoryDatabaseSession(sessionId);
   return historyDatabase().count(sessionId);
@@ -2421,6 +2431,8 @@ export interface BoundedHistoryPage {
 
 export interface ResumeHistoryPage extends BoundedHistoryPage {
   historyKind: "initial" | "delta";
+  /** Why a client cursor did not produce a delta. Logged, never sent. */
+  fallbackReason?: string;
 }
 
 export interface ResumeHistoryOptions {
@@ -2428,6 +2440,10 @@ export interface ResumeHistoryOptions {
   knownSessionSeq?: number;
   knownHistoryOffset?: number;
   knownHistoryEntryCount?: number;
+  /** `[sessionSeq, revision]` pairs for the newest cached entries, ascending. */
+  knownEntryRevisions?: number[][];
+  /** sha256 of `${sessionSeq}:${entryId}\n` over the same entries. */
+  knownEntryIdentityDigest?: string;
   minEntries?: number;
   recentUserPrompts?: number;
   maxDeltaEntries?: number;
@@ -2525,13 +2541,82 @@ export function getBoundedHistoryDelta(
   };
 }
 
+type KnownEntryRevisions = { sessionSeqs: number[]; revisions: Map<number, number> };
+
+/** Validate `[sessionSeq, revision]` pairs from a client: ascending, positive, no repeats. */
+function parseKnownEntryRevisions(raw: unknown): KnownEntryRevisions | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const pairs: unknown[] = raw;
+  const sessionSeqs: number[] = [];
+  const revisions = new Map<number, number>();
+  let previous = 0;
+  for (const pair of pairs) {
+    if (!Array.isArray(pair) || pair.length !== 2) return undefined;
+    const members: unknown[] = pair;
+    const sessionSeq = positiveInteger(members[0]);
+    const revision = positiveInteger(members[1]);
+    if (sessionSeq === null || revision === null || sessionSeq <= previous) return undefined;
+    sessionSeqs.push(sessionSeq);
+    revisions.set(sessionSeq, revision);
+    previous = sessionSeq;
+  }
+  return { sessionSeqs, revisions };
+}
+
+/**
+ * Durable entries the phone's cache lacks or holds at an older revision, from
+ * the oldest listed entry on. Undefined means the cache cannot be trusted as a
+ * base (a listed sequence is gone, or an identity changed) and the client
+ * needs a fresh page.
+ */
+function resumeDeltaFromKnownEntries(
+  database: TranscriptDatabase,
+  sessionId: string,
+  known: KnownEntryRevisions,
+  identityDigest: string | undefined,
+  maxEntries: number,
+): { entries: HistoryEntry[]; knownIndex: number; changed: number } | { reason: string } {
+  const oldest = known.sessionSeqs[0];
+  const newest = known.sessionSeqs[known.sessionSeqs.length - 1];
+  const knownIndex = database.offsetForSessionSeq(sessionId, newest);
+  if (knownIndex === undefined) return { reason: `newest known seq ${newest} is not stored` };
+  const rows = database.positionsBetween(sessionId, oldest, newest);
+  const stored = new Map(rows.map((row) => [row.sessionSeq, row]));
+  const identity = crypto.createHash("sha256");
+  const changedSeqs: number[] = [];
+  for (const sessionSeq of known.sessionSeqs) {
+    const row = stored.get(sessionSeq);
+    if (!row) return { reason: `known seq ${sessionSeq} is not stored` };
+    identity.update(`${sessionSeq}:${row.entryId}\n`);
+    if (row.revision !== known.revisions.get(sessionSeq)) changedSeqs.push(sessionSeq);
+  }
+  if (identityDigest && identity.digest("hex") !== identityDigest) {
+    return { reason: "entry identities differ from the cache" };
+  }
+  for (const row of rows) {
+    if (!known.revisions.has(row.sessionSeq)) changedSeqs.push(row.sessionSeq);
+  }
+  if (changedSeqs.length > maxEntries) {
+    return { reason: `${changedSeqs.length} changed entries exceed the delta budget` };
+  }
+  changedSeqs.sort((left, right) => left - right);
+  return {
+    entries: database.getBySessionSeqs(sessionId, changedSeqs),
+    knownIndex,
+    changed: changedSeqs.length,
+  };
+}
+
 /**
  * Build the complete visible window for a session resume in one server read.
  *
- * The initial snapshot targets at least `minEntries` and the requested recent
- * prompts, then applies hard entry/byte limits so a pathological tool-heavy
- * turn cannot freeze the phone. Any contiguous cached suffix is a safe delta
- * cursor; older context remains available through normal pagination.
+ * A client that lists its cached `[sessionSeq, revision]` pairs gets back
+ * exactly the entries it lacks or holds stale, plus everything newer. The
+ * older window fields (offset, count, digest) remain for clients that only
+ * send those; they require the cache to be contiguous. When neither cursor
+ * can be honoured, the initial snapshot targets at least `minEntries` and the
+ * requested recent prompts, then applies hard entry/byte limits so a
+ * pathological tool-heavy turn cannot freeze the phone.
  */
 export function getResumeHistoryPage(
   sessionId: string,
@@ -2551,61 +2636,105 @@ export function getResumeHistoryPage(
   const maxInitialBytes = Math.max(1, options.maxInitialBytes ?? 256 * 1024);
   const totalUserPrompts = summary.userPromptCount;
   const targetUserPrompts = Math.min(totalUserPrompts, recentUserPrompts);
+  let fallbackReason: string | undefined;
 
-  const knownSessionSeq = options.knownSessionSeq;
   const knownHistoryOffset = options.knownHistoryOffset;
-  const knownHistoryEntryCount = options.knownHistoryEntryCount;
-  if (Number.isSafeInteger(knownSessionSeq) && knownSessionSeq! >= 0 &&
-      Number.isSafeInteger(knownHistoryOffset) && knownHistoryOffset! >= 0 &&
-      Number.isSafeInteger(knownHistoryEntryCount) && knownHistoryEntryCount! > 0) {
-    const knownIndex = database.offsetForSessionSeq(sessionId, knownSessionSeq!);
-    const cacheIsContiguous = knownIndex !== undefined &&
-      knownHistoryOffset! + knownHistoryEntryCount! === knownIndex + 1 &&
-      (!options.knownHistoryDigest || options.knownHistoryDigest ===
-        database.windowDigest(sessionId, knownHistoryOffset!, knownHistoryEntryCount!));
-    if (cacheIsContiguous) {
-      const deltaCount = total - knownIndex! - 1;
-      if (deltaCount <= maxDeltaEntries) {
+  /** Interactive cards older than the listed entries that changed since they were cached. */
+  const revisedBefore = (firstListedSeq: number): HistoryEntry[] => {
+    if (!Number.isSafeInteger(knownHistoryOffset) || knownHistoryOffset! < 0) return [];
+    const cachedStart = database.getPage(sessionId, knownHistoryOffset!, 1)[0];
+    if (!cachedStart?.sessionSeq || cachedStart.sessionSeq >= firstListedSeq) return [];
+    return database.getRevisedInteractionsBetween(
+      sessionId,
+      cachedStart.sessionSeq,
+      firstListedSeq - 1,
+      maxDeltaEntries + 1,
+    );
+  };
+  const deltaPage = (
+    label: string,
+    knownIndex: number,
+    newest: number,
+    changed: HistoryEntry[],
+  ): ResumeHistoryPage | undefined => {
+    const newer = database.getAfter(sessionId, newest, maxDeltaEntries + 1);
+    const resumeEntries = [...changed, ...newer];
+    if (resumeEntries.length > maxDeltaEntries) {
+      fallbackReason = `${resumeEntries.length} delta entries exceed ${maxDeltaEntries}`;
+      return undefined;
+    }
+    const hydratedDelta = hydrateHistoryEntries(resumeEntries);
+    const bytes = Buffer.byteLength(JSON.stringify(hydratedDelta), "utf8");
+    if (bytes > maxDeltaBytes) {
+      fallbackReason = `delta of ${bytes} bytes exceeds ${maxDeltaBytes}`;
+      return undefined;
+    }
+    warnIfSlow(label, startedAt, {
+      sessionId,
+      total,
+      entries: hydratedDelta.length,
+      changedEntries: changed.length,
+      offset: knownIndex + 1,
+    });
+    return {
+      entries: hydratedDelta,
+      total,
+      offset: knownIndex + 1,
+      deferredContextAvailable: false,
+      totalUserPrompts,
+      historyKind: "delta",
+    };
+  };
+
+  const known = parseKnownEntryRevisions(options.knownEntryRevisions);
+  if (options.knownEntryRevisions !== undefined && !known) {
+    fallbackReason = "knownEntryRevisions is malformed";
+  }
+  if (known) {
+    const diff = resumeDeltaFromKnownEntries(
+      database,
+      sessionId,
+      known,
+      options.knownEntryIdentityDigest,
+      maxDeltaEntries,
+    );
+    if ("reason" in diff) {
+      fallbackReason = diff.reason;
+    } else {
+      const newest = known.sessionSeqs[known.sessionSeqs.length - 1];
+      const changed = [...revisedBefore(known.sessionSeqs[0]), ...diff.entries];
+      const page = deltaPage("history_resume_delta", diff.knownIndex, newest, changed);
+      if (page) return page;
+    }
+  } else {
+    const knownSessionSeq = options.knownSessionSeq;
+    const knownHistoryEntryCount = options.knownHistoryEntryCount;
+    if (Number.isSafeInteger(knownSessionSeq) && knownSessionSeq! >= 0 &&
+        Number.isSafeInteger(knownHistoryOffset) && knownHistoryOffset! >= 0 &&
+        Number.isSafeInteger(knownHistoryEntryCount) && knownHistoryEntryCount! > 0) {
+      const knownIndex = database.offsetForSessionSeq(sessionId, knownSessionSeq!);
+      if (knownIndex === undefined) {
+        fallbackReason = `known seq ${knownSessionSeq} is not stored`;
+      } else if (knownHistoryOffset! + knownHistoryEntryCount! !== knownIndex + 1) {
+        fallbackReason = `cache holds ${knownHistoryEntryCount} of ${knownIndex + 1 - knownHistoryOffset!} entries in its window`;
+      } else if (options.knownHistoryDigest && options.knownHistoryDigest !==
+          database.windowDigest(sessionId, knownHistoryOffset!, knownHistoryEntryCount!)) {
+        fallbackReason = "window digest differs";
+      } else {
         // A durable interaction update keeps its original sequence and raises
         // its revision. Re-send mutable cards from the phone's cached window
         // so an answered question cannot return to its older pending state.
-        // Ordinary stream revisions stay on the normal sequence delta path.
-        const cachedStart = database.getPage(sessionId, knownHistoryOffset!, 1)[0];
-        const revisedEntries = cachedStart
-          ? database.getRevisedInteractionsBetween(
-              sessionId,
-              cachedStart.sessionSeq!,
-              knownSessionSeq!,
-              maxDeltaEntries + 1,
-            )
-          : [];
-        const deltaEntries = database.getAfter(
-          sessionId,
+        const page = deltaPage(
+          "history_resume_delta",
+          knownIndex,
           knownSessionSeq!,
-          maxDeltaEntries + 1,
+          revisedBefore(knownSessionSeq! + 1),
         );
-        const resumeEntries = [...revisedEntries, ...deltaEntries];
-        if (resumeEntries.length <= maxDeltaEntries) {
-          const hydratedDelta = hydrateHistoryEntries(resumeEntries);
-          if (Buffer.byteLength(JSON.stringify(hydratedDelta), "utf8") <= maxDeltaBytes) {
-            warnIfSlow("history_resume_delta", startedAt, {
-              sessionId,
-              total,
-              entries: hydratedDelta.length,
-              revisedEntries: revisedEntries.length,
-              offset: knownIndex + 1,
-            });
-            return {
-              entries: hydratedDelta,
-              total,
-              offset: knownIndex + 1,
-              deferredContextAvailable: false,
-              totalUserPrompts,
-              historyKind: "delta",
-            };
-          }
-        }
+        if (page) return page;
       }
+    } else if (knownSessionSeq !== undefined || knownHistoryOffset !== undefined
+        || knownHistoryEntryCount !== undefined) {
+      fallbackReason = "window cursor is incomplete";
     }
   }
 
@@ -2638,6 +2767,7 @@ export function getResumeHistoryPage(
     deferredContextAvailable: boundedStart > start,
     totalUserPrompts,
     historyKind: "initial",
+    ...(fallbackReason ? { fallbackReason } : {}),
   };
 }
 
@@ -2902,7 +3032,7 @@ export function backfillClaudeTasksFromHistory(sessionId: string): Record<string
  */
 export function settleStaleRuntimeTaskStates(sessionId: string): number {
   ensureHistoryDatabaseSession(sessionId);
-  const entries = historyDatabase().getByRole(sessionId, "task_state");
+  const entries = historyDatabase().getActiveTaskStates(sessionId);
   let settled = 0;
   const changedEntries: HistoryEntry[] = [];
   const timestamp = new Date().toISOString();

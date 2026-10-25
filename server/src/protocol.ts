@@ -507,6 +507,16 @@ export interface ResumeSessionMessage {
   knownHistoryOffset?: number;
   /** Number of contiguous durable entries represented by the cached snapshot. */
   knownHistoryEntryCount?: number;
+  /**
+   * `[sessionSeq, revision]` for the newest cached entries, ascending. The
+   * server answers with every entry in that range the client lacks or holds
+   * at an older revision, plus everything newer. Unlike the window fields
+   * above, this stays valid when the cache skipped entries that never had a
+   * live event (run boundaries, notifications, task states).
+   */
+  knownEntryRevisions?: number[][];
+  /** sha256 of `${sessionSeq}:${entryId}\n` over the same entries, so a reused sequence is caught. */
+  knownEntryIdentityDigest?: string;
   /** Optional client trace identifier for click-to-ready diagnostics. */
   openTraceId?: string;
 }

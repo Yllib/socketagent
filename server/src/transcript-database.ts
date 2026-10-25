@@ -572,6 +572,50 @@ export class TranscriptDatabase {
       `${row.session_seq}:${row.entry_id}:${row.revision}\n`).join("")).digest("hex");
   }
 
+  /** Identity and revision of every row with a sequence in [fromSeq, toSeq], ascending. */
+  positionsBetween(
+    sessionId: string,
+    fromSeq: number,
+    toSeq: number,
+  ): { sessionSeq: number; entryId: string; revision: number }[] {
+    return z.array(entryPositionRowSchema).parse(this.db.prepare(`
+      SELECT session_seq, entry_id, revision FROM transcript_entries
+      WHERE session_id = ? AND session_seq BETWEEN ? AND ? ORDER BY session_seq
+    `).all(sessionId, fromSeq, toSeq)).map((row) => ({
+      sessionSeq: row.session_seq,
+      entryId: row.entry_id,
+      revision: row.revision,
+    }));
+  }
+
+  /** The rows at exactly these sequences, ascending. Missing sequences are skipped. */
+  getBySessionSeqs(sessionId: string, sessionSeqs: number[]): HistoryEntry[] {
+    const entries: HistoryEntry[] = [];
+    // Stay well under SQLite's bound-parameter limit.
+    for (let start = 0; start < sessionSeqs.length; start += 500) {
+      const chunk = sessionSeqs.slice(start, start + 500);
+      entries.push(...entryRowsSchema.parse(this.db.prepare(`
+        SELECT * FROM transcript_entries
+        WHERE session_id = ? AND session_seq IN (${chunk.map(() => "?").join(",")})
+        ORDER BY session_seq
+      `).all(sessionId, ...chunk)).map(parseEntry));
+    }
+    return entries;
+  }
+
+  /**
+   * Task states still in flight. A session accumulates thousands of finished
+   * task rows; a resume only needs the ones that can still change.
+   */
+  getActiveTaskStates(sessionId: string): HistoryEntry[] {
+    return (entryRowsSchema.parse(this.db.prepare(`
+      SELECT * FROM transcript_entries
+      WHERE session_id = ? AND role = 'task_state'
+        AND json_extract(entry_json, '$.status') IN ('pending', 'running', 'paused')
+      ORDER BY session_seq
+    `).all(sessionId))).map(parseEntry);
+  }
+
   getPage(sessionId: string, offset: number, limit: number): HistoryEntry[] {
     return entryRowsSchema.parse(this.positionedRows(sessionId, "*", offset, limit)).map(parseEntry);
   }
@@ -625,7 +669,9 @@ export class TranscriptDatabase {
           'elicitation_url',
           'secure_input',
           'browser_session',
-          'work_review'
+          'work_review',
+          'task_state',
+          'memory'
         )
       ORDER BY session_seq
       LIMIT ?

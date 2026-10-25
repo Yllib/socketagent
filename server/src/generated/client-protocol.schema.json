@@ -1106,6 +1106,18 @@
             "knownHistoryEntryCount": {
               "type": "number"
             },
+            "knownEntryRevisions": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            },
+            "knownEntryIdentityDigest": {
+              "type": "string"
+            },
             "openTraceId": {
               "type": "string"
             },

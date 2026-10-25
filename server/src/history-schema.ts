@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type {
-  ComputerAccessRequestCard, EmailPreview, HistoryEntry, QuestionItem, SessionRunOutcome,
+  ComputerAccessRequestCard, EmailPreview, HistoryEntry, MemoryCard, QuestionItem, SessionRunOutcome,
   WorkflowPhaseState, WorkflowProgressState, WorkflowStatePayload,
 } from "./protocol";
 
@@ -60,7 +60,7 @@ export const historyEntrySchema = z.object({
     "secure_input", "browser_session", "html_plan", "work_review", "todos_update",
     "codex_plan", "user_uuid", "elicitation_url", "prompt_suggestion", "monitor",
     "notification", "task_state", "permission_mode", "model_change", "run_boundary", "system",
-    "error", "computer_access",
+    "error", "computer_access", "memory",
   ]).transform(role => role === "system" ? "notification" : role),
   // Older tool cards can omit these display fields. Do not invent a timestamp.
   content: z.string().default(""), timestamp: z.string().default(""),
@@ -83,6 +83,11 @@ export const historyEntrySchema = z.object({
     access: z.object({ read: z.boolean(), agents: z.boolean(), commands: z.boolean() }).passthrough().optional(),
     reason: optionalText,
   } satisfies Shape<ComputerAccessRequestCard>).passthrough().optional(),
+  memory: z.object({
+    path: z.string(), name: z.string(), description: z.string(), memoryType: z.string(),
+    body: z.string(), change: z.enum(["created", "edited", "deleted"]),
+    userChange: z.enum(["edited", "deleted"]).optional(),
+  } satisfies Shape<MemoryCard>).passthrough().optional(),
   authRequest: z.object({
     kind: z.string(), requestId: z.string(), startUrl: z.string(),
     captureOrigins: z.array(z.string()),

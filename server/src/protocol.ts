@@ -719,6 +719,32 @@ export interface FileManagerWriteTextMessage {
   content: string;
 }
 
+/**
+ * Memory card actions. The path must be a memory file under Claude Code's
+ * projects folder; the server refuses anything else. sessionId names the chat
+ * whose cards should show the result.
+ */
+export interface MemoryReadMessage {
+  type: "memory_read";
+  requestId?: string;
+  path: string;
+}
+
+export interface MemoryWriteMessage {
+  type: "memory_write";
+  requestId?: string;
+  sessionId?: string;
+  path: string;
+  content: string;
+}
+
+export interface MemoryDeleteMessage {
+  type: "memory_delete";
+  requestId?: string;
+  sessionId?: string;
+  path: string;
+}
+
 /** Asks for every Codex and Claude config file the computer lets the app edit. */
 export interface BackendConfigListMessage {
   type: "backend_config_list";
@@ -1614,6 +1640,9 @@ export type ClientMessage = { commandId?: string } & (
   | ComputerLinkListMessage
   | KnownComputersMessage
   | ComputerAccessAnswerMessage
+  | MemoryReadMessage
+  | MemoryWriteMessage
+  | MemoryDeleteMessage
   | FileManagerMkdirMessage
   | FileManagerRenameMessage
   | FileManagerDeleteMessage
@@ -2506,7 +2535,7 @@ export interface SessionArchiveFailedServerMessage {
 }
 
 export interface HistoryEntry {
-  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "model_change" | "run_boundary" | "error" | "computer_access";
+  role: "user" | "assistant" | "tool_call" | "tool_result" | "tool_image" | "question" | "secure_input" | "browser_session" | "html_plan" | "work_review" | "todos_update" | "codex_plan" | "user_uuid" | "elicitation_url" | "prompt_suggestion" | "monitor" | "notification" | "task_state" | "permission_mode" | "model_change" | "run_boundary" | "error" | "computer_access" | "memory";
   content: string;
   /** On a model_change entry: the notice kind, as on ModelChangedServerMessage. */
   modelNotice?: ModelNotice;
@@ -2552,6 +2581,8 @@ export interface HistoryEntry {
    * the requestId; status holds the decision once answered.
    */
   computerAccess?: ComputerAccessRequestCard;
+  /** A memory card (role === "memory"). questionId holds the card id. */
+  memory?: MemoryCard;
   authRequest?: {
     kind: string;
     requestId: string;
@@ -3139,6 +3170,53 @@ export interface ComputerAccessResolvedServerMessage {
   requestId: string;
   sessionId: string;
   decision: ComputerAccessAnswerMessage["decision"] | "expired";
+}
+
+export type MemoryChange = "created" | "edited" | "deleted";
+
+/** One Claude Code auto-memory file as the agent left it after a tool call. */
+export interface MemoryCard {
+  /** Absolute path of the memory file. */
+  path: string;
+  name: string;
+  description: string;
+  /** Frontmatter metadata.type: user, feedback, project or reference. */
+  memoryType: string;
+  /** Markdown body without the frontmatter. After a delete, the last body. */
+  body: string;
+  /** What the agent did. */
+  change: MemoryChange;
+  /** Set once the user edited or deleted the memory from the card. */
+  userChange?: "edited" | "deleted";
+}
+
+/** Shows a memory card, or replaces one with the same entryId after a card action. */
+export interface MemoryCardServerMessage {
+  type: "memory_card";
+  sessionId: string;
+  memory: MemoryCard;
+  entryId?: string;
+  sessionSeq?: number;
+  revision?: number;
+  timestamp?: string;
+}
+
+export interface MemoryReadResultServerMessage {
+  type: "memory_read_result";
+  requestId?: string;
+  ok: boolean;
+  path: string;
+  content?: string;
+  error?: string;
+}
+
+export interface MemoryActionResultServerMessage {
+  type: "memory_action_result";
+  requestId?: string;
+  operation: "write" | "delete";
+  ok: boolean;
+  path: string;
+  error?: string;
 }
 
 export interface ReminderServerMessage {
@@ -3912,6 +3990,9 @@ export type ServerMessage =
   | ComputerLinkListResultServerMessage
   | ComputerLinkOperationResultServerMessage
   | ComputerAccessRequestServerMessage
+  | MemoryCardServerMessage
+  | MemoryReadResultServerMessage
+  | MemoryActionResultServerMessage
   | ComputerAccessResolvedServerMessage
   | ReminderServerMessage
   | CompactBoundaryServerMessage

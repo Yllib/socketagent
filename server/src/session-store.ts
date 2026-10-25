@@ -21,6 +21,7 @@ import type {
   Backend,
   SessionInfo,
   HistoryEntry,
+  MemoryCard,
   ErrorServerMessage,
   UserMessageUuidServerMessage,
 } from "./protocol";
@@ -36,6 +37,7 @@ import { isUnusableSessionPreview, isBareSlashCommand, isLocalCommandOnlyEntry, 
 import { remapHtmlPlans } from "./html-plan-store";
 import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
+import { claudeProjectSlug } from "./claude-memory";
 import { deleteSendFileDelivery } from "./send-file-store";
 import { ByteBoundedLru } from "./byte-bounded-lru";
 import {
@@ -2021,6 +2023,35 @@ export function markComputerAccessResolved(
   }
 }
 
+/**
+ * Rewrites every memory card for one file after the user edited or deleted
+ * it from a card, so each card shows the memory as it is now. Returns the
+ * entries that changed, already positioned, for the caller to broadcast.
+ */
+export function updateMemoryCards(
+  sessionId: string,
+  memoryPath: string,
+  update: (card: MemoryCard) => MemoryCard,
+): HistoryEntry[] {
+  try {
+    ensureHistoryDatabaseSession(sessionId);
+    const changedEntries: HistoryEntry[] = [];
+    for (const entry of getHistory(sessionId)) {
+      if (entry.role !== "memory" || !entry.memory || entry.memory.path !== memoryPath) continue;
+      const next = update(entry.memory);
+      if (JSON.stringify(next) === JSON.stringify(entry.memory)) continue;
+      entry.memory = next;
+      entry.revision = (positiveInteger(entry.revision) || 1) + 1;
+      changedEntries.push(entry);
+    }
+    if (changedEntries.length > 0) appendHistoryBulk(sessionId, changedEntries);
+    return changedEntries;
+  } catch (error) {
+    console.error(`[History] Error updating memory cards for ${memoryPath}: ${error}`);
+    return [];
+  }
+}
+
 export function getHistory(sessionId: string): HistoryEntry[] {
   // Recover UUIDs on user prompts saved before self-assigned UUIDs (Apr 22 →
   // Apr 27). Once-per-process and a no-op when nothing's missing.
@@ -2889,20 +2920,8 @@ export function settleStaleRuntimeTaskStates(sessionId: string): number {
   return settled;
 }
 
-/** Sanitize CWD to match the SDK's project directory naming convention.
- *  Works on both Unix (/home/user/code) and Windows (C:\Users\user\code) paths. */
-function sanitizeCwdToProjectDir(cwd: string): string {
-  let dir = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-  if (dir.length > 200) {
-    let hash = 0;
-    for (let i = 0; i < cwd.length; i++) {
-      hash = (hash << 5) - hash + cwd.charCodeAt(i);
-      hash |= 0;
-    }
-    dir = dir.slice(0, 200) + "-" + Math.abs(hash).toString(36);
-  }
-  return dir;
-}
+/** Sanitize CWD to match the SDK's project directory naming convention. */
+const sanitizeCwdToProjectDir = claudeProjectSlug;
 
 /** Build the path to Claude Code's JSONL session file */
 export function getJsonlPath(sessionId: string, cwd: string): string {

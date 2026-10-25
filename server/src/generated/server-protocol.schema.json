@@ -331,6 +331,15 @@
           "$ref": "#/definitions/ComputerAccessRequestServerMessage"
         },
         {
+          "$ref": "#/definitions/MemoryCardServerMessage"
+        },
+        {
+          "$ref": "#/definitions/MemoryReadResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/MemoryActionResultServerMessage"
+        },
+        {
           "$ref": "#/definitions/ComputerAccessResolvedServerMessage"
         },
         {
@@ -4784,7 +4793,8 @@
             "model_change",
             "run_boundary",
             "error",
-            "computer_access"
+            "computer_access",
+            "memory"
           ]
         },
         "content": {
@@ -4875,6 +4885,9 @@
         },
         "computerAccess": {
           "$ref": "#/definitions/ComputerAccessRequestCard"
+        },
+        "memory": {
+          "$ref": "#/definitions/MemoryCard"
         },
         "authRequest": {
           "type": "object",
@@ -5173,6 +5186,52 @@
         "read",
         "agents",
         "commands"
+      ]
+    },
+    "MemoryCard": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "memoryType": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "change": {
+          "$ref": "#/definitions/MemoryChange"
+        },
+        "userChange": {
+          "type": "string",
+          "enum": [
+            "edited",
+            "deleted"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "name",
+        "description",
+        "memoryType",
+        "body",
+        "change"
+      ]
+    },
+    "MemoryChange": {
+      "type": "string",
+      "enum": [
+        "created",
+        "edited",
+        "deleted"
       ]
     },
     "WorkflowStatePayload": {
@@ -6778,6 +6837,101 @@
         "source",
         "target",
         "type"
+      ]
+    },
+    "MemoryCardServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "memory_card"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "memory": {
+          "$ref": "#/definitions/MemoryCard"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "sessionSeq": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "timestamp": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "sessionId",
+        "memory"
+      ]
+    },
+    "MemoryReadResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "memory_read_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "path"
+      ]
+    },
+    "MemoryActionResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "memory_action_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "write",
+            "delete"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "operation",
+        "ok",
+        "path"
       ]
     },
     "ComputerAccessResolvedServerMessage": {

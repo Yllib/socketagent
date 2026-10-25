@@ -15,6 +15,7 @@ import { prepareCodexMcpElicitation, resolveCodexMcpElicitation } from "./codex-
 import { bashCapturePath, removeBashCapture, unwrapBashCapture, wrapBashForCapture } from "./bash-capture";
 import { toolApprovalMarkdown } from "./tool-approval";
 import { saveFullOutput } from "./full-output-store";
+import { ClaudeMemoryWatcher, claudeMemoryDir } from "./claude-memory";
 import * as crypto from "crypto";
 import { execFile, execFileSync, spawn, spawnSync } from "child_process";
 import * as pty from "node-pty";
@@ -2390,6 +2391,50 @@ export class ClaudeSession {
     }
   }
 
+  private _memoryWatcherInstance?: ClaudeMemoryWatcher;
+
+  /**
+   * Claude Code keys auto-memory on the folder the session started in, so the
+   * watcher is pinned to the cwd of the first tool call and ignores later cd's.
+   */
+  private _memoryWatcher(): ClaudeMemoryWatcher {
+    this._memoryWatcherInstance ??= new ClaudeMemoryWatcher(claudeMemoryDir(this.cwd));
+    return this._memoryWatcherInstance;
+  }
+
+  /** The user changed a memory from its card; that is not an agent change. */
+  resetMemoryBaseline(): void {
+    this._memoryWatcherInstance?.reset();
+  }
+
+  /** One transcript card per memory file the last tool call created, changed or removed. */
+  private _publishMemoryChanges(): void {
+    if (!this.sessionId) return;
+    try {
+      for (const memory of this._memoryWatcher().collect()) {
+        const verb = memory.change === "created" ? "Saved" : memory.change === "edited" ? "Updated" : "Deleted";
+        const positioned = appendHistory(this.sessionId, {
+          role: "memory",
+          content: `${verb} memory: ${memory.name}`,
+          questionId: `memory_${crypto.randomUUID()}`,
+          memory,
+          timestamp: new Date().toISOString(),
+        });
+        this.send({
+          type: "memory_card",
+          sessionId: this.sessionId,
+          memory,
+          ...(positioned.entryId ? { entryId: positioned.entryId } : {}),
+          ...(positioned.sessionSeq ? { sessionSeq: positioned.sessionSeq } : {}),
+          ...(positioned.revision ? { revision: positioned.revision } : {}),
+          ...(positioned.timestamp ? { timestamp: positioned.timestamp } : {}),
+        });
+      }
+    } catch (error) {
+      console.warn(`[Hook] Failed to publish memory changes: ${error}`);
+    }
+  }
+
   private _publishClaudeTaskUpdate(update: ClaudeTaskStateUpdate): void {
     if (!this.sessionId) return;
     const current = unknownArray(getTodos(this.sessionId)).filter(isRecord);
@@ -3948,6 +3993,7 @@ export class ClaudeSession {
             PreToolUse: [{
               hooks: [async (input) => {
                 if (input.hook_event_name !== "PreToolUse") return { continue: true };
+                this._memoryWatcher().prime();
                 const toolName = input.tool_name || "";
                 const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
 
@@ -4074,6 +4120,7 @@ export class ClaudeSession {
                 } catch (error) {
                   console.warn(`[Hook] Failed to persist Claude task state: ${error}`);
                 }
+                this._publishMemoryChanges();
                 return { continue: true };
               }],
             }],

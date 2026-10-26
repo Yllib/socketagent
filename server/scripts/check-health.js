@@ -21,14 +21,27 @@ function probe(endpoint = 'health') {
   };
   const request = http.get({ hostname: '127.0.0.1', port: Number(env.PORT || 8085),
     path: `/internal/restart/${endpoint}`, headers: { Authorization: `Bearer ${env.AUTH_TOKEN}` }, timeout: 2000 }, response => {
-    if (response.statusCode === 404 && endpoint === 'health') { response.resume(); probe('status'); return; }
+    if (response.statusCode === 404 && endpoint === 'health') { finished = true; response.resume(); probe('status'); return; }
+    if (response.statusCode !== 200) {
+      response.resume();
+      const reason = response.statusCode === 404
+        ? 'An older SocketAgent server or another program may still be using this port'
+        : response.statusCode === 401 || response.statusCode === 403
+          ? 'The running server does not accept this installation\'s authentication token'
+          : 'The server has not become ready';
+      finish(new Error(`HTTP ${response.statusCode} from /internal/restart/${endpoint}. ${reason}`));
+      return;
+    }
     let data = '';
     response.on('data', (/** @type {Buffer} */ chunk) => { data += chunk; if (data.length > 65536) request.destroy(new Error('Unexpected health response')); });
     response.on('error', finish);
     response.on('end', () => {
       try {
         /** @type {unknown} */
-        const body = JSON.parse(data);
+        const body = (/** @returns {unknown} */ () => {
+          try { return JSON.parse(data); }
+          catch { throw new Error(`The readiness endpoint /internal/restart/${endpoint} did not return JSON. Another program may be using this port`); }
+        })();
         if (!isRecord(body) || response.statusCode !== 200 || (endpoint === 'health' ? body.service !== 'socketagent' : typeof body.preparing !== 'boolean' || !Array.isArray(body.sessions)) || body.ready !== true || !Number.isInteger(body.pid)) throw new Error(`Readiness check returned ${response.statusCode}`);
         finish(null, { ready: true, pid: body.pid });
       } catch (error) { finish(error); }

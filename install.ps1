@@ -455,33 +455,7 @@ if (-not (Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue) 
 }
 
 # ── Pre-flight: check if port is available ──
-$existingTask = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
-$portInUse = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($portInUse) {
-    # Check if it's our own task — that's fine, we'll stop it in Phase 6
-    $ourPids = @()
-    if ($existingTask -and $existingTask.State -eq "Running") {
-        $ourPids = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -in
-            (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$TASK_NAME*" -or $_.CommandLine -like "*run-service*" }).ProcessId -or
-            $_.CommandLine -like "*socketagent*dist*index.js*"
-        } | ForEach-Object ProcessId)
-    }
-    # This checkout's own server, even when its task is stopped or renamed.
-    $ownEntry = Join-Path $SERVER_DIR 'dist\index.js'
-    $ourPids += @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-        Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($ownEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
-        ForEach-Object ProcessId)
-    $conflictPids = $portInUse.OwningProcess | Where-Object { $_ -notin $ourPids }
-    if ($conflictPids) {
-        $procInfo = Get-Process -Id $conflictPids[0] -ErrorAction SilentlyContinue
-        $procName = if ($procInfo) { "$($procInfo.ProcessName) (PID $($conflictPids[0]))" } else { "PID $($conflictPids[0])" }
-        Write-Fail "Port $Port is already in use by $procName"
-        Write-Host ""
-        Write-Host "  Use a different port:  & .\install.ps1 -Port 8086" -ForegroundColor Yellow
-        Write-Host ""
-        throw "Port $Port is already in use"
-    }
-}
+$installListeners = @(Get-SocketAgentInstallListeners $Port)
 
 # ══════════════════════════════════════════════
 #  Phase 1: Node.js & Git
@@ -790,6 +764,8 @@ if ($existing) {
     Write-Host "  Removed existing task"
 }
 
+Stop-SocketAgentInstallListeners $installListeners | ForEach-Object { Write-Ok $_ }
+
 # Generate run-service.bat (the restart loop the task runs) and
 # run-recovery.bat. The server writes the same files on every start, so both
 # come from one generator. It also records windows-service.json, which pins
@@ -881,13 +857,10 @@ try {
     Write-Warn "Starting server directly for this session; it will start from the task on next logon/startup."
     Start-Process -FilePath (Get-SocketAgentLauncher) -ArgumentList ('"' + $batFile + '"') | Out-Null
 }
-& $nodeExe (Join-Path $SERVER_DIR 'scripts\check-health.js') 180
-if ($LASTEXITCODE -ne 0) { throw "Server did not become ready. Check $LOG_FILE" }
-Write-Ok "SocketAgent is ready"
-
 # The same wrapper as SYSTEM serves while this account is signed out, so the
 # computer stays reachable at the sign-in screen and for every other account.
-# It starts now and waits while the task above serves.
+# Register it before waiting for readiness: setup can run with another admin's
+# credentials while only a standard user has an interactive Windows session.
 if ($LIMITED_INSTALL) {
     Write-Warn "Limited install: SocketAgent serves only while $env:USERNAME is signed in."
 } else {
@@ -898,6 +871,10 @@ if ($LIMITED_INSTALL) {
         Write-Warn "Could not register SocketAgentService yet: $($_.Exception.Message)"
     }
 }
+& $nodeExe (Join-Path $SERVER_DIR 'scripts\check-health.js') 180
+if ($LASTEXITCODE -ne 0) { throw "Server did not become ready. Check $LOG_FILE" }
+Write-Ok "SocketAgent is ready"
+
 $installStateDir = Join-Path $env:LOCALAPPDATA 'SocketAgent'
 New-Item -ItemType Directory -Force $installStateDir | Out-Null
 Set-Content -Path (Join-Path $installStateDir 'install-location.txt') -Value $REPO_ROOT -Encoding UTF8

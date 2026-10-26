@@ -1,5 +1,46 @@
 # Shared by installation, startup migration, and the CLI. Dot-source to use.
 
+# Only a node process running an absolute SocketAgent server entry is an upgrade
+# candidate. A process name or an open port alone does not establish ownership.
+function Get-SocketAgentProcessDirectory($Process) {
+    if ($Process.Name -ine 'node.exe' -or -not $Process.CommandLine) { return }
+    $entryPattern = '(?:^|\s)(?:"(?<entry>[A-Za-z]:\\[^"\r\n]+\\dist\\index\.js)"|(?<entry>[A-Za-z]:\\[^\s"]+\\dist\\index\.js))(?:\s|$)'
+    if ($Process.CommandLine -notmatch $entryPattern) { return }
+    $directory = Split-Path (Split-Path $Matches['entry'] -Parent) -Parent
+    try {
+        $package = Get-Content -LiteralPath (Join-Path $directory 'package.json') -Raw | ConvertFrom-Json
+        if ($package.name -eq 'socketagent-server') { return $directory }
+    } catch { return }
+}
+
+function Get-SocketAgentInstallListeners([int]$Port) {
+    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    foreach ($processId in @($listeners.OwningProcess | Sort-Object -Unique)) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId"
+        if (-not $process) { continue }
+        if (-not (Get-SocketAgentProcessDirectory $process)) {
+            throw "Port $Port is already in use by $($process.Name) (PID $processId). Stop that program or rerun install.ps1 -Port with a different port."
+        }
+        $process
+    }
+}
+
+# Legacy task launchers can leave node alive after Stop-ScheduledTask. Recheck
+# the captured identity before stopping it so a reused PID is never killed.
+function Stop-SocketAgentInstallListeners($Listeners) {
+    foreach ($previous in $Listeners) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($previous.ProcessId)"
+        if (-not $process) { continue }
+        if ($process.CreationDate -ne $previous.CreationDate -or
+            $process.CommandLine -cne $previous.CommandLine -or
+            -not (Get-SocketAgentProcessDirectory $process)) {
+            throw "Process $($previous.ProcessId) changed during setup; refusing to stop it. Rerun setup to check the port again."
+        }
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+        Write-Output "Stopped previous SocketAgent server (PID $($process.ProcessId))"
+    }
+}
+
 # Local app data of the install's owner, from server\windows-service.json.
 # Paths written into tasks come from here, so a server running as SYSTEM
 # still points them at the owner's launcher rather than its own profile.

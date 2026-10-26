@@ -10,6 +10,11 @@ test('installer health rejects unrelated listeners, failed auth, and a server th
   let mode = 'unrelated';
   const server = http.createServer((req, res) => {
     assert.equal(req.headers.authorization, 'Bearer lab-token');
+    if (mode === 'old-server' || mode === 'plain-text') {
+      res.statusCode = mode === 'old-server' ? 404 : 200;
+      res.end('Not found');
+      return;
+    }
     if (mode.startsWith('legacy')) {
       res.statusCode = req.url.endsWith('/health') ? 404 : 200;
       res.end(JSON.stringify({ ready: true, pid: 123, preparing: false, ...(mode === 'legacy' ? { sessions: [] } : {}) }));
@@ -25,14 +30,20 @@ test('installer health rejects unrelated listeners, failed auth, and a server th
     fs.symlinkSync(path.resolve(__dirname, '../node_modules'), path.join(fixture, 'node_modules'), 'junction');
     fs.copyFileSync(path.resolve(__dirname, '../scripts/check-health.js'), path.join(fixture, 'scripts/check-health.js'));
     fs.writeFileSync(path.join(fixture, '.env'), `PORT=${server.address().port}\nAUTH_TOKEN=lab-token\n`);
-    for (mode of ['unrelated', 'auth', 'starting', 'ready', 'legacy', 'legacy-invalid']) {
+    for (mode of ['unrelated', 'auth', 'starting', 'ready', 'legacy', 'legacy-invalid', 'old-server', 'plain-text']) {
+      let stderr = '';
       /** @type {Promise<number | null>} */
       const exited = new Promise(resolve => {
-        const child = spawn(process.execPath, [path.join(fixture, 'scripts/check-health.js')], { stdio: 'ignore' });
+        const child = spawn(process.execPath, [path.join(fixture, 'scripts/check-health.js')], { stdio: ['ignore', 'ignore', 'pipe'] });
+        child.stderr.on('data', (/** @type {Buffer} */ chunk) => { stderr += chunk; });
         child.on('exit', resolve);
       });
       const code = await exited;
       assert.equal(code, ['ready', 'legacy'].includes(mode) ? 0 : 1, mode);
+      if (mode === 'old-server') assert.match(stderr, /HTTP 404.*older SocketAgent server/);
+      if (mode === 'plain-text') assert.match(stderr, /did not return JSON/);
+      if (mode === 'auth') assert.match(stderr, /authentication token/);
+      assert.doesNotMatch(stderr, /Unexpected token|lab-token/);
     }
   } finally { server.close(); fs.rmSync(fixture, { recursive: true, force: true }); }
 });

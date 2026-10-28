@@ -82,6 +82,8 @@ export const historyEntrySchema = z.object({
     challengeId: optionalText, digest: optionalText,
     access: z.object({ read: z.boolean(), agents: z.boolean(), commands: z.boolean() }).passthrough().optional(),
     reason: optionalText,
+    client: z.object({ name: z.string(), publicKey: z.string() }).passthrough().optional(),
+    approvalKey: optionalText,
   } satisfies Shape<ComputerAccessRequestCard>).passthrough().optional(),
   memory: z.object({
     path: z.string(), name: z.string(), description: z.string(), memoryType: z.string(),

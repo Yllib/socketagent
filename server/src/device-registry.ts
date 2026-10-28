@@ -7,11 +7,14 @@ import { errorMessage } from "./value-guards";
 /**
  * Keys allowed to talk to this computer through the relay. Phones and desktops
  * enroll a "device" key; other computers that may act here through a link
- * enroll a "computer" key. The relay never sees this file or its contents.
+ * enroll a "computer" key; AI clients signed in through the AI connector
+ * enroll a "connector" key, which is a random ID rather than a NaCl key.
+ * The relay never sees this file or its contents.
  */
-export type DeviceKind = "device" | "computer";
-export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "computer";
-export type DeviceVia = "migration" | "token" | "approval" | "link";
+/** "connector" is an AI client (Claude, ChatGPT) that signed in through the AI connector. */
+export type DeviceKind = "device" | "computer" | "connector";
+export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "computer" | "connector";
+export type DeviceVia = "migration" | "token" | "approval" | "link" | "connector";
 export type RegistryMode = "learning" | "enforced";
 export type ComputerConfirm = "ask" | "never";
 
@@ -52,16 +55,16 @@ export const computerConfirmSchema = z.preprocess(
   (value) => (value === "every_time" || value === "per_chat" ? "ask" : value),
   z.enum(["ask", "never"]),
 );
-export const devicePlatformSchema = z.enum(["android", "windows", "linux", "macos", "ios", "computer"]);
+export const devicePlatformSchema = z.enum(["android", "windows", "linux", "macos", "ios", "computer", "connector"]);
 
 const deviceEntrySchema = z.object({
   publicKey: z.string().min(1),
-  kind: z.enum(["device", "computer"]),
+  kind: z.enum(["device", "computer", "connector"]),
   name: z.string(),
   platform: devicePlatformSchema,
   addedAt: z.string(),
   lastSeenAt: z.string(),
-  via: z.enum(["migration", "token", "approval", "link"]),
+  via: z.enum(["migration", "token", "approval", "link", "connector"]),
   access: computerAccessSchema.optional(),
   confirm: computerConfirmSchema.optional(),
   expiresAt: z.number().optional(),

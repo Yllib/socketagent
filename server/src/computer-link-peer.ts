@@ -254,7 +254,9 @@ export class ComputerLinkPeerApi {
     }
     const request = parsed.data;
     const entry = this.registry.get(publicKey);
-    if (entry?.kind !== "computer") {
+    // Connector clients act here through the same access and approval rules
+    // as linked computers; the AI connector calls handle() with their key.
+    if (entry?.kind !== "computer" && entry?.kind !== "connector") {
       return this.fail(request, "access_denied", "This computer is not linked here");
     }
     try {

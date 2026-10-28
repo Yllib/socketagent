@@ -86,7 +86,7 @@ import {
   ComputerLinkPeerApi, accessFor, approvalSummary, oneTimeDigest,
   type PeerAction, type PeerEvent, type PeerResponse, type RemoteSupervisor,
 } from "./computer-link-peer";
-import { runPeerCommand } from "./peer-command";
+import { peerShellName, runPeerCommand } from "./peer-command";
 import { ComputerLinkManager, ComputerLinkStore, type ComputerLinkRecord, type LinkConnection } from "./computer-links";
 import { ComputerAccessRequests } from "./computer-access-requests";
 import type { ComputersToolArgs, ComputersToolListEntry } from "./computers-tool";
@@ -106,6 +106,11 @@ import {
 } from "./relay-crypto";
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
+import { AiConnectorStore } from "./ai-connector-store";
+import { AiConnectorOAuth, PendingSignIn, normalizePublicUrl } from "./ai-connector-oauth";
+import { AiConnectorHttp } from "./ai-connector-http";
+import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store";
+import type { AiConnectorStatusServerMessage } from "./protocol";
 import { isAuthFailureMessage } from "./backend-auth";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
 import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
@@ -2836,6 +2841,12 @@ async function runSessionReport(sessionId: string, text: string, messageId: stri
 }
 
 function deliverDelegatedAgentReport(record: DelegatedAgentRecord, run: DelegatedAgentRun): Promise<void> {
+  if (aiConnectorStore.grantForSession(record.supervisorSessionId)) {
+    // The supervisor is an AI client outside SocketAgent. It polls
+    // agent_status; the user sees the outcome in the client's session.
+    noteConnectorAgentOutcome(record, run);
+    return Promise.resolve();
+  }
   if (record.remoteSupervisor) {
     // The supervisor is a chat on another computer. The report crosses the
     // link lane and stays pending until that computer acknowledges it.
@@ -3482,7 +3493,20 @@ const computerLinkPeerApi = new ComputerLinkPeerApi(deviceRegistry, loadServerKe
     title: hit.title,
   })),
   runCommand: (request) => runPeerCommand(request),
-  agent: (args, remote) => manageRemoteAgentSession(remote, args),
+  agent: (args, remote) => {
+    // An AI connector client supervises from its own activity session here,
+    // so its children report there instead of over a link lane.
+    const grant = aiConnectorStore.grantForKey(remote.publicKey);
+    if (grant) {
+      return manageDelegatedAgents({
+        supervisorSessionId: grant.sessionId,
+        parentSessionId: grant.sessionId,
+        defaultCwd: getDefaultCwd(),
+        defaultBackend: detectAvailableBackends()[0] || "claude",
+      }, args);
+    }
+    return manageRemoteAgentSession(remote, args);
+  },
   ackAgentReport: (delegationId, runId) => {
     updateDelegatedAgentRun(delegationId, runId, {
       reportStatus: "delivered",
@@ -3517,6 +3541,222 @@ const computerLinks = new ComputerLinkManager(
     },
   },
 );
+
+
+// ── AI connector: Claude, ChatGPT and other remote MCP clients ──
+
+const aiConnectorStore = new AiConnectorStore(socketAgentDataPath("ai-connector.json"));
+
+/** The card fields that say a request came from an AI connector client, when the session is one of theirs. */
+function connectorClientForCard(sessionId: string): { client?: { name: string; publicKey: string } } {
+  const grant = aiConnectorStore.grantForSession(sessionId);
+  return grant ? { client: { name: grant.clientName, publicKey: grant.publicKey } } : {};
+}
+
+/** Writes one entry to the client's session and shows it on connected phones. */
+function appendConnectorEntry(grant: AiConnectorGrant, entry: HistoryEntry): HistoryEntry {
+  const positioned = appendHistory(grant.sessionId, entry);
+  updateSessionActivity(grant.sessionId, entry.role === "tool_call" ? `${entry.toolName}` : entry.content || "");
+  return positioned;
+}
+
+/** A child the client started finished; the outcome goes to its session, not to an agent. */
+function noteConnectorAgentOutcome(record: DelegatedAgentRecord, run: DelegatedAgentRun): void {
+  const grant = aiConnectorStore.grantForSession(record.supervisorSessionId);
+  if (!grant || run.reportStatus === "delivered") return;
+  const outcome = run.status === "completed" ? run.result || "finished" : run.error || run.status;
+  const positioned = appendConnectorEntry(grant, {
+    role: "notification",
+    content: `Agent "${record.label}" ${run.status}: ${outcome.slice(0, 2000)}`,
+    status: run.status === "completed" ? "info" : "warning",
+    toolInput: { notificationKind: "ai_connector_agent", delegationId: record.delegationId, childSessionId: record.childSessionId || "" },
+    timestamp: new Date().toISOString(),
+  });
+  broadcastControlMessage({
+    type: "notification", sessionId: grant.sessionId, content: positioned.content, status: positioned.status,
+    entryId: positioned.entryId, sessionSeq: positioned.sessionSeq, revision: positioned.revision, timestamp: positioned.timestamp,
+  });
+  updateDelegatedAgentRun(record.delegationId, run.runId, { reportStatus: "delivered", reportDeliveredAt: new Date().toISOString() });
+}
+
+/**
+ * One action for a connector client on this computer. The peer API applies
+ * the client's access and confirm settings; when it wants an approval, the
+ * card goes in the client's session, sealed to this computer's own key.
+ */
+async function runConnectorActionHere(grant: AiConnectorGrant, action: PeerAction, args: Record<string, unknown>): Promise<unknown> {
+  const self = { name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey) };
+  let approval: ComputerApprovalToken | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await computerLinkPeerApi.handle({
+      type: "peer_request", id: crypto.randomUUID(), action, args, sourceSessionId: grant.sessionId,
+      ...(approval ? { approval } : {}),
+    }, grant.publicKey);
+    if (!response) throw new Error("No answer from this computer");
+    if (response.ok) return response.result;
+    if (response.approvalRequired && !approval) {
+      const challenge = response.approvalRequired;
+      void sendPushNotification({
+        title: `${grant.clientName} needs your approval`,
+        body: challenge.summary.split("\n")[0].slice(0, 120),
+        sessionId: grant.sessionId,
+        kind: "computer_access",
+        showNotification: true,
+      }).catch(() => undefined);
+      const answer = await computerAccessRequests.ask(grant.sessionId, {
+        kind: "approval",
+        source: self,
+        target: self,
+        action: challenge.action,
+        summary: challenge.summary,
+        challengeId: challenge.challengeId,
+        digest: challenge.digest,
+        expiresAt: challenge.expiresAt,
+        client: { name: grant.clientName, publicKey: grant.publicKey },
+        approvalKey: grant.publicKey,
+      });
+      if (answer.decision === "deny") throw new Error("The user denied this request.");
+      if (answer.decision === "expired") throw new Error("The user did not answer the approval request in time.");
+      if (!answer.approval) throw new Error("The app answered without an approval token. Update the app.");
+      approval = answer.approval;
+      continue;
+    }
+    if (response.code === "access_denied") {
+      throw new Error(`${grant.clientName} is not allowed ${peerScopeForAction(action)} on ${self.name}. The user can change that under Devices in the SocketAgent app.`);
+    }
+    throw new Error(response.error || `${self.name} refused the ${describePeerAction(action)}`);
+  }
+  throw new Error(`${self.name} kept asking for approval`);
+}
+
+function isThisComputer(name: string | undefined): boolean {
+  const wanted = (name || "").trim();
+  if (!wanted) return true;
+  return wanted.toLowerCase() === os.hostname().toLowerCase() || wanted === toBase64(loadServerKeyPair().publicKey);
+}
+
+const aiConnectorOAuth = new AiConnectorOAuth({
+  store: aiConnectorStore,
+  serverName: () => os.hostname(),
+  signInPending: (signIn: PendingSignIn) => {
+    noteDevicePending({ publicKey: signIn.publicKey, name: signIn.clientName, platform: "connector", code: signIn.code });
+    void sendPushNotification({
+      title: `${signIn.clientName} wants to use your computers`,
+      body: `Code ${signIn.code.slice(0, 3)} ${signIn.code.slice(3)}. Approve it in SocketAgent.`,
+      kind: "device_pending",
+      showNotification: true,
+    }).catch(() => undefined);
+  },
+  signInSettled: (signIn: PendingSignIn) => clearDevicePending(signIn.publicKey),
+  grantAccess: (signIn: PendingSignIn) => {
+    deviceRegistry.enroll({
+      publicKey: signIn.publicKey, kind: "connector", via: "connector", name: signIn.clientName, platform: "connector",
+      access: { read: true, agents: true, commands: true }, confirm: "ask",
+    });
+    const now = new Date().toISOString();
+    const sessionId = `connector-${crypto.createHash("sha256").update(signIn.publicKey).digest("hex").slice(0, 24)}`;
+    saveSession({
+      id: sessionId,
+      title: `${signIn.clientName} via AI connector`,
+      cwd: getDefaultCwd(),
+      createdAt: now,
+      lastActive: now,
+      messagePreview: "Signed in",
+      backend: "claude",
+    });
+    appendHistory(sessionId, {
+      role: "notification",
+      content: `${signIn.clientName} signed in through the AI connector. Its actions on this computer and on linked computers appear here, with their approval cards.`,
+      status: "info",
+      toolInput: { notificationKind: "ai_connector_sign_in" },
+      timestamp: now,
+    });
+    broadcastSessionList();
+    return { sessionId };
+  },
+});
+
+const aiConnectorHttp = new AiConnectorHttp({
+  oauth: aiConnectorOAuth,
+  serverName: () => os.hostname(),
+  listComputers: () => [
+    {
+      name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey), linked: true, online: true,
+      platform: process.platform, shell: peerShellName(),
+    },
+    ...listComputersForAgent(),
+  ],
+  act: async (grant, computer, action, args, timeoutMs) => {
+    if (!deviceRegistry.get(grant.publicKey)) throw new Error("This client was removed in the SocketAgent app. Sign in again.");
+    if (isThisComputer(computer)) return runConnectorActionHere(grant, action, args);
+    return (await callComputer(grant.sessionId, computer, action, args, undefined, timeoutMs)).result;
+  },
+  logCall: (grant, toolUseId, tool, input) => {
+    const positioned = appendConnectorEntry(grant, {
+      role: "tool_call", content: "", toolName: tool, toolInput: input, toolUseId, parentToolUseId: null,
+      timestamp: new Date().toISOString(),
+    });
+    broadcastControlMessage({
+      type: "tool_call", tool, input, toolUseId, sessionId: grant.sessionId, parentToolUseId: null,
+      entryId: positioned.entryId, sessionSeq: positioned.sessionSeq, revision: positioned.revision,
+    });
+  },
+  logResult: (grant, toolUseId, output, isError) => {
+    const shown = output.length > 16_000 ? `${output.slice(0, 16_000)}\n… (${output.length - 16_000} more characters)` : output;
+    const positioned = appendConnectorEntry(grant, {
+      role: "tool_result", content: "", toolUseId, toolOutput: shown, backgroundPending: false, parentToolUseId: null,
+      ...(isError ? { status: "error" } : {}),
+      timestamp: new Date().toISOString(),
+    });
+    broadcastControlMessage({
+      type: "tool_result", toolUseId, output: shown, sessionId: grant.sessionId, parentToolUseId: null,
+      entryId: positioned.entryId, sessionSeq: positioned.sessionSeq, revision: positioned.revision,
+    });
+  },
+});
+
+let aiConnectorError: string | undefined;
+
+/** Starts or stops the loopback listener to match the saved settings. */
+async function applyAiConnectorSettings(): Promise<void> {
+  const settings = aiConnectorStore.settings;
+  await aiConnectorHttp.close();
+  aiConnectorError = undefined;
+  if (!settings.enabled) return;
+  if (!settings.publicUrl) {
+    aiConnectorError = "Set the public URL of your tunnel first";
+    return;
+  }
+  if (settings.port === PORT) {
+    aiConnectorError = `Port ${settings.port} is the main SocketAgent port; pick another`;
+    return;
+  }
+  try {
+    await aiConnectorHttp.listen(settings.port);
+    console.log(`[AI connector] Listening on 127.0.0.1:${settings.port} for ${settings.publicUrl}`);
+  } catch (err: unknown) {
+    aiConnectorError = `Could not listen on port ${settings.port}: ${errorMessage(err)}`;
+    console.warn(`[AI connector] ${aiConnectorError}`);
+  }
+}
+
+function aiConnectorStatus(requestId: string | undefined): AiConnectorStatusServerMessage & Record<string, unknown> {
+  const settings = aiConnectorStore.settings;
+  return {
+    type: "ai_connector_status",
+    requestId,
+    enabled: settings.enabled,
+    publicUrl: settings.publicUrl,
+    port: settings.port,
+    listening: aiConnectorHttp.listening,
+    ...(aiConnectorError ? { error: aiConnectorError } : {}),
+    mcpUrl: settings.publicUrl ? aiConnectorOAuth.resourceUrl : "",
+    clients: aiConnectorStore.listGrants().length,
+    pendingSignIns: aiConnectorOAuth.pendingSignIns().length,
+  };
+}
+
+aiConnectorOAuth.startSweeping();
 
 const linkHelloSchema = z.object({
   access: computerAccessSchema,
@@ -3638,6 +3878,7 @@ async function askForComputerLink(
     target: { name: target.name, publicKey: target.serverPubkey },
     access: card.access,
     reason: card.reason,
+    ...connectorClientForCard(sessionId),
     ...(card.request ? {
       action: card.request.action,
       summary: approvalSummary(card.request.action, card.request.args),
@@ -3746,6 +3987,7 @@ async function requestOnComputer(
         challengeId: challenge.challengeId,
         digest: challenge.digest,
         expiresAt: challenge.expiresAt,
+        ...connectorClientForCard(sessionId),
       }, signal);
       if (answer.decision === "deny") throw new Error(`The user denied this ${describePeerAction(action)}.`);
       if (answer.decision === "expired") throw new Error(`The user did not answer the approval request for ${target.name} in time.`);
@@ -10188,6 +10430,45 @@ function createConnectionHandler(
         break;
       }
 
+      case "ai_connector_get": {
+        sendJson(aiConnectorStatus(msg.requestId));
+        break;
+      }
+
+      case "ai_connector_set": {
+        try {
+          const patch: Partial<AiConnectorSettings> = {};
+          if (typeof msg.enabled === "boolean") patch.enabled = msg.enabled;
+          if (typeof msg.publicUrl === "string") patch.publicUrl = normalizePublicUrl(msg.publicUrl);
+          if (typeof msg.port === "number") {
+            if (!Number.isInteger(msg.port) || msg.port < 1024 || msg.port > 65535) throw new Error("The port must be between 1024 and 65535");
+            patch.port = msg.port;
+          }
+          aiConnectorStore.saveSettings(patch);
+          await applyAiConnectorSettings();
+          sendJson(aiConnectorStatus(msg.requestId));
+        } catch (e: unknown) {
+          sendJson({ ...aiConnectorStatus(msg.requestId), error: errorMessage(e) || String(e) });
+        }
+        break;
+      }
+
+      case "ai_connector_client_set": {
+        const requestId = msg.requestId;
+        const entry = isValidPublicKey(msg.publicKey) ? deviceRegistry.get(normalizePublicKey(msg.publicKey)) : undefined;
+        if (entry?.kind !== "connector") {
+          sendJson({ type: "device_approve_result", requestId, ok: false, publicKey: String(msg.publicKey), error: "No AI client with that key" });
+          break;
+        }
+        deviceRegistry.enroll({
+          ...entry,
+          access: msg.access ?? entry.access ?? { read: true, agents: true, commands: true },
+          confirm: msg.confirm ?? entry.confirm ?? "ask",
+        });
+        sendJson(deviceListResult(requestId, relayPeerKeyForMessage(msg)));
+        break;
+      }
+
       case "pairing_reset": {
         // The same clients that are sent the pairing token may replace it.
         const holdsToken = transport instanceof DirectClientTransport
@@ -10217,6 +10498,12 @@ function createConnectionHandler(
           break;
         }
         const publicKey = normalizePublicKey(msg.publicKey);
+        if (aiConnectorOAuth.approveSignIn(publicKey)) {
+          // An AI client's sign-in, shown like a pending device. The browser
+          // page waiting on it gets its code on the next refresh.
+          sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });
+          break;
+        }
         // The key may be waiting on the relay, revoked, or never seen: an
         // account invite approves the new device before it ever connects.
         const notice = pendingDeviceNotices.get(publicKey);
@@ -10245,9 +10532,11 @@ function createConnectionHandler(
           break;
         }
         const publicKey = normalizePublicKey(msg.publicKey);
-        relayClient?.dropPeersWithKey(publicKey, "not_approved");
-        relayBulkClient?.dropPeersWithKey(publicKey, "not_approved");
-        dropDirectPeersWithKey(publicKey, "Not approved");
+        if (!aiConnectorOAuth.denySignIn(publicKey)) {
+          relayClient?.dropPeersWithKey(publicKey, "not_approved");
+          relayBulkClient?.dropPeersWithKey(publicKey, "not_approved");
+          dropDirectPeersWithKey(publicKey, "Not approved");
+        }
         clearDevicePending(publicKey);
         sendJson({ type: "device_deny_result", requestId, ok: true, publicKey });
         break;
@@ -10287,6 +10576,9 @@ function createConnectionHandler(
           relayClient?.dropPeersWithKey(publicKey, "removed");
           relayBulkClient?.dropPeersWithKey(publicKey, "removed");
           dropDirectPeersWithKey(publicKey, "Removed");
+        } else if (entry.kind === "connector") {
+          // Its tokens stop working at once; the next MCP call gets a 401.
+          aiConnectorOAuth.revokeKey(publicKey);
         } else {
           relayLinkClient?.dropPeersWithKey(publicKey, "removed");
         }
@@ -11516,6 +11808,7 @@ async function initializeListeningServer(): Promise<void> {
   console.log(
     `Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)${LOCAL_NETWORK_ONLY ? ", local network only" : ""}`,
   );
+  void applyAiConnectorSettings();
   cancelWindowsRecoveryGuard();
   if (windowsElevated() === false) {
     console.warn("[Startup] Running without administrator rights (limited install). Rerun setup from PowerShell opened with Run as administrator for full functionality.");

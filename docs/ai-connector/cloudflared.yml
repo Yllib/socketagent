@@ -1,0 +1,16 @@
+# Cloudflare Tunnel config for the SocketAgent AI connector.
+# Copy to ~/.cloudflared/config.yml on the computer that hosts the connector.
+# Forwards one hostname to the connector port and nothing else.
+
+tunnel: <tunnel id from `cloudflared tunnel create socketagent`>
+credentials-file: /home/you/.cloudflared/<tunnel id>.json
+
+ingress:
+  - hostname: agent.example.com
+    service: http://127.0.0.1:8086
+    originRequest:
+      # The sign-in page waits on the phone, and MCP streams can be long.
+      connectTimeout: 10s
+      noHappyEyeballs: true
+  # Everything else is refused.
+  - service: http_status:404

@@ -1379,8 +1379,9 @@ export interface RestoreScheduledTaskMessage {
 
 // ── Device keys and computer links ──
 
-export type DeviceKind = "device" | "computer";
-export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "computer";
+/** "connector" is an AI client (Claude, ChatGPT) signed in through the AI connector. */
+export type DeviceKind = "device" | "computer" | "connector";
+export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "computer" | "connector";
 export type DeviceRegistryMode = "learning" | "enforced";
 /** "ask" puts an approval card in the source chat; the user may allow the rest of that chat. */
 export type ComputerConfirm = "ask" | "never";
@@ -1469,6 +1470,32 @@ export interface DeviceAuthorizeMessage {
 export interface LinkRoomInfoMessage {
   type: "link_room_info";
   requestId?: string;
+}
+
+/** Current AI connector settings and status. Replies with ai_connector_status. */
+export interface AiConnectorGetMessage {
+  type: "ai_connector_get";
+  requestId?: string;
+}
+
+/** Changes AI connector settings. Omitted fields keep their value. Replies with ai_connector_status. */
+export interface AiConnectorSetMessage {
+  type: "ai_connector_set";
+  requestId?: string;
+  enabled?: boolean;
+  /** The HTTPS origin the user's tunnel exposes, for example https://agent.example.com. Empty clears it. */
+  publicUrl?: string;
+  /** Loopback port the connector listens on for the tunnel. */
+  port?: number;
+}
+
+/** Changes what one AI connector client may do here. Replies with device_list_result. */
+export interface AiConnectorClientSetMessage {
+  type: "ai_connector_client_set";
+  requestId?: string;
+  publicKey: string;
+  access?: ComputerAccess;
+  confirm?: ComputerConfirm;
 }
 
 /** Source side of a link: store the target and connect to its link room. */
@@ -1652,6 +1679,9 @@ export type ClientMessage = { commandId?: string } & (
   | DeviceDenyMessage
   | DeviceRemoveMessage
   | DeviceLockMessage
+  | AiConnectorGetMessage
+  | AiConnectorSetMessage
+  | AiConnectorClientSetMessage
   | PairingResetMessage
   | DeviceAuthorizeMessage
   | LinkRoomInfoMessage
@@ -3075,12 +3105,30 @@ export interface DeviceListEntry {
   platform: DevicePlatform;
   addedAt: string;
   lastSeenAt: string;
-  via: "migration" | "token" | "approval" | "link";
+  via: "migration" | "token" | "approval" | "link" | "connector";
   online: boolean;
   access?: ComputerAccess;
   confirm?: ComputerConfirm;
   /** Unix ms when a computer link ends. */
   expiresAt?: number;
+}
+
+export interface AiConnectorStatusServerMessage {
+  type: "ai_connector_status";
+  requestId?: string;
+  enabled: boolean;
+  publicUrl: string;
+  port: number;
+  /** The connector listener is bound on loopback. */
+  listening: boolean;
+  /** Why it is not listening, or why the settings were refused. */
+  error?: string;
+  /** What to paste into the AI client, once publicUrl is set. */
+  mcpUrl: string;
+  /** Connected AI clients, also listed by device_list_result with kind "connector". */
+  clients: number;
+  /** Sign-ins waiting on the phone right now. */
+  pendingSignIns: number;
 }
 
 export interface DeviceListResultServerMessage {
@@ -3176,6 +3224,14 @@ export interface ComputerAccessRequestCard {
   // kind "link": the boxes to start with, existing access plus what is asked
   access?: ComputerAccess;
   reason?: string;
+  /** The AI connector client the request came from, when it did not come from an agent in this chat. */
+  client?: { name: string; publicKey: string };
+  /**
+   * The key the target expects in the approval's sourceKey claim when it is
+   * not the source server's key: a connector client acting on the computer
+   * that raised the card.
+   */
+  approvalKey?: string;
 }
 
 export interface ComputerAccessRequestServerMessage extends ComputerAccessRequestCard {
@@ -4010,6 +4066,7 @@ export type ServerMessage =
   | DevicePendingServerMessage
   | DevicePendingClearedServerMessage
   | DeviceListResultServerMessage
+  | AiConnectorStatusServerMessage
   | DeviceApproveResultServerMessage
   | DeviceDenyResultServerMessage
   | DeviceRemoveResultServerMessage

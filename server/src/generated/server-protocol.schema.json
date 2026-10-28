@@ -307,6 +307,9 @@
           "$ref": "#/definitions/DeviceListResultServerMessage"
         },
         {
+          "$ref": "#/definitions/AiConnectorStatusServerMessage"
+        },
+        {
           "$ref": "#/definitions/DeviceApproveResultServerMessage"
         },
         {
@@ -5159,6 +5162,24 @@
         },
         "reason": {
           "type": "string"
+        },
+        "client": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "publicKey"
+          ]
+        },
+        "approvalKey": {
+          "type": "string"
         }
       },
       "required": [
@@ -6408,7 +6429,8 @@
         "linux",
         "macos",
         "ios",
-        "computer"
+        "computer",
+        "connector"
       ]
     },
     "DevicePendingClearedServerMessage": {
@@ -6510,7 +6532,8 @@
             "migration",
             "token",
             "approval",
-            "link"
+            "link",
+            "connector"
           ]
         },
         "online": {
@@ -6541,7 +6564,8 @@
       "type": "string",
       "enum": [
         "device",
-        "computer"
+        "computer",
+        "connector"
       ]
     },
     "ComputerConfirm": {
@@ -6549,6 +6573,52 @@
       "enum": [
         "ask",
         "never"
+      ]
+    },
+    "AiConnectorStatusServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "ai_connector_status"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "publicUrl": {
+          "type": "string"
+        },
+        "port": {
+          "type": "number"
+        },
+        "listening": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "mcpUrl": {
+          "type": "string"
+        },
+        "clients": {
+          "type": "number"
+        },
+        "pendingSignIns": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "enabled",
+        "publicUrl",
+        "port",
+        "listening",
+        "mcpUrl",
+        "clients",
+        "pendingSignIns"
       ]
     },
     "DeviceApproveResultServerMessage": {
@@ -6834,6 +6904,24 @@
           "$ref": "#/definitions/ComputerAccess"
         },
         "reason": {
+          "type": "string"
+        },
+        "client": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "publicKey"
+          ]
+        },
+        "approvalKey": {
           "type": "string"
         },
         "type": {

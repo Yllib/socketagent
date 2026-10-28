@@ -319,6 +319,16 @@ test("startup prunes grants that never got a token, shaped like a store after fa
   assert.equal(restarted.listGrants().filter((entry) => entry.clientId === live.clientId).length, 2);
 });
 
+test("an unreadable grants file is reported, so startup leaves AI client devices alone", () => {
+  const missing = new AiConnectorStore(path.join(dataDir, `ai-connector-${++counter}.json`));
+  assert.equal(missing.readFailed, false, "no file yet is a fresh start");
+  const file = path.join(dataDir, `ai-connector-${++counter}.json`);
+  require("node:fs").writeFileSync(file, JSON.stringify({ version: 1, grants: [{ grantId: "half" }] }));
+  const broken = new AiConnectorStore(file);
+  assert.equal(broken.readFailed, true);
+  assert.deepEqual(broken.listGrants(), []);
+});
+
 test("confidential clients must present their secret", async () => {
   const env = setup();
   env.store.saveSettings({ publicUrl: "https://agent.example.com" });

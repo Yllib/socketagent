@@ -3660,9 +3660,21 @@ const aiConnectorOAuth = new AiConnectorOAuth({
 
 // Approvals whose code was never redeemed cannot be used; drop them and their
 // device entries so a few failed attempts do not leave a row each in Devices.
-for (const grant of aiConnectorStore.pruneUnredeemedGrants(AUTH_CODE_TTL_MS)) {
-  deviceRegistry.revoke(grant.publicKey);
-  console.log(`[AI connector] Dropped an unfinished ${grant.clientName} sign-in from ${grant.createdAt}`);
+// AI client entries left without any grant are dropped too, unless the grants
+// file could not be read. Runs once the server is listening: a revoke
+// broadcasts capabilities, which reads state defined later in this module.
+function pruneUnfinishedAiConnectorSignIns(): void {
+  for (const grant of aiConnectorStore.pruneUnredeemedGrants(AUTH_CODE_TTL_MS)) {
+    deviceRegistry.revoke(grant.publicKey);
+    console.log(`[AI connector] Dropped an unfinished ${grant.clientName} sign-in from ${grant.createdAt}`);
+  }
+  if (aiConnectorStore.readFailed) return;
+  const granted = new Set(aiConnectorStore.listGrants().map((grant) => grant.publicKey));
+  for (const device of deviceRegistry.list()) {
+    if (device.kind !== "connector" || granted.has(device.publicKey)) continue;
+    deviceRegistry.revoke(device.publicKey);
+    console.log(`[AI connector] Dropped ${device.name}, an AI client with no sign-in, from Devices`);
+  }
 }
 
 /** Last time each client's "seen" stamp was written, so a burst of MCP calls writes it once a minute. */
@@ -11807,6 +11819,7 @@ async function initializeListeningServer(): Promise<void> {
   console.log(
     `Server listening on ${BIND_HOST}:${PORT} (WebSocket + HTTP)${LOCAL_NETWORK_ONLY ? ", local network only" : ""}`,
   );
+  pruneUnfinishedAiConnectorSignIns();
   void applyAiConnectorSettings();
   cancelWindowsRecoveryGuard();
   if (windowsElevated() === false) {

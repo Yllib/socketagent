@@ -127,19 +127,24 @@ export function randomToken(bytes = 32): string {
 
 export class AiConnectorStore {
   private state: AiConnectorFile;
+  /** The file existed but could not be read, so the empty state is not the real one. */
+  readonly readFailed: boolean;
 
   constructor(private readonly filePath: string, private readonly now: () => number = Date.now) {
-    this.state = this.read() ?? fileSchema.parse({ version: 1 });
+    const loaded = this.read();
+    this.readFailed = loaded === null;
+    this.state = loaded ?? fileSchema.parse({ version: 1 });
   }
 
-  private read(): AiConnectorFile | undefined {
+  /** The file's state, undefined when there is none yet, null when it could not be read. */
+  private read(): AiConnectorFile | undefined | null {
     try {
       if (!fs.existsSync(this.filePath)) return undefined;
       const parsed: unknown = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
       return fileSchema.parse(parsed);
     } catch (err: unknown) {
       console.error(`[AI connector] Could not read ${this.filePath}: ${errorMessage(err)}. Starting with no clients.`);
-      return undefined;
+      return null;
     }
   }
 

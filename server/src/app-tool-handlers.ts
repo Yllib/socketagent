@@ -916,6 +916,8 @@ function delegatedAgentSummary(
     cwd: record.cwd,
     label: record.label,
     status: record.status,
+    lifetime: record.lifetime || "permanent",
+    ...(record.childExpiredAt ? { child_expired_at: record.childExpiredAt } : {}),
     created_at: record.createdAt,
     updated_at: record.updatedAt,
     run_count: record.runs.length,

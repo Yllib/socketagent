@@ -94,6 +94,8 @@ const agentArgs = z.object({
   model: z.string().optional(),
   effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional(),
   permissionMode: z.string().optional(),
+  // Optional on the wire: a source that predates it starts a permanent child.
+  lifetime: z.enum(["fleeting", "permanent"]).optional(),
   after_session_seq: z.number().int().nonnegative().optional(),
   limit: z.number().int().min(1).max(50).optional(),
 });

@@ -49,8 +49,9 @@ import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { startBashCapturePruning } from "./bash-capture";
 import { readFullOutput, startFullOutputTrimming } from "./full-output-store";
-import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, updateMemoryCards, getMemoryCardEntry, deleteSession, deleteSessionArtifacts, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getActiveTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, updateMemoryCards, getMemoryCardEntry, deleteSession, deleteSessionArtifacts, makeSessionPermanent, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getActiveTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummary } from "./session-list-snapshot";
+import { expiredFleetingSessions, fleetingExpiresAt, fleetingChildExpiredMessage, requireStartLifetime } from "./fleeting-sessions";
 import { watchNativeSessionFolders } from "./native-session-watcher";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
 import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
@@ -1420,14 +1421,72 @@ function enrichSessions(sessions: SessionInfo[]): SessionInfo[] {
           messagePreview: active?.lastPreview || s.messagePreview,
         };
       }
+      const expiresAt = fleetingExpiresAt(s);
       return {
         ...s,
         ...(replacedSessionIds?.length ? { replacedSessionIds } : {}),
         ...(memory ? { compactionsSinceRollover: memory.compactionsSinceRollover } : {}),
         ...(memory ? { freshThreadPending: memory.freshThreadPending } : {}),
+        ...(expiresAt ? { expiresAt } : {}),
         running: false,
       };
     });
+}
+
+/**
+ * Removes a session and everything it owns: the live harness, history,
+ * transcripts, tool output, HTML plans. The app's Delete and fleeting expiry
+ * both come through here.
+ */
+async function deleteSessionCompletely(sid: string): Promise<void> {
+  const running = activeSessions.get(sid);
+  if (running) {
+    running.abort();
+    activeSessions.delete(sid);
+  }
+  const sessionInfo = getSession(sid) || await getCodexNativeThreadSessionInfo(sid, getDefaultCwd()) || undefined;
+  const result = deleteSessionArtifacts(sid, sessionInfo);
+  deleteHtmlPlansForSession(sid);
+  invalidateCodexNativeListCache();
+  for (const warning of result.warnings) {
+    console.warn(`[DeleteSession] ${warning}`);
+  }
+  console.log(`Deleted session ${sid} (${result.removed.length} artifact(s) removed)`);
+}
+
+/** Live state the stored record cannot show: a turn, a prompt waiting on an answer, delegated work, a run being recovered. */
+function fleetingSessionBusy(session: SessionInfo): boolean {
+  if (hasBusyLiveSession(session.id)) return true;
+  const active = activeSessions.get(session.id);
+  if (active && sessionIsBusy(active)) return true;
+  if (restartRecovery.get(session.id) !== undefined) return true;
+  const current = session.runStats?.current;
+  return current ? delegatedWorkOutstanding(session.id, current.startedAt) : false;
+}
+
+const FLEETING_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+/** Deletes fleeting sessions that sat idle past their limit. Runs at startup and every few minutes. */
+async function sweepFleetingSessions(): Promise<void> {
+  if (shuttingDown) return;
+  const expired = expiredFleetingSessions(listStoredSessions(), { isBusy: fleetingSessionBusy });
+  if (expired.length === 0) return;
+  const now = new Date().toISOString();
+  for (const session of expired) {
+    try {
+      await deleteSessionCompletely(session.id);
+      console.log(`[Fleeting] Expired idle session ${session.id} ("${session.title}")`);
+    } catch (err: unknown) {
+      console.warn(`[Fleeting] Could not expire ${session.id}: ${errorMessage(err) || String(err)}`);
+      continue;
+    }
+    for (const delegation of listDelegatedAgents()) {
+      if (delegation.childSessionId === session.id && !delegation.childExpiredAt) {
+        updateDelegatedAgent(delegation.delegationId, { childExpiredAt: now });
+      }
+    }
+  }
+  broadcastSessionList();
 }
 
 function immediateEnrichedSessions(): SessionInfo[] {
@@ -2931,6 +2990,7 @@ function registerDelegatedChildSession(
       ? undefined
       : record.parentSessionId || record.supervisorSessionId;
     info.delegationId = record.delegationId;
+    if (record.lifetime === "fleeting") info.lifetime = "fleeting";
     saveSession(info);
   }
   broadcastSessionList();
@@ -3014,6 +3074,7 @@ async function launchDelegatedAgentTurn(
       child._resumeSessionId = childInfo.id;
       await restorePersistedAgentSettings(child, childInfo);
     } else {
+      child.sessionLifetime = record.lifetime;
       await restorePersistedAgentSettings(child, undefined);
       await applyInitialSessionSettings(child, record.backend, {
         ...(record.agentSettings || {}),
@@ -3294,6 +3355,7 @@ async function manageAgentSession(
 ): Promise<AgentSessionToolResponse> {
   const supervisorSessionId = delegationSupervisorForSession(supervisor);
   if (!supervisorSessionId) throw new Error("The supervising session ID is not available yet");
+  if (args.action === "start") requireStartLifetime(args);
   // A child started on another computer is managed there even when the agent
   // leaves out the computer argument on a follow-up.
   const id = args.session_id?.trim() || args.delegation_id?.trim();
@@ -3357,6 +3419,8 @@ async function manageDelegatedAgents(
           ...(args.effort ? { effort: args.effort } : {}),
         },
       } : {}),
+      // A caller without the field (an older linked computer) starts permanent.
+      ...(args.lifetime === "fleeting" ? { lifetime: "fleeting" as const } : {}),
       ...(scope.remoteSupervisor ? { remoteSupervisor: scope.remoteSupervisor } : {}),
       runs: [],
     });
@@ -3364,7 +3428,9 @@ async function manageDelegatedAgents(
     return {
       action,
       delegation: started,
-      message: `Independent ${backend} agent started.`,
+      message: args.lifetime === "fleeting"
+        ? `Independent ${backend} agent started in a fleeting session; it is deleted after six idle hours.`
+        : `Independent ${backend} agent started.`,
     };
   }
 
@@ -3372,6 +3438,13 @@ async function manageDelegatedAgents(
   if (!id) throw new Error(`action=${action} requires session_id or delegation_id`);
   const record = getDelegatedAgent(id, supervisorSessionId);
   if (!record) throw new Error(`No delegated agent ${id} belongs to this supervising session`);
+
+  if (record.childExpiredAt) {
+    const expired = fleetingChildExpiredMessage(record.childSessionId || id, record.childExpiredAt);
+    if (action === "status") return { action, delegation: record, message: expired };
+    if (action === "stop") return { action, delegation: record, message: `Nothing to stop. ${expired}` };
+    throw new Error(expired);
+  }
 
   if (action === "status") {
     return { action, delegation: record, message: "Delegated agent status." };
@@ -5705,6 +5778,7 @@ function createConnectionHandler(
         }
         activeSession = createSession(msg.backend, transport, cwd, plugins);
         activeSessionId = null;
+        activeSession.sessionLifetime = msg.lifetime;
         activeSession.setTtsEnabled(pendingTtsEnabled);
         activeSession.setTtsEngine(pendingTtsEngine);
         activeSession.setKokoroVoice(pendingKokoroVoice);
@@ -7049,26 +7123,29 @@ function createConnectionHandler(
 
       case "delete_session": {
         const sid = msg.sessionId;
-        const running = activeSessions.get(sid);
-        if (running) {
-          running.abort();
-          activeSessions.delete(sid);
-        }
         try {
-          const sessionInfo = getSession(sid) || await getCodexNativeThreadSessionInfo(sid, getDefaultCwd()) || undefined;
-          const result = deleteSessionArtifacts(sid, sessionInfo);
-          deleteHtmlPlansForSession(sid);
-          invalidateCodexNativeListCache();
-          for (const warning of result.warnings) {
-            console.warn(`[DeleteSession] ${warning}`);
-          }
-          console.log(`Deleted session ${sid} (${result.removed.length} artifact(s) removed)`);
+          await deleteSessionCompletely(sid);
           sendJson({ type: "session_deleted", sessionId: sid });
         } catch (err: unknown) {
           const message = errorMessage(err) || String(err);
           console.warn(`[DeleteSession] Failed to delete ${sid}: ${message}`);
           sendJson({ type: "session_delete_failed", sessionId: sid, error: message });
         }
+        broadcastSessionList();
+        break;
+      }
+
+      case "make_session_permanent": {
+        if (!makeSessionPermanent(msg.sessionId)) {
+          sendJson({ type: "error", message: `Session ${msg.sessionId} not found` });
+          break;
+        }
+        for (const delegation of listDelegatedAgents()) {
+          if (delegation.childSessionId === msg.sessionId && delegation.lifetime === "fleeting") {
+            updateDelegatedAgent(delegation.delegationId, { lifetime: "permanent" });
+          }
+        }
+        console.log(`[Fleeting] Session ${msg.sessionId} is now permanent`);
         broadcastSessionList();
         break;
       }
@@ -11884,6 +11961,10 @@ async function initializeListeningServer(): Promise<void> {
   recoverInterruptedSessions();
   const recoveryTimer = setInterval(recoverInterruptedSessions, 2_000);
   recoveryTimer.unref();
+  // Crash recovery has claimed its runs by now, so an interrupted fleeting
+  // session reads as busy rather than idle.
+  setTimeout(() => void sweepFleetingSessions(), 30_000).unref();
+  setInterval(() => void sweepFleetingSessions(), FLEETING_SWEEP_INTERVAL_MS).unref();
 }
 
 // Close tool calls left pending by the previous process. Sessions that were

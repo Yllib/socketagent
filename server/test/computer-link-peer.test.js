@@ -13,7 +13,7 @@ const { peerShellName } = require("#server/peer-command");
 
 let counter = 0;
 
-/** @param {{ confirm?: "ask" | "never", commands?: boolean }} options */
+/** @param {{ confirm?: "ask" | "never", commands?: boolean, agent?: import("#server/computer-link-peer").PeerApiHost["agent"] }} options */
 function setup(options = {}) {
   const registry = new DeviceRegistry(path.join(dataDir, `peer-registry-${++counter}.json`), true);
   const target = generateKeyPair();
@@ -36,7 +36,7 @@ function setup(options = {}) {
       ran.push(request.command);
       return { exitCode: 0, stdout: "ok\n", stderr: "", truncated: false, timedOut: false };
     },
-    agent: async () => { throw new Error("unused"); },
+    agent: options.agent ?? (async () => { throw new Error("unused"); }),
     ackAgentReport: () => {},
   }, () => now);
   return {
@@ -248,4 +248,22 @@ test("enrolling a link again without expiresAt makes it permanent", () => {
   delete entry.expiresAt;
   env.registry.enroll(entry);
   assert.equal(env.registry.get(env.sourceKey)?.expiresAt, undefined);
+});
+
+test("an agent start from a linked computer that predates lifetime arrives without one, and a named lifetime passes through", async () => {
+  /** @type {Array<import("#server/delegated-agent-types").AgentSessionToolArgs>} */
+  const starts = [];
+  const env = setup({
+    confirm: "never",
+    agent: async (args) => {
+      starts.push(args);
+      return { action: args.action, message: "started" };
+    },
+  });
+  const legacy = await env.api.handle({ ...request, id: "a1", action: "agent_start", args: { prompt: "look into it" } }, env.sourceKey);
+  assert.equal(legacy?.ok, true);
+  const named = await env.api.handle({ ...request, id: "a2", action: "agent_start", args: { prompt: "look into it", lifetime: "fleeting" } }, env.sourceKey);
+  assert.equal(named?.ok, true);
+  assert.deepEqual(starts.map((args) => args.lifetime), [undefined, "fleeting"]);
+  assert.deepEqual(starts.map((args) => args.action), ["start", "start"]);
 });

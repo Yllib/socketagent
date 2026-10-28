@@ -315,6 +315,13 @@ export function deleteSession(id: string): void {
   writeStore(sessions);
 }
 
+/** Makes a fleeting session permanent. False when the session is unknown. */
+export function makeSessionPermanent(id: string): boolean {
+  return mutateSessionStore(id, (session) => {
+    delete session.lifetime;
+  });
+}
+
 let archivedSessionIdsCache: ReadonlySet<string> | null = null;
 
 /**

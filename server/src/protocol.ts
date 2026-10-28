@@ -15,6 +15,14 @@ import { isRecord } from "./value-guards";
  */
 export type Backend = "claude" | "codex";
 
+/**
+ * How long a session lives. A fleeting session is deleted once it has sat idle
+ * (no turn running) for six hours; "permanent" is the default and the only
+ * value a fleeting session can move to. Absent on stored records means
+ * permanent, so older servers and apps see an ordinary session.
+ */
+export type SessionLifetime = "fleeting" | "permanent";
+
 export type CodexDriver = "app-server";
 
 // ── Transport capabilities ──
@@ -489,6 +497,8 @@ export interface NewSessionMessage {
   cwd?: string;
   /** Which agent backend to use. Defaults to "claude" if omitted. */
   backend?: Backend;
+  /** Omitted means permanent. */
+  lifetime?: SessionLifetime;
 }
 
 export interface ResumeSessionMessage {
@@ -584,6 +594,12 @@ export interface BackendInstallCancelMessage {
 
 export interface DeleteSessionMessage {
   type: "delete_session";
+  sessionId: string;
+}
+
+/** Turns a fleeting session permanent. One-way: there is no reverse message. */
+export interface MakeSessionPermanentMessage {
+  type: "make_session_permanent";
   sessionId: string;
 }
 
@@ -1611,6 +1627,7 @@ export type ClientMessage = { commandId?: string } & (
   | CodexCollaborationModesMessage
   | SetCodexCollaborationModeMessage
   | DeleteSessionMessage
+  | MakeSessionPermanentMessage
   | RenameSessionMessage
   | DismissTasksMessage
   | ClearContextMessage
@@ -2339,6 +2356,13 @@ export interface SessionInfo {
   scheduledTaskId?: string;
   /** Backend that drives this session. Absent on legacy sessions = "claude". */
   backend?: Backend;
+  /** Absent means permanent. See SessionLifetime. */
+  lifetime?: SessionLifetime;
+  /**
+   * List only. When a fleeting session is idle, the ISO time the server will
+   * delete it; omitted while it runs, since a running session never expires.
+   */
+  expiresAt?: string;
   /** Codex runtime driver for codex sessions. Absent means use the server default. */
   codexDriver?: CodexDriver;
   /** Last integration instructions delivered to this native Codex thread. */

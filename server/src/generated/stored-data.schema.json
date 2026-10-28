@@ -84,6 +84,12 @@
         "agentSettings": {
           "$ref": "#/definitions/AgentSessionSettings"
         },
+        "lifetime": {
+          "$ref": "#/definitions/SessionLifetime"
+        },
+        "childExpiredAt": {
+          "type": "string"
+        },
         "runs": {
           "type": "array",
           "items": {
@@ -249,6 +255,13 @@
             "type"
           ]
         }
+      ]
+    },
+    "SessionLifetime": {
+      "type": "string",
+      "enum": [
+        "fleeting",
+        "permanent"
       ]
     },
     "DelegatedAgentRun": {
@@ -1509,6 +1522,12 @@
         },
         "backend": {
           "$ref": "#/definitions/Backend"
+        },
+        "lifetime": {
+          "$ref": "#/definitions/SessionLifetime"
+        },
+        "expiresAt": {
+          "type": "string"
         },
         "codexDriver": {
           "$ref": "#/definitions/CodexDriver"

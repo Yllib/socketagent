@@ -6,6 +6,7 @@ import type { ComputersToolListEntry } from "./computers-tool";
 import type { PeerAction } from "./computer-link-peer";
 import type { McpTextResult } from "./app-tool-handlers";
 import { errorMessage } from "./value-guards";
+import { LIFETIME_GUIDANCE } from "./fleeting-sessions";
 
 /**
  * The tools an AI client gets through the connector. Each one is a peer
@@ -136,10 +137,12 @@ export function createAiConnectorMcpServer(grant: AiConnectorGrant, host: AiConn
       model: z.string().optional().describe("Provider model id. Omit for the default."),
       effort: effortArg.describe("Reasoning effort"),
       permission_mode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("How much the agent may do without asking"),
+      lifetime: z.enum(["fleeting", "permanent"]).describe(`Required. Use ${LIFETIME_GUIDANCE}`),
     },
   }, async (args) => run("start_agent", args, () =>
     host.act(grant, args.computer, "agent_start", {
       prompt: args.prompt,
+      lifetime: args.lifetime,
       ...(args.backend ? { backend: args.backend } : {}),
       ...(args.cwd ? { cwd: args.cwd } : {}),
       ...(args.label ? { label: args.label } : {}),

@@ -32,6 +32,7 @@ import {
   HistoryEntry,
   QuestionItem,
   SessionInfo,
+  SessionLifetime,
   AgentSessionSettings,
   Backend,
   WorkflowStatePayload,
@@ -71,6 +72,7 @@ import type {
   DelegatedAgentLiveActivity,
 } from "./delegated-agent-types";
 import { AGENT_SESSION_TOOL_DESCRIPTION, buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, REMEMBER_TOOL_DESCRIPTION, WORK_REVIEW_TOOL_DESCRIPTION } from "./socketagent-instructions";
+import { LIFETIME_GUIDANCE } from "./fleeting-sessions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
 import { createClaudeAuthRequest, exchangeClaudeAuthCode, ClaudeAuthRequest } from "./claude-auth";
@@ -855,6 +857,8 @@ interface PendingTurn {
 export class ClaudeSession {
   private sessionId: string | null = null;
   private pendingQuestions: Map<string, PendingQuestion> = new Map();
+  /** Set before the first turn; stored on the record that turn creates. */
+  sessionLifetime: SessionLifetime | undefined;
   private abortController: AbortController | null = null;
   /** Set when SocketAgent itself stopped the run, so backend-initiated tool
    *  cancellations can be told apart from ones the user actually asked for. */
@@ -1757,6 +1761,7 @@ export class ClaudeSession {
       lastActive: now,
       messagePreview: "",
       backend: "claude",
+      ...(this.sessionLifetime === "fleeting" ? { lifetime: "fleeting" as const } : {}),
       agentSettings: this.getAgentSettings(),
     });
   }
@@ -3612,6 +3617,7 @@ export class ClaudeSession {
               model: z.string().optional().describe("Optional provider model ID for start"),
               effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Optional reasoning effort for start"),
               permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
+              lifetime: z.enum(["fleeting", "permanent"]).optional().describe(`Required for start. Use ${LIFETIME_GUIDANCE}`),
               computer: z.string().optional().describe("Run this action on a linked computer, by name or public key. See the Computers tool."),
               question_id: z.string().optional().describe("For answer, the question_id from the child's question report"),
               answers: z.array(z.string()).optional().describe("For answer, one answer per question in order: an option label such as Approve, or your own text"),

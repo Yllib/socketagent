@@ -3566,6 +3566,12 @@
         "backend": {
           "$ref": "#/definitions/Backend"
         },
+        "lifetime": {
+          "$ref": "#/definitions/SessionLifetime"
+        },
+        "expiresAt": {
+          "type": "string"
+        },
         "codexDriver": {
           "$ref": "#/definitions/CodexDriver"
         },
@@ -3760,6 +3766,13 @@
       "enum": [
         "claude",
         "codex"
+      ]
+    },
+    "SessionLifetime": {
+      "type": "string",
+      "enum": [
+        "fleeting",
+        "permanent"
       ]
     },
     "CodexDriver": {

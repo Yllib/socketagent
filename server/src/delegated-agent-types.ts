@@ -1,4 +1,4 @@
-import type { AgentEffort, AgentSessionSettings, Backend } from "./protocol";
+import type { AgentEffort, AgentSessionSettings, Backend, SessionLifetime } from "./protocol";
 
 export type DelegatedAgentAction =
   | "start"
@@ -23,6 +23,11 @@ export interface AgentSessionToolArgs {
   model?: string;
   effort?: AgentEffort;
   permissionMode?: string;
+  /**
+   * Required for start at the tool boundary: fleeting children are deleted
+   * after six idle hours. A peer that predates the field starts permanent.
+   */
+  lifetime?: SessionLifetime;
   /** Return durable child activity newer than this transcript sequence. */
   after_session_seq?: number;
   /** Maximum durable activity entries returned by action=tail. */
@@ -110,6 +115,10 @@ export interface DelegatedAgentRecord {
   updatedAt: string;
   permissionMode?: string;
   agentSettings?: AgentSessionSettings;
+  /** Absent means permanent. */
+  lifetime?: SessionLifetime;
+  /** Set when the fleeting child sat idle past its limit and was deleted. */
+  childExpiredAt?: string;
   runs: DelegatedAgentRun[];
   /** Source side: the child runs on this linked computer; runs mirror its reports. */
   remoteComputer?: { publicKey: string; name: string };

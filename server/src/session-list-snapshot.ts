@@ -162,6 +162,8 @@ export function sessionListSummary(session: SessionInfo): SessionInfo {
     running: session.running,
     activeStartedAt: session.activeStartedAt,
     backend: session.backend,
+    lifetime: session.lifetime,
+    expiresAt: session.expiresAt,
     codexDriver: session.codexDriver,
     replacedSessionIds: session.replacedSessionIds,
     compactionsSinceRollover: session.compactionsSinceRollover,

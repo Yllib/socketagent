@@ -60,6 +60,7 @@ export const sessionInfoSchema = z.object({
   lastUsage: usageSchema.extend({ costUsd: optionalNumber, numTurns: optionalNumber }).optional(),
   lastContextUsage: z.record(z.string(), z.unknown()).optional(),
   scheduledTaskId: optionalText, backend: backendSchema.optional(),
+  lifetime: z.enum(["fleeting", "permanent"]).optional(), expiresAt: optionalText,
   // Older metadata names the retired exec driver; all current sessions use app-server.
   codexDriver: z.enum(["app-server", "exec"]).transform(() => "app-server" as const).optional(),
   codexInstructionDelivery: z.object({ threadId: z.string(), digest: z.string() }).passthrough().optional(),

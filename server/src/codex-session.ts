@@ -30,6 +30,7 @@ import {
   ServerMessage,
   Backend,
   SessionInfo,
+  SessionLifetime,
   HistoryEntry,
   CodexDriver,
   CodexGoal,
@@ -652,6 +653,8 @@ export class CodexSession {
   // Persistence state — see runQuery/handleEvent for the buffer-then-flush
   // dance for the user prompt (prompt arrives before sessionId on first turn).
   private _sessionInfoSaved = false;
+  /** Set before the first turn; stored on the record that turn creates. */
+  sessionLifetime: SessionLifetime | undefined;
   private _pendingUserPrompt: { text: string; uuid: string; messageId?: string } | null = null;
   private _currentClientMessageId: string | null = null;
   private _currentPrompt = "";   // for SessionInfo.title on first save
@@ -2586,6 +2589,7 @@ export class CodexSession {
           messagePreview: "",
           backend: "codex",
           codexDriver: "app-server",
+          ...(this.sessionLifetime === "fleeting" ? { lifetime: "fleeting" as const } : {}),
           permissionMode: this.permissionMode || undefined,
           agentSettings: this.getAgentSettings(),
         });
@@ -3494,6 +3498,7 @@ export class CodexSession {
         messagePreview: "",
         backend: "codex",
         codexDriver: "app-server",
+        ...(this.sessionLifetime === "fleeting" ? { lifetime: "fleeting" as const } : {}),
         permissionMode: this.permissionMode || undefined,
         agentSettings: this.getAgentSettings(),
       };

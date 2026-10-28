@@ -1067,6 +1067,9 @@
             "backend": {
               "$ref": "#/definitions/Backend"
             },
+            "lifetime": {
+              "$ref": "#/definitions/SessionLifetime"
+            },
             "commandId": {
               "type": "string"
             }
@@ -1396,6 +1399,25 @@
             "type": {
               "type": "string",
               "const": "delete_session"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "make_session_permanent"
             },
             "sessionId": {
               "type": "string"
@@ -5315,6 +5337,13 @@
         "changes_requested",
         "rejected",
         "skipped"
+      ]
+    },
+    "SessionLifetime": {
+      "type": "string",
+      "enum": [
+        "fleeting",
+        "permanent"
       ]
     },
     "CodexDriver": {

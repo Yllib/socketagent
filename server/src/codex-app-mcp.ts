@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { errorMessage } from "./value-guards";
+import { LIFETIME_GUIDANCE } from "./fleeting-sessions";
 import {
   AppToolContext,
   handleBrowserSessionTool,
@@ -411,6 +412,7 @@ function createServer(context: AppToolContext): McpServer {
         model: z.string().optional().describe("Optional provider model ID for start"),
         effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Optional reasoning effort for start"),
         permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Optional child permission mode"),
+        lifetime: z.enum(["fleeting", "permanent"]).optional().describe(`Required for start. Use ${LIFETIME_GUIDANCE}`),
         computer: z.string().optional().describe("Run this action on a linked computer, by name or public key. See the Computers tool."),
         question_id: z.string().optional().describe("For answer, the question_id from the child's question report"),
         answers: z.array(z.string()).optional().describe("For answer, one answer per question in order: an option label such as Approve, or your own text"),

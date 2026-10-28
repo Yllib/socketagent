@@ -523,9 +523,16 @@ test("the listener serves only the connector and runs the full flow with a real 
   const ran = await client.callTool({ name: "run_command", arguments: { computer: "Laptop", command: "uname -a", timeout_seconds: 5 } });
   assert.equal(ran.isError, undefined);
   assert.deepEqual(env.acted.at(-1), { grant: env.store.grantForKey(signIn.publicKey)?.grantId, computer: "Laptop", action: "run_command", args: { command: "uname -a", timeoutSeconds: 5 } });
-  const started = await client.callTool({ name: "start_agent", arguments: { prompt: "Fix the build", backend: "codex", label: "fix" } });
+  const unnamed = await client.callTool({ name: "start_agent", arguments: { prompt: "Fix the build", backend: "codex", label: "fix" } });
+  assert.equal(unnamed.isError, true, "start_agent must name the child's lifetime");
+  assert.match(toolText(unnamed), /lifetime/);
+  assert.match(toolText(unnamed), /fleeting/);
+  assert.match(toolText(unnamed), /permanent/);
+  const actedBefore = env.acted.length;
+  const started = await client.callTool({ name: "start_agent", arguments: { prompt: "Fix the build", backend: "codex", label: "fix", lifetime: "fleeting" } });
   assert.equal(started.isError, undefined);
-  assert.deepEqual(env.acted.at(-1), { grant: env.acted[0]?.grant, computer: undefined, action: "agent_start", args: { prompt: "Fix the build", backend: "codex", label: "fix" } });
+  assert.equal(env.acted.length, actedBefore + 1, "the refused call never reached a computer");
+  assert.deepEqual(env.acted.at(-1), { grant: env.acted[0]?.grant, computer: undefined, action: "agent_start", args: { prompt: "Fix the build", lifetime: "fleeting", backend: "codex", label: "fix" } });
   const calls = env.logged.filter((entry) => entry.kind === "call").map((entry) => entry.tool);
   assert.deepEqual(calls, ["list_computers", "run_command", "start_agent"]);
   assert.ok(env.logged.every((entry) => entry.session === "connector-1"), "every action lands in the client's session");

@@ -19,7 +19,10 @@ approval: the AI client has its own permission prompts, so its actions run
 without a card here. Under Devices each client has access boxes (read,
 commands, agents) that every computer enforces, an "Ask before each action"
 switch for a card on your phone before each action, naming the client, and
-Remove, which revokes its access at once.
+Remove, which revokes its access at once. With the switch on, a tool call
+waits twenty seconds for the card; if you have not answered by then the client
+is told to ask again once you have, and the card stays open for ten minutes.
+The same request made again returns the result without a second card.
 
 Each sign-in is its own row under Devices, with when it signed in and when it
 last called. Two accounts on the same AI service sign in separately and both

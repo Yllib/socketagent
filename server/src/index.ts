@@ -108,6 +108,7 @@ import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, r
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { AiConnectorStore } from "./ai-connector-store";
 import { AUTH_CODE_TTL_MS, AiConnectorOAuth, PendingSignIn, normalizePublicUrl } from "./ai-connector-oauth";
+import { ConnectorHostActions } from "./ai-connector-host-actions";
 import { AiConnectorHttp } from "./ai-connector-http";
 import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store";
 import type { AiConnectorStatusServerMessage } from "./protocol";
@@ -3584,49 +3585,24 @@ function noteConnectorAgentOutcome(record: DelegatedAgentRecord, run: DelegatedA
  * the client's access and confirm settings; when it wants an approval, the
  * card goes in the client's session, sealed to this computer's own key.
  */
-async function runConnectorActionHere(grant: AiConnectorGrant, action: PeerAction, args: Record<string, unknown>): Promise<unknown> {
-  const self = { name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey) };
-  let approval: ComputerApprovalToken | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await computerLinkPeerApi.handle({
-      type: "peer_request", id: crypto.randomUUID(), action, args, sourceSessionId: grant.sessionId,
-      ...(approval ? { approval } : {}),
-    }, grant.publicKey);
-    if (!response) throw new Error("No answer from this computer");
-    if (response.ok) return response.result;
-    if (response.approvalRequired && !approval) {
-      const challenge = response.approvalRequired;
-      void sendPushNotification({
-        title: `${grant.clientName} needs your approval`,
-        body: challenge.summary.split("\n")[0].slice(0, 120),
-        sessionId: grant.sessionId,
-        kind: "computer_access",
-        showNotification: true,
-      }).catch(() => undefined);
-      const answer = await computerAccessRequests.ask(grant.sessionId, {
-        kind: "approval",
-        source: self,
-        target: self,
-        action: challenge.action,
-        summary: challenge.summary,
-        challengeId: challenge.challengeId,
-        digest: challenge.digest,
-        expiresAt: challenge.expiresAt,
-        client: { name: grant.clientName, publicKey: grant.publicKey },
-        approvalKey: grant.publicKey,
-      });
-      if (answer.decision === "deny") throw new Error("The user denied this request.");
-      if (answer.decision === "expired") throw new Error("The user did not answer the approval request in time.");
-      if (!answer.approval) throw new Error("The app answered without an approval token. Update the app.");
-      approval = answer.approval;
-      continue;
-    }
-    if (response.code === "access_denied") {
-      throw new Error(`${grant.clientName} is not allowed ${peerScopeForAction(action)} on ${self.name}. The user can change that under Devices in the SocketAgent app.`);
-    }
-    throw new Error(response.error || `${self.name} refused the ${describePeerAction(action)}`);
-  }
-  throw new Error(`${self.name} kept asking for approval`);
+/** Actions an AI client takes on this computer, with cards in its session when the registry says to ask. */
+const connectorHostActions = new ConnectorHostActions({
+  peerApi: computerLinkPeerApi,
+  self: () => ({ name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey) }),
+  ask: (sessionId, card) => computerAccessRequests.ask(sessionId, card),
+  notify: (grant, summary) => {
+    void sendPushNotification({
+      title: `${grant.clientName} needs your approval`,
+      body: summary,
+      sessionId: grant.sessionId,
+      kind: "computer_access",
+      showNotification: true,
+    }).catch(() => undefined);
+  },
+});
+
+function runConnectorActionHere(grant: AiConnectorGrant, action: PeerAction, args: Record<string, unknown>): Promise<unknown> {
+  return connectorHostActions.run(grant, action, args);
 }
 
 function isThisComputer(name: string | undefined): boolean {

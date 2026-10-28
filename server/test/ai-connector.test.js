@@ -8,7 +8,7 @@ const {
   AiConnectorStore, ACCESS_TOKEN_TTL_MS, REFRESH_REUSE_GRACE_MS, REFRESH_TOKEN_TTL_MS,
 } = require("#server/ai-connector-store");
 const {
-  AiConnectorOAuth, AuthorizeRedirectError, OAuthError, SIGN_IN_TTL_MS, MAX_PENDING_SIGN_INS,
+  AiConnectorOAuth, AuthorizeRedirectError, OAuthError, SIGN_IN_TTL_MS, AUTH_CODE_TTL_MS, MAX_PENDING_SIGN_INS,
   normalizePublicUrl, redirectUriAllowed,
 } = require("#server/ai-connector-oauth");
 const { AiConnectorHttp } = require("#server/ai-connector-http");
@@ -63,6 +63,8 @@ function setup(options = {}) {
   const settled = [];
   /** @type {string[]} */
   const granted = [];
+  /** @type {string[]} */
+  const abandoned = [];
   const oauth = new AiConnectorOAuth({
     store,
     now,
@@ -73,15 +75,19 @@ function setup(options = {}) {
       granted.push(signIn.clientName);
       return { sessionId: `connector-${granted.length}` };
     },
+    grantAbandoned: (grant) => abandoned.push(grant.publicKey),
     fetchClientMetadata: options.fetchClientMetadata,
   });
   /** @type {{ grant: string, computer: string | undefined, action: PeerAction, args: Record<string, unknown> }[]} */
   const acted = [];
   /** @type {{ kind: "call" | "result", session: string, toolUseId: string, tool?: string, input?: unknown, output?: string, isError?: boolean }[]} */
   const logged = [];
+  /** @type {string[]} */
+  const seen = [];
   const http = new AiConnectorHttp({
     oauth,
     now,
+    grantSeen: (grant) => seen.push(grant.grantId),
     serverName: () => "Desktop",
     listComputers: () => [{ name: "Laptop", publicKey: "k", linked: true, online: true }],
     act: async (grant, computer, action, args) => {
@@ -91,7 +97,7 @@ function setup(options = {}) {
     logCall: (grant, toolUseId, tool, input) => logged.push({ kind: "call", session: grant.sessionId, toolUseId, tool, input }),
     logResult: (grant, toolUseId, output, isError) => logged.push({ kind: "result", session: grant.sessionId, toolUseId, output, isError }),
   });
-  return { clock, store, oauth, http, pending, settled, granted, acted, logged };
+  return { clock, store, oauth, http, pending, settled, granted, abandoned, seen, acted, logged };
 }
 
 function pkce() {
@@ -241,6 +247,8 @@ test("approval on the phone issues a one-time code that needs the PKCE verifier"
 
   const other = await signIn(env);
   assert.throws(() => env.oauth.token({ ...tokenRequest, client_id: registration.client_id, code: other.code, code_verifier: other.verifier }), (err) => oauthError(err).code === "invalid_grant", "a code is bound to its client");
+  assert.equal(env.store.grantForKey(other.started.publicKey), undefined, "a burned code takes its unredeemed grant with it");
+  assert.ok(env.abandoned.includes(other.started.publicKey));
 
   const again = await signIn(env);
   const tokens = env.oauth.token({ ...tokenRequest, client_id: again.registration.client_id, code: again.code, code_verifier: again.verifier });
@@ -258,6 +266,57 @@ test("approval on the phone issues a one-time code that needs the PKCE verifier"
   env.oauth.revokeKey(again.started.publicKey);
   assert.equal(env.oauth.authenticateBearer(`Bearer ${refreshed.access_token}`), undefined);
   assert.throws(() => env.oauth.token({ grant_type: "refresh_token", client_id: again.registration.client_id, refresh_token: refreshed.refresh_token }), (err) => oauthError(err).code === "invalid_grant");
+});
+
+test("an approval the client never redeems is dropped with its device entry", async () => {
+  const env = setup();
+  env.store.saveSettings({ publicUrl: "https://agent.example.com" });
+  const { started, code, registration, verifier } = await signIn(env);
+  assert.ok(env.store.grantForKey(started.publicKey), "approval creates the grant at once");
+  env.clock.now += AUTH_CODE_TTL_MS + 1;
+  env.oauth.pendingSignIns();
+  assert.equal(env.store.grantForKey(started.publicKey), undefined);
+  assert.deepEqual(env.abandoned, [started.publicKey]);
+  assert.throws(() => env.oauth.token({ grant_type: "authorization_code", client_id: registration.client_id, code, code_verifier: verifier }), (err) => oauthError(err).code === "invalid_grant");
+
+  // A redeemed grant is never touched by this, however old it gets.
+  const live = await signIn(env);
+  env.oauth.token({ grant_type: "authorization_code", client_id: live.registration.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code: live.code, code_verifier: live.verifier });
+  env.clock.now += AUTH_CODE_TTL_MS * 10;
+  env.oauth.pendingSignIns();
+  assert.ok(env.store.grantForKey(live.started.publicKey));
+  assert.equal(env.abandoned.length, 1);
+});
+
+test("startup prunes grants that never got a token, shaped like a store after failed attempts", () => {
+  const file = path.join(dataDir, `ai-connector-prune-${++counter}.json`);
+  const clock = { now: Date.parse("2026-10-28T04:24:00.000Z") };
+  const store = new AiConnectorStore(file, () => clock.now);
+  // One CIMD client, four grants from the same account's attempts, only the last one redeemed.
+  store.saveClient({ clientId: "https://claude.ai/oauth/mcp-oauth-client-metadata", clientName: "Claude", redirectUris: ["https://claude.ai/api/mcp/auth_callback"], tokenEndpointAuthMethod: "none", via: "cimd" });
+  const grant = (/** @type {string} */ key, /** @type {number} */ offsetMs) => {
+    clock.now = Date.parse("2026-10-28T04:24:33.000Z") + offsetMs;
+    return store.createGrant({ clientId: "https://claude.ai/oauth/mcp-oauth-client-metadata", clientName: "Claude", publicKey: key, sessionId: `connector-${key}` });
+  };
+  const first = grant("M83cvN", 0);
+  const second = grant("qjzzax", 165_000);
+  const third = grant("lARB5V", 167_000);
+  const live = grant("18IDW/", 181_000);
+  const tokens = store.issueTokens(live.grantId);
+  // A fifth account signed in a moment ago and has not finished yet.
+  const fresh = grant("young1", 20 * 60_000);
+  clock.now = Date.parse("2026-10-28T04:24:33.000Z") + 21 * 60_000;
+
+  const restarted = new AiConnectorStore(file, () => clock.now);
+  const dropped = restarted.pruneUnredeemedGrants(AUTH_CODE_TTL_MS);
+  assert.deepEqual(dropped.map((entry) => entry.grantId).sort(), [first.grantId, second.grantId, third.grantId].sort());
+  assert.deepEqual(restarted.listGrants().map((entry) => entry.publicKey), ["18IDW/", "young1"]);
+  assert.equal(restarted.grantForAccessToken(tokens.accessToken)?.grantId, live.grantId, "the live connection keeps its tokens");
+  assert.ok(restarted.getClient("https://claude.ai/oauth/mcp-oauth-client-metadata"), "the shared client ID stays while a grant uses it");
+  assert.deepEqual(restarted.pruneUnredeemedGrants(AUTH_CODE_TTL_MS), [], "a second pass finds nothing");
+  assert.equal(fresh.grantId, restarted.listGrants()[1].grantId);
+  // Two grants from one client ID are two sign-ins, never merged.
+  assert.equal(restarted.listGrants().filter((entry) => entry.clientId === live.clientId).length, 2);
 });
 
 test("confidential clients must present their secret", async () => {
@@ -448,6 +507,7 @@ test("the listener serves only the connector and runs the full flow with a real 
   ]);
 
   const computers = await client.callTool({ name: "list_computers", arguments: {} });
+  assert.ok(env.seen.includes(env.store.grantForKey(signIn.publicKey)?.grantId ?? ""), "an authenticated call marks the client seen");
   assert.match(toolText(computers), /"this_computer": "Desktop"/);
   assert.match(toolText(computers), /Laptop/);
   const ran = await client.callTool({ name: "run_command", arguments: { computer: "Laptop", command: "uname -a", timeout_seconds: 5 } });

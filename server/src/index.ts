@@ -107,7 +107,7 @@ import {
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { AiConnectorStore } from "./ai-connector-store";
-import { AiConnectorOAuth, PendingSignIn, normalizePublicUrl } from "./ai-connector-oauth";
+import { AUTH_CODE_TTL_MS, AiConnectorOAuth, PendingSignIn, normalizePublicUrl } from "./ai-connector-oauth";
 import { AiConnectorHttp } from "./ai-connector-http";
 import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store";
 import type { AiConnectorStatusServerMessage } from "./protocol";
@@ -3650,8 +3650,10 @@ const aiConnectorOAuth = new AiConnectorOAuth({
   signInSettled: (signIn: PendingSignIn) => clearDevicePending(signIn.publicKey),
   grantAccess: (signIn: PendingSignIn) => {
     deviceRegistry.enroll({
+      // The AI client has its own permission prompts, so actions run without
+      // a card here unless the user turns "Ask before each action" on.
       publicKey: signIn.publicKey, kind: "connector", via: "connector", name: signIn.clientName, platform: "connector",
-      access: { read: true, agents: true, commands: true }, confirm: "ask",
+      access: { read: true, agents: true, commands: true }, confirm: "never",
     });
     const now = new Date().toISOString();
     const sessionId = `connector-${crypto.createHash("sha256").update(signIn.publicKey).digest("hex").slice(0, 24)}`;
@@ -3674,10 +3676,31 @@ const aiConnectorOAuth = new AiConnectorOAuth({
     broadcastSessionList();
     return { sessionId };
   },
+  grantAbandoned: (grant) => {
+    deviceRegistry.revoke(grant.publicKey);
+    console.log(`[AI connector] ${grant.clientName} approved a sign-in it never finished; dropped it`);
+  },
 });
+
+// Approvals whose code was never redeemed cannot be used; drop them and their
+// device entries so a few failed attempts do not leave a row each in Devices.
+for (const grant of aiConnectorStore.pruneUnredeemedGrants(AUTH_CODE_TTL_MS)) {
+  deviceRegistry.revoke(grant.publicKey);
+  console.log(`[AI connector] Dropped an unfinished ${grant.clientName} sign-in from ${grant.createdAt}`);
+}
+
+/** Last time each client's "seen" stamp was written, so a burst of MCP calls writes it once a minute. */
+const aiConnectorSeenAt = new Map<string, number>();
 
 const aiConnectorHttp = new AiConnectorHttp({
   oauth: aiConnectorOAuth,
+  grantSeen: (grant) => {
+    const now = Date.now();
+    if (now - (aiConnectorSeenAt.get(grant.grantId) ?? 0) < 60_000) return;
+    aiConnectorSeenAt.set(grant.grantId, now);
+    deviceRegistry.touch(grant.publicKey);
+    aiConnectorStore.touchGrant(grant.grantId);
+  },
   serverName: () => os.hostname(),
   listComputers: () => [
     {

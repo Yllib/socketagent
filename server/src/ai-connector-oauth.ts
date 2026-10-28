@@ -74,6 +74,8 @@ export interface AiConnectorOAuthHost {
   signInSettled(signIn: PendingSignIn): void;
   /** Enrolls the client's key and creates its activity session. */
   grantAccess(signIn: PendingSignIn): { sessionId: string };
+  /** An approved sign-in the client never redeemed: the grant is gone, so its device entry should go too. */
+  grantAbandoned(grant: AiConnectorGrant): void;
   /** Replaceable for tests; the default fetches the document over HTTPS. */
   fetchClientMetadata?(clientId: string): Promise<ClientMetadataDocument>;
 }
@@ -510,18 +512,26 @@ export class AiConnectorOAuth {
       const code = request.code || "";
       const entry = this.codes.get(code);
       if (entry) this.codes.delete(code);
-      if (!entry || entry.expiresAt <= this.now()) throw new OAuthError("invalid_grant", "The authorization code is unknown or expired");
-      if (entry.clientId !== clientId) throw new OAuthError("invalid_grant", "The code belongs to another client");
-      if (request.redirect_uri !== undefined && request.redirect_uri !== entry.redirectUri) {
-        throw new OAuthError("invalid_grant", "redirect_uri does not match the authorization request");
+      if (!entry) throw new OAuthError("invalid_grant", "The authorization code is unknown or expired");
+      // A code is handed over once. Whatever goes wrong below burns it, and
+      // a grant that will never be redeemed is dropped with it.
+      try {
+        if (entry.expiresAt <= this.now()) throw new OAuthError("invalid_grant", "The authorization code is unknown or expired");
+        if (entry.clientId !== clientId) throw new OAuthError("invalid_grant", "The code belongs to another client");
+        if (request.redirect_uri !== undefined && request.redirect_uri !== entry.redirectUri) {
+          throw new OAuthError("invalid_grant", "redirect_uri does not match the authorization request");
+        }
+        if (!request.code_verifier || !pkceMatches(request.code_verifier, entry.codeChallenge)) {
+          throw new OAuthError("invalid_grant", "code_verifier does not match the code_challenge");
+        }
+        if (request.resource !== undefined && !this.resourceAccepted(request.resource)) {
+          throw new OAuthError("invalid_target", `resource must be ${this.resourceUrl}`);
+        }
+        if (!this.store.getGrant(entry.grantId)) throw new OAuthError("invalid_grant", "The grant was revoked");
+      } catch (err: unknown) {
+        this.abandon(entry.grantId);
+        throw err;
       }
-      if (!request.code_verifier || !pkceMatches(request.code_verifier, entry.codeChallenge)) {
-        throw new OAuthError("invalid_grant", "code_verifier does not match the code_challenge");
-      }
-      if (request.resource !== undefined && !this.resourceAccepted(request.resource)) {
-        throw new OAuthError("invalid_target", `resource must be ${this.resourceUrl}`);
-      }
-      if (!this.store.getGrant(entry.grantId)) throw new OAuthError("invalid_grant", "The grant was revoked");
       return this.tokenResponse(this.store.issueTokens(entry.grantId), entry.scope);
     }
     if (request.grant_type === "refresh_token") {
@@ -569,6 +579,12 @@ export class AiConnectorOAuth {
     this.denySignIn(publicKey);
   }
 
+  /** The code for this grant will never be redeemed; the grant goes unless tokens were already issued. */
+  private abandon(grantId: string): void {
+    const grant = this.store.revokeUnredeemedGrant(grantId);
+    if (grant) this.host.grantAbandoned(grant);
+  }
+
   private sweep(): void {
     const now = this.now();
     for (const [id, signIn] of this.signIns) {
@@ -579,7 +595,11 @@ export class AiConnectorOAuth {
       // Decided sign-ins linger so the browser can still be redirected, then go.
       if (signIn.status !== "pending" && signIn.expiresAt + SIGN_IN_TTL_MS <= now) this.signIns.delete(id);
     }
-    for (const [code, entry] of this.codes) if (entry.expiresAt <= now) this.codes.delete(code);
+    for (const [code, entry] of this.codes) {
+      if (entry.expiresAt > now) continue;
+      this.codes.delete(code);
+      this.abandon(entry.grantId);
+    }
   }
 
   /** Expires sign-ins on a timer so phones hear about it without a request. */

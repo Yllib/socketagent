@@ -25,6 +25,8 @@ export interface AiConnectorToolHost {
    */
   act(grant: AiConnectorGrant, computer: string | undefined, action: PeerAction, args: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
   /** Records the call in the client's session and shows it on connected phones. */
+  /** A request authenticated with the grant's token, for "last seen" in Devices. */
+  grantSeen?(grant: AiConnectorGrant): void;
   logCall(grant: AiConnectorGrant, toolUseId: string, tool: string, input: Record<string, unknown>): void;
   logResult(grant: AiConnectorGrant, toolUseId: string, output: string, isError: boolean): void;
 }

@@ -245,6 +245,38 @@ export class AiConnectorStore {
     return grant ? this.revokeGrant(grant.grantId) : undefined;
   }
 
+  /** Drops the grant only if no token was ever issued for it: an approval the client never redeemed. */
+  revokeUnredeemedGrant(grantId: string): AiConnectorGrant | undefined {
+    if (this.state.tokens.some((token) => token.grantId === grantId)) return undefined;
+    return this.revokeGrant(grantId);
+  }
+
+  /**
+   * Grants older than maxAgeMs that never got a token. A sign-in the client
+   * abandoned after the phone approved it leaves one of these; they can
+   * never be used, so they are removed and returned for the caller to drop
+   * their device entries too.
+   */
+  pruneUnredeemedGrants(maxAgeMs: number): AiConnectorGrant[] {
+    const cutoff = this.now() - maxAgeMs;
+    const redeemed = new Set(this.state.tokens.map((token) => token.grantId));
+    const dead = this.state.grants.filter((grant) => !redeemed.has(grant.grantId) && Date.parse(grant.createdAt) <= cutoff);
+    if (dead.length === 0) return [];
+    const gone = new Set(dead.map((grant) => grant.grantId));
+    this.state.grants = this.state.grants.filter((grant) => !gone.has(grant.grantId));
+    this.pruneClients();
+    this.write();
+    return dead.map((grant) => ({ ...grant }));
+  }
+
+  /** The client used its grant: a bearer request, so Devices can show when it was last seen. */
+  touchGrant(grantId: string): void {
+    const grant = this.state.grants.find((entry) => entry.grantId === grantId);
+    if (!grant) return;
+    grant.lastUsedAt = new Date(this.now()).toISOString();
+    this.write();
+  }
+
   // ── Tokens ──
 
   /** A fresh access and refresh token pair for the grant. */

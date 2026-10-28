@@ -321,6 +321,7 @@ export class AiConnectorHttp {
   private async handleMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const oauth = this.host.oauth;
     const grant = oauth.authenticateBearer(req.headers.authorization);
+    if (grant) this.host.grantSeen?.(grant);
     if (!grant) {
       const hadToken = /^Bearer\s/i.test(String(req.headers.authorization || ""));
       const challenge = `Bearer resource_metadata="${oauth.resourceMetadataUrl}"${hadToken ? ', error="invalid_token", error_description="The access token is expired, revoked or unknown"' : ""}`;

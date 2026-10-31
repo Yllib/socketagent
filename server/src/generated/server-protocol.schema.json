@@ -38,6 +38,15 @@
           "$ref": "#/definitions/SupportedAgentsServerMessage"
         },
         {
+          "$ref": "#/definitions/McpStatusServerMessage"
+        },
+        {
+          "$ref": "#/definitions/McpLoginStartedServerMessage"
+        },
+        {
+          "$ref": "#/definitions/McpLoginResultServerMessage"
+        },
+        {
           "$ref": "#/definitions/FilesPersistedServerMessage"
         },
         {
@@ -935,6 +944,121 @@
       "required": [
         "name",
         "description"
+      ]
+    },
+    "McpStatusServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "mcp_status"
+        },
+        "servers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/McpServerStatusEntry"
+          }
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "servers"
+      ]
+    },
+    "McpServerStatusEntry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/McpServerConnectionState"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "signIn": {
+          "type": "boolean"
+        },
+        "toggleable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ],
+      "additionalProperties": {}
+    },
+    "McpServerConnectionState": {
+      "type": "string",
+      "enum": [
+        "connected",
+        "failed",
+        "needs-auth",
+        "pending",
+        "disabled"
+      ]
+    },
+    "McpLoginStartedServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "mcp_login_started"
+        },
+        "serverName": {
+          "type": "string"
+        },
+        "loginId": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "serverName",
+        "url"
+      ]
+    },
+    "McpLoginResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "mcp_login_result"
+        },
+        "serverName": {
+          "type": "string"
+        },
+        "loginId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "serverName",
+        "success"
       ]
     },
     "FilesPersistedServerMessage": {

@@ -2445,6 +2445,25 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "mcp_login"
+            },
+            "serverName": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "serverName",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "rewind"
             },
             "userMessageUuid": {

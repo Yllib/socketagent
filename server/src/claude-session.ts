@@ -3210,6 +3210,15 @@ export class ClaudeSession {
     return null;
   }
 
+  /**
+   * The Agent SDK has no MCP sign-in call, and reconnectMcpServer refuses a
+   * needs-auth server, so the sign-in has to happen in Claude Code's own
+   * terminal. The app shows this message.
+   */
+  async loginMcpServer(name: string): Promise<void> {
+    throw new Error(`Claude Code signs in to ${name} from its own terminal: run /mcp there. The Agent SDK has no sign-in call.`);
+  }
+
   /** Rewind files to a specific message UUID (requires file checkpointing) */
   async rewindFiles(uuid: string, dryRun = false) {
     if (this.activeQuery) {

@@ -9,6 +9,7 @@ import type { ModeKind } from "./generated/codex/types/ModeKind";
 import type { MessagePhase } from "./generated/codex/types/MessagePhase";
 import type { ThreadBackgroundTerminal } from "./generated/codex/types/v2/ThreadBackgroundTerminal";
 import type { SkillMetadata } from "./generated/codex/types/v2/SkillMetadata";
+import type { McpServerStatus } from "./generated/codex/types/v2/McpServerStatus";
 import type { SkillSummary } from "./generated/codex/types/v2/SkillSummary";
 import { parseCodexResponse } from "./codex-contracts";
 import { isRecord as isCodexRecord, unknownArray } from "./value-guards";
@@ -47,6 +48,8 @@ import {
   BackgroundTasksChangedServerMessage,
   SupportedCommandsServerMessage,
   SdkEventServerMessage,
+  McpServerConnectionState,
+  McpServerStatusEntry,
 } from "./protocol";
 import { SessionContext, SocketAgentPlugin } from "./plugin-api";
 import {
@@ -460,6 +463,44 @@ export interface CodexPluginSkills {
 }
 
 const CODEX_SKILL_SCOPE_RANK: Record<string, number> = { repo: 0, user: 1, admin: 2, system: 3, plugin: 4 };
+
+/**
+ * Folds Codex's runtime and auth status for one MCP server into the states the
+ * app already renders for Claude. A server Codex can sign in to but has not is
+ * needs-auth whatever its runtime says, since that is the fix the user can apply.
+ */
+export function codexMcpConnectionState(server: McpServerStatus): McpServerConnectionState {
+  if (server.authStatus === "notLoggedIn" || server.runtimeStatus === "authenticationRequired") return "needs-auth";
+  switch (server.runtimeStatus) {
+    case "connected": return "connected";
+    case "failed":
+    case "cancelled": return "failed";
+    case "disabled": return "disabled";
+    case "starting":
+    case "notStarted": return "pending";
+    case null:
+      // Without a thread Codex still dials the server to list its tools.
+      return server.toolsError ? "failed" : "connected";
+  }
+}
+
+/** The mcp_status entry for one Codex MCP server. */
+export function codexMcpStatusEntry(server: McpServerStatus): McpServerStatusEntry {
+  const status = codexMcpConnectionState(server);
+  return {
+    name: server.name,
+    status,
+    enabled: status !== "disabled",
+    ...(server.toolsError ? { error: server.toolsError } : {}),
+    authStatus: server.authStatus,
+    ...(server.httpOrigin ? { httpOrigin: server.httpOrigin } : {}),
+    ...(server.pluginId ? { pluginId: server.pluginId } : {}),
+    tools: Object.keys(server.tools).map((name) => ({ name })),
+    signIn: server.authStatus === "notLoggedIn",
+    // Codex enables servers in config.toml, not per thread.
+    toggleable: false,
+  };
+}
 
 /**
  * Builds the picker entries for a Codex session: SocketAgent's native
@@ -1688,11 +1729,77 @@ export class CodexSession {
     if (!result.terminated) console.warn(`[codex app-server] Background terminal ${processId} was not terminated`);
     await this.refreshBackgroundTerminals();
   }
-  async mcpServerStatus(): Promise<unknown[]> { return []; }
-  async reconnectMcpServer(_name: string): Promise<{ success: boolean; error?: string }> {
-    return { success: false, error: "MCP not supported on codex backend" };
+  async mcpServerStatus(): Promise<McpServerStatusEntry[]> {
+    await this.ensureAppServer();
+    try {
+      return (await this.listMcpServers()).map(codexMcpStatusEntry);
+    } finally {
+      this.scheduleAppServerIdleStop();
+    }
   }
-  async toggleMcpServer(_name: string, _enabled: boolean): Promise<void> {}
+
+  /** Every configured MCP server, with this thread's runtime state when a thread exists. */
+  private async listMcpServers(): Promise<McpServerStatus[]> {
+    const client = this.appServer;
+    if (!client) return [];
+    const servers: McpServerStatus[] = [];
+    let cursor: string | null = null;
+    do {
+      const response: unknown = await client.request("mcpServerStatus/list", {
+        threadId: this.threadId || undefined, cursor, limit: 50,
+      });
+      const page = parseCodexResponse("mcpServerStatus/list", response);
+      servers.push(...page.data);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return servers;
+  }
+
+  /** Codex has no per-server reconnect; a config reload restarts them all. */
+  async reconnectMcpServer(_name: string): Promise<{ success: boolean; error?: string }> {
+    await this.ensureAppServer();
+    try {
+      await this.appServer!.request("config/mcpServer/reload", undefined);
+      return { success: true };
+    } finally {
+      this.scheduleAppServerIdleStop();
+    }
+  }
+
+  async toggleMcpServer(name: string, _enabled: boolean): Promise<void> {
+    throw new Error(`Codex enables ${name} in config.toml, not per session.`);
+  }
+
+  /**
+   * Starts an OAuth sign-in for one MCP server. Codex answers with the
+   * authorization URL and later reports the outcome through
+   * mcpServer/oauthLogin/completed; both reach the app as their own messages.
+   */
+  async loginMcpServer(name: string): Promise<void> {
+    await this.ensureAppServer();
+    const response: unknown = await this.appServer!.request("mcpServer/oauth/login", {
+      name, threadId: this.threadId || undefined,
+    });
+    const login = parseCodexResponse("mcpServer/oauth/login", response);
+    this.send({
+      type: "mcp_login_started",
+      serverName: name,
+      loginId: login.loginId,
+      url: login.authorizationUrl,
+      sessionId: this.sessionId || undefined,
+    });
+  }
+
+  /** After a sign-in, the thread's connection to the server picks up the new token. */
+  private async pushMcpStatusAfterLogin(): Promise<void> {
+    try {
+      await this.appServer?.request("config/mcpServer/reload", undefined);
+      const servers = await this.mcpServerStatus();
+      this.send({ type: "mcp_status", servers, sessionId: this.sessionId || undefined });
+    } catch (error) {
+      console.warn(`[Codex] MCP status refresh after sign-in failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   async rewindFiles(_uuid: string, _dryRun = false): Promise<{ success: boolean; restored: string[] }> {
     return { success: false, restored: [] };
   }
@@ -5165,6 +5272,26 @@ export class CodexSession {
           message: details ? `${summary}\n${details}` : summary,
           sessionId: this.sessionId || undefined,
         });
+        return;
+      }
+
+      case "mcpServer/oauthLogin/completed": {
+        const name = typeof p.name === "string" ? p.name : "";
+        if (!name) return;
+        const success = p.success === true;
+        this.send({
+          type: "mcp_login_result",
+          serverName: name,
+          loginId: typeof p.loginId === "string" ? p.loginId : undefined,
+          success,
+          error: typeof p.error === "string" ? p.error : undefined,
+          sessionId: this.sessionId || undefined,
+        });
+        if (success) {
+          // The next auth failure for this server is news again.
+          this.surfacedMcpAuth.delete(name.trim().toLowerCase());
+          void this.pushMcpStatusAfterLogin();
+        }
         return;
       }
 

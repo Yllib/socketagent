@@ -9494,7 +9494,8 @@ function createConnectionHandler(
       case "mcp_status": {
         if (activeSession) {
           activeSession.mcpServerStatus().then(status => {
-            sendJson({ type: "mcp_status", servers: status || [] });
+            const message: ServerMessage = { type: "mcp_status", servers: status || [] };
+            sendJson({ ...message });
           }).catch((e: unknown) => {
             sendJson({ type: "error", message: `Failed to get MCP status: ${errorMessage(e) || e}` });
           });
@@ -9722,6 +9723,20 @@ function createConnectionHandler(
             sendJson({ type: "mcp_reconnect_result", serverName, success: true });
           }).catch((e: unknown) => {
             sendJson({ type: "error", message: `Failed to reconnect ${serverName}: ${errorMessage(e) || e}` });
+          });
+        }
+        break;
+      }
+
+      case "mcp_login": {
+        const serverName = msg.serverName;
+        if (activeSession && serverName) {
+          // Success arrives later as mcp_login_started, then mcp_login_result.
+          activeSession.loginMcpServer(serverName).catch((e: unknown) => {
+            const result: ServerMessage = {
+              type: "mcp_login_result", serverName, success: false, error: errorMessage(e) || String(e),
+            };
+            sendJson({ ...result });
           });
         }
         break;

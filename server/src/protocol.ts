@@ -1280,6 +1280,12 @@ export interface McpToggleMessage {
   enabled: boolean;
 }
 
+/** Starts an OAuth sign-in for an MCP server whose mcp_status entry sets signIn. */
+export interface McpLoginMessage {
+  type: "mcp_login";
+  serverName: string;
+}
+
 export interface RewindMessage {
   type: "rewind";
   userMessageUuid: string;
@@ -1670,6 +1676,7 @@ export type ClientMessage = { commandId?: string } & (
   | GetSdkEventHistoryMessage
   | McpReconnectMessage
   | McpToggleMessage
+  | McpLoginMessage
   | RewindMessage
   | RewindConversationMessage
   | BranchFromMessage
@@ -2413,6 +2420,48 @@ export interface BackendAuthRequiredServerMessage {
   mcpServerName?: string;
   message: string;
   detail?: string;
+  sessionId?: string;
+}
+
+export type McpServerConnectionState = "connected" | "failed" | "needs-auth" | "pending" | "disabled";
+
+/**
+ * One MCP server in an mcp_status reply. Claude entries are the Agent SDK's
+ * McpServerStatus; Codex entries are mapped from mcpServerStatus/list.
+ */
+export interface McpServerStatusEntry {
+  name: string;
+  status: McpServerConnectionState;
+  enabled?: boolean;
+  error?: string;
+  /** The server supports OAuth and is not signed in, so mcp_login applies. */
+  signIn?: boolean;
+  /** False when the backend has no per-session enable switch (Codex). */
+  toggleable?: boolean;
+  [key: string]: unknown;
+}
+
+export interface McpStatusServerMessage {
+  type: "mcp_status";
+  servers: McpServerStatusEntry[];
+  sessionId?: string;
+}
+
+/** The backend issued a sign-in URL; the user finishes it in a browser. */
+export interface McpLoginStartedServerMessage {
+  type: "mcp_login_started";
+  serverName: string;
+  loginId?: string;
+  url: string;
+  sessionId?: string;
+}
+
+export interface McpLoginResultServerMessage {
+  type: "mcp_login_result";
+  serverName: string;
+  loginId?: string;
+  success: boolean;
+  error?: string;
   sessionId?: string;
 }
 
@@ -4008,6 +4057,9 @@ export type ServerMessage =
   | SessionInitServerMessage
   | SupportedCommandsServerMessage
   | SupportedAgentsServerMessage
+  | McpStatusServerMessage
+  | McpLoginStartedServerMessage
+  | McpLoginResultServerMessage
   | FilesPersistedServerMessage
   | AuthStatusServerMessage
   | CwdChangedServerMessage

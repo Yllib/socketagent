@@ -19,6 +19,8 @@ type CodexRequestParams = { [M in keyof CodexMethods]: CodexMethods[M]["params"]
   // Used only to trust SocketAgent's own capture hook; see codex-capture-hook-config.
   "hooks/list": { cwds?: string[] };
   "config/value/write": { keyPath: string; value: { [key: string]: { trusted_hash: string } }; mergeStrategy: "upsert" };
+  // Takes no params, which the contract generator cannot express. Restarts every configured MCP server.
+  "config/mcpServer/reload": undefined;
 } &{ [M in keyof CodexRealtimeMethods]: CodexRealtimeMethods[M]["params"] };
 import { isCodexRecord, parseRewindResponse } from "./codex-rewind-contract";
 import { parseCodexResponse } from "./codex-contracts";

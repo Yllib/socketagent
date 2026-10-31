@@ -62,6 +62,21 @@ test("the continuation prompt is not replayed as a user message", (t) => {
   );
 });
 
+// Claude Code writes a background task's completion as a user row. Reading it
+// back showed the raw <task-notification> XML as a prompt the user never sent.
+test("a background task notification is not read back as a user message", (t) => {
+  const notification = "<task-notification>\n<task-id>bfpctt2r8</task-id>\n<status>completed</status>\n</task-notification>";
+  const written = writeTranscript([
+    { ...userMessage(notification, "2026-10-31T19:29:19.866Z"), origin: { kind: "task-notification" } },
+    userMessage("mark 1192 completed", "2026-10-31T19:30:00.000Z"),
+  ]);
+  t.after(() => fs.rmSync(path.dirname(written), { recursive: true, force: true }));
+
+  const missed = getMissedMessages(SESSION_ID, CWD, "2026-10-31T19:00:00.000Z");
+
+  assert.deepEqual(missed.map((e) => e.content), ["mark 1192 completed"]);
+});
+
 // SocketAgent records a prompt a few milliseconds before Claude writes it to
 // its transcript. Opening the chat in that window read the prompt back as
 // missed, so it showed twice.

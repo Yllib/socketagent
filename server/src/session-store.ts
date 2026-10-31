@@ -3237,6 +3237,9 @@ function appendClaudeJsonlEntries(
       }
     }
   } else if (msg.type === "user" && isRecord(msg.message) && msg.message.content) {
+    // Claude Code hands the model a background task's completion as a user
+    // row. The live stream already shows it as a task card.
+    if (isRecord(msg.origin) && msg.origin.kind === "task-notification") return;
     const content = msg.message.content;
     if (Array.isArray(content)) {
       for (const block of unknownArray(content).filter(isRecord)) {

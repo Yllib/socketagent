@@ -32,6 +32,9 @@ test('Codex request types reject unknown methods and invalid parameters without 
     client.request('thread/read', { threadId: 123, includeTurns: true });
     client.request('turn/interrupt', { threadId: 't' });
     client.request('thread/goal/set', { threadId: 't', status: 'invented' });
+    client.request('thread/goal/set', { threadId: 't', origin: 'robot', status: 'active' });
+    client.setGoal('t', { status: 'active' });
+    client.clearGoal('t');
   `;
   const options = { strict: true, noEmit: true, skipLibCheck: true, esModuleInterop: true,
     resolveJsonModule: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS };
@@ -43,7 +46,7 @@ test('Codex request types reject unknown methods and invalid parameters without 
   const program = ts.createProgram([file], options, host);
   const diagnostics = ts.getPreEmitDiagnostics(program).filter(diagnostic => diagnostic.file?.fileName === file);
   const lines = diagnostics.map(diagnostic => diagnostic.file?.getLineAndCharacterOfPosition(diagnostic.start ?? 0).line);
-  assert.deepEqual(lines, [6, 7, 8, 9], diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')).join('\n'));
+  assert.deepEqual(lines, [6, 7, 8, 9, 10, 11, 12], diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')).join('\n'));
 });
 
 test('generated Codex files match the recorded snapshot and every JSON reference resolves', async () => {

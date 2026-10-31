@@ -28,6 +28,14 @@ test('history validation checks optional and nested fields instead of only the r
   }
 });
 
+test('history keeps every Codex message phase, including partial answers', () => {
+  const entry = { role: 'assistant', content: 'Part of the answer', timestamp: '' };
+  for (const messagePhase of ['commentary', 'partial_answer', 'final_answer']) {
+    assert.deepEqual(parseHistoryEntry({ ...entry, messagePhase }), { ...entry, messagePhase });
+  }
+  assert.throws(() => parseHistoryEntry({ ...entry, messagePhase: 'draft' }));
+});
+
 test('history arrays reject malformed entries without silently dropping messages', () => {
   const valid = { role: 'assistant', content: 'Keep this message', timestamp: '' };
   assert.throws(() => parseHistoryEntries([valid, null]));

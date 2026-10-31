@@ -387,6 +387,7 @@ test("preserves Codex agent message phase and resolves cleared questions", () =>
       item: { id: "message-1", type: "agentMessage", text: "Checking", phase: "commentary" },
     });
     assert.equal(codexAgentMessagePhase("commentary"), "commentary");
+    assert.equal(codexAgentMessagePhase("partial_answer"), "partial_answer");
     assert.equal(codexAgentMessagePhase("final"), undefined);
     assert.ok(sent.some((message) =>
       message.type === "text" && message.messagePhase === "commentary"));

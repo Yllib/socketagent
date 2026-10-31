@@ -1,6 +1,7 @@
 import type { AccountInfo, AgentInfo, SDKControlGetContextUsageResponse, SDKFilesPersistedEvent, SDKSessionStateChangedMessage, SDKSystemMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { CodexSubagentStatus } from "./codex-subagent-state";
 import type { TurnPlanStep } from "./generated/codex/types/v2/TurnPlanStep";
+import type { MessagePhase } from "./generated/codex/types/MessagePhase";
 import type { ScheduledTask } from "./scheduled-task-store";
 import type { ReasoningEffort } from "./generated/codex/types/ReasoningEffort";
 import { isRecord } from "./value-guards";
@@ -1796,7 +1797,7 @@ export interface TextServerMessage {
   snapshot?: boolean;
   finalSnapshot?: boolean;
   /** Codex Responses API message phase when supplied by app-server. */
-  messagePhase?: "commentary" | "final_answer";
+  messagePhase?: MessagePhase;
   deliveryId?: string;
   entryId?: string;
   sessionSeq?: number;
@@ -2672,7 +2673,7 @@ export interface HistoryEntry {
   triggerUserMessageUuid?: string;
   triggerUserMessageUuids?: string[];
   /** Codex Responses API message phase when supplied by app-server. */
-  messagePhase?: "commentary" | "final_answer";
+  messagePhase?: MessagePhase;
   // Tool summary fields
   toolSummary?: boolean;
   precedingToolUseIds?: string[];

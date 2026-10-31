@@ -10,6 +10,7 @@ import type { ApprovalsReviewer } from "./generated/codex/types/v2/ApprovalsRevi
 import type { UserInput } from "./generated/codex/types/v2/UserInput";
 import type { InitializeCapabilities } from "./generated/codex/types/InitializeCapabilities";
 import type { ReviewTarget } from "./generated/codex/types/v2/ReviewTarget";
+import type { ThreadGoalMutationOrigin } from "./generated/codex/types/v2/ThreadGoalMutationOrigin";
 import type { CodexRealtimeMethods } from "./codex-realtime";
 
 type CodexRequestParams = { [M in keyof CodexMethods]: CodexMethods[M]["params"] } & {
@@ -315,12 +316,16 @@ export class CodexAppServerClient extends EventEmitter {
     return parseCodexResponse("thread/goal/get", await this.request("thread/goal/get", { threadId }));
   }
 
-  async setGoal(threadId: string, params: Omit<CodexMethods["thread/goal/set"]["params"], "threadId">) {
-    return parseCodexResponse("thread/goal/set", await this.request("thread/goal/set", { threadId, ...params }));
+  /**
+   * Codex treats a missing origin as unauthorized by the user, so callers must
+   * say whether a person asked for the change ("user") or the system did ("automatic").
+   */
+  async setGoal(threadId: string, origin: ThreadGoalMutationOrigin, params: Omit<CodexMethods["thread/goal/set"]["params"], "threadId" | "origin">) {
+    return parseCodexResponse("thread/goal/set", await this.request("thread/goal/set", { threadId, origin, ...params }));
   }
 
-  async clearGoal(threadId: string): Promise<unknown> {
-    return this.request("thread/goal/clear", { threadId });
+  async clearGoal(threadId: string, origin: ThreadGoalMutationOrigin): Promise<unknown> {
+    return this.request("thread/goal/clear", { threadId, origin });
   }
 
   async startReview(threadId: string, instructions?: string): Promise<unknown> {

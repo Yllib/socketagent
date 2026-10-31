@@ -6,6 +6,7 @@ import { peekClaudeAvailability, peekCodexAvailability, probeCodexAvailability, 
 import type { JsonValue } from "./generated/codex/types/serde_json/JsonValue";
 import type { CollaborationMode } from "./generated/codex/types/CollaborationMode";
 import type { ModeKind } from "./generated/codex/types/ModeKind";
+import type { MessagePhase } from "./generated/codex/types/MessagePhase";
 import { isRecord as isCodexRecord, unknownArray } from "./value-guards";
 import { promptTitle } from "./prompt-title";
 import { deliverCodexInstructions, invalidateCodexInstructions } from "./codex-instruction-delivery";
@@ -371,8 +372,8 @@ function authoritativeTurnIdFromSteerError(error: unknown): string | null {
   return match?.[1]?.trim() || null;
 }
 
-export function codexAgentMessagePhase(value: unknown): "commentary" | "final_answer" | undefined {
-  return value === "commentary" || value === "final_answer" ? value : undefined;
+export function codexAgentMessagePhase(value: unknown): MessagePhase | undefined {
+  return value === "commentary" || value === "partial_answer" || value === "final_answer" ? value : undefined;
 }
 
 interface PendingQuestion {
@@ -620,7 +621,7 @@ export class CodexSession {
   private appServerFileChangePaths = new Map<string, string[]>();
   private appServerSeenUserMessageItems = new Set<string>();
   private appServerStreamParents = new Map<string, string>();
-  private appServerAgentPhases = new Map<string, "commentary" | "final_answer">();
+  private appServerAgentPhases = new Map<string, MessagePhase>();
   private codexSubagents = new Map<string, CodexSubagentState>();
   private lastSubagentSnapshotFingerprint: string | null = null;
   private _isCompacting = false;
@@ -1567,13 +1568,14 @@ export class CodexSession {
     return normalizeCodexGoal(result?.goal);
   }
 
+  /** Applies a goal change the user made through the app's goal controls. */
   async setAppServerGoal(
     update: { objective?: string; status?: CodexGoalStatus; tokenBudget?: number | null },
     threadId = this.threadId || this.sessionId || this._resumeSessionId,
   ): Promise<CodexGoal> {
     if (!threadId) throw new Error("No Codex thread id for goal");
     await this.ensureAppServer();
-    const result = await this.appServer!.setGoal(threadId, update);
+    const result = await this.appServer!.setGoal(threadId, "user", update);
     const goal = normalizeCodexGoal(result?.goal);
     if (!goal) throw new Error("Codex returned an invalid goal state");
     return goal;
@@ -1584,7 +1586,7 @@ export class CodexSession {
   ): Promise<void> {
     if (!threadId) throw new Error("No Codex thread id for goal");
     await this.ensureAppServer();
-    await this.appServer!.clearGoal(threadId);
+    await this.appServer!.clearGoal(threadId, "user");
   }
 
   /** True while a realtime voice call is attached to this session's thread. */
@@ -1709,21 +1711,21 @@ export class CodexSession {
         }
         const action = commandArgs.toLowerCase();
         if (action === "clear") {
-          await this.appServer!.clearGoal(threadId);
+          await this.appServer!.clearGoal(threadId, "user");
           this.emitSlashCommandResult(command, "Goal cleared.");
           return;
         }
         if (action === "pause" || action === "paused") {
-          await this.appServer!.setGoal(threadId, { status: "paused" });
+          await this.appServer!.setGoal(threadId, "user", { status: "paused" });
           this.emitSlashCommandResult(command, "Goal paused.");
           return;
         }
         if (action === "resume" || action === "active") {
-          await this.appServer!.setGoal(threadId, { status: "active" });
+          await this.appServer!.setGoal(threadId, "user", { status: "active" });
           this.emitSlashCommandResult(command, "Goal resumed.");
           return;
         }
-        await this.appServer!.setGoal(threadId, { objective: commandArgs, status: "active" });
+        await this.appServer!.setGoal(threadId, "user", { objective: commandArgs, status: "active" });
         this.emitSlashCommandResult(command, `Goal set: ${commandArgs}`);
         return;
       }
@@ -6241,7 +6243,7 @@ export async function setCodexAppServerGoal(
   update: { objective?: string; status?: CodexGoalStatus; tokenBudget?: number | null },
 ): Promise<CodexGoal> {
   return withStandaloneAppServerClient(cwd, async (client) => {
-    const result = await client.setGoal(threadId, update);
+    const result = await client.setGoal(threadId, "user", update);
     const goal = normalizeCodexGoal(result?.goal);
     if (!goal) throw new Error("Codex returned an invalid goal state");
     return goal;
@@ -6250,7 +6252,7 @@ export async function setCodexAppServerGoal(
 
 export async function clearCodexAppServerGoal(threadId: string, cwd: string): Promise<void> {
   await withStandaloneAppServerClient(cwd, async (client) => {
-    await client.clearGoal(threadId);
+    await client.clearGoal(threadId, "user");
   });
 }
 

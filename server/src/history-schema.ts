@@ -100,7 +100,7 @@ export const historyEntrySchema = z.object({
   subagentStatus: optionalText, parentToolUseId: z.string().nullable().optional(),
   uuid: optionalText, triggerUserMessageUuid: optionalText,
   triggerUserMessageUuids: z.array(z.string()).optional(),
-  messagePhase: z.enum(["commentary", "final_answer"]).optional(),
+  messagePhase: z.enum(["commentary", "partial_answer", "final_answer"]).optional(),
   toolSummary: optionalBoolean, precedingToolUseIds: z.array(z.string()).optional(),
   thinking: optionalBoolean, thinkingTokens: optionalNumber, thinkingDurationMs: optionalNumber,
   filePath: optionalText, mimeType: optionalText, mcpServerName: optionalText, url: optionalText,

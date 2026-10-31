@@ -2542,13 +2542,11 @@ export class CodexSession {
   private async readInstalledPluginSkills(): Promise<CodexPluginSkills[]> {
     const client = this.appServer;
     if (!client) return [];
-    let installed;
-    try {
-      installed = await client.listInstalledPlugins([this.cwd]);
-    } catch (error) {
+    const installed = await client.listInstalledPlugins([this.cwd]).catch((error: unknown) => {
       console.warn(`[codex app-server] Could not list installed plugins: ${codexAppServerErrorMessage(error, String(error))}`);
-      return [];
-    }
+      return null;
+    });
+    if (!installed) return [];
     const reads = installed.marketplaces.flatMap((marketplace) => marketplace.plugins
       .filter((plugin) => plugin.installed && plugin.enabled)
       .map(async (plugin): Promise<CodexPluginSkills | null> => {

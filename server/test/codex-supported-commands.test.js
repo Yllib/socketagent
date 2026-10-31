@@ -65,11 +65,13 @@ test("a chosen skill becomes a skill input, or a $mention when Codex has no path
   assert.match(remote[0].text, /^\$plugin-management list my plugins/);
 
   const bare = s.buildAppServerTurnInput("/Plugin-Management");
-  assert.match(bare[0].text, /^\$plugin-management$/m);
+  assert.equal(bare[0].type, "text");
+  assert.match(bare[0].type === "text" ? bare[0].text : "", /^\$plugin-management$/m);
 
   const plain = s.buildAppServerTurnInput("/not-a-skill at all");
   assert.equal(plain.length, 1);
-  assert.match(plain[0].text, /^\/not-a-skill at all/);
+  assert.equal(plain[0].type, "text");
+  assert.match(plain[0].type === "text" ? plain[0].text : "", /^\/not-a-skill at all/);
 });
 
 test("supported_commands is sent once per change and replayed to a client that attaches", async () => {

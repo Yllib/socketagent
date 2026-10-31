@@ -593,11 +593,7 @@
           "type": "boolean"
         },
         "messagePhase": {
-          "type": "string",
-          "enum": [
-            "commentary",
-            "final_answer"
-          ]
+          "$ref": "#/definitions/MessagePhase"
         },
         "deliveryId": {
           "type": "string"
@@ -616,6 +612,14 @@
         "type",
         "content",
         "sessionId"
+      ]
+    },
+    "MessagePhase": {
+      "type": "string",
+      "enum": [
+        "commentary",
+        "partial_answer",
+        "final_answer"
       ]
     },
     "ToolCallServerMessage": {
@@ -4953,11 +4957,7 @@
           }
         },
         "messagePhase": {
-          "type": "string",
-          "enum": [
-            "commentary",
-            "final_answer"
-          ]
+          "$ref": "#/definitions/MessagePhase"
         },
         "toolSummary": {
           "type": "boolean"

@@ -335,6 +335,18 @@ export class CodexAppServerClient extends EventEmitter {
     return this.request("review/start", { threadId, target, delivery: "inline" });
   }
 
+  async listSkills(cwds: string[]) {
+    return parseCodexResponse("skills/list", await this.request("skills/list", { cwds }));
+  }
+
+  async listInstalledPlugins(cwds: string[]) {
+    return parseCodexResponse("plugin/installed", await this.request("plugin/installed", { cwds }));
+  }
+
+  async readPlugin(params: CodexMethods["plugin/read"]["params"]) {
+    return parseCodexResponse("plugin/read", await this.request("plugin/read", params));
+  }
+
   async listMcpServerStatus(threadId?: string): Promise<unknown> {
     return this.request("mcpServerStatus/list", { threadId, limit: 50 });
   }

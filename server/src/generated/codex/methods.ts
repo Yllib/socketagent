@@ -77,6 +77,8 @@ import type { SkillsListParams } from "./types/v2/SkillsListParams";
 import type { SkillsListResponse } from "./types/v2/SkillsListResponse";
 import type { PluginListParams } from "./types/v2/PluginListParams";
 import type { PluginListResponse } from "./types/v2/PluginListResponse";
+import type { PluginInstalledParams } from "./types/v2/PluginInstalledParams";
+import type { PluginInstalledResponse } from "./types/v2/PluginInstalledResponse";
 import type { PluginReadParams } from "./types/v2/PluginReadParams";
 import type { PluginReadResponse } from "./types/v2/PluginReadResponse";
 import type { PluginSkillReadParams } from "./types/v2/PluginSkillReadParams";
@@ -124,6 +126,7 @@ export interface CodexMethods {
   "thread/backgroundTerminals/clean": { params: ThreadBackgroundTerminalsCleanParams; response: ThreadBackgroundTerminalsCleanResponse };
   "skills/list": { params: SkillsListParams; response: SkillsListResponse };
   "plugin/list": { params: PluginListParams; response: PluginListResponse };
+  "plugin/installed": { params: PluginInstalledParams; response: PluginInstalledResponse };
   "plugin/read": { params: PluginReadParams; response: PluginReadResponse };
   "plugin/skill/read": { params: PluginSkillReadParams; response: PluginSkillReadResponse };
   "mcpServer/oauth/login": { params: McpServerOauthLoginParams; response: McpServerOauthLoginResponse };
@@ -169,6 +172,7 @@ export const codexResponseSchemas = {
   "thread/backgroundTerminals/clean": "ThreadBackgroundTerminalsCleanResponse",
   "skills/list": "SkillsListResponse",
   "plugin/list": "PluginListResponse",
+  "plugin/installed": "PluginInstalledResponse",
   "plugin/read": "PluginReadResponse",
   "plugin/skill/read": "PluginSkillReadResponse",
   "mcpServer/oauth/login": "McpServerOauthLoginResponse",

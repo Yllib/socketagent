@@ -41,12 +41,13 @@
     "thread/backgroundTerminals/clean",
     "skills/list",
     "plugin/list",
+    "plugin/installed",
     "plugin/read",
     "plugin/skill/read",
     "mcpServer/oauth/login"
   ],
   "sha256": {
-    "methods.ts": "f68e7a80c081ce56f48136b8e2523fd4784f87acbab71251a511f799a1dd6a1d",
+    "methods.ts": "0bed1ae2a2fd1f08f0073fb12f3a0e56d922b2ea372946134fae85707cf0ea85",
     "protocol.schemas.json": "cde4190bdc3a866fd5bd0f839f9f3569ea8af3f41888c876f7c12370729cc87f",
     "types/AbsolutePathBuf.ts": "a79d31d5e8f24c58c8cce2633e5e4fc5b0bb88d1c44c69e7ce7d0dc7c1252272",
     "types/AgentMessageInputContent.ts": "b1383afc5e1daa28c7c0fa4bdf808d272c79b85291ccdc21afa9502a4ce36688",
@@ -329,6 +330,8 @@
     "types/v2/PluginDetail.ts": "0919e4864f5d61ecba7bed52421976bf9b4e2415e35a883c3b0b8f6edf3bc56e",
     "types/v2/PluginDisabledReason.ts": "6ee9da97c290fe832d73b4b8b10b9b8227c245d84487c72e65256741e04b52e6",
     "types/v2/PluginHookSummary.ts": "6401aa6cadd5ab3ed036486265a8010903b573d89096d21256021270499ff7e8",
+    "types/v2/PluginInstalledParams.ts": "9b9fa324cfad9a1bc9509c1148ebd4f4108633db26886b17cdc5e6c2429fb372",
+    "types/v2/PluginInstalledResponse.ts": "ecf178f6da5d7faff971f3c2799d5dbd5dc49a14862301581b814308cee1094a",
     "types/v2/PluginInstallPolicy.ts": "60e403b86d0cf6ff509317c28088b75c890817ac2b707ec230d67dff1d265843",
     "types/v2/PluginInstallPolicySource.ts": "6dc58eb9fb8f7e8a81d12a44185722c57ae257f28d15b28c9c118f6f45670a3f",
     "types/v2/PluginInterface.ts": "41d7d65beeae405f08c41c346e6a7dd4083907c1b286343f59fe52dfdf50698e",

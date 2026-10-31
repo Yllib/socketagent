@@ -8,6 +8,8 @@ import type { CollaborationMode } from "./generated/codex/types/CollaborationMod
 import type { ModeKind } from "./generated/codex/types/ModeKind";
 import type { MessagePhase } from "./generated/codex/types/MessagePhase";
 import type { ThreadBackgroundTerminal } from "./generated/codex/types/v2/ThreadBackgroundTerminal";
+import type { SkillMetadata } from "./generated/codex/types/v2/SkillMetadata";
+import type { SkillSummary } from "./generated/codex/types/v2/SkillSummary";
 import { parseCodexResponse } from "./codex-contracts";
 import { isRecord as isCodexRecord, unknownArray } from "./value-guards";
 import { promptTitle } from "./prompt-title";
@@ -43,6 +45,7 @@ import {
   SupportedModelsServerMessage,
   ActiveSubagentsServerMessage,
   BackgroundTasksChangedServerMessage,
+  SupportedCommandsServerMessage,
   SdkEventServerMessage,
 } from "./protocol";
 import { SessionContext, SocketAgentPlugin } from "./plugin-api";
@@ -87,7 +90,7 @@ import {
   type CodexAppServerTurnStartParams,
 } from "./codex-app-server-client";
 import { buildCodexSpawn } from "./codex-env";
-import { listSkills, SkillEntry } from "./skills-manager";
+import { listSkills } from "./skills-manager";
 import { ClaudeSession } from "./claude-session";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
@@ -435,6 +438,86 @@ type CodexRunOptions = {
   parentTurn?: CodexTurnLineage;
 };
 
+/** One entry in a Codex session's slash command picker. */
+export interface CodexSupportedCommand {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  kind: "command" | "skill";
+  agent: "codex";
+  /** SKILL.md path for a skill Codex found on disk; absent for a remote plugin skill. */
+  path?: string;
+  scope?: string;
+  displayName?: string;
+  /** Owning plugin's display name for a plugin skill. */
+  pluginName?: string;
+}
+
+/** A plugin's skills as plugin/read reports them, with the plugin's display name. */
+export interface CodexPluginSkills {
+  pluginName: string;
+  skills: SkillSummary[];
+}
+
+const CODEX_SKILL_SCOPE_RANK: Record<string, number> = { repo: 0, user: 1, admin: 2, system: 3, plugin: 4 };
+
+/**
+ * Builds the picker entries for a Codex session: SocketAgent's native
+ * commands, then every enabled skill Codex reports. Codex resolves a `$name`
+ * mention to one skill, so a name appearing in several scopes keeps the
+ * entry the mention would reach: repo over user, then admin, system, plugin.
+ */
+export function buildCodexSupportedCommands(
+  skills: SkillMetadata[],
+  plugins: CodexPluginSkills[],
+): CodexSupportedCommand[] {
+  const commands: CodexSupportedCommand[] = CODEX_NATIVE_SLASH_COMMANDS.map((command) => ({
+    name: command.name,
+    description: command.description,
+    ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
+    kind: "command",
+    agent: "codex",
+  }));
+  const taken = new Set(commands.map((command) => command.name.toLowerCase()));
+  const candidates: CodexSupportedCommand[] = [];
+  for (const skill of skills) {
+    if (!skill.enabled || !skill.name.trim()) continue;
+    candidates.push({
+      name: skill.name,
+      description: skill.interface?.shortDescription || skill.shortDescription || skill.description,
+      kind: "skill",
+      agent: "codex",
+      path: skill.path,
+      scope: skill.pluginId ? "plugin" : skill.scope,
+      ...(skill.interface?.displayName ? { displayName: skill.interface.displayName } : {}),
+    });
+  }
+  for (const plugin of plugins) {
+    for (const skill of plugin.skills) {
+      if (!skill.enabled || !skill.name.trim()) continue;
+      candidates.push({
+        name: skill.name,
+        description: skill.interface?.shortDescription || skill.shortDescription || skill.description,
+        kind: "skill",
+        agent: "codex",
+        ...(skill.path ? { path: skill.path } : {}),
+        scope: "plugin",
+        ...(skill.interface?.displayName ? { displayName: skill.interface.displayName } : {}),
+        pluginName: plugin.pluginName,
+      });
+    }
+  }
+  candidates.sort((a, b) => (CODEX_SKILL_SCOPE_RANK[a.scope ?? ""] ?? 99) - (CODEX_SKILL_SCOPE_RANK[b.scope ?? ""] ?? 99)
+    || a.name.localeCompare(b.name));
+  for (const candidate of candidates) {
+    const key = candidate.name.toLowerCase();
+    if (taken.has(key)) continue;
+    taken.add(key);
+    commands.push(candidate);
+  }
+  return commands;
+}
+
 export const CODEX_NATIVE_SLASH_COMMANDS: CodexSlashCommand[] = [
   {
     name: "status",
@@ -622,6 +705,12 @@ export class CodexSession {
    * process id. The app lists and stops them like Claude's background tasks.
    */
   private backgroundTerminals = new Map<string, { itemId: string; command: string }>();
+  /** Picker entries from Codex's skills/list and installed plugins; replayed to a client that attaches. */
+  private _lastSupportedCommands: SupportedCommandsServerMessage | null = null;
+  /** Skills Codex reports, by lowercase name, for resolving a /name prompt. */
+  private codexSkillIndex = new Map<string, CodexSupportedCommand>();
+  private supportedCommandsRefresh: Promise<void> | null = null;
+  private skillsChangedTimer: ReturnType<typeof setTimeout> | null = null;
   private backgroundTerminalRefresh: Promise<void> | null = null;
   private backgroundTerminalPoll: ReturnType<typeof setTimeout> | null = null;
   /** rootTurnId Codex reported for the active turn; a turn without one is its own root. */
@@ -1194,6 +1283,7 @@ export class CodexSession {
     }
     this.sendSubagentSnapshot(ws);
     if (this.backgroundTerminals.size > 0) this.sendBackgroundTerminals(ws);
+    if (this._lastSupportedCommands) this.sendTo(ws, this._lastSupportedCommands);
     void this.reconcileCodexSubagents();
   }
 
@@ -2307,6 +2397,67 @@ export class CodexSession {
     return modes;
   }
 
+  /**
+   * Reads Codex's skills and installed plugins and sends the picker list as
+   * supported_commands, the message Claude sessions use. Runs after the thread
+   * starts and again when Codex reports skills/changed.
+   */
+  refreshSupportedCommands(): Promise<void> {
+    if (this.supportedCommandsRefresh) return this.supportedCommandsRefresh;
+    const refresh = (async () => {
+      const client = this.appServer;
+      if (!client || !this.appServerInitialized) return;
+      const skills = (await client.listSkills([this.cwd])).data.flatMap((entry) => entry.skills);
+      const plugins = await this.readInstalledPluginSkills();
+      const commands = buildCodexSupportedCommands(skills, plugins);
+      this.codexSkillIndex = new Map(commands.filter((command) => command.kind === "skill")
+        .map((command) => [command.name.toLowerCase(), command]));
+      const sid = this.sessionId;
+      if (!sid) return;
+      const message: SupportedCommandsServerMessage = {
+        type: "supported_commands",
+        commands: commands.map((command) => ({ ...command })),
+        sessionId: sid,
+      };
+      if (JSON.stringify(message) === JSON.stringify(this._lastSupportedCommands)) return;
+      this._lastSupportedCommands = message;
+      this.send(message);
+    })().catch((error: unknown) => {
+      console.warn(`[codex app-server] Could not list skills: ${codexAppServerErrorMessage(error, String(error))}`);
+    }).finally(() => {
+      this.supportedCommandsRefresh = null;
+    });
+    this.supportedCommandsRefresh = refresh;
+    return refresh;
+  }
+
+  /** Skills of every enabled installed plugin. A plugin Codex cannot read is skipped. */
+  private async readInstalledPluginSkills(): Promise<CodexPluginSkills[]> {
+    const client = this.appServer;
+    if (!client) return [];
+    let installed;
+    try {
+      installed = await client.listInstalledPlugins([this.cwd]);
+    } catch (error) {
+      console.warn(`[codex app-server] Could not list installed plugins: ${codexAppServerErrorMessage(error, String(error))}`);
+      return [];
+    }
+    const reads = installed.marketplaces.flatMap((marketplace) => marketplace.plugins
+      .filter((plugin) => plugin.installed && plugin.enabled)
+      .map(async (plugin): Promise<CodexPluginSkills | null> => {
+        try {
+          const detail = await client.readPlugin(marketplace.path
+            ? { marketplacePath: marketplace.path, pluginName: plugin.name }
+            : { remoteMarketplaceName: marketplace.name, pluginName: plugin.name });
+          return { pluginName: plugin.interface?.displayName || plugin.name, skills: detail.plugin.skills };
+        } catch (error) {
+          console.warn(`[codex app-server] Could not read plugin ${plugin.name}: ${codexAppServerErrorMessage(error, String(error))}`);
+          return null;
+        }
+      }));
+    return (await Promise.all(reads)).filter((plugin): plugin is CodexPluginSkills => plugin !== null);
+  }
+
   async refreshSupportedModels(): Promise<void> {
     if (playReviewModeEnabled()) {
       this.publishSupportedModels([{
@@ -2980,6 +3131,7 @@ export class CodexSession {
         });
       }
       void this.refreshSupportedModels();
+      void this.refreshSupportedCommands();
 
       // Install the turn settler only after thread startup/resume succeeds.
       // A failed resume may require killing the app-server process; there is
@@ -3564,18 +3716,27 @@ export class CodexSession {
     return prompt;
   }
 
+  /**
+   * A /name prompt becomes the skill Codex expects. A skill with a SKILL.md
+   * path goes as a skill input item; a remote plugin skill has no path, and
+   * Codex resolves those from a `$name` mention in the text instead.
+   */
   private buildAppServerTurnInput(prompt: string): CodexAppServerUserInput[] {
     const slashSkill = this.resolveCodexSlashSkill(prompt);
     if (!slashSkill) {
       return [{ type: "text", text: this.buildCodexTurnText(prompt), text_elements: [] }];
     }
 
-    const text = slashSkill.args || `Use the /${slashSkill.skill.name} skill.`;
+    if (!slashSkill.path) {
+      const text = `$${slashSkill.name}${slashSkill.args ? ` ${slashSkill.args}` : ""}`;
+      return [{ type: "text", text: this.buildCodexTurnText(text), text_elements: [] }];
+    }
+    const text = slashSkill.args || `Use the /${slashSkill.name} skill.`;
     return [
       {
         type: "skill",
-        name: slashSkill.skill.name,
-        path: slashSkill.skill.filePath,
+        name: slashSkill.name,
+        path: slashSkill.path,
       },
       {
         type: "text",
@@ -3585,11 +3746,15 @@ export class CodexSession {
     ];
   }
 
-  private resolveCodexSlashSkill(prompt: string): { skill: SkillEntry; args: string } | null {
+  /** Codex's own skill list wins; the SKILL.md scan covers a session whose list has not loaded. */
+  private resolveCodexSlashSkill(prompt: string): { name: string; path: string | null; args: string } | null {
     const match = prompt.match(/^\/(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.-]+))(?:\s+([\s\S]*))?$/);
     if (!match) return null;
 
     const requestedName = (match[1] || match[2] || match[3]).toLowerCase();
+    const args = (match[4] || "").trim();
+    const known = this.codexSkillIndex.get(requestedName);
+    if (known) return { name: known.name, path: known.path ?? null, args };
     const skills = listSkills(this.cwd).filter((skill) =>
       skill.agent === "codex" &&
       skill.format === "skill" &&
@@ -3604,10 +3769,7 @@ export class CodexSession {
       return a.filePath.localeCompare(b.filePath);
     });
 
-    return {
-      skill: skills[0],
-      args: (match[4] || "").trim(),
-    };
+    return { name: skills[0].name, path: skills[0].filePath, args };
   }
 
   private extractThreadId(value: unknown): string | null {
@@ -4366,6 +4528,16 @@ export class CodexSession {
     const goalRecord = isCodexRecord(p.goal) ? p.goal : {};
     this.emitAppServerRawEvent(method, p);
     switch (method) {
+      case "skills/changed":
+        // An invalidation signal: a burst of file saves becomes one re-read.
+        if (this.skillsChangedTimer) clearTimeout(this.skillsChangedTimer);
+        this.skillsChangedTimer = setTimeout(() => {
+          this.skillsChangedTimer = null;
+          void this.refreshSupportedCommands();
+        }, 1000);
+        this.skillsChangedTimer.unref?.();
+        return;
+
       case "thread/started":
         {
           const startedThreadId = String(thread.id || p?.threadId || "");

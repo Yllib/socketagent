@@ -27,7 +27,7 @@ const methods = [
   'account/read', 'account/rateLimits/read', 'account/rateLimitResetCredit/consume',
   'account/usage/read', 'account/login/start', 'account/login/cancel',
   'thread/backgroundTerminals/list', 'thread/backgroundTerminals/terminate', 'thread/backgroundTerminals/clean',
-  'skills/list', 'plugin/list', 'plugin/read', 'plugin/skill/read', 'mcpServer/oauth/login',
+  'skills/list', 'plugin/list', 'plugin/installed', 'plugin/read', 'plugin/skill/read', 'mcpServer/oauth/login',
 ];
 
 /** @param {string} directory @returns {Promise<string[]>} */

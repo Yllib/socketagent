@@ -36,6 +36,7 @@ test("Codex runtime and auth states fold into the app's connection states", () =
   assert.equal(entry.toggleable, false);
   assert.equal(entry.error, "Auth required");
   assert.equal(codexMcpStatusEntry(server({ runtimeStatus: "connected", authStatus: "bearerToken" })).signIn, false);
+  assert.equal(codexMcpStatusEntry(server({ runtimeStatus: "authenticationRequired", authStatus: "oAuth" })).signIn, true);
   assert.equal(codexMcpStatusEntry(server({ runtimeStatus: "disabled" })).enabled, false);
 });
 

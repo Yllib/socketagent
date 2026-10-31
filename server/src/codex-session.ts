@@ -496,7 +496,8 @@ export function codexMcpStatusEntry(server: McpServerStatus): McpServerStatusEnt
     ...(server.httpOrigin ? { httpOrigin: server.httpOrigin } : {}),
     ...(server.pluginId ? { pluginId: server.pluginId } : {}),
     tools: Object.keys(server.tools).map((name) => ({ name })),
-    signIn: server.authStatus === "notLoggedIn",
+    // Every needs-auth Codex server takes mcpServer/oauth/login, including an expired OAuth token.
+    signIn: status === "needs-auth",
     // Codex enables servers in config.toml, not per thread.
     toggleable: false,
   };

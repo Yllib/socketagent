@@ -3579,7 +3579,7 @@ export interface TaskUpdatedServerMessage {
 
 export interface BackgroundTasksChangedServerMessage {
   type: "background_tasks_changed";
-  /** Authoritative replacement snapshot for Claude SDK background work. */
+  /** Authoritative replacement snapshot of background work: Claude SDK tasks or Codex background terminals. */
   tasks: {
     taskId: string;
     taskType: string;

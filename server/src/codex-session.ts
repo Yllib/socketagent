@@ -7,6 +7,8 @@ import type { JsonValue } from "./generated/codex/types/serde_json/JsonValue";
 import type { CollaborationMode } from "./generated/codex/types/CollaborationMode";
 import type { ModeKind } from "./generated/codex/types/ModeKind";
 import type { MessagePhase } from "./generated/codex/types/MessagePhase";
+import type { ThreadBackgroundTerminal } from "./generated/codex/types/v2/ThreadBackgroundTerminal";
+import { parseCodexResponse } from "./codex-contracts";
 import { isRecord as isCodexRecord, unknownArray } from "./value-guards";
 import { promptTitle } from "./prompt-title";
 import { deliverCodexInstructions, invalidateCodexInstructions } from "./codex-instruction-delivery";
@@ -40,6 +42,7 @@ import {
   QuestionServerMessage,
   SupportedModelsServerMessage,
   ActiveSubagentsServerMessage,
+  BackgroundTasksChangedServerMessage,
   SdkEventServerMessage,
 } from "./protocol";
 import { SessionContext, SocketAgentPlugin } from "./plugin-api";
@@ -76,6 +79,7 @@ import {
   CodexAppServerApprovalPolicy,
   CodexAppServerApprovalsReviewer,
   CodexAppServerClient,
+  CodexAppServerProtocolError,
   CodexAppServerRequestTimeoutError,
   CodexAppServerNotification,
   CodexAppServerRequestResponder,
@@ -592,6 +596,8 @@ type CodexSubagentState = {
 // an active goal auto-continues. Treat that short boundary as one SocketAgent
 // run so the app never loses its running state or Stop control between turns.
 const CODEX_TURN_COMPLETION_GRACE_MS = 500;
+/** Codex sends no change notification for background terminals, so the list is polled while any exist. */
+const CODEX_BACKGROUND_TERMINAL_POLL_MS = 15_000;
 
 // ─── CodexSession ─────────────────────────────────────────────────────────
 
@@ -611,6 +617,13 @@ export class CodexSession {
   private appServerMcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
   private realtime: CodexRealtimeBridge | null = null;
   private activeAppServerTurnId: string | null = null;
+  /**
+   * Unified exec commands Codex left running after their turn, keyed by
+   * process id. The app lists and stops them like Claude's background tasks.
+   */
+  private backgroundTerminals = new Map<string, { itemId: string; command: string }>();
+  private backgroundTerminalRefresh: Promise<void> | null = null;
+  private backgroundTerminalPoll: ReturnType<typeof setTimeout> | null = null;
   /** rootTurnId Codex reported for the active turn; a turn without one is its own root. */
   private activeAppServerRootTurnId: string | null = null;
   private _currentParentTurn: CodexTurnLineage | null = null;
@@ -778,7 +791,8 @@ export class CodexSession {
       || this._queuedPrompts.length > 0
       || this._pendingAppServerSteers.length > 0
       || this.pendingQuestions.size > 0
-      || this.hasRunningSubagents;
+      || this.hasRunningSubagents
+      || this.backgroundTerminals.size > 0;
   }
 
   private cancelPendingAppServerTurnCompletion(): boolean {
@@ -797,7 +811,12 @@ export class CodexSession {
     const sid = this.sessionId;
     if (!sid || this.appServerActiveToolCalls.size === 0) return;
     const historyEntries: HistoryEntry[] = [];
+    // A command still running in a background terminal settles when Codex
+    // reports its exit, not when the turn that started it ends.
+    const backgroundItemIds = new Set([...this.backgroundTerminals.values()].map((terminal) => terminal.itemId));
+    const kept = new Map([...this.appServerActiveToolCalls].filter(([toolUseId]) => backgroundItemIds.has(toolUseId)));
     for (const [toolUseId, call] of this.appServerActiveToolCalls.entries()) {
+      if (kept.has(toolUseId)) continue;
       this.send({
         type: "tool_result",
         toolUseId,
@@ -816,7 +835,84 @@ export class CodexSession {
       this.appServerToolOutput.delete(toolUseId);
     }
     appendHistoryBulk(sid, historyEntries);
-    this.appServerActiveToolCalls.clear();
+    this.appServerActiveToolCalls = kept;
+  }
+
+  /**
+   * Reads Codex's background terminals for this thread and tells the app
+   * about any change. Codex has no change notification, so this runs when a
+   * turn or command settles and on a timer while terminals remain.
+   */
+  refreshBackgroundTerminals(): Promise<void> {
+    if (this.backgroundTerminalRefresh) return this.backgroundTerminalRefresh;
+    const refresh = (async () => {
+      const client = this.appServer;
+      const threadId = this.threadId;
+      if (!client || !threadId || !this.appServerInitialized) {
+        this.applyBackgroundTerminals([]);
+        return;
+      }
+      const terminals: ThreadBackgroundTerminal[] = [];
+      let cursor: string | null = null;
+      do {
+        const response: unknown = await client.request("thread/backgroundTerminals/list", { threadId, cursor, limit: 50 });
+        const page = parseCodexResponse("thread/backgroundTerminals/list", response);
+        terminals.push(...page.data);
+        cursor = page.nextCursor;
+      } while (cursor);
+      this.applyBackgroundTerminals(terminals);
+    })().catch((error: unknown) => {
+      // An older CLI has no terminal list; nothing is tracked then.
+      if (error instanceof CodexAppServerProtocolError && error.unsupportedMethod) {
+        this.applyBackgroundTerminals([]);
+        return;
+      }
+      console.warn(`[codex app-server] Could not list background terminals: ${codexAppServerErrorMessage(error, String(error))}`);
+    }).finally(() => {
+      this.backgroundTerminalRefresh = null;
+    });
+    this.backgroundTerminalRefresh = refresh;
+    return refresh;
+  }
+
+  private applyBackgroundTerminals(terminals: ThreadBackgroundTerminal[]): void {
+    const next = new Map(terminals.map((terminal) => [terminal.processId, { itemId: terminal.itemId, command: terminal.command }]));
+    const changed = next.size !== this.backgroundTerminals.size
+      || [...next.keys()].some((processId) => !this.backgroundTerminals.has(processId));
+    this.backgroundTerminals = next;
+    if (this.backgroundTerminalPoll) {
+      clearTimeout(this.backgroundTerminalPoll);
+      this.backgroundTerminalPoll = null;
+    }
+    if (next.size > 0) {
+      this.backgroundTerminalPoll = setTimeout(() => {
+        this.backgroundTerminalPoll = null;
+        void this.refreshBackgroundTerminals();
+      }, CODEX_BACKGROUND_TERMINAL_POLL_MS);
+      this.backgroundTerminalPoll.unref?.();
+    }
+    if (!changed) return;
+    this.sendBackgroundTerminals();
+    this.onActivity?.();
+    // The last terminal ending may leave the session idle.
+    if (next.size === 0) this.scheduleAppServerIdleStop();
+  }
+
+  private sendBackgroundTerminals(ws?: ClientTransport): void {
+    const sid = this.sessionId;
+    if (!sid) return;
+    const message: BackgroundTasksChangedServerMessage = {
+      type: "background_tasks_changed",
+      tasks: [...this.backgroundTerminals].map(([processId, terminal]) => ({
+        taskId: processId,
+        taskType: "codex_terminal",
+        description: terminal.command,
+        toolUseId: terminal.itemId,
+      })),
+      sessionId: sid,
+    };
+    if (ws) this.sendTo(ws, message);
+    else this.send(message);
   }
 
   private scheduleAppServerTurnCompletion(status = "completed"): void {
@@ -871,7 +967,10 @@ export class CodexSession {
   }
   get sessionModel(): string | null { return this._model; }
   get lastUsage(): NonNullable<CodexSession["_lastUsage"]> | null { return this._lastUsage; }
-  get activeBackgroundTasks(): Map<string, string> { return new Map(); }
+  /** Background terminal process ids mapped to their command item ids. */
+  get activeBackgroundTasks(): Map<string, string> {
+    return new Map([...this.backgroundTerminals].map(([processId, terminal]) => [processId, terminal.itemId]));
+  }
   get lastPreview(): string { return this._lastAssistantText; }
   getSessionId(): string | null { return this.sessionId; }
   getCwd(): string { return this.cwd; }
@@ -1094,6 +1193,7 @@ export class CodexSession {
       if (pending.questionData) this.sendTo(ws, pending.questionData);
     }
     this.sendSubagentSnapshot(ws);
+    if (this.backgroundTerminals.size > 0) this.sendBackgroundTerminals(ws);
     void this.reconcileCodexSubagents();
   }
 
@@ -1485,7 +1585,19 @@ export class CodexSession {
     stopAppMonitor(taskId, true, true);
   }
 
-  async stopTask(_taskId: string): Promise<void> {}
+  /** Stops a background terminal by process id or by its command item id. */
+  async stopTask(taskId: string): Promise<void> {
+    const processId = this.backgroundTerminals.has(taskId)
+      ? taskId
+      : [...this.backgroundTerminals].find(([, terminal]) => terminal.itemId === taskId)?.[0];
+    const client = this.appServer;
+    const threadId = this.threadId;
+    if (!processId || !client || !threadId) return;
+    const result = parseCodexResponse("thread/backgroundTerminals/terminate",
+      await client.request("thread/backgroundTerminals/terminate", { threadId, processId }));
+    if (!result.terminated) console.warn(`[codex app-server] Background terminal ${processId} was not terminated`);
+    await this.refreshBackgroundTerminals();
+  }
   async mcpServerStatus(): Promise<unknown[]> { return []; }
   async reconnectMcpServer(_name: string): Promise<{ success: boolean; error?: string }> {
     return { success: false, error: "MCP not supported on codex backend" };
@@ -3298,6 +3410,8 @@ export class CodexSession {
     }
     const client = this.appServer;
     this.appServer = null;
+    // Background terminals are the process's children and end with it.
+    this.applyBackgroundTerminals([]);
     this.appServerInitialized = false;
     this.appServerInitializePromise = null;
     // The call cannot outlive its process; tell the phone before the exit lands.
@@ -5002,6 +5116,9 @@ export class CodexSession {
         if (this._manualCompactionPending || this._rewindPending) { this.activeAppServerTurnId = null; return; }
         this.requeuePendingAppServerSteers("turn completed before steered userMessage was emitted");
         this.activeAppServerTurnId = null;
+        // Commands the model left running show up here, before the completion
+        // grace settles the turn's open tool calls.
+        void this.refreshBackgroundTerminals();
         // serverRequest/resolved owns per-request cleanup. A root turn ending
         // must not cancel an approval still owned by a background subagent.
         if (turn.status === "failed") {
@@ -5274,6 +5391,8 @@ export class CodexSession {
           timestamp: now(),
         });
       } else {
+        // A background terminal exiting completes its command item.
+        if (this.backgroundTerminals.size > 0) void this.refreshBackgroundTerminals();
         const buffered = this.appServerToolOutput.get(item.id) || "";
         const baseOutput = item.aggregatedOutput ?? buffered;
         const suffix = item.exitCode ? `\n[exit ${item.exitCode}]` : "";

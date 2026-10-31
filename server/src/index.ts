@@ -46,7 +46,7 @@ import { flushSessionStore, flushSdkEventQueue } from "./session-store";
 import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
-import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
+import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, type CodexTurnLineage, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { startBashCapturePruning } from "./bash-capture";
 import { readFullOutput, startFullOutputTrimming } from "./full-output-store";
 import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, updateMemoryCards, getMemoryCardEntry, deleteSession, deleteSessionArtifacts, makeSessionPermanent, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getActiveTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
@@ -3019,9 +3019,15 @@ function delegatedAgentPromptPreview(prompt: string): string {
   return compact.length <= 300 ? compact : `${compact.slice(0, 297)}...`;
 }
 
+/**
+ * Starts or continues the child's turn. A Codex child started by a Codex
+ * supervisor's turn receives that turn as its parent; a Claude supervisor has
+ * no Codex turn, so the child's turn is its own root.
+ */
 async function launchDelegatedAgentTurn(
   record: DelegatedAgentRecord,
   prompt: string,
+  supervisorTurn?: CodexTurnLineage,
 ): Promise<DelegatedAgentRecord> {
   if (record.childSessionId) {
     assertSessionAutomationAllowed(record.childSessionId, "delegated agent follow-up");
@@ -3098,7 +3104,9 @@ async function launchDelegatedAgentTurn(
   let launchFailure: Error | null = null;
   const resumeId = record.childSessionId || undefined;
   const turnAbortState = turnAbortTracker.begin(child);
-  const runPromise = child.runQuery(prompt, resumeId);
+  const runPromise = child instanceof CodexSession && supervisorTurn
+    ? child.runQueryWithOptions(prompt, resumeId, { parentTurn: supervisorTurn })
+    : child.runQuery(prompt, resumeId);
   void runPromise
     .then(() => {
       if (shuttingDown) return;
@@ -3347,6 +3355,8 @@ interface DelegationScope {
   defaultCwd: string;
   defaultBackend: Backend;
   remoteSupervisor?: RemoteSupervisor;
+  /** The Codex supervisor's running turn, so a Codex child's turn is attributed to it. */
+  supervisorTurn?: CodexTurnLineage;
 }
 
 async function manageAgentSession(
@@ -3364,11 +3374,13 @@ async function manageAgentSession(
     : undefined;
   const computer = args.computer || mirrored?.publicKey;
   if (computer) return manageRemoteDelegation(supervisorSessionId, supervisor, { ...args, computer });
+  const supervisorTurn = supervisor instanceof CodexSession ? supervisor.activeTurnLineage : null;
   return manageDelegatedAgents({
     supervisorSessionId,
     parentSessionId: supervisor.getSessionId()?.trim() || supervisorSessionId,
     defaultCwd: supervisor.getCwd(),
     defaultBackend: getSession(supervisorSessionId)?.backend || "claude",
+    ...(supervisorTurn ? { supervisorTurn } : {}),
   }, args);
 }
 
@@ -3424,7 +3436,7 @@ async function manageDelegatedAgents(
       ...(scope.remoteSupervisor ? { remoteSupervisor: scope.remoteSupervisor } : {}),
       runs: [],
     });
-    const started = await launchDelegatedAgentTurn(record, prompt);
+    const started = await launchDelegatedAgentTurn(record, prompt, scope.supervisorTurn);
     return {
       action,
       delegation: started,
@@ -3481,7 +3493,7 @@ async function manageDelegatedAgents(
     const childWasRunning = record.childSessionId
       ? activeSessions.get(record.childSessionId)?.isRunning === true
       : false;
-    const resumed = await launchDelegatedAgentTurn(record, prompt);
+    const resumed = await launchDelegatedAgentTurn(record, prompt, scope.supervisorTurn);
     return {
       action,
       delegation: resumed,

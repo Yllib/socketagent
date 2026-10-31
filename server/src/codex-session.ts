@@ -80,6 +80,7 @@ import {
   CodexAppServerNotification,
   CodexAppServerRequestResponder,
   CodexAppServerUserInput,
+  type CodexAppServerTurnStartParams,
 } from "./codex-app-server-client";
 import { buildCodexSpawn } from "./codex-env";
 import { listSkills, SkillEntry } from "./skills-manager";
@@ -417,9 +418,17 @@ export type CodexSlashCommand = {
   availability?: "app-server" | "any";
 };
 
+/** The Codex turn that caused a turn in another thread, such as a delegated child's. */
+export interface CodexTurnLineage {
+  parentTurnId: string;
+  rootTurnId: string;
+}
+
 type CodexRunOptions = {
   fastMode?: boolean;
   messageId?: string;
+  /** Set when a Codex supervisor's turn starts this one so Codex can attribute the work. */
+  parentTurn?: CodexTurnLineage;
 };
 
 export const CODEX_NATIVE_SLASH_COMMANDS: CodexSlashCommand[] = [
@@ -602,6 +611,9 @@ export class CodexSession {
   private appServerMcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
   private realtime: CodexRealtimeBridge | null = null;
   private activeAppServerTurnId: string | null = null;
+  /** rootTurnId Codex reported for the active turn; a turn without one is its own root. */
+  private activeAppServerRootTurnId: string | null = null;
+  private _currentParentTurn: CodexTurnLineage | null = null;
   private appServerTurnSettler: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private pendingAppServerTurnCompletion: ReturnType<typeof setTimeout> | null = null;
   private appServerAgentText = new Map<string, string>();
@@ -2536,19 +2548,65 @@ export class CodexSession {
    * existing SocketAgent/Codex thread.
    */
   async runQueryWithOptions(prompt: string, resumeSessionId?: string, options: CodexRunOptions = {}): Promise<void> {
-    if (options.fastMode === undefined && options.messageId === undefined) {
+    if (options.fastMode === undefined && options.messageId === undefined && options.parentTurn === undefined) {
       return this.runQuery(prompt, resumeSessionId);
     }
     const previousFastMode = this._fastMode;
     const previousClientMessageId = this._currentClientMessageId;
+    const previousParentTurn = this._currentParentTurn;
     if (options.fastMode !== undefined) this._fastMode = options.fastMode;
     this._currentClientMessageId = options.messageId || null;
+    this._currentParentTurn = options.parentTurn ?? null;
     try {
       return await this.runQuery(prompt, resumeSessionId);
     } finally {
       this._fastMode = previousFastMode;
       this._currentClientMessageId = previousClientMessageId;
+      this._currentParentTurn = previousParentTurn;
     }
+  }
+
+  /**
+   * The running turn as a parent for work started on its behalf, or null when
+   * idle. Passed to a delegated Codex child's turn/start so Codex attributes
+   * the child's work to this turn and its root.
+   */
+  get activeTurnLineage(): CodexTurnLineage | null {
+    const parentTurnId = this.activeAppServerTurnId;
+    if (!parentTurnId) return null;
+    return { parentTurnId, rootTurnId: this.activeAppServerRootTurnId || parentTurnId };
+  }
+
+  /** turn/start params for a prompt, including the parent turn for delegated work. */
+  private appServerTurnStartParams(
+    threadId: string,
+    nativePrompt: string,
+    clientUserMessageId: string | undefined,
+    turnModel: string | undefined,
+  ): CodexAppServerTurnStartParams {
+    const collaborationMode = this.codexCollaborationMode();
+    return {
+      threadId,
+      clientUserMessageId,
+      cwd: this.cwd,
+      input: this.buildAppServerTurnInput(nativePrompt),
+      model: turnModel,
+      ...(collaborationMode ? { collaborationMode } : {}),
+      ...(this._currentParentTurn ? {
+        parentTurnId: this._currentParentTurn.parentTurnId,
+        rootTurnId: this._currentParentTurn.rootTurnId,
+      } : {}),
+    };
+  }
+
+  /** Records the turn Codex says is active, with its root when reported. */
+  private adoptActiveAppServerTurn(source: unknown): void {
+    const turnId = this.extractTurnId(source);
+    if (!turnId) return;
+    const record = isCodexRecord(source) ? source : {};
+    const turn = isCodexRecord(record.turn) ? record.turn : record;
+    this.activeAppServerTurnId = turnId;
+    this.activeAppServerRootTurnId = typeof turn.rootTurnId === "string" && turn.rootTurnId ? turn.rootTurnId : null;
   }
 
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
@@ -2820,21 +2878,14 @@ export class CodexSession {
       void completion.catch(() => {});
 
       this.noteFullAccess(this.threadId);
-      const collaborationMode = this.codexCollaborationMode();
-      const turn = await this.appServer!.startTurn({
-        threadId: this.threadId,
-        clientUserMessageId,
-        cwd: this.cwd,
-        input: this.buildAppServerTurnInput(nativePrompt),
-        model: turnModel,
-        ...(collaborationMode ? { collaborationMode } : {}),
-      });
+      const turn = await this.appServer!.startTurn(
+        this.appServerTurnStartParams(this.threadId, nativePrompt, clientUserMessageId, turnModel));
       this._pendingTransferContext = null;
       if (transferContext) {
         const transferSessionId = this.sessionId || this.replacesSessionId;
         if (transferSessionId) clearSessionPendingHandoffContext(transferSessionId);
       }
-      this.activeAppServerTurnId = this.extractTurnId(turn) || this.activeAppServerTurnId;
+      this.adoptActiveAppServerTurn(turn);
       this.flushPendingUserPrompt();
       this.flushPendingAppServerSteers();
 
@@ -3745,6 +3796,7 @@ export class CodexSession {
         ) {
           console.warn(`[codex app-server] adopting authoritative active turn ${authoritativeTurnId} after stale steer target ${turnId}`);
           this.activeAppServerTurnId = authoritativeTurnId;
+          this.activeAppServerRootTurnId = null;
           pending.steerSent = false;
           this.sendPendingAppServerSteer(pending);
           return;
@@ -4255,6 +4307,7 @@ export class CodexSession {
         }
         if (this._manualCompactionPending || this._rewindPending) {
           this.activeAppServerTurnId = typeof turn.id === "string" ? turn.id : null;
+          this.activeAppServerRootTurnId = null;
           this.onActivity?.();
           return;
         }
@@ -4265,7 +4318,7 @@ export class CodexSession {
         this.cancelPendingAppServerTurnCompletion();
         this._isRunning = true;
         this._runStartedAt ||= new Date().toISOString();
-        this.activeAppServerTurnId = this.extractTurnId(p) || this.activeAppServerTurnId;
+        this.adoptActiveAppServerTurn(p);
         this.flushPendingAppServerSteers();
         if (this.sessionId) {
           this.send({

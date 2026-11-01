@@ -17,6 +17,7 @@ const PRIORITY_MESSAGE_TYPES = new Set([
 // connection's selected session. They can respond while a resume or prompt is
 // starting instead of waiting behind it.
 const CONCURRENT_READ_MESSAGE_TYPES = new Set([
+  "get_model_catalog",
   "get_push_registration",
   "get_recent_cwds",
   "get_server_settings",

@@ -4198,6 +4198,25 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "get_model_catalog"
+            },
+            "backend": {
+              "$ref": "#/definitions/Backend"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "backend",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "cancel_scheduled_task"
             },
             "taskId": {

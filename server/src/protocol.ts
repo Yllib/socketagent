@@ -1351,6 +1351,12 @@ export interface ListScheduledTasksMessage {
   type: "list_scheduled_tasks";
 }
 
+/** Asks for a harness's cached model list without opening a session. */
+export interface GetModelCatalogMessage {
+  type: "get_model_catalog";
+  backend: Backend;
+}
+
 export interface CancelScheduledTaskMessage {
   type: "cancel_scheduled_task";
   taskId: string;
@@ -1741,6 +1747,7 @@ export type ClientMessage = { commandId?: string } & (
   | GetPushRegistrationMessage
   | ScheduleTaskMessage
   | ListScheduledTasksMessage
+  | GetModelCatalogMessage
   | CancelScheduledTaskMessage
   | ExecuteScheduledTaskMessage
   | UpdateScheduledTaskMessage
@@ -3757,6 +3764,15 @@ export interface SessionSettingsServerMessage {
   settings: AgentSessionSettings;
 }
 
+/** Reply to get_model_catalog. models is empty when this computer has not
+ *  cached a list for the harness yet. */
+export interface ModelCatalogServerMessage {
+  type: "model_catalog";
+  backend: Backend;
+  models: Array<Record<string, unknown>>;
+  updatedAt?: string;
+}
+
 export interface SupportedModelsServerMessage {
   type: "supported_models";
   models: Array<Record<string, unknown>>;
@@ -4190,6 +4206,7 @@ export type ServerMessage =
   | SessionLifecycleServerMessage
   | SessionSettingsServerMessage
   | SupportedModelsServerMessage
+  | ModelCatalogServerMessage
   | TaskCompletedHookServerMessage
   | ElicitationUrlServerMessage
   | UsageUpdateServerMessage

@@ -7252,6 +7252,18 @@ function createConnectionHandler(
         break;
       }
 
+      case "get_model_catalog": {
+        const backend = msg.backend === "codex" ? "codex" : "claude";
+        const catalog = getCachedModelCatalog(backend);
+        sendJson({
+          type: "model_catalog",
+          backend,
+          models: catalog?.models ?? [],
+          ...(catalog ? { updatedAt: catalog.updatedAt } : {}),
+        });
+        break;
+      }
+
       case "cancel_scheduled_task": {
         const task = getScheduledTask(msg.taskId);
         if (task && task.status === "pending") {

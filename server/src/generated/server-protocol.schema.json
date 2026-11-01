@@ -457,6 +457,9 @@
           "$ref": "#/definitions/SupportedModelsServerMessage"
         },
         {
+          "$ref": "#/definitions/ModelCatalogServerMessage"
+        },
+        {
           "$ref": "#/definitions/TaskCompletedHookServerMessage"
         },
         {
@@ -8975,6 +8978,33 @@
         "models",
         "sessionId",
         "backend"
+      ]
+    },
+    "ModelCatalogServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "model_catalog"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "backend",
+        "models"
       ]
     },
     "TaskCompletedHookServerMessage": {

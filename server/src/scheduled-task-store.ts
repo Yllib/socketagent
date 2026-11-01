@@ -204,6 +204,30 @@ function writeTasks(tasks: ScheduledTask[]): void {
   fs.renameSync(temporary, TASKS_FILE);
 }
 
+/** How many of each task's newest runs the task list carries. */
+export const LISTED_RUNS_PER_TASK = 20;
+/** Run summaries in the list are cut to this many characters. */
+export const LISTED_RUN_SUMMARY_CHARS = 400;
+
+/** A task as the list message carries it: newest runs only, plus a count of the rest. */
+export type ScheduledTaskListing = ScheduledTask & { runsOmitted?: number };
+
+/**
+ * Tasks for scheduled_task_list. Full run histories reached megabytes, sent on
+ * every change, so the list has each task's newest runs with short summaries.
+ * get_scheduled_task_runs returns one task's full runs.
+ */
+export function scheduledTaskListing(tasks: ScheduledTask[]): ScheduledTaskListing[] {
+  return tasks.map((task) => {
+    const runs = task.runs ?? [];
+    const omitted = Math.max(0, runs.length - LISTED_RUNS_PER_TASK);
+    const listed = runs.slice(omitted).map(run => run.resultSummary && run.resultSummary.length > LISTED_RUN_SUMMARY_CHARS
+      ? { ...run, resultSummary: `${run.resultSummary.slice(0, LISTED_RUN_SUMMARY_CHARS)}…` }
+      : run);
+    return omitted ? { ...task, runs: listed, runsOmitted: omitted } : { ...task, runs: listed };
+  });
+}
+
 export function listScheduledTasks(): ScheduledTask[] {
   return readTasks().sort(
     (a, b) => new Date(a.scheduledTime).getTime() - new Date(b.scheduledTime).getTime()
@@ -297,7 +321,11 @@ export function parseSchedule(
         return { error: "Weekdays must be 0 (Sunday) to 6 (Saturday)" };
       }
       const daysOfWeek = [...new Set(days)].sort((a, b) => a - b);
-      return { scheduledTime: time, recurrence: daysOfWeek.length ? { type, daysOfWeek } : { type } };
+      if (!daysOfWeek.length) return { scheduledTime: time, recurrence: { type } };
+      // The first run is the first chosen weekday at or after the given time.
+      const first = new Date(anchor);
+      while (!daysOfWeek.includes(first.getDay())) first.setDate(first.getDate() + 1);
+      return { scheduledTime: first.toISOString(), recurrence: { type, daysOfWeek } };
     }
     case "monthly":
       return { scheduledTime: time, recurrence: { type, dayOfMonth: anchor.getDate() } };

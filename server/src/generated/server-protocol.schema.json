@@ -412,6 +412,12 @@
           "$ref": "#/definitions/ScheduledTaskUpdateServerMessage"
         },
         {
+          "$ref": "#/definitions/ScheduledTaskSaveResultServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ScheduledTaskRunsServerMessage"
+        },
+        {
           "$ref": "#/definitions/ScheduledTaskNotificationServerMessage"
         },
         {
@@ -8130,7 +8136,7 @@
         "tasks": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/ScheduledTask"
+            "$ref": "#/definitions/ScheduledTaskListing"
           }
         },
         "revision": {
@@ -8142,9 +8148,12 @@
         "tasks"
       ]
     },
-    "ScheduledTask": {
+    "ScheduledTaskListing": {
       "type": "object",
       "properties": {
+        "runsOmitted": {
+          "type": "number"
+        },
         "id": {
           "type": "string"
         },
@@ -8229,11 +8238,11 @@
         }
       },
       "required": [
+        "createdAt",
+        "cwd",
         "id",
         "prompt",
-        "cwd",
         "scheduledTime",
-        "createdAt",
         "status"
       ]
     },
@@ -8359,6 +8368,146 @@
       "required": [
         "type",
         "task"
+      ]
+    },
+    "ScheduledTask": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "backend": {
+          "$ref": "#/definitions/Backend"
+        },
+        "codexDriver": {
+          "$ref": "#/definitions/CodexDriver"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "$ref": "#/definitions/AgentEffort"
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "scheduledTime": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ScheduledTaskStatus"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "resultSummary": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "createdBySessionId": {
+          "type": "string"
+        },
+        "linkedSessionId": {
+          "type": "string"
+        },
+        "recurrence": {
+          "$ref": "#/definitions/RecurrenceConfig"
+        },
+        "reuseSession": {
+          "type": "boolean"
+        },
+        "notificationMode": {
+          "type": "string",
+          "enum": [
+            "completion",
+            "quiet"
+          ]
+        },
+        "runCount": {
+          "type": "number"
+        },
+        "lastRunAt": {
+          "type": "string"
+        },
+        "lastReadAt": {
+          "type": "string"
+        },
+        "archivedAt": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TaskRun"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "prompt",
+        "cwd",
+        "scheduledTime",
+        "createdAt",
+        "status"
+      ]
+    },
+    "ScheduledTaskSaveResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "scheduled_task_save_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId"
+      ]
+    },
+    "ScheduledTaskRunsServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "scheduled_task_runs"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TaskRun"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "taskId",
+        "runs"
       ]
     },
     "ScheduledTaskNotificationServerMessage": {

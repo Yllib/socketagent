@@ -4,7 +4,7 @@
 process.env.TZ = "America/New_York";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { parseSchedule, getNextRunTime, settleScheduledTaskAfterRun, scheduledTaskCanArchive, MIN_CUSTOM_INTERVAL_MS } = require("#server/scheduled-task-store");
+const { parseSchedule, getNextRunTime, settleScheduledTaskAfterRun, scheduledTaskCanArchive, scheduledTaskListing, LISTED_RUNS_PER_TASK, LISTED_RUN_SUMMARY_CHARS, MIN_CUSTOM_INTERVAL_MS } = require("#server/scheduled-task-store");
 
 /** @param {string} iso */
 const at = (iso) => new Date(iso).getTime();
@@ -106,4 +106,27 @@ test("cancelled tasks can be archived, including recurring ones", () => {
   assert.equal(scheduledTaskCanArchive({ status: "pending", recurrence: { type: "daily" } }), false);
   assert.equal(scheduledTaskCanArchive({ status: "completed" }), true);
   assert.equal(scheduledTaskCanArchive({ status: "cancelled", archivedAt: "x" }), false);
+});
+
+test("weekly with weekdays starts on the first chosen day at or after the time", () => {
+  // Saturday 7 Nov 2026, 09:00 EST; Monday and Thursday only.
+  const parsed = parseSchedule("2026-11-07T14:00:00Z", { type: "weekly", daysOfWeek: [4, 1] });
+  assert.equal(parsed.scheduledTime, "2026-11-09T14:00:00.000Z");
+  // A time already on a chosen day stays.
+  assert.equal(parseSchedule("2026-11-09T14:00:00Z", { type: "weekly", daysOfWeek: [1] }).scheduledTime, "2026-11-09T14:00:00.000Z");
+});
+
+test("the task list carries each task's newest runs and counts the rest", () => {
+  /** @param {number} i */
+  const run = (i) => ({ sessionId: `s${i}`, startedAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(), status: /** @type {const} */ ("completed") });
+  const base = { prompt: "p", cwd: "/", createdAt: "x", status: /** @type {const} */ ("pending"), scheduledTime: "2026-11-01T12:00:00.000Z" };
+  const runs = [...Array(LISTED_RUNS_PER_TASK + 5).keys()].map(run);
+  const [long, short] = scheduledTaskListing([{ ...base, id: "long", runs }, { ...base, id: "short", runs: runs.slice(0, 3) }]);
+  assert.equal(long.runs?.length, LISTED_RUNS_PER_TASK);
+  assert.equal(long.runs?.[0].sessionId, "s5", "oldest five are left out");
+  assert.equal(long.runsOmitted, 5);
+  assert.equal(short.runs?.length, 3);
+  assert.equal(short.runsOmitted, undefined);
+  const [summarized] = scheduledTaskListing([{ ...base, id: "s", runs: [{ ...run(1), resultSummary: "x".repeat(LISTED_RUN_SUMMARY_CHARS + 50) }] }]);
+  assert.equal(summarized.runs?.[0].resultSummary, `${"x".repeat(LISTED_RUN_SUMMARY_CHARS)}…`);
 });

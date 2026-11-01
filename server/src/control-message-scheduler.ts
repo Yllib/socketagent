@@ -18,6 +18,7 @@ const PRIORITY_MESSAGE_TYPES = new Set([
 // starting instead of waiting behind it.
 const CONCURRENT_READ_MESSAGE_TYPES = new Set([
   "get_model_catalog",
+  "get_scheduled_task_runs",
   "get_push_registration",
   "get_recent_cwds",
   "get_server_settings",

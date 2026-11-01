@@ -4102,6 +4102,9 @@
         {
           "type": "object",
           "properties": {
+            "requestId": {
+              "type": "string"
+            },
             "linkedSessionId": {
               "type": "string"
             },
@@ -4199,6 +4202,25 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "get_scheduled_task_runs"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "taskId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "cancel_scheduled_task"
             },
             "taskId": {
@@ -4238,6 +4260,9 @@
             "type": {
               "type": "string",
               "const": "update_scheduled_task"
+            },
+            "requestId": {
+              "type": "string"
             },
             "taskId": {
               "type": "string"

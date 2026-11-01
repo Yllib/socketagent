@@ -54,7 +54,7 @@ import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummar
 import { expiredFleetingSessions, fleetingExpiresAt, fleetingChildExpiredMessage, requireStartLifetime } from "./fleeting-sessions";
 import { watchNativeSessionFolders } from "./native-session-watcher";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
-import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, parseSchedule, settleScheduledTaskAfterRun, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
+import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, parseSchedule, scheduledTaskListing, settleScheduledTaskAfterRun, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
 import {
   AgentEffort,
   AgentSessionSettings,
@@ -1588,7 +1588,7 @@ function broadcastSessionList(delayMs = 500, reason = "update"): void {
 function broadcastScheduledTaskList(): void {
   const msg = JSON.stringify({
     type: "scheduled_task_list",
-    tasks: listScheduledTasks(),
+    tasks: scheduledTaskListing(listScheduledTasks()),
     revision: getScheduledTaskRevision(),
   });
   for (const client of connectedClients) {
@@ -7200,17 +7200,21 @@ function createConnectionHandler(
       // ── Scheduled tasks ──
 
       case "schedule_task": {
+        const requestId = msg.requestId;
+        const saveFailed = (error: string) => sendJson(requestId
+          ? { type: "scheduled_task_save_result", requestId, error }
+          : { type: "error", message: error });
         if (msg.linkedSessionId && !getSession(msg.linkedSessionId)) {
-          sendJson({ type: "error", message: "The linked session no longer exists on this computer" });
+          saveFailed("The linked session no longer exists on this computer");
           break;
         }
         const schedule = parseSchedule(msg.scheduledTime, msg.recurrence);
         if ("error" in schedule) {
-          sendJson({ type: "error", message: schedule.error });
+          saveFailed(schedule.error);
           break;
         }
         if (!fs.existsSync(msg.cwd)) {
-          sendJson({ type: "error", message: `Folder not found on this computer: ${msg.cwd}` });
+          saveFailed(`Folder not found on this computer: ${msg.cwd}`);
           break;
         }
         const backend = msg.backend === "codex" ? "codex" : "claude";
@@ -7248,15 +7252,21 @@ function createConnectionHandler(
         saveScheduledTask(task);
         console.log(`[Scheduler] Task created: ${task.id} for ${task.scheduledTime}${task.recurrence ? ` (recurring: ${task.recurrence.type})` : ""}`);
         broadcastScheduledTaskList();
+        if (requestId) sendJson({ type: "scheduled_task_save_result", requestId, taskId: task.id });
         break;
       }
 
       case "list_scheduled_tasks": {
         sendJson({
           type: "scheduled_task_list",
-          tasks: listScheduledTasks(),
+          tasks: scheduledTaskListing(listScheduledTasks()),
           revision: getScheduledTaskRevision(),
         });
+        break;
+      }
+
+      case "get_scheduled_task_runs": {
+        sendJson({ type: "scheduled_task_runs", taskId: msg.taskId, runs: getScheduledTask(msg.taskId)?.runs ?? [] });
         break;
       }
 
@@ -7304,9 +7314,13 @@ function createConnectionHandler(
       }
 
       case "update_scheduled_task": {
+        const requestId = msg.requestId;
+        const saveFailed = (error: string) => sendJson(requestId
+          ? { type: "scheduled_task_save_result", requestId, taskId: msg.taskId, error }
+          : { type: "error", message: error });
         const task = getScheduledTask(msg.taskId);
         if (!task) {
-          sendJson({ type: "error", message: "Scheduled task not found" });
+          saveFailed("Scheduled task not found");
           break;
         }
         const scheduleChanged = msg.scheduledTime !== undefined || msg.recurrence !== undefined;
@@ -7314,15 +7328,15 @@ function createConnectionHandler(
           ? parseSchedule(msg.scheduledTime ?? task.scheduledTime, msg.recurrence === undefined ? task.recurrence : msg.recurrence)
           : undefined;
         if (schedule && "error" in schedule) {
-          sendJson({ type: "error", message: schedule.error });
+          saveFailed(schedule.error);
           break;
         }
         if (msg.cwd !== undefined && !fs.existsSync(msg.cwd)) {
-          sendJson({ type: "error", message: `Folder not found on this computer: ${msg.cwd}` });
+          saveFailed(`Folder not found on this computer: ${msg.cwd}`);
           break;
         }
         if (msg.linkedSessionId && !getSession(msg.linkedSessionId)) {
-          sendJson({ type: "error", message: "The linked session no longer exists on this computer" });
+          saveFailed("The linked session no longer exists on this computer");
           break;
         }
         if (msg.name !== undefined) {
@@ -7384,6 +7398,7 @@ function createConnectionHandler(
         broadcastStatusSync();
         console.log(`[Scheduler] Task updated: ${task.id}`);
         broadcastScheduledTaskList();
+        if (requestId) sendJson({ type: "scheduled_task_save_result", requestId, taskId: task.id });
         break;
       }
 

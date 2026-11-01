@@ -2,7 +2,7 @@ import type { AccountInfo, AgentInfo, SDKControlGetContextUsageResponse, SDKFile
 import type { CodexSubagentStatus } from "./codex-subagent-state";
 import type { TurnPlanStep } from "./generated/codex/types/v2/TurnPlanStep";
 import type { MessagePhase } from "./generated/codex/types/MessagePhase";
-import type { ScheduledTask } from "./scheduled-task-store";
+import type { ScheduledTaskListing, ScheduledTask, TaskRun } from "./scheduled-task-store";
 import type { ReasoningEffort } from "./generated/codex/types/ReasoningEffort";
 import { isRecord } from "./value-guards";
 
@@ -1326,6 +1326,8 @@ export interface ListSdkSessionsMessage {
 }
 
 export interface ScheduleTaskMessage {
+  /** When set, the server answers with scheduled_task_save_result instead of a bare error. */
+  requestId?: string;
   /** Optional session on this server to receive results and continue its agent. */
   linkedSessionId?: string;
   type: "schedule_task";
@@ -1364,6 +1366,12 @@ export interface GetModelCatalogMessage {
   backend: Backend;
 }
 
+/** Asks for one task's full run history; the list carries only recent runs. */
+export interface GetScheduledTaskRunsMessage {
+  type: "get_scheduled_task_runs";
+  taskId: string;
+}
+
 export interface CancelScheduledTaskMessage {
   type: "cancel_scheduled_task";
   taskId: string;
@@ -1376,6 +1384,8 @@ export interface ExecuteScheduledTaskMessage {
 
 export interface UpdateScheduledTaskMessage {
   type: "update_scheduled_task";
+  /** When set, the server answers with scheduled_task_save_result instead of a bare error. */
+  requestId?: string;
   taskId: string;
   name?: string;
   prompt?: string;
@@ -1758,6 +1768,7 @@ export type ClientMessage = { commandId?: string } & (
   | ScheduleTaskMessage
   | ListScheduledTasksMessage
   | GetModelCatalogMessage
+  | GetScheduledTaskRunsMessage
   | CancelScheduledTaskMessage
   | ExecuteScheduledTaskMessage
   | UpdateScheduledTaskMessage
@@ -3565,8 +3576,24 @@ export interface ActiveSubagentsServerMessage {
 
 export interface ScheduledTaskListServerMessage {
   type: "scheduled_task_list";
-  tasks: ScheduledTask[];
+  /** Each task carries its newest runs; runsOmitted counts the older ones. */
+  tasks: ScheduledTaskListing[];
   revision?: string;
+}
+
+/** Answers a schedule_task or update_scheduled_task that had a requestId. error means nothing was saved. */
+export interface ScheduledTaskSaveResultServerMessage {
+  type: "scheduled_task_save_result";
+  requestId: string;
+  taskId?: string;
+  error?: string;
+}
+
+/** Reply to get_scheduled_task_runs, oldest first. Empty when the task is gone. */
+export interface ScheduledTaskRunsServerMessage {
+  type: "scheduled_task_runs";
+  taskId: string;
+  runs: TaskRun[];
 }
 
 export interface ScheduledTaskUpdateServerMessage {
@@ -4201,6 +4228,8 @@ export type ServerMessage =
   | ActiveSubagentsServerMessage
   | ScheduledTaskListServerMessage
   | ScheduledTaskUpdateServerMessage
+  | ScheduledTaskSaveResultServerMessage
+  | ScheduledTaskRunsServerMessage
   | ScheduledTaskNotificationServerMessage
   | RateLimitEventServerMessage
   | TaskStartedServerMessage

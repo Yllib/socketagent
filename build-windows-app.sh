@@ -12,7 +12,9 @@ if [[ $# -gt 0 ]]; then
   exit 1
 fi
 "$ROOT/check-flutter-version.sh" "$HOST" 'C:/Users/billy/Downloads/flutter/flutter/bin/flutter.bat'
-ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force '$REMOTE_DIR' | Out-Null\""
+# The build directory persists so build/ and .dart_tool stay warm. The source
+# folders are cleared first, or a file deleted locally would still compile there.
+ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force '$REMOTE_DIR' | Out-Null; foreach (\$d in 'lib','test','test_support','assets','scripts') { \$p = Join-Path '$REMOTE_DIR' \$d; if (Test-Path \$p) { Remove-Item \$p -Recurse -Force } }\""
 tar cf - -C "$APP_DIR" --exclude='.git' --exclude='build' --exclude='.dart_tool' --exclude='.flutter-plugins-dependencies' --exclude='windows/flutter/ephemeral' --exclude='android' --exclude='play-store' . |
   ssh "$HOST" "tar xf - -C $REMOTE_DIR"
 ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File $REMOTE_DIR/scripts/build-windows.ps1"

@@ -189,7 +189,15 @@ if [[ -n "$APP_ID_OVERRIDE" ]]; then
 fi
 BUILD_START=$SECONDS
 
-# Sync app source to remote via tar (Windows SSH doesn't have rsync)
+# Sync app source to remote via tar (Windows SSH doesn't have rsync).
+# Releases start from an empty folder. Test builds keep build/, .dart_tool
+# and android/.gradle so Gradle, Dart and libsodium build incrementally, and
+# replace only the source folders so files deleted here do not linger there.
+if $DEPLOY || $BUNDLE; then
+  REMOTE_CLEAN="if (Test-Path '$REMOTE_DIR') { Remove-Item '$REMOTE_DIR' -Recurse -Force };"
+else
+  REMOTE_CLEAN="Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '$REMOTE_DIR/lib','$REMOTE_DIR/test','$REMOTE_DIR/test_support','$REMOTE_DIR/assets','$REMOTE_DIR/scripts','$REMOTE_DIR/android/app/src';"
+fi
 echo "  Syncing source..."
 tar cf - -C "$APP_DIR" \
   --exclude='.git' \
@@ -199,7 +207,7 @@ tar cf - -C "$APP_DIR" \
   --exclude='.idea' \
   --exclude='*.iml' \
   --exclude='.flutter-plugins-dependencies' \
-  . | ssh "$REMOTE_HOST" "powershell -Command \"if (Test-Path '$REMOTE_DIR') { Remove-Item '$REMOTE_DIR' -Recurse -Force }; New-Item -ItemType Directory -Path '$REMOTE_DIR' -Force | Out-Null; Set-Location '$REMOTE_DIR'; tar xf -\""
+  . | ssh "$REMOTE_HOST" "powershell -Command \"$REMOTE_CLEAN New-Item -ItemType Directory -Path '$REMOTE_DIR' -Force | Out-Null; Set-Location '$REMOTE_DIR'; tar xf -\""
 
 # Build on remote
 echo "  Building on remote..."
@@ -207,10 +215,16 @@ REMOTE_APP_ID_ASSIGNMENT=""
 if [[ -n "$APP_ID_OVERRIDE" ]]; then
   REMOTE_APP_ID_ASSIGNMENT="\$env:SOCKETAGENT_APPLICATION_ID='$APP_ID_OVERRIDE'; "
 fi
+# Direct test builds go to one phone, so they compile only arm64. Releases
+# and Play builds keep every ABI.
+TARGET_PLATFORMS=""
+if ! $DEPLOY && [[ "$FLAVOR" == "direct" ]]; then
+  TARGET_PLATFORMS="--target-platform android-arm64 "
+fi
 BUILD_LOG="$(mktemp)"
 trap - ERR
 set +e
-ssh "$REMOTE_HOST" "powershell -ExecutionPolicy Bypass -Command \"${REMOTE_APP_ID_ASSIGNMENT}\$env:ANDROID_HOME='$REMOTE_ANDROID_HOME'; Set-Location '$REMOTE_DIR'; & ./scripts/android-build-env.ps1; \$artifact='$REMOTE_ARTIFACT_RELATIVE'; Remove-Item \$artifact -Force -ErrorAction SilentlyContinue; & '$REMOTE_FLUTTER' build '$BUILD_KIND' --release --flavor '$FLAVOR' --dart-define 'SOCKETAGENT_DISTRIBUTION=$FLAVOR' 2>&1; exit \$LASTEXITCODE\"" 2>&1 | tee "$BUILD_LOG" | while read -r line; do
+ssh "$REMOTE_HOST" "powershell -ExecutionPolicy Bypass -Command \"${REMOTE_APP_ID_ASSIGNMENT}\$env:ANDROID_HOME='$REMOTE_ANDROID_HOME'; Set-Location '$REMOTE_DIR'; & ./scripts/android-build-env.ps1; \$artifact='$REMOTE_ARTIFACT_RELATIVE'; Remove-Item \$artifact -Force -ErrorAction SilentlyContinue; & '$REMOTE_FLUTTER' build '$BUILD_KIND' --release --flavor '$FLAVOR' $TARGET_PLATFORMS--dart-define 'SOCKETAGENT_DISTRIBUTION=$FLAVOR' 2>&1; exit \$LASTEXITCODE\"" 2>&1 | tee "$BUILD_LOG" | while read -r line; do
   echo "  [remote] $line"
 done
 REMOTE_BUILD_EXIT=${PIPESTATUS[0]}
@@ -366,7 +380,7 @@ if $SKIP_DESKTOP; then
 else
   echo ""
   echo "Building the Windows desktop app..."
-  "$REPO_ROOT/build-windows-app.sh"
+  "$REPO_ROOT/build-windows-app.sh" --release-checks
   # The zip goes first. Desktop apps update when a release has the installer,
   # and the installer downloads the newest release's zip.
   gh release upload "v$NEW_VERSION" "$APP_DIR/build/windows/packages/SocketAgent-windows-x64.zip" --repo "$SERVER_REPO"

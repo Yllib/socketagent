@@ -141,6 +141,9 @@ export class CodexAppServerClient extends EventEmitter {
   private stderrTail = "";
   private closed = false;
   private initializeParams?: CodexAppServerInitializeParams;
+  /** The process that completed the handshake. A respawned one has not. */
+  private initializedProcess: ChildProcessWithoutNullStreams | null = null;
+  private reinitializing: Promise<unknown> | null = null;
   private stoppingProcessTree: PosixProcessTree | null = null;
 
   constructor(private readonly options: CodexAppServerOptions) {
@@ -199,6 +202,8 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   async initialize(params: CodexAppServerInitializeParams): Promise<unknown> {
+    this.start();
+    const proc = this.proc;
     const result = await this.request("initialize", {
       clientInfo: { name: params.clientInfo.name, title: params.clientInfo.title ?? null, version: params.clientInfo.version ?? "1.0.0" },
       capabilities: params.capabilities ? {
@@ -209,6 +214,7 @@ export class CodexAppServerClient extends EventEmitter {
     }, this.options.startupTimeoutMs);
     this.notify("initialized", {});
     this.initializeParams = params;
+    this.initializedProcess = proc;
     return result;
   }
 
@@ -486,6 +492,17 @@ export class CodexAppServerClient extends EventEmitter {
     timeoutMs = this.options.requestTimeoutMs ?? 30_000,
   ): Promise<unknown> {
     this.start();
+    // start() respawns a process that exited. Codex refuses every request on
+    // a process that has not had the handshake ("Not initialized"), so repeat it.
+    if (method !== "initialize" && this.initializeParams && this.initializedProcess !== this.proc) {
+      if (!this.reinitializing) {
+        console.warn(`[codex app-server] process was restarted; repeating the initialize handshake before ${method}`);
+        this.reinitializing = this.initialize(this.initializeParams).finally(() => {
+          this.reinitializing = null;
+        });
+      }
+      await this.reinitializing;
+    }
     if (!this.proc || !this.proc.stdin.writable) {
       throw new Error("codex app-server stdin is not writable");
     }

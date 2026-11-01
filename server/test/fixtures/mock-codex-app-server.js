@@ -20,6 +20,12 @@ lines.on("line", (line) => {
     })}\n`);
     return;
   }
+  if (message.id !== undefined && !methods.includes("initialize")) {
+    // Real app-servers refuse requests before the handshake.
+    process.stdout.write(`${JSON.stringify({ id: message.id, error: { code: -32600, message: "Not initialized" } })}\n`);
+    return;
+  }
+  if (message.method === "test/exit") process.exit(0);
   if (message.id !== undefined) {
     process.stdout.write(`${JSON.stringify({ id: message.id, result: message.params })}\n`);
   }

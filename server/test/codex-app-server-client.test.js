@@ -156,6 +156,31 @@ test("completes the app-server initialize handshake before other requests", asyn
   }
 });
 
+test("a respawned app-server gets the initialize handshake before the next request", async () => {
+  const client = new CodexAppServerClient({
+    cwd: process.cwd(),
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "mock-codex-app-server.js")],
+  });
+  try {
+    await client.initialize({ clientInfo: { name: "socketagent" } });
+    const exited = waitForEvent(client, "exit");
+    client.notify("test/exit");
+    await exited;
+
+    // Without a repeated handshake the new process answers "Not initialized".
+    const params = { threadId: "thread-1", gitInfo: { branch: "master", sha: "abc123" } };
+    const [first, second] = await Promise.all([
+      client.updateThreadMetadata(params),
+      client.updateThreadMetadata(params),
+    ]);
+    assert.deepEqual(first, params);
+    assert.deepEqual(second, params);
+  } finally {
+    await client.stop();
+  }
+});
+
 test("thread resume excludes the native turn transcript by default", async () => {
   const client = new CodexAppServerClient({
     cwd: process.cwd(),

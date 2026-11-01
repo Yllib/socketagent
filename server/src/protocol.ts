@@ -1337,14 +1337,21 @@ export interface ScheduleTaskMessage {
   model?: string;
   effort?: AgentEffort;
   permissionMode?: string;
+  /** Any time Date can parse; the server stores it as ISO. */
   scheduledTime: string;
-  recurrence?: {
-    type: "once" | "daily" | "weekly" | "monthly" | "custom";
-    intervalMs?: number;
-  };
+  recurrence?: ScheduledTaskRecurrenceInput;
   /** Carry summaries from the two most recent runs into a fresh session. */
   reuseSession?: boolean;
   notificationMode?: "completion" | "quiet";
+}
+
+/** A task's repeat rule as a client sends it. The server rejects custom intervals under a minute. */
+export interface ScheduledTaskRecurrenceInput {
+  type: "once" | "daily" | "weekly" | "monthly" | "custom";
+  /** For "custom". */
+  intervalMs?: number;
+  /** For "weekly": 0=Sun ... 6=Sat. Unset repeats on the scheduled time's weekday. */
+  daysOfWeek?: number[];
 }
 
 export interface ListScheduledTasksMessage {
@@ -1376,10 +1383,13 @@ export interface UpdateScheduledTaskMessage {
   backend?: Backend;
   codexDriver?: CodexDriver | null;
   model?: string | null;
-  effort?: AgentEffort;
-  permissionMode?: string;
+  /** null clears effort, access and the linked session. */
+  effort?: AgentEffort | null;
+  permissionMode?: string | null;
+  linkedSessionId?: string | null;
+  /** A future time re-arms a completed or failed task. */
   scheduledTime?: string;
-  recurrence?: { type: "once" | "daily" | "weekly" | "monthly" | "custom"; intervalMs?: number } | null;
+  recurrence?: ScheduledTaskRecurrenceInput | null;
   /** Carry summaries from the two most recent runs into a fresh session. */
   reuseSession?: boolean;
   notificationMode?: "completion" | "quiet";

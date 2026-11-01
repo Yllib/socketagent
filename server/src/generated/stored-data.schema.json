@@ -544,6 +544,9 @@
           "items": {
             "type": "number"
           }
+        },
+        "dayOfMonth": {
+          "type": "number"
         }
       },
       "required": [
@@ -592,6 +595,9 @@
             "scheduled",
             "manual"
           ]
+        },
+        "scheduledFor": {
+          "type": "string"
         },
         "resumeTaskStatus": {
           "type": "string",

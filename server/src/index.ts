@@ -54,7 +54,7 @@ import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummar
 import { expiredFleetingSessions, fleetingExpiresAt, fleetingChildExpiredMessage, requireStartLifetime } from "./fleeting-sessions";
 import { watchNativeSessionFolders } from "./native-session-watcher";
 import { promptNeedsSessionRebind } from "./prompt-session-target";
-import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, getNextRunTime, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
+import { listScheduledTasks, getScheduledTask, saveScheduledTask, deleteScheduledTask, getDueTasks, parseSchedule, settleScheduledTaskAfterRun, getScheduledTaskSessionIds, getScheduledTaskRevision, reconcileInterruptedScheduledTasks, scheduledTaskCanArchive, scheduledTaskDisplayName, scheduledTaskPriorRunContext, scheduledTaskUsesAutomaticNotifications, setScheduledTaskArchiveState, setScheduledTaskReadState, ScheduledTask } from "./scheduled-task-store";
 import {
   AgentEffort,
   AgentSessionSettings,
@@ -7204,7 +7204,15 @@ function createConnectionHandler(
           sendJson({ type: "error", message: "The linked session no longer exists on this computer" });
           break;
         }
-        const recurrence = msg.recurrence;
+        const schedule = parseSchedule(msg.scheduledTime, msg.recurrence);
+        if ("error" in schedule) {
+          sendJson({ type: "error", message: schedule.error });
+          break;
+        }
+        if (!fs.existsSync(msg.cwd)) {
+          sendJson({ type: "error", message: `Folder not found on this computer: ${msg.cwd}` });
+          break;
+        }
         const backend = msg.backend === "codex" ? "codex" : "claude";
         const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
         const model = typeof msg.model === "string" ? msg.model.trim() : "";
@@ -7225,13 +7233,13 @@ function createConnectionHandler(
           ...(effort ? { effort } : {}),
           ...(permissionMode ? { permissionMode } : {}),
           ...(msg.linkedSessionId ? { linkedSessionId: msg.linkedSessionId } : {}),
-          scheduledTime: msg.scheduledTime,
+          scheduledTime: schedule.scheduledTime,
           createdAt: new Date().toISOString(),
           status: "pending",
           createdBySessionId: activeSessionId
             ? delegationSupervisorForSessionId(activeSessionId)
             : undefined,
-          recurrence: recurrence && recurrence.type !== "once" ? recurrence : undefined,
+          recurrence: schedule.recurrence,
           reuseSession: msg.reuseSession || false,
           notificationMode: msg.notificationMode === "quiet" ? "quiet" : "completion",
           runCount: 0,
@@ -7297,58 +7305,85 @@ function createConnectionHandler(
 
       case "update_scheduled_task": {
         const task = getScheduledTask(msg.taskId);
-        if (task) {
-          if (msg.name !== undefined) {
-            const name = typeof msg.name === "string" ? msg.name.trim() : "";
-            task.name = name || undefined;
-          }
-          if (msg.prompt !== undefined) task.prompt = msg.prompt;
-          if (msg.cwd !== undefined) task.cwd = msg.cwd;
-          if (msg.backend !== undefined) {
-            const nextBackend = msg.backend === "codex" ? "codex" : "claude";
-            if (task.backend && task.backend !== nextBackend) {
-              task.sessionId = undefined;
-              if (msg.model === undefined) task.model = undefined;
-            }
-            task.backend = nextBackend;
-            task.codexDriver = nextBackend === "codex" ? "app-server" : undefined;
-          }
-          if (msg.codexDriver !== undefined) {
-            task.codexDriver = task.backend === "codex" ? "app-server" : undefined;
-          }
-          if (msg.model !== undefined) {
-            const model = msg.model;
-            task.model = typeof model === "string" && model.trim() ? model.trim() : undefined;
-          }
-          if (msg.effort && AGENT_EFFORTS.has(msg.effort)) {
-            task.effort = msg.effort;
-          }
-          if (msg.permissionMode && SCHEDULED_PERMISSION_MODES.has(msg.permissionMode)) {
-            task.permissionMode = msg.permissionMode;
-          }
-          if (msg.scheduledTime !== undefined) task.scheduledTime = msg.scheduledTime;
-          if (msg.recurrence !== undefined) {
-            const rec = msg.recurrence;
-            task.recurrence = rec && rec.type !== "once" ? rec : undefined;
-          }
-          if (msg.reuseSession !== undefined) task.reuseSession = msg.reuseSession;
-          if (msg.notificationMode !== undefined) {
-            task.notificationMode = msg.notificationMode === "quiet" ? "quiet" : "completion";
-          }
-          // Allow re-activating a cancelled task
-          if (task.status === "cancelled") task.status = "pending";
-          saveScheduledTask(task);
-          for (const session of activeSessions.values()) {
-            if (session._scheduledTaskId === task.id) {
-              session._scheduledTaskName = scheduledTaskDisplayName(task);
-              session._suppressOngoingNotification =
-                !scheduledTaskUsesAutomaticNotifications(task);
-            }
-          }
-          broadcastStatusSync();
-          console.log(`[Scheduler] Task updated: ${task.id}`);
-          broadcastScheduledTaskList();
+        if (!task) {
+          sendJson({ type: "error", message: "Scheduled task not found" });
+          break;
         }
+        const scheduleChanged = msg.scheduledTime !== undefined || msg.recurrence !== undefined;
+        const schedule = scheduleChanged
+          ? parseSchedule(msg.scheduledTime ?? task.scheduledTime, msg.recurrence === undefined ? task.recurrence : msg.recurrence)
+          : undefined;
+        if (schedule && "error" in schedule) {
+          sendJson({ type: "error", message: schedule.error });
+          break;
+        }
+        if (msg.cwd !== undefined && !fs.existsSync(msg.cwd)) {
+          sendJson({ type: "error", message: `Folder not found on this computer: ${msg.cwd}` });
+          break;
+        }
+        if (msg.linkedSessionId && !getSession(msg.linkedSessionId)) {
+          sendJson({ type: "error", message: "The linked session no longer exists on this computer" });
+          break;
+        }
+        if (msg.name !== undefined) {
+          const name = typeof msg.name === "string" ? msg.name.trim() : "";
+          task.name = name || undefined;
+        }
+        if (msg.prompt !== undefined) task.prompt = msg.prompt;
+        if (msg.cwd !== undefined) task.cwd = msg.cwd;
+        if (msg.backend !== undefined) {
+          const nextBackend = msg.backend === "codex" ? "codex" : "claude";
+          if (task.backend && task.backend !== nextBackend) {
+            task.sessionId = undefined;
+            if (msg.model === undefined) task.model = undefined;
+          }
+          task.backend = nextBackend;
+          task.codexDriver = nextBackend === "codex" ? "app-server" : undefined;
+        }
+        if (msg.codexDriver !== undefined) {
+          task.codexDriver = task.backend === "codex" ? "app-server" : undefined;
+        }
+        if (msg.model !== undefined) {
+          const model = msg.model;
+          task.model = typeof model === "string" && model.trim() ? model.trim() : undefined;
+        }
+        // null clears effort, access and the linked session; unknown values are ignored.
+        if (msg.effort === null) task.effort = undefined;
+        else if (msg.effort && AGENT_EFFORTS.has(msg.effort)) task.effort = msg.effort;
+        if (msg.permissionMode === null) task.permissionMode = undefined;
+        else if (msg.permissionMode && SCHEDULED_PERMISSION_MODES.has(msg.permissionMode)) {
+          task.permissionMode = msg.permissionMode;
+        }
+        if (msg.linkedSessionId !== undefined) task.linkedSessionId = msg.linkedSessionId || undefined;
+        if (schedule) {
+          task.scheduledTime = schedule.scheduledTime;
+          task.recurrence = schedule.recurrence;
+        }
+        if (msg.reuseSession !== undefined) task.reuseSession = msg.reuseSession;
+        if (msg.notificationMode !== undefined) {
+          task.notificationMode = msg.notificationMode === "quiet" ? "quiet" : "completion";
+        }
+        // Saving re-arms a cancelled task, and a finished one whose time moved
+        // to the future. Re-armed tasks leave the archive so they can run.
+        const rearm = task.status === "cancelled"
+          || ((task.status === "completed" || task.status === "failed")
+            && msg.scheduledTime !== undefined
+            && new Date(task.scheduledTime).getTime() > Date.now());
+        if (rearm) {
+          task.status = "pending";
+          delete task.archivedAt;
+        }
+        saveScheduledTask(task);
+        for (const session of activeSessions.values()) {
+          if (session._scheduledTaskId === task.id) {
+            session._scheduledTaskName = scheduledTaskDisplayName(task);
+            session._suppressOngoingNotification =
+              !scheduledTaskUsesAutomaticNotifications(task);
+          }
+        }
+        broadcastStatusSync();
+        console.log(`[Scheduler] Task updated: ${task.id}`);
+        broadcastScheduledTaskList();
         break;
       }
 
@@ -12263,29 +12298,30 @@ function labelScheduledRunSession(task: ScheduledTask, sessionId: string): void 
   saveSession({ ...info, scheduledTaskId: task.id, ...(autoTitled ? { title: name } : {}) });
 }
 
-function applyLatestScheduledTaskEditableFields(task: ScheduledTask): void {
+/**
+ * Copies changes the user saved while a run held `task` in memory, so the
+ * run's next save keeps them. Returns false when the task was deleted, and
+ * the run must not save it back.
+ */
+function syncScheduledTaskEdits(task: ScheduledTask): boolean {
   const latest = getScheduledTask(task.id);
-  if (!latest || latest.status !== "running") return;
+  if (!latest) return false;
   task.name = latest.name;
   task.prompt = latest.prompt;
   task.cwd = latest.cwd;
-  task.backend = latest.backend;
-  task.codexDriver = latest.codexDriver;
+  task.backend = latest.backend ?? task.backend;
+  task.codexDriver = latest.backend ? latest.codexDriver : task.codexDriver;
   task.model = latest.model;
   task.effort = latest.effort;
   task.permissionMode = latest.permissionMode;
+  task.scheduledTime = latest.scheduledTime;
   task.recurrence = latest.recurrence;
   task.reuseSession = latest.reuseSession;
   task.notificationMode = latest.notificationMode;
-}
-
-function finishManualScheduledTask(task: ScheduledTask, originalStatus: ScheduledTask["status"], success: boolean): void {
-  if (originalStatus === "pending") {
-    task.status = "pending";
-    if (success) task.error = undefined;
-    return;
-  }
-  task.status = success ? "completed" : "failed";
+  task.linkedSessionId = latest.linkedSessionId;
+  task.lastReadAt = latest.lastReadAt;
+  task.archivedAt = latest.archivedAt;
+  return true;
 }
 
 async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | "manual" = "scheduled"): Promise<void> {
@@ -12304,6 +12340,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     startedAt: new Date().toISOString(),
     status: "running",
     trigger,
+    scheduledFor: task.scheduledTime,
     ...(manualRun ? { resumeTaskStatus: originalStatus } : {}),
   };
   if (!task.runs) task.runs = [];
@@ -12322,15 +12359,15 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       currentRun.error = task.error;
       task.runCount = runNumber;
       task.lastRunAt = currentRun.completedAt;
-      if (manualRun) finishManualScheduledTask(task, originalStatus, false);
-      else task.status = "failed";
+      settleScheduledTaskAfterRun(task, currentRun, "failed");
+      task.error = currentRun.error;
       saveScheduledTask(task);
       void scheduledTaskCallbacks.flush();
       broadcastScheduledTaskList();
       if (scheduledTaskUsesAutomaticNotifications(task)) {
         broadcastScheduledTaskNotification(
           `${scheduledTaskDisplayName(task)} failed`,
-          task.error,
+          currentRun.error,
           "",
           "failed",
           { scheduledTaskId: task.id },
@@ -12351,7 +12388,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     if (codexDriver) task.codexDriver = codexDriver;
     else task.codexDriver = undefined;
     currentRun.codexDriver = codexDriver;
-    saveScheduledTask(task);
+    if (syncScheduledTaskEdits(task)) saveScheduledTask(task);
 
     let session: Session;
     const ws = {
@@ -12378,11 +12415,8 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     }
     if (task.model) await session.setModel(task.model);
     if (task.effort) {
-      const effort = backend === "claude" && !["low", "medium", "high", "max"].includes(task.effort)
-        ? "high"
-        : task.effort;
-      if (session instanceof CodexSession) session.setEffort(effort);
-      else if (isClaudeEffort(effort)) session.setEffort(effort);
+      if (session instanceof CodexSession) session.setEffort(task.effort);
+      else session.setEffort(isClaudeEffort(task.effort) ? task.effort : "high");
     }
     attachSessionLifecycleCallbacks(session);
 
@@ -12412,7 +12446,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
         currentRun.sessionId = sid;
         persistDelegationSupervisorLineage(session, sid);
         labelScheduledRunSession(task, sid);
-        saveScheduledTask(task);
+        if (syncScheduledTaskEdits(task)) saveScheduledTask(task);
         maybeSendScheduledStartPush();
         broadcastSessionList();
         broadcastStatusSync();
@@ -12438,7 +12472,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.resultSummary = currentRun.resultSummary;
       task.runCount = runNumber;
       task.lastRunAt = new Date().toISOString();
-      applyLatestScheduledTaskEditableFields(task);
+      const taskExists = syncScheduledTaskEdits(task);
 
       if (session.isWarmIdle) {
         void session.closeWarmIdle();
@@ -12447,23 +12481,9 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       if (activeSessions.get(tempId) === session) activeSessions.delete(tempId);
       broadcastStatusSync();
 
-      const runIsRecurring = !manualRun && task.recurrence && task.recurrence.type !== "once";
-      if (manualRun) {
-        finishManualScheduledTask(task, originalStatus, true);
-      } else if (runIsRecurring) {
-        const nextTime = getNextRunTime(task);
-        if (nextTime) {
-          task.status = "pending";
-          task.scheduledTime = nextTime;
-          task.error = undefined;
-          console.log(`[Scheduler] Task ${task.id} next run at ${nextTime}`);
-        } else {
-          task.status = "completed";
-        }
-      } else {
-        task.status = "completed";
-      }
-      saveScheduledTask(task);
+      settleScheduledTaskAfterRun(task, currentRun, "completed");
+      if (task.status === "pending") console.log(`[Scheduler] Task ${task.id} next run at ${task.scheduledTime}`);
+      if (taskExists) saveScheduledTask(task);
       void scheduledTaskCallbacks.flush();
 
       broadcastScheduledTaskList();
@@ -12508,7 +12528,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.error = currentRun.error;
       task.runCount = runNumber;
       task.lastRunAt = new Date().toISOString();
-      applyLatestScheduledTaskEditableFields(task);
+      const taskExists = syncScheduledTaskEdits(task);
 
       if (session.isWarmIdle) {
         void session.closeWarmIdle();
@@ -12517,22 +12537,9 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       if (sid !== tempId) activeSessions.delete(sid);
       broadcastStatusSync();
 
-      const runIsRecurring = !manualRun && task.recurrence && task.recurrence.type !== "once";
-      if (manualRun) {
-        finishManualScheduledTask(task, originalStatus, false);
-      } else if (runIsRecurring) {
-        const nextTime = getNextRunTime(task);
-        if (nextTime) {
-          task.status = "pending";
-          task.scheduledTime = nextTime;
-          console.log(`[Scheduler] Task ${task.id} failed but rescheduled for ${nextTime}`);
-        } else {
-          task.status = "failed";
-        }
-      } else {
-        task.status = "failed";
-      }
-      saveScheduledTask(task);
+      settleScheduledTaskAfterRun(task, currentRun, "failed");
+      if (task.status === "pending") console.log(`[Scheduler] Task ${task.id} failed; next run at ${task.scheduledTime}`);
+      if (taskExists) saveScheduledTask(task);
       void scheduledTaskCallbacks.flush();
 
       broadcastScheduledTaskList();
@@ -12570,10 +12577,10 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
       task.runCount = runNumber;
       task.lastRunAt = currentRun.completedAt;
     }
+    const taskExists = syncScheduledTaskEdits(task);
+    settleScheduledTaskAfterRun(task, currentRun, "failed");
     task.error = errorMessage(err);
-    if (manualRun) finishManualScheduledTask(task, originalStatus, false);
-    else task.status = "failed";
-    saveScheduledTask(task);
+    if (taskExists) saveScheduledTask(task);
     void scheduledTaskCallbacks.flush();
     broadcastScheduledTaskList();
     if (scheduledTaskUsesAutomaticNotifications(task)) {

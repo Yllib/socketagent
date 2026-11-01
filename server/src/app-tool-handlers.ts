@@ -6,7 +6,7 @@ import * as path from "path";
 import type { Backend, CodexDriver, HistoryEntry, ServerMessage } from "./protocol";
 import type { WorkReviewAgentView, WorkReviewItemInput } from "./work-review-types";
 import { generateKokoroAudio } from "./kokoro-tts";
-import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, RecurrenceConfig } from "./scheduled-task-store";
+import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, parseSchedule } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
 import {
   listAvailableSecureInputs,
@@ -570,6 +570,7 @@ export interface ScheduleTaskArgs {
   scheduledTime: string;
   recurrenceType?: "once" | "daily" | "weekly" | "monthly" | "custom";
   customIntervalMs?: number;
+  daysOfWeek?: number[];
   /** Carry summaries from the two most recent runs into a fresh session. */
   reuseSession?: boolean;
   notificationMode?: "completion" | "quiet";
@@ -1612,12 +1613,20 @@ export async function handleScheduleTaskTool(
   ctx: AppToolContext,
   args: ScheduleTaskArgs,
 ): Promise<McpTextResult> {
-  const scheduledDate = new Date(args.scheduledTime);
-  if (isNaN(scheduledDate.getTime())) {
-    return { content: [{ type: "text", text: `Invalid date format: ${args.scheduledTime}. Use ISO 8601 format.` }] };
+  const schedule = parseSchedule(args.scheduledTime, {
+    type: args.recurrenceType || "once",
+    intervalMs: args.customIntervalMs,
+    daysOfWeek: args.daysOfWeek,
+  });
+  if ("error" in schedule) {
+    return { isError: true, content: [{ type: "text", text: `${schedule.error}. Use an ISO 8601 time and, for custom, an interval of at least 60000 ms.` }] };
   }
+  const scheduledDate = new Date(schedule.scheduledTime);
   if (scheduledDate.getTime() <= Date.now()) {
     return { content: [{ type: "text", text: "Scheduled time is in the past. Please provide a future time." }] };
+  }
+  if (!fs.existsSync(args.cwd)) {
+    return { isError: true, content: [{ type: "text", text: `Folder not found on this computer: ${args.cwd}` }] };
   }
 
   // A scheduled run's session ends with the run, so a follow-up it links
@@ -1635,12 +1644,7 @@ export async function handleScheduleTaskTool(
     return { isError: true, content: [{ type: "text", text: "This task cannot be linked until the current session has an ID." }] };
   }
 
-  const recurrenceType = args.recurrenceType || "once";
-  const recurrence: RecurrenceConfig | undefined = recurrenceType !== "once" ? {
-    type: recurrenceType,
-    intervalMs: recurrenceType === "custom" ? args.customIntervalMs : undefined,
-  } : undefined;
-
+  const recurrence = schedule.recurrence;
   const backend = args.backend || ctx.getBackend?.() || "claude";
   const task: ScheduledTask = {
     id: crypto.randomUUID(),
@@ -1654,7 +1658,7 @@ export async function handleScheduleTaskTool(
     ...(args.model?.trim() ? { model: args.model.trim() } : {}),
     ...(args.effort ? { effort: args.effort } : {}),
     ...(args.permissionMode ? { permissionMode: args.permissionMode } : {}),
-    scheduledTime: args.scheduledTime,
+    scheduledTime: schedule.scheduledTime,
     createdAt: new Date().toISOString(),
     status: "pending",
     createdBySessionId:

@@ -695,9 +695,6 @@ function serverMessagePositionKey(message: PositionableMessage): string | null {
     return `${role}:question:${String(questionId)}`;
   }
   if (type === "monitor_output" && message.taskId) return `monitor:${String(message.taskId)}`;
-  if (type === "work_review_card" && message.reviewId) {
-    return `work_review:${String(message.reviewId)}`;
-  }
   return null;
 }
 
@@ -801,7 +798,6 @@ interface PositionableMessage {
   questionId?: unknown;
   requestId?: unknown;
   taskId?: unknown;
-  reviewId?: unknown;
 }
 
 /** Assign a durable transcript identity before the first live frame is sent. */
@@ -2139,14 +2135,13 @@ export function getHistoryEntryByToolUseId(
   return entry ? hydrateHistoryEntry(entry) : undefined;
 }
 
-export function getWorkReviewHistoryEntry(
-  sessionId: string,
-  reviewId: string,
-): HistoryEntry | undefined {
-  if (!sessionId || !reviewId) return undefined;
-  ensureHistoryDatabaseSession(sessionId);
-  const entry = historyDatabase().getWorkReview(sessionId, reviewId);
-  return entry ? hydrateHistoryEntry(entry) : undefined;
+/**
+ * Entries the app should render. Old transcripts can still hold `work_review`
+ * cards from the removed Work Review feature; they stay stored but are never
+ * sent to the app.
+ */
+export function appVisibleHistory(entries: HistoryEntry[]): HistoryEntry[] {
+  return entries.filter(entry => entry.role !== "work_review");
 }
 
 export function hasPersistedUserContentPrefix(sessionId: string, prefix: string): boolean {

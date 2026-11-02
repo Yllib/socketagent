@@ -1,7 +1,6 @@
 import { serviceState } from "./windows-service-env";
 import qrcode from "qrcode-terminal";
 import { z } from "zod";
-import type { WorkReviewAgentView, WorkReviewClientSnapshot, WorkReviewPublishedResult } from "./work-review-types";
 import { errorMessage, isRecord, parseJsonObject } from "./value-guards";
 import type { ClientTransport } from "./client-transport";
 import { isLocalNetworkAddress, listenWithFallback, localIpv4Addresses } from "./local-network";
@@ -49,7 +48,7 @@ import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
 import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, type CodexTurnLineage, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
 import { startBashCapturePruning } from "./bash-capture";
 import { readFullOutput, startFullOutputTrimming } from "./full-output-store";
-import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, getWorkReviewHistoryEntry, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, updateMemoryCards, getMemoryCardEntry, deleteSession, deleteSessionArtifacts, makeSessionPermanent, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getActiveTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
+import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, appVisibleHistory, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, updateMemoryCards, getMemoryCardEntry, deleteSession, deleteSessionArtifacts, makeSessionPermanent, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getActiveTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
 import { mergeSessionListBase, createNativeRefreshCoordinator, sessionListSummary } from "./session-list-snapshot";
 import { expiredFleetingSessions, fleetingExpiresAt, fleetingChildExpiredMessage, requireStartLifetime } from "./fleeting-sessions";
 import { watchNativeSessionFolders } from "./native-session-watcher";
@@ -68,7 +67,6 @@ import {
   TRANSPORT_LANE_VERSION,
   TransportLane,
   UPLOAD_ACK_VERSION,
-  WORK_REVIEW_VERSION,
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
@@ -145,7 +143,7 @@ import { getCachedModelCatalog, invalidateCachedModelCatalog } from "./model-cat
 import { recordModelChange } from "./model-change";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
 import { lastClaudePlanUsage } from "./claude-plan-usage-cache";
-import { activeAppMonitorRecords, AppToolContext, publishWorkReviewCard, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
+import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings, isClaudeEffort } from "./initial-session-settings";
 import { TurnAbortTracker } from "./turn-abort-tracker";
@@ -218,23 +216,6 @@ import {
   setSessionRunSupervisorSettled,
 } from "./session-run-store";
 import type { SessionRunOutcome, HistoryEntry, MemoryCard, MemoryCardServerMessage, QuestionServerMessage, ServerMessage } from "./protocol";
-import {
-  archiveWorkReview,
-  cancelWorkReview,
-  exportWorkReviews,
-  finishWorkReview,
-  getWorkReviewClientSnapshot,
-  listWorkReviews,
-  restoreWorkReview,
-  updateWorkReviewDraft,
-} from "./work-review-service";
-import {
-  WorkReviewResultDeliveryStore,
-} from "./work-review-delivery-store";
-import {
-  buildWorkReviewResultPrompt,
-  deliverWorkReviewToSession,
-} from "./work-review-result-route";
 
 let browserRuntimeInstallPromise: Promise<void> | null = null;
 
@@ -1172,7 +1153,6 @@ function retryDeferredAutomationAfterUserPrompt(): void {
   // harness. This prevents old fallback work from racing ahead of that prompt.
   setImmediate(() => {
     retryPendingDelegatedAgentReports();
-    restorePendingWorkReviewResultDeliveries();
   });
 }
 
@@ -1691,11 +1671,6 @@ function serverCapabilitiesPayload(
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 2 },
-    workReviews: {
-      version: WORK_REVIEW_VERSION,
-      privateDrafts: true,
-      atomicFinish: true,
-    },
     sessionTransfer: { version: 3 },
     codexGoals: { version: 1 },
     sessionMemory: { version: 1 },
@@ -2101,12 +2076,6 @@ const durableMonitorPromptQueues = new Map<string, Promise<void>>();
 
 const durableSessionEventDeliveries = new Map<string, SessionEventDelivery>();
 
-const workReviewResultQueues = new Map<string, Promise<void>>();
-const workReviewResultDeliveries = new Set<string>();
-const workReviewResultRetryAttempts = new Map<string, number>();
-const workReviewResultRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const workReviewResultDeliveryStore = new WorkReviewResultDeliveryStore();
-
 function dispatchDurableSessionMessage(message: Record<string, unknown>): void {
   const raw = JSON.stringify(redactSecretsDeep(message));
   for (const client of connectedClients) {
@@ -2127,222 +2096,6 @@ onInlineImagesSaved((sessionId, entry) => {
     snapshot: true, finalSnapshot: true, inlineImagesReady: true,
   }));
 });
-
-function workReviewClientPayload(
-  snapshot: WorkReviewClientSnapshot,
-  requestId?: string,
-) {
-  const { currentDraft, ...review } = snapshot;
-  const cardEntry = getWorkReviewHistoryEntry(
-    String(snapshot.originSessionId || ""),
-    String(snapshot.reviewId || ""),
-  );
-  return {
-    type: "work_review_snapshot",
-    ...(requestId ? { requestId } : {}),
-    reviewId: String(snapshot.reviewId || ""),
-    sessionId: String(snapshot.originSessionId || ""),
-    review,
-    ...(cardEntry?.entryId ? { entryId: cardEntry.entryId } : {}),
-    ...(cardEntry?.sessionSeq ? { sessionSeq: cardEntry.sessionSeq } : {}),
-    ...(cardEntry?.revision ? { revision: cardEntry.revision } : {}),
-    ...(currentDraft ? {
-      draft: {
-        revision: currentDraft.revision,
-        updatedAt: currentDraft.updatedAt,
-        ...(currentDraft.overallNote ? { overallNote: currentDraft.overallNote } : {}),
-        items: Array.isArray(currentDraft.itemDecisions)
-          ? currentDraft.itemDecisions
-          : [],
-      },
-    } : {}),
-  };
-}
-
-function broadcastWorkReviewCard(review: WorkReviewAgentView): void {
-  const sessionId = String(review.originSessionId || "");
-  if (!sessionId) return;
-  let delivery = durableSessionEventDeliveries.get(sessionId);
-  if (!delivery) {
-    delivery = new SessionEventDelivery(dispatchDurableSessionMessage);
-    durableSessionEventDeliveries.set(sessionId, delivery);
-  }
-  publishWorkReviewCard({
-    appendHistory: (entry) => appendHistory(sessionId, entry),
-    send: (message) => {
-      const outgoing = [...connectedClients].some(
-        (client) => client.supportsSessionEventAck === true,
-      ) ? delivery!.prepare({ ...message }) : { ...message };
-      dispatchDurableSessionMessage(outgoing);
-    },
-  }, review);
-}
-
-async function runWorkReviewResultDelivery(
-  sessionId: string,
-  text: string,
-  resultId: string,
-): Promise<void> {
-  assertSessionAutomationAllowed(sessionId, "Work Review result delivery");
-  const existing = activeSessions.get(sessionId);
-  if (existing) {
-    assertSessionAutomationAllowed(sessionId, "Work Review result delivery");
-    const backend = getSession(sessionId)?.backend === "codex" ? "codex" : "claude";
-    await deliverWorkReviewToSession(
-      existing,
-      backend,
-      text,
-      sessionId,
-      resultId,
-      sessionIsBusy(existing),
-    );
-    return;
-  }
-
-  const sessionInfo = getSession(sessionId);
-  if (!sessionInfo) {
-    throw new Error(`Work Review origin session ${sessionId} no longer exists`);
-  }
-  const headlessSocket = {
-    readyState: WebSocket.OPEN,
-    send: (data: string) => broadcastHeadlessSessionMessage(data, sessionId),
-  };
-  const session = createSession(
-    sessionInfo.backend,
-    headlessSocket,
-    sessionInfo.cwd,
-    plugins,
-    getStoredCodexDriver(sessionInfo),
-  );
-  await restorePersistedPermissionMode(session, sessionInfo);
-  session._resumeSessionId = sessionId;
-  await restorePersistedAgentSettings(session, sessionInfo);
-  attachSessionLifecycleCallbacks(session);
-  activeSessions.set(sessionId, session);
-  try {
-    assertSessionAutomationAllowed(sessionId, "Work Review result delivery");
-    await deliverWorkReviewToSession(
-      session,
-      sessionInfo.backend === "codex" ? "codex" : "claude",
-      text,
-      sessionId,
-      resultId,
-      false,
-    );
-  } finally {
-    const sid = session.getSessionId() || sessionId;
-    if (activeSessions.get(sid) === session && !sessionShouldRemainPooled(session)) {
-      activeSessions.delete(sid);
-    }
-    broadcastSessionList();
-    broadcastStatusSync();
-  }
-}
-
-function queueWorkReviewResultDelivery(
-  review: WorkReviewAgentView,
-  result: WorkReviewPublishedResult,
-): Promise<void> {
-  const sessionId = String(review.originSessionId || "");
-  const resultId = String(result.resultId || "");
-  if (!sessionId || !resultId) {
-    return Promise.reject(new Error("Published Work Review result is missing its origin session or result ID"));
-  }
-  workReviewResultDeliveryStore.enqueue(review, result);
-  if (workReviewResultDeliveryStore.isDelivered(resultId)) return Promise.resolve();
-  if (sessionAutomationLocks.isLocked(sessionId)) {
-    console.log(`[StopLock] Work Review result remains pending for stopped session ${sessionId}`);
-    return Promise.resolve();
-  }
-  if (workReviewResultDeliveries.has(resultId)) return Promise.resolve();
-  workReviewResultDeliveries.add(resultId);
-  const previous = workReviewResultQueues.get(sessionId) || Promise.resolve();
-  const next = previous
-    .catch(() => {})
-    .then(() => runWorkReviewResultDelivery(
-      sessionId,
-      buildWorkReviewResultPrompt(review, result),
-      resultId,
-    ));
-  workReviewResultQueues.set(sessionId, next);
-  return next
-    .then(() => {
-      // runQuery/injectMessage persist the stable resultId-backed user message
-      // before they resolve, so only then may the durable outbox be settled.
-      workReviewResultDeliveryStore.markDelivered(resultId);
-      workReviewResultRetryAttempts.delete(resultId);
-      const retryTimer = workReviewResultRetryTimers.get(resultId);
-      if (retryTimer) clearTimeout(retryTimer);
-      workReviewResultRetryTimers.delete(resultId);
-    })
-    .catch((error: unknown) => {
-      workReviewResultDeliveries.delete(resultId);
-      const attempt = (workReviewResultRetryAttempts.get(resultId) || 0) + 1;
-      workReviewResultRetryAttempts.set(resultId, attempt);
-      if (attempt <= 8 && !workReviewResultRetryTimers.has(resultId)) {
-        const delayMs = Math.min(5 * 60_000, 5_000 * (2 ** (attempt - 1)));
-        const timer = setTimeout(() => {
-          workReviewResultRetryTimers.delete(resultId);
-          void queueWorkReviewResultDelivery(review, result).catch((retryError: unknown) => {
-            console.error(
-              `[WorkReview] result retry failed result=${resultId}`
-              + ` attempt=${attempt}: ${errorMessage(retryError) || String(retryError)}`,
-            );
-          });
-        }, delayMs);
-        timer.unref?.();
-        workReviewResultRetryTimers.set(resultId, timer);
-      }
-      throw error;
-    })
-    .finally(() => {
-      workReviewResultDeliveries.delete(resultId);
-      if (workReviewResultQueues.get(sessionId) === next) {
-        workReviewResultQueues.delete(sessionId);
-      }
-    });
-}
-
-function restorePendingWorkReviewResultDeliveries(): void {
-  // Rebuild missing outbox records from the durable review store first. This
-  // covers a crash after atomic Finish Review but before outbox enqueue.
-  try {
-    const exported = exportWorkReviews({ includeArchived: true });
-    const publishedById = new Map<string, {
-      review: WorkReviewAgentView;
-      result: WorkReviewPublishedResult;
-    }>();
-    for (const review of exported.reviews || []) {
-      for (const round of review.rounds || []) {
-        if (round?.status === "completed" && round.result?.resultId) {
-          workReviewResultDeliveryStore.enqueue(review, round.result);
-          publishedById.set(String(round.result.resultId), {
-            review,
-            result: round.result,
-          });
-        }
-      }
-    }
-    for (const record of workReviewResultDeliveryStore.pending()) {
-      const published = publishedById.get(record.resultId);
-      if (!published) {
-        console.warn(`[WorkReview] pending delivery has no published result ${record.resultId}`);
-        continue;
-      }
-      void queueWorkReviewResultDelivery(
-        published.review,
-        published.result,
-      ).catch((error: unknown) => {
-        console.error(
-          `[WorkReview] pending result delivery failed result=${record.resultId}`
-          + ` session=${record.originSessionId || ""}: ${errorMessage(error) || String(error)}`,
-        );
-      });
-    }
-  } catch (error: unknown) {
-    console.warn(`[WorkReview] failed to rebuild result outbox: ${errorMessage(error) || String(error)}`);
-  }
-}
 
 function broadcastDurableMonitorMessage(message: Record<string, unknown>): void {
   const sessionId = String(message.sessionId || "");
@@ -5210,7 +4963,7 @@ function createConnectionHandler(
             // Never replay an old transcript snapshot over newer conversation.
             const page = getResumeHistoryPage(targetSessionId);
             reply({ type: "session_history", historyKind: "append", receiptReplay: true, sessionId: targetSessionId,
-              messages: page.entries, total: page.total, offset: page.offset });
+              messages: appVisibleHistory(page.entries), total: page.total, offset: page.offset });
             broadcastStatusSync();
           }
         }
@@ -5975,7 +5728,7 @@ function createConnectionHandler(
         sendJson({
           type: "session_history",
           sessionId: msg.sessionId,
-          messages: page.entries,
+          messages: appVisibleHistory(page.entries),
           total: page.total,
           offset: page.offset,
           historyKind,
@@ -7950,7 +7703,7 @@ function createConnectionHandler(
         const { sid, ts } = msg;
         const entries = isCodexNativeArchiveTs(ts)
           ? await readCodexAppServerThreadHistory(sid)
-          : getArchiveHistory(sid, ts);
+          : appVisibleHistory(getArchiveHistory(sid, ts));
         sendJson({ type: "archive_history", sid, ts, messages: entries });
         break;
       }
@@ -8450,259 +8203,6 @@ function createConnectionHandler(
             operation: "delete",
             ok: false,
             error: errorMessage(e) || String(e),
-          });
-        }
-        break;
-      }
-
-      case "work_review_list": {
-        const reviews = listWorkReviews({
-          ...(msg.sessionId
-            ? { originSessionId: String(msg.sessionId) }
-            : {}),
-          includeArchived: msg.includeArchived === true,
-        });
-        sendJson({
-          type: "work_review_list_result",
-          requestId: msg.requestId,
-          reviews,
-        });
-        break;
-      }
-
-      case "work_review_get": {
-        const reviewId = String(msg.reviewId || "");
-        const snapshot = getWorkReviewClientSnapshot(reviewId);
-        if (!snapshot) {
-          sendJson({
-            type: "work_review_operation_result",
-            requestId: String(msg.requestId || ""),
-            operation: "get",
-            reviewId,
-            ok: false,
-            error: `Work review not found: ${reviewId}`,
-          });
-          break;
-        }
-        sendJson(workReviewClientPayload(
-          snapshot,
-          String(msg.requestId || ""),
-        ));
-        break;
-      }
-
-      case "work_review_draft_update": {
-        const requestId = String(msg.requestId || "");
-        const reviewId = String(msg.reviewId || "");
-        const roundId = String(msg.roundId || "");
-        try {
-          const before = getWorkReviewClientSnapshot(reviewId);
-          if (!before) throw new Error(`Work review not found: ${reviewId}`);
-          const currentRound = Array.isArray(before.rounds)
-            ? before.rounds.find((round) => Number(round.revision) === Number(before.currentRevision))
-              || before.rounds[before.rounds.length - 1]
-            : undefined;
-          if (!currentRound || String(currentRound.roundId || "") !== roundId) {
-            throw new Error("Draft update targets a stale Work Review round");
-          }
-          const draft = msg.draft || {};
-          const mutationId = String(msg.mutationId || "").trim();
-          if (!mutationId) throw new Error("Draft update requires mutationId");
-          const snapshot = await updateWorkReviewDraft(reviewId, {
-            mutationId,
-            expectedRevision: Number.isInteger(msg.baseRevision)
-              ? Number(msg.baseRevision)
-              : undefined,
-            itemUpdates: Array.isArray(draft.items)
-              ? draft.items.map((item) => ({
-                  itemId: String(item.itemId || ""),
-                  status: item.status,
-                  ...(typeof item.note === "string" ? { note: item.note } : {}),
-                }))
-              : [],
-            ...(typeof draft.overallNote === "string"
-              ? { overallNote: draft.overallNote }
-              : {}),
-          });
-          const payload = workReviewClientPayload(snapshot, requestId);
-          sendJson(payload);
-          sendJson({
-            type: "work_review_operation_result",
-            requestId,
-            operation: "draft_update",
-            reviewId,
-            roundId,
-            ok: true,
-            review: payload.review,
-            draft: payload.draft,
-          });
-        } catch (error: unknown) {
-          sendJson({
-            type: "work_review_operation_result",
-            requestId,
-            operation: "draft_update",
-            reviewId,
-            roundId,
-            ok: false,
-            error: errorMessage(error) || String(error),
-          });
-        }
-        break;
-      }
-
-      case "work_review_finish": {
-        const requestId = String(msg.requestId || "");
-        const reviewId = String(msg.reviewId || "");
-        const roundId = String(msg.roundId || "");
-        try {
-          const before = getWorkReviewClientSnapshot(reviewId);
-          if (!before) throw new Error(`Work review not found: ${reviewId}`);
-          const currentRound = Array.isArray(before.rounds)
-            ? before.rounds.find((round) => Number(round.revision) === Number(before.currentRevision))
-              || before.rounds[before.rounds.length - 1]
-            : undefined;
-          if (!currentRound || String(currentRound.roundId || "") !== roundId) {
-            throw new Error("Finish Review targets a stale Work Review round");
-          }
-          const draft = msg.draft || {};
-          const mutationId = String(msg.mutationId || "").trim();
-          if (!mutationId) throw new Error("Finish Review requires mutationId");
-          const finished = await finishWorkReview(reviewId, {
-            draft: {
-              mutationId,
-              expectedRevision: Number.isInteger(msg.baseRevision)
-                ? Number(msg.baseRevision)
-                : undefined,
-              itemUpdates: Array.isArray(draft.items)
-                ? draft.items.map((item) => ({
-                    itemId: String(item.itemId || ""),
-                    status: item.status,
-                    ...(typeof item.note === "string" ? { note: item.note } : {}),
-                  }))
-                : [],
-              ...(typeof draft.overallNote === "string"
-                ? { overallNote: draft.overallNote }
-                : {}),
-            },
-          });
-          broadcastWorkReviewCard(finished.review);
-          const resultDelivery = queueWorkReviewResultDelivery(
-            finished.review,
-            finished.result,
-          );
-          const snapshot = getWorkReviewClientSnapshot(reviewId);
-          const payload = snapshot
-            ? workReviewClientPayload(snapshot, requestId)
-            : { review: finished.review };
-          if (snapshot) sendJson(payload);
-          sendJson({
-            type: "work_review_operation_result",
-            requestId,
-            operation: "finish",
-            reviewId,
-            roundId,
-            ok: true,
-            review: payload.review,
-            ...("draft" in payload && payload.draft ? { draft: payload.draft } : {}),
-            resultId: finished.result.resultId,
-            published: finished.published,
-          });
-          void resultDelivery.catch((error: unknown) => {
-            console.error(
-              `[WorkReview] result delivery failed result=${finished.result.resultId}`
-              + ` session=${finished.review.originSessionId}: ${errorMessage(error) || String(error)}`,
-            );
-          });
-        } catch (error: unknown) {
-          sendJson({
-            type: "work_review_operation_result",
-            requestId,
-            operation: "finish",
-            reviewId,
-            roundId,
-            ok: false,
-            error: errorMessage(error) || String(error),
-          });
-        }
-        break;
-      }
-
-      case "work_review_cancel": {
-        const requestId = String(msg.requestId || "");
-        const reviewId = String(msg.reviewId || "");
-        const roundId = String(msg.roundId || "");
-        try {
-          const before = getWorkReviewClientSnapshot(reviewId);
-          if (!before) throw new Error(`Work review not found: ${reviewId}`);
-          const currentRound = Array.isArray(before.rounds)
-            ? before.rounds.find((round) => Number(round.revision) === Number(before.currentRevision))
-              || before.rounds[before.rounds.length - 1]
-            : undefined;
-          if (!currentRound || String(currentRound.roundId || "") !== roundId) {
-            throw new Error("Cancel targets a stale Work Review round");
-          }
-          const review = await cancelWorkReview(reviewId);
-          // Keep the durable phone card truthful without publishing a result
-          // or injecting any message into the originating agent session.
-          broadcastWorkReviewCard(review);
-          sendJson({
-            type: "work_review_operation_result",
-            requestId,
-            operation: "cancel",
-            reviewId,
-            roundId,
-            ok: true,
-            review,
-          });
-        } catch (error: unknown) {
-          sendJson({
-            type: "work_review_operation_result",
-            requestId,
-            operation: "cancel",
-            reviewId,
-            roundId,
-            ok: false,
-            error: errorMessage(error) || String(error),
-          });
-        }
-        break;
-      }
-
-      case "work_review_archive":
-      case "work_review_restore": {
-        const requestId = String(msg.requestId || "");
-        const reviewId = String(msg.reviewId || "");
-        const operation = msg.type === "work_review_archive"
-          ? "archive"
-          : "restore";
-        try {
-          const review = operation === "archive"
-            ? await archiveWorkReview(reviewId)
-            : await restoreWorkReview(reviewId);
-          // This revises only the stable app/history card. Lifecycle actions
-          // never enter queueWorkReviewResultDelivery or the agent session.
-          broadcastWorkReviewCard(review);
-          const snapshot = getWorkReviewClientSnapshot(reviewId);
-          const payload = snapshot
-            ? workReviewClientPayload(snapshot, requestId)
-            : { review };
-          sendJson({
-            type: "work_review_operation_result",
-            requestId,
-            operation,
-            reviewId,
-            ok: true,
-            review: payload.review,
-            ...("draft" in payload && payload.draft ? { draft: payload.draft } : {}),
-          });
-        } catch (error: unknown) {
-          sendJson({
-            type: "work_review_operation_result",
-            requestId,
-            operation,
-            reviewId,
-            ok: false,
-            error: errorMessage(error) || String(error),
           });
         }
         break;
@@ -9887,7 +9387,7 @@ function createConnectionHandler(
               const fingerprint = rewindSessionInfo && nativeHistoryFingerprintForSession(rewindSessionInfo);
               if (fingerprint) rewoundNativeHistoryFingerprints.set(sessionId, fingerprint);
               const page = getHistoryPageToLastPrompt(sessionId);
-              const historyMessage = { type: "session_history", historyKind: "rewind", sessionId, messages: page.entries, total: page.total, offset: page.offset };
+              const historyMessage = { type: "session_history", historyKind: "rewind", sessionId, messages: appVisibleHistory(page.entries), total: page.total, offset: page.offset };
               broadcastHeadlessSessionMessage(JSON.stringify(resultMessage), sessionId);
               broadcastHeadlessSessionMessage(JSON.stringify(historyMessage), sessionId);
               broadcastSessionList();
@@ -9971,7 +9471,7 @@ function createConnectionHandler(
             type: "session_history",
             historyKind: "rewind",
             sessionId,
-            messages: page.entries,
+            messages: appVisibleHistory(page.entries),
             total: page.total,
             offset: page.offset,
           });
@@ -10069,7 +9569,7 @@ function createConnectionHandler(
           sendJson({
             type: "session_history",
             sessionId: newSessionId,
-            messages: branchPage.entries,
+            messages: appVisibleHistory(branchPage.entries),
             total: branchPage.total,
             offset: branchPage.offset,
           });
@@ -10149,7 +9649,7 @@ function createConnectionHandler(
           sendJson({
             type: "session_history",
             sessionId: newSessionId,
-            messages: forkPage.entries,
+            messages: appVisibleHistory(forkPage.entries),
             total: forkPage.total,
             offset: forkPage.offset,
           });
@@ -10174,7 +9674,7 @@ function createConnectionHandler(
         sendJson({
           type: "session_history",
           sessionId,
-          messages: page.entries,
+          messages: appVisibleHistory(page.entries),
           total: page.total,
           offset: page.offset,
           historyKind: "older",
@@ -12043,7 +11543,6 @@ async function initializeListeningServer(): Promise<void> {
   if (restoredMonitors > 0) {
     console.log(`[AppMonitor] Restored ${restoredMonitors} durable monitor(s)`);
   }
-  restorePendingWorkReviewResultDeliveries();
   computerLinks.start();
   serverReady = true;
   transferJobs.resume();

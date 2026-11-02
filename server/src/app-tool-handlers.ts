@@ -4,7 +4,6 @@ import { isRecord, unknownArray, errorMessage } from "./value-guards";
 import * as fs from "fs";
 import * as path from "path";
 import type { Backend, CodexDriver, HistoryEntry, ServerMessage } from "./protocol";
-import type { WorkReviewAgentView, WorkReviewItemInput } from "./work-review-types";
 import { generateKokoroAudio } from "./kokoro-tts";
 import { getScheduledTaskSessionIds, saveScheduledTask, ScheduledTask, parseSchedule } from "./scheduled-task-store";
 import { listSkills, SkillEntry } from "./skills-manager";
@@ -17,15 +16,7 @@ import {
   type SecureInputRequestStatus,
 } from "./secure-input-store";
 import { sendPushNotification } from "./push-notifications";
-import { getHtmlPlan, saveHtmlPlan } from "./html-plan-store";
-import {
-  archiveWorkReview,
-  createWorkReview,
-  createWorkReviewRound,
-  exportWorkReviews,
-  getWorkReview,
-  listWorkReviews,
-} from "./work-review-service";
+import { saveHtmlPlan } from "./html-plan-store";
 import {
   attachSendFileDeliveryToHistory,
   getTodos,
@@ -606,38 +597,6 @@ export interface ReportSubagentAssignmentArgs {
   prompt: string;
 }
 
-export interface WorkReviewTargetArgs {
-  kind: "url" | "file" | "image" | "html" | "html_plan" | "diff" | "session" | "custom";
-  uri: string;
-  label?: string;
-  environment?: string;
-  displayMode?: "auto" | "embedded" | "external";
-  description?: string;
-}
-
-export interface WorkReviewItemArgs {
-  item_id?: string;
-  title: string;
-  description?: string;
-  instructions?: string;
-  primary_target: WorkReviewTargetArgs;
-  supporting_targets?: WorkReviewTargetArgs[];
-}
-
-export interface WorkReviewArgs {
-  action: "create" | "get" | "list" | "export" | "new_round" | "archive";
-  review_id?: string;
-  idempotency_key?: string;
-  title?: string;
-  purpose?: string;
-  summary?: string;
-  instructions?: string;
-  approval_meaning?: string;
-  linked_html_plan_id?: string;
-  items?: WorkReviewItemArgs[];
-  include_archived?: boolean;
-}
-
 export interface RememberArgs {
   action: "search" | "search_all" | "list" | "get" | "context" | "runs";
   source_id?: string;
@@ -650,7 +609,7 @@ export interface RememberArgs {
   roles?: Array<
     "user" | "assistant" | "tool_call" | "tool_result" | "thinking"
     | "task_state" | "run_boundary" | "monitor" | "question"
-    | "secure_input" | "work_review" | "html_plan"
+    | "secure_input" | "html_plan"
   >;
   tool_name?: string;
   since?: string;
@@ -1089,210 +1048,6 @@ export async function handleHtmlPlanTool(
   } catch (e: unknown) {
     return {
       content: [{ type: "text", text: `HTML plan error: ${errorMessage(e) || String(e)}` }],
-      isError: true,
-    };
-  }
-}
-
-function workReviewItems(items: WorkReviewItemArgs[] | undefined): WorkReviewItemInput[] {
-  return (items || []).map((item) => ({
-    ...(item.item_id ? { itemId: item.item_id } : {}),
-    title: item.title,
-    ...(item.description ? { description: item.description } : {}),
-    ...(item.instructions ? { instructions: item.instructions } : {}),
-    primaryTarget: item.primary_target,
-    ...(item.supporting_targets ? { supportingTargets: item.supporting_targets } : {}),
-  }));
-}
-
-/**
- * Upsert the single durable chat card for a review. appendHistory replaces the
- * existing logical entry because both its review key and explicit entryId are
- * stable; it never removes/re-appends the card at a new transcript position.
- */
-export function publishWorkReviewCard(
-  ctx: Pick<AppToolContext, "appendHistory" | "send">,
-  review: WorkReviewAgentView,
-): HistoryEntry | undefined {
-  const reviewId = String(review.reviewId || "");
-  const sessionId = String(review.originSessionId || "");
-  if (!reviewId || !sessionId) return undefined;
-  const round = review.rounds.find(candidate => candidate.revision === review.currentRevision)
-    || review.rounds[review.rounds.length - 1];
-  const linkedHtmlPlan = round?.linkedHtmlPlanId
-    ? getHtmlPlan(sessionId, round.linkedHtmlPlanId)
-    : undefined;
-  const cardReview = {
-    reviewId,
-    cardId: review.cardId,
-    originSessionId: sessionId,
-    ...(review.originBackend ? { originBackend: review.originBackend } : {}),
-    createdAt: review.createdAt,
-    updatedAt: review.updatedAt,
-    ...(review.archivedAt ? { archivedAt: review.archivedAt } : {}),
-    currentRevision: review.currentRevision,
-    roundId: round?.roundId,
-    title: round?.title || "Work review",
-    ...(round?.linkedHtmlPlanId ? { linkedHtmlPlanId: round.linkedHtmlPlanId } : {}),
-    ...(linkedHtmlPlan ? { linkedHtmlPlan } : {}),
-    ...(round?.purpose ? { purpose: round.purpose } : {}),
-    ...(round?.summary ? { summary: round.summary } : {}),
-    ...(round?.instructions ? { instructions: round.instructions } : {}),
-    ...(round?.approvalMeaning ? { approvalMeaning: round.approvalMeaning } : {}),
-    items: Array.isArray(round?.items) ? round.items : [],
-    status: round?.status || "in_review",
-    ...(round?.result ? { result: round.result } : {}),
-  };
-  const positioned = ctx.appendHistory?.({
-    role: "work_review",
-    content: String(cardReview.title),
-    toolName: "WorkReview",
-    reviewId,
-    workReview: cardReview,
-    entryId: String(review.cardId || `work-review:${reviewId}`),
-    timestamp: String(review.updatedAt || new Date().toISOString()),
-  }) ?? undefined;
-  if (!positioned?.entryId || !positioned?.sessionSeq || !positioned?.revision) {
-    return positioned;
-  }
-  ctx.send({
-    type: "work_review_card",
-    reviewId,
-    sessionId,
-    review: cardReview,
-    entryId: positioned.entryId,
-    sessionSeq: positioned.sessionSeq,
-    revision: positioned.revision,
-  });
-  return positioned;
-}
-
-export async function handleWorkReviewTool(
-  ctx: AppToolContext,
-  args: WorkReviewArgs,
-): Promise<McpTextResult> {
-  const originSessionId = ctx.getSessionId();
-  if (!originSessionId) {
-    return {
-      content: [{ type: "text", text: "WorkReview requires an active SocketAgent session." }],
-      isError: true,
-    };
-  }
-  try {
-    let result: unknown;
-    switch (args.action) {
-      case "create": {
-        if (!args.idempotency_key?.trim()) throw new Error("idempotency_key is required");
-        if (!args.title?.trim()) throw new Error("title is required");
-        if (!args.items?.length) throw new Error("items must contain at least one review item");
-        if (args.linked_html_plan_id?.trim()
-          && !getHtmlPlan(originSessionId, args.linked_html_plan_id.trim())) {
-          throw new Error(`HTML plan not found in this session: ${args.linked_html_plan_id.trim()}`);
-        }
-        const review = await createWorkReview({
-          idempotencyKey: args.idempotency_key.trim(),
-          originSessionId,
-          originBackend: ctx.getBackend?.(),
-          title: args.title,
-          linkedHtmlPlanId: args.linked_html_plan_id?.trim(),
-          purpose: args.purpose,
-          summary: args.summary,
-          instructions: args.instructions,
-          approvalMeaning: args.approval_meaning,
-          items: workReviewItems(args.items),
-        });
-        const card = publishWorkReviewCard(ctx, review);
-        result = {
-          review,
-          ...(card ? {
-            card: {
-              entryId: card.entryId,
-              sessionSeq: card.sessionSeq,
-              revision: card.revision,
-            },
-          } : {}),
-        };
-        break;
-      }
-      case "get": {
-        if (!args.review_id?.trim()) throw new Error("review_id is required");
-        const review = getWorkReview(args.review_id.trim());
-        if (!review) throw new Error(`Work review not found: ${args.review_id.trim()}`);
-        result = review;
-        break;
-      }
-      case "list":
-        result = listWorkReviews({
-          originSessionId,
-          includeArchived: args.include_archived === true,
-        });
-        break;
-      case "export":
-        result = exportWorkReviews({
-          originSessionId,
-          includeArchived: args.include_archived === true,
-        });
-        break;
-      case "new_round": {
-        if (!args.review_id?.trim()) throw new Error("review_id is required");
-        if (!args.idempotency_key?.trim()) throw new Error("idempotency_key is required");
-        if (!args.title?.trim()) throw new Error("title is required");
-        if (!args.items?.length) throw new Error("items must contain at least one review item");
-        if (args.linked_html_plan_id?.trim()
-          && !getHtmlPlan(originSessionId, args.linked_html_plan_id.trim())) {
-          throw new Error(`HTML plan not found in this session: ${args.linked_html_plan_id.trim()}`);
-        }
-        const existing = getWorkReview(args.review_id.trim());
-        if (!existing) throw new Error(`Work review not found: ${args.review_id.trim()}`);
-        if (String(existing.originSessionId || "") !== originSessionId) {
-          throw new Error("Only the originating session can create a new review round");
-        }
-        const review = await createWorkReviewRound(args.review_id.trim(), {
-          idempotencyKey: args.idempotency_key.trim(),
-          title: args.title,
-          linkedHtmlPlanId: args.linked_html_plan_id?.trim(),
-          purpose: args.purpose,
-          summary: args.summary,
-          instructions: args.instructions,
-          approvalMeaning: args.approval_meaning,
-          items: workReviewItems(args.items),
-        });
-        const card = publishWorkReviewCard(ctx, review);
-        result = { review, ...(card ? { card: {
-          entryId: card.entryId,
-          sessionSeq: card.sessionSeq,
-          revision: card.revision,
-        } } : {}) };
-        break;
-      }
-      case "archive": {
-        if (!args.review_id?.trim()) throw new Error("review_id is required");
-        const existing = getWorkReview(args.review_id.trim());
-        if (!existing) throw new Error(`Work review not found: ${args.review_id.trim()}`);
-        if (String(existing.originSessionId || "") !== originSessionId) {
-          throw new Error("Only the originating session can archive a work review");
-        }
-        const review = await archiveWorkReview(args.review_id.trim());
-        const card = publishWorkReviewCard(ctx, review);
-        result = { review, ...(card ? { card: {
-          entryId: card.entryId,
-          sessionSeq: card.sessionSeq,
-          revision: card.revision,
-        } } : {}) };
-        break;
-      }
-      default:
-        throw new Error(`Unsupported WorkReview action: ${String(args.action)}`);
-    }
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
-  } catch (error: unknown) {
-    return {
-      content: [{
-        type: "text",
-        text: `WorkReview error: ${errorMessage(error) || String(error)}`,
-      }],
       isError: true,
     };
   }

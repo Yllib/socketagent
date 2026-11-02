@@ -281,9 +281,6 @@ export class TranscriptDatabase {
       CREATE INDEX IF NOT EXISTS transcript_entries_user_uuid
         ON transcript_entries(session_id, json_extract(entry_json, '$.uuid'))
         WHERE role = 'user';
-      CREATE INDEX IF NOT EXISTS transcript_entries_work_review_id
-        ON transcript_entries(session_id, json_extract(entry_json, '$.reviewId'))
-        WHERE role = 'work_review';
     `);
     const schemaVersion = Number((schemaVersionRowSchema.parse(this.db.prepare("PRAGMA user_version").get())).user_version);
     const hadFtsTable = !!this.db.prepare(
@@ -669,7 +666,6 @@ export class TranscriptDatabase {
           'elicitation_url',
           'secure_input',
           'browser_session',
-          'work_review',
           'task_state',
           'memory'
         )
@@ -805,16 +801,6 @@ export class TranscriptDatabase {
       WHERE session_id = ? AND tool_use_id = ? AND role = ?
       ORDER BY session_seq DESC LIMIT 1
     `).get(sessionId, toolUseId, role));
-    return row ? parseEntry(row) : undefined;
-  }
-
-  getWorkReview(sessionId: string, reviewId: string): HistoryEntry | undefined {
-    const row = optionalEntryRowSchema.parse(this.db.prepare(`
-      SELECT * FROM transcript_entries
-      WHERE session_id = ? AND role = 'work_review'
-        AND json_extract(entry_json, '$.reviewId') = ?
-      ORDER BY session_seq DESC LIMIT 1
-    `).get(sessionId, reviewId));
     return row ? parseEntry(row) : undefined;
   }
 

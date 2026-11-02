@@ -25,7 +25,6 @@ import {
   handleSendFileTool,
   handleSpeakTool,
   handleTaskBatchTool,
-  handleWorkReviewTool,
   BROWSER_SESSION_DESCRIPTION,
   BROWSER_SESSION_INPUT,
 } from "./app-tool-handlers";
@@ -35,7 +34,6 @@ import {
   HTML_PLAN_TOOL_DESCRIPTION,
   REMEMBER_TOOL_DESCRIPTION,
   SESSION_MEMORY_TOOL_DESCRIPTION,
-  WORK_REVIEW_TOOL_DESCRIPTION,
 } from "./socketagent-instructions";
 
 export interface SocketAgentAppToolManifest {
@@ -47,10 +45,6 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   {
     name: "HtmlPlan",
     description: HTML_PLAN_TOOL_DESCRIPTION,
-  },
-  {
-    name: "WorkReview",
-    description: WORK_REVIEW_TOOL_DESCRIPTION,
   },
   {
     name: "SendFile",
@@ -174,49 +168,6 @@ function createServer(context: AppToolContext): McpServer {
       },
     },
     async (args) => handleHtmlPlanTool(context, args),
-  );
-
-  const workReviewTargetSchema = z.object({
-    kind: z.enum(["url", "file", "image", "html", "html_plan", "diff", "session", "custom"]),
-    uri: z.string().describe("Address or identifier the reviewer opens or inspects"),
-    label: z.string().optional(),
-    environment: z.string().optional().describe("For example production, development, sandbox, or local"),
-    displayMode: z.enum(["auto", "embedded", "external"]).optional(),
-    description: z.string().optional(),
-  });
-  const workReviewPrimaryTargetSchema = workReviewTargetSchema.extend({
-    displayMode: z.enum(["auto", "embedded"]).optional().describe(
-      "Primary HTTP(S) targets are embedded beneath the review panel. Use auto or embedded.",
-    ),
-  });
-  const workReviewItemSchema = z.object({
-    item_id: z.string().optional().describe("Stable item ID; omit to generate one"),
-    title: z.string(),
-    description: z.string().optional(),
-    instructions: z.string().optional().describe("What the reviewer should inspect or verify"),
-    primary_target: workReviewPrimaryTargetSchema,
-    supporting_targets: z.array(workReviewTargetSchema).optional(),
-  });
-  server.registerTool(
-    "WorkReview",
-    {
-      title: "Work Review",
-      description: WORK_REVIEW_TOOL_DESCRIPTION,
-      inputSchema: {
-        action: z.enum(["create", "get", "list", "export", "new_round", "archive"]),
-        review_id: z.string().optional().describe("Required for get, new_round, and archive"),
-        idempotency_key: z.string().optional().describe("Stable caller-generated key required for create and new_round; reuse it when retrying"),
-        title: z.string().optional().describe("Required for create and new_round"),
-        purpose: z.string().optional().describe("Optional workflow purpose, such as pre-deployment, QA, design review, audit, or informational"),
-        summary: z.string().optional().describe("Concise description of the work completed"),
-        instructions: z.string().optional().describe("Instructions applying to the whole review"),
-        approval_meaning: z.string().optional().describe("What approval authorizes or confirms, including deployment authorization when applicable"),
-        linked_html_plan_id: z.string().optional().describe("Same-session HtmlPlan ID to display once for html_plan item targets"),
-        items: z.array(workReviewItemSchema).optional().describe("Required non-empty list for create and new_round"),
-        include_archived: z.boolean().optional().describe("Include archived reviews for list/export"),
-      },
-    },
-    async (args) => handleWorkReviewTool(context, args),
   );
 
   server.registerTool(
@@ -446,7 +397,7 @@ function createServer(context: AppToolContext): McpServer {
         before: z.number().int().min(0).max(20).optional().describe("Context entries before session_seq. Default 3"),
         after: z.number().int().min(0).max(20).optional().describe("Context entries after session_seq. Default 3"),
         direction: z.enum(["before", "after"]).optional().describe("For list, page before or after session_seq. Default before; omit session_seq for the latest page"),
-        roles: z.array(z.enum(["user", "assistant", "tool_call", "tool_result", "thinking", "task_state", "run_boundary", "monitor", "question", "secure_input", "work_review", "html_plan"])).optional().describe("Search role filters. Defaults to user and assistant"),
+        roles: z.array(z.enum(["user", "assistant", "tool_call", "tool_result", "thinking", "task_state", "run_boundary", "monitor", "question", "secure_input", "html_plan"])).optional().describe("Search role filters. Defaults to user and assistant"),
         tool_name: z.string().optional().describe("Search only calls/results for this tool name"),
         since: z.string().optional().describe("Optional ISO timestamp lower bound for search"),
         until: z.string().optional().describe("Optional ISO timestamp upper bound for search"),

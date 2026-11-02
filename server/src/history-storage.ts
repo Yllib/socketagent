@@ -175,8 +175,5 @@ export function historyPositionKey(entry: HistoryEntry): string | null {
   if (entry.role === "task_state" && entry.taskId) {
     return `task_state:${entry.taskKind || "background"}:${entry.taskId}`;
   }
-  if (entry.role === "work_review" && entry.reviewId) {
-    return `work_review:${entry.reviewId}`;
-  }
   return null;
 }

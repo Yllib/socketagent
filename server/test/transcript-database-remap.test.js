@@ -196,6 +196,7 @@ test("serves resume recovery data through targeted transcript indexes", () => {
     assert.equal(database.getSinceTimestamp(sessionId, "2026-08-24T10:03:00.000Z").length, 2);
     assert.equal(database.getRunBoundary(sessionId, "run-1").entryId, "boundary");
 
+    // Cards from the removed Work Review feature must still load from old transcripts.
     database.upsert(sessionId, {
       entryId: "review",
       sessionSeq: 7,
@@ -211,7 +212,7 @@ test("serves resume recovery data through targeted transcript indexes", () => {
       role: "user",
       content: '<socketagent_delegation_report delegation_id="delegation-1">result',
     }, "user:delegated-report");
-    assert.equal(database.getWorkReview(sessionId, "review-1").entryId, "review");
+    assert.equal(database.getByRole(sessionId, "work_review")[0].reviewId, "review-1");
     assert.equal(
       database.hasUserContentPrefix(
         sessionId,

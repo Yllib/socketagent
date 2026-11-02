@@ -33,7 +33,6 @@ const CONCURRENT_READ_MESSAGE_TYPES = new Set([
   "secret_inventory_request",
   "skills_list",
   "version_check",
-  "work_review_list",
 ]);
 
 // These operations replace or depend on the connection-local active runner.

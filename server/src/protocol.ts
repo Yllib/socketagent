@@ -30,7 +30,6 @@ export type CodexDriver = "app-server";
 
 export const TRANSPORT_LANE_VERSION = 1;
 export const UPLOAD_ACK_VERSION = 1;
-export const WORK_REVIEW_VERSION = 2;
 export const BULK_RELAY_PAIRING_SUFFIX = ":bulk:v1";
 export type TransportLane = "control" | "bulk";
 
@@ -411,86 +410,6 @@ export interface HtmlPlanRollbackMessage {
   sessionId: string;
   planId: string;
   revision: number;
-}
-
-export type WorkReviewDisposition =
-  | "approved"
-  | "changes_requested"
-  | "rejected"
-  | "skipped";
-
-export interface WorkReviewDraftItem {
-  itemId: string;
-  status: "pending" | WorkReviewDisposition;
-  note?: string;
-}
-
-/**
- * Mutable, reviewer-private state. This object is returned only to app
- * clients; agent-facing WorkReview reads intentionally omit it until finish.
- */
-export interface WorkReviewDraft {
-  revision?: number;
-  updatedAt?: string;
-  overallNote?: string;
-  items: WorkReviewDraftItem[];
-}
-
-export interface WorkReviewListMessage {
-  type: "work_review_list";
-  requestId?: string;
-  sessionId?: string;
-  includeArchived?: boolean;
-}
-
-export interface WorkReviewGetMessage {
-  type: "work_review_get";
-  requestId: string;
-  reviewId: string;
-}
-
-export interface WorkReviewDraftUpdateMessage {
-  type: "work_review_draft_update";
-  requestId: string;
-  reviewId: string;
-  roundId: string;
-  /** Stable client-generated id used to deduplicate retries. */
-  mutationId: string;
-  /** Optional optimistic-concurrency cursor from the latest draft snapshot. */
-  baseRevision?: number;
-  /** Full private snapshot, never an incremental feedback event. */
-  draft: WorkReviewDraft;
-}
-
-export interface WorkReviewFinishMessage {
-  type: "work_review_finish";
-  requestId: string;
-  reviewId: string;
-  roundId: string;
-  /** Stable client-generated id used to make Finish Review idempotent. */
-  mutationId: string;
-  baseRevision?: number;
-  /** The complete final draft is published atomically by this operation. */
-  draft: WorkReviewDraft;
-}
-
-export interface WorkReviewCancelMessage {
-  type: "work_review_cancel";
-  requestId: string;
-  reviewId: string;
-  roundId: string;
-}
-
-export interface WorkReviewArchiveMessage {
-  type: "work_review_archive";
-  requestId: string;
-  reviewId: string;
-}
-
-export interface WorkReviewRestoreMessage {
-  type: "work_review_restore";
-  requestId: string;
-  reviewId: string;
 }
 
 export interface NewSessionMessage {
@@ -1639,13 +1558,6 @@ export type ClientMessage = { commandId?: string } & (
   | HtmlPlanRevisionListMessage
   | HtmlPlanRevisionGetMessage
   | HtmlPlanRollbackMessage
-  | WorkReviewListMessage
-  | WorkReviewGetMessage
-  | WorkReviewDraftUpdateMessage
-  | WorkReviewFinishMessage
-  | WorkReviewCancelMessage
-  | WorkReviewArchiveMessage
-  | WorkReviewRestoreMessage
   | NewSessionMessage
   | ResumeSessionMessage
   | SessionEventAckMessage
@@ -2536,11 +2448,6 @@ export interface ServerCapabilitiesMessage {
   htmlPlans?: {
     version: number;
   };
-  workReviews?: {
-    version: number;
-    privateDrafts: true;
-    atomicFinish: true;
-  };
   sessionTransfer?: {
     version: number;
   };
@@ -2800,8 +2707,8 @@ export interface HistoryEntry {
   runFinishedAt?: string;
   runDurationMs?: number;
   runOutcome?: SessionRunOutcome;
-  // Work Review fields (role === "work_review"). Private drafts are never
-  // stored in chat history; workReview is the public/card projection only.
+  // Removed Work Review feature. Kept only so old transcripts with
+  // role "work_review" still load; the server never sends them to the app.
   reviewId?: string;
   workReview?: Record<string, unknown>;
   /** Stable transcript identity shared by live delivery and history replay. */
@@ -2882,56 +2789,6 @@ export interface SessionRunCompletedServerMessage {
   sessionId: string;
   runStats: SessionRunStats;
   boundary: HistoryEntry;
-}
-
-export interface WorkReviewSnapshotServerMessage {
-  type: "work_review_snapshot";
-  requestId?: string;
-  reviewId: string;
-  /** Exact originating SocketAgent session, not the currently visible one. */
-  sessionId: string;
-  review: Record<string, unknown>;
-  /** Reviewer-private mutable state; absent once there is no open draft. */
-  draft?: WorkReviewDraft;
-  entryId?: string;
-  sessionSeq?: number;
-  revision?: number;
-}
-
-export interface WorkReviewListResultServerMessage {
-  type: "work_review_list_result";
-  requestId?: string;
-  reviews: Record<string, unknown>[];
-}
-
-export interface WorkReviewOperationResultServerMessage {
-  type: "work_review_operation_result";
-  requestId: string;
-  operation: "get" | "draft_update" | "finish" | "cancel" | "archive" | "restore";
-  reviewId: string;
-  roundId?: string;
-  ok: boolean;
-  error?: string;
-  review?: Record<string, unknown>;
-  draft?: WorkReviewDraft;
-  resultId?: string;
-  published?: boolean;
-}
-
-/**
- * Durable card update. All revisions for one review reuse the same entryId and
- * sessionSeq. It contains only the public review projection.
- */
-export interface WorkReviewCardServerMessage {
-  type: "work_review_card";
-  reviewId: string;
-  sessionId: string;
-  review: Record<string, unknown>;
-  entryId: string;
-  sessionSeq: number;
-  revision: number;
-  deliveryId?: string;
-  replay?: boolean;
 }
 
 export interface StatusServerMessage {
@@ -4149,10 +4006,6 @@ export type ServerMessage =
   | HtmlPlanOperationResultServerMessage
   | HtmlPlanRevisionListServerMessage
   | HtmlPlanRevisionServerMessage
-  | WorkReviewSnapshotServerMessage
-  | WorkReviewListResultServerMessage
-  | WorkReviewOperationResultServerMessage
-  | WorkReviewCardServerMessage
   | ResultServerMessage
   | SessionListServerMessage
   | SdkSessionListServerMessage

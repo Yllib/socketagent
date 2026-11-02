@@ -29,6 +29,7 @@ function isSyntheticPrompt(content: string): boolean {
     || text.startsWith("[Image:")
     || text.startsWith("[Request interrupted by user]")
     || text.startsWith("[You previously asked me a question.")
+    // Prompts the removed Work Review feature sent, still in old transcripts.
     || text.startsWith("The user finished the Work Review.");
 }
 

@@ -123,28 +123,6 @@ test("HTML plan cards use acknowledged delivery", () => {
   delivery.dispose();
 });
 
-test("Work Review cards use acknowledged delivery and stable replay IDs", () => {
-  /** @type {Record<string, unknown>[]} */
-  const sent = [];
-  const delivery = new SessionEventDelivery((/** @type {Record<string, unknown>} */ message) => sent.push(message), 10_000);
-  const prepared = delivery.prepare({
-    type: "work_review_card",
-    sessionId: "review-session",
-    reviewId: "review-1",
-    entryId: "card-1",
-    sessionSeq: 7,
-    revision: 2,
-  });
-  assert.ok(prepared.deliveryId);
-  /** @type {Record<string, unknown>[]} */
-  const replayed = [];
-  delivery.replayTo((message) => replayed.push(message));
-  assert.equal(replayed.length, 1);
-  assert.equal(replayed[0].deliveryId, prepared.deliveryId);
-  assert.equal(replayed[0].entryId, "card-1");
-  delivery.dispose();
-});
-
 test("protected browser cards use acknowledged delivery", () => {
   const delivery = new SessionEventDelivery(() => {});
   const prepared = delivery.prepare({

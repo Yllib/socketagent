@@ -55,6 +55,7 @@ export const sessionRunOutcomeSchema = z.enum([
 ]) satisfies z.ZodType<SessionRunOutcome>;
 
 export const historyEntrySchema = z.object({
+  // "work_review" (with reviewId/workReview below) is kept only for old transcripts.
   role: z.enum([
     "user", "assistant", "tool_call", "tool_result", "tool_image", "question",
     "secure_input", "browser_session", "html_plan", "work_review", "todos_update",

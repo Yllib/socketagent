@@ -23,7 +23,4 @@ test('stored contracts reject invalid nested values without including their cont
       sourceSessionId: 'source', exactNativeResume: false, session: { id: 'incomplete' },
     },
   }), /Invalid transferHeader/);
-  assert.throws(() => parseStoredData('workReviewDeliveries', {
-    schemaVersion: 1, records: [{ resultId: 123 }],
-  }), /Invalid workReviewDeliveries/);
 });

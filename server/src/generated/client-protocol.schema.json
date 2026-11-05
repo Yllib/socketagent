@@ -4471,6 +4471,25 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "rerun_windows_setup_elevated"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "add_recent_cwd"
             },
             "cwd": {

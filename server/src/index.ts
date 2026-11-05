@@ -1669,6 +1669,7 @@ function serverCapabilitiesPayload(
       platform: process.platform,
     },
     windowsElevated: windowsElevated(),
+    windowsSetupElevationVersion: process.platform === "win32" ? 1 : undefined,
     binaryEnvelope,
     binaryFileDownloadVersion: BINARY_FILE_DOWNLOAD_VERSION,
     // Clients that see this over the static box know their handshake was stripped.
@@ -6776,6 +6777,25 @@ function createConnectionHandler(
           sessions: immediateEnrichedSessions().map(sessionListSummary),
         });
         refreshNativeSessionListInBackground("list_sessions");
+        break;
+      }
+
+      case "rerun_windows_setup_elevated": {
+        const requestId = msg.requestId;
+        if (process.platform !== "win32" || windowsElevated() !== false) {
+          sendJson({
+            type: "windows_setup_elevation_result",
+            requestId,
+            ok: false,
+            error: "This computer does not need it",
+          });
+          break;
+        }
+        console.log("[Setup] Asking for administrator rights to rerun setup");
+        void rerunWindowsSetupElevated().then((result) => {
+          console.log(`[Setup] Elevated setup ${result.ok ? "started" : `did not start: ${result.error}`}`);
+          sendJson({ type: "windows_setup_elevation_result", requestId, ...result });
+        });
         break;
       }
 
@@ -13525,6 +13545,40 @@ function windowsElevated(): boolean | undefined {
     return undefined;
   }
   return cachedWindowsElevation;
+}
+
+/** The prompt waits for someone at the computer, so give them time. */
+const WINDOWS_SETUP_ELEVATION_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Reruns this computer's own install.ps1 as administrator, in a visible
+ * window. Windows shows its consent prompt on this PC and someone there has
+ * to approve it. Running the local script avoids downloading one and piping
+ * it into iex, which antivirus blocks. Resolves when the prompt is answered,
+ * before setup restarts this server.
+ */
+function rerunWindowsSetupElevated(): Promise<{ ok: true } | { ok: false; error: string }> {
+  // Single-quoted PowerShell strings escape a quote by doubling it. -File needs
+  // its own double quotes because Start-Process joins arguments with spaces.
+  const script = path.join(GIT_ROOT, "install.ps1").replace(/'/g, "''");
+  const args = ["-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", `"${script}"`, "-Port", String(PORT)]
+    .map((arg) => `'${arg}'`)
+    .join(",");
+  const command = `try { Start-Process -FilePath powershell.exe -Verb RunAs -ArgumentList ${args} -ErrorAction Stop } catch { exit 2 }`;
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      // Encoded, so the quotes inside survive Windows command-line parsing.
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")],
+      { windowsHide: true, timeout: WINDOWS_SETUP_ELEVATION_TIMEOUT_MS },
+      (err) => {
+        if (!err) return resolve({ ok: true });
+        if (err.killed) return resolve({ ok: false, error: "No one answered the administrator prompt" });
+        if (err.code === 2) return resolve({ ok: false, error: "The administrator prompt was declined" });
+        resolve({ ok: false, error: `Setup could not start: ${errorMessage(err) || "unknown error"}` });
+      },
+    );
+  });
 }
 
 function cancelWindowsRecoveryGuard(): void {

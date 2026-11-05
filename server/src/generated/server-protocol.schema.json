@@ -56,6 +56,9 @@
           "$ref": "#/definitions/CwdChangedServerMessage"
         },
         {
+          "$ref": "#/definitions/WindowsSetupElevationResultServerMessage"
+        },
+        {
           "$ref": "#/definitions/ClaudeAuthServerMessage"
         },
         {
@@ -1164,6 +1167,29 @@
         "oldCwd",
         "newCwd",
         "sessionId"
+      ]
+    },
+    "WindowsSetupElevationResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "windows_setup_elevation_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "ok"
       ]
     },
     "ClaudeAuthServerMessage": {
@@ -4077,6 +4103,9 @@
         },
         "windowsElevated": {
           "type": "boolean"
+        },
+        "windowsSetupElevationVersion": {
+          "type": "number"
         },
         "binaryEnvelope": {
           "type": "boolean"

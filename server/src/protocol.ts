@@ -1700,6 +1700,8 @@ export type ClientMessage = { commandId?: string } & (
   | { type: "get_claude_usage" }
   | { type: "consume_codex_reset"; sessionId: string; requestId: string; idempotencyKey: string; confirmed: boolean }
   | { type: "get_recent_cwds" }
+  /** Reruns a limited Windows install's setup as administrator. Needs windowsSetupElevationVersion. */
+  | { type: "rerun_windows_setup_elevated"; requestId: string }
   | { type: "add_recent_cwd"; cwd: string }
   | { type: "remove_recent_cwd"; cwd: string }
   | { type: "skills_list" }
@@ -1845,6 +1847,17 @@ export interface AuthStatusServerMessage {
   output: string[];
   error?: string;
   sessionId: string;
+}
+
+/**
+ * Answers rerun_windows_setup_elevated once someone at the computer answers
+ * the administrator prompt. ok means setup is running in an elevated window.
+ */
+export interface WindowsSetupElevationResultServerMessage {
+  type: "windows_setup_elevation_result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
 }
 
 export interface CwdChangedServerMessage {
@@ -2434,6 +2447,8 @@ export interface ServerCapabilitiesMessage {
    * agents cannot change system settings and firewall rules may be missing.
    */
   windowsElevated?: boolean;
+  /** Present when the app can ask a limited install to rerun setup as administrator. */
+  windowsSetupElevationVersion?: number;
   binaryEnvelope?: boolean;
   binaryFileDownloadVersion?: number;
   transportLane?: TransportLane;
@@ -3973,6 +3988,7 @@ export type ServerMessage =
   | FilesPersistedServerMessage
   | AuthStatusServerMessage
   | CwdChangedServerMessage
+  | WindowsSetupElevationResultServerMessage
   | ClaudeAuthServerMessage
   | ClaudeAuthResultServerMessage
   | BashBackgroundedServerMessage

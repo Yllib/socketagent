@@ -13550,31 +13550,54 @@ function windowsElevated(): boolean | undefined {
 /** The prompt waits for someone at the computer, so give them time. */
 const WINDOWS_SETUP_ELEVATION_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** PowerShell single-quoted string literal. */
+const psQuote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+const psEncoded = (script: string) => Buffer.from(script, "utf16le").toString("base64");
+
 /**
  * Reruns this computer's own install.ps1 as administrator, in a visible
  * window. Windows shows its consent prompt on this PC and someone there has
  * to approve it. Running the local script avoids downloading one and piping
  * it into iex, which antivirus blocks. Resolves when the prompt is answered,
  * before setup restarts this server.
+ *
+ * Setup must not run inside this server's scheduled-task job: it stops that
+ * task, and Windows then kills everything in the job, setup included. So the
+ * elevated step only registers a one-shot task that runs setup, starts it and
+ * removes it again; a task's running instance survives its removal.
  */
 function rerunWindowsSetupElevated(): Promise<{ ok: true } | { ok: false; error: string }> {
-  // Single-quoted PowerShell strings escape a quote by doubling it. -File needs
-  // its own double quotes because Start-Process joins arguments with spaces.
-  const script = path.join(GIT_ROOT, "install.ps1").replace(/'/g, "''");
-  const args = ["-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", `"${script}"`, "-Port", String(PORT)]
-    .map((arg) => `'${arg}'`)
-    .join(",");
-  const command = `try { Start-Process -FilePath powershell.exe -Verb RunAs -ArgumentList ${args} -ErrorAction Stop } catch { exit 2 }`;
+  const setupTask = "SocketAgentSetup";
+  // -File needs its own double quotes inside the task's argument string.
+  const setupArgs = `-NoExit -NoProfile -ExecutionPolicy Bypass -File "${path.join(GIT_ROOT, "install.ps1")}" -Port ${PORT}`;
+  const user = process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${os.userInfo().username}` : os.userInfo().username;
+  const elevated = [
+    "$ErrorActionPreference = 'Stop'",
+    "try {",
+    `  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${psQuote(setupArgs)}`,
+    `  $principal = New-ScheduledTaskPrincipal -UserId ${psQuote(user)} -LogonType Interactive -RunLevel Highest`,
+    "  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)",
+    `  Register-ScheduledTask -TaskName '${setupTask}' -Action $action -Principal $principal -Settings $settings -Force | Out-Null`,
+    `  Start-ScheduledTask -TaskName '${setupTask}'`,
+    `  for ($i = 0; $i -lt 20 -and (Get-ScheduledTask -TaskName '${setupTask}').State -ne 'Running'; $i++) { Start-Sleep -Milliseconds 500 }`,
+    `  Unregister-ScheduledTask -TaskName '${setupTask}' -Confirm:$false`,
+    "} catch { exit 3 }",
+  ].join("\n");
+  const command = [
+    `try { $p = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${psEncoded(elevated)}' } catch { exit 2 }`,
+    "exit $p.ExitCode",
+  ].join("\n");
   return new Promise((resolve) => {
     execFile(
       "powershell.exe",
       // Encoded, so the quotes inside survive Windows command-line parsing.
-      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")],
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", psEncoded(command)],
       { windowsHide: true, timeout: WINDOWS_SETUP_ELEVATION_TIMEOUT_MS },
       (err) => {
         if (!err) return resolve({ ok: true });
         if (err.killed) return resolve({ ok: false, error: "No one answered the administrator prompt" });
         if (err.code === 2) return resolve({ ok: false, error: "The administrator prompt was declined" });
+        if (err.code === 3) return resolve({ ok: false, error: "Setup could not be scheduled to run as administrator" });
         resolve({ ok: false, error: `Setup could not start: ${errorMessage(err) || "unknown error"}` });
       },
     );

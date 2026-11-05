@@ -13,14 +13,14 @@ const { peerShellName } = require("#server/peer-command");
 
 let counter = 0;
 
-/** @param {{ confirm?: "ask" | "never", commands?: boolean, agent?: import("#server/computer-link-peer").PeerApiHost["agent"] }} options */
+/** @param {{ kind?: "computer" | "connector", confirm?: "ask" | "never", commands?: boolean, agent?: import("#server/computer-link-peer").PeerApiHost["agent"] }} options */
 function setup(options = {}) {
   const registry = new DeviceRegistry(path.join(dataDir, `peer-registry-${++counter}.json`), true);
   const target = generateKeyPair();
   const source = generateKeyPair();
   const device = generateKeyPair();
   const sourceKey = toBase64(source.publicKey);
-  registry.enroll({ publicKey: sourceKey, kind: "computer", name: "Dev VM", platform: "computer", via: "link",
+  registry.enroll({ publicKey: sourceKey, kind: options.kind ?? "computer", name: "Dev VM", platform: "computer", via: "link",
     access: { read: true, agents: true, commands: options.commands ?? true }, confirm: options.confirm ?? "ask" });
   registry.enroll({ publicKey: toBase64(device.publicKey), kind: "device", name: "Pixel", platform: "android", via: "token" });
   /** @type {string[]} */
@@ -84,7 +84,7 @@ test("canonical JSON sorts keys so both sides hash the same bytes", () => {
 });
 
 test("a correct approval runs the command once and a replay is refused", async () => {
-  const env = setup();
+  const env = setup({ kind: "connector" });
   const pending = await challenge(env);
   const approval = env.token(claims(env, pending));
   const ok = await env.api.handle({ ...request, approval }, env.sourceKey);
@@ -98,7 +98,7 @@ test("a correct approval runs the command once and a replay is refused", async (
 });
 
 test("approvals from the wrong sender are refused", async () => {
-  const env = setup();
+  const env = setup({ kind: "connector" });
   const pending = await challenge(env);
   const stranger = generateKeyPair();
   const fromStranger = await env.api.handle({ ...request, approval: env.token(claims(env, pending), stranger) }, env.sourceKey);
@@ -120,7 +120,7 @@ test("approvals from the wrong sender are refused", async () => {
 });
 
 test("a wrong digest or a changed request is refused", async () => {
-  const env = setup();
+  const env = setup({ kind: "connector" });
   const pending = await challenge(env);
   const wrongDigest = await env.api.handle({ ...request, approval: env.token(claims(env, pending, { digest: "00".repeat(32) })) }, env.sourceKey);
   assert.equal(wrongDigest?.ok, false);
@@ -138,7 +138,7 @@ test("a wrong digest or a changed request is refused", async () => {
 });
 
 test("expired tokens and expired challenges are refused", async () => {
-  const env = setup();
+  const env = setup({ kind: "connector" });
   const pending = await challenge(env);
   const stale = await env.api.handle({ ...request, approval: env.token(claims(env, pending, { expiresAt: env.now() - 1 })) }, env.sourceKey);
   assert.equal(stale?.ok, false);
@@ -152,14 +152,14 @@ test("expired tokens and expired challenges are refused", async () => {
 });
 
 test("a once approval covers one request and a chat approval covers that chat", async () => {
-  const onceEnv = setup();
+  const onceEnv = setup({ kind: "connector" });
   const pending = await challenge(onceEnv);
   const once = await onceEnv.api.handle({ ...request, approval: onceEnv.token(claims(onceEnv, pending)) }, onceEnv.sourceKey);
   assert.equal(once?.ok, true);
   const again = await onceEnv.api.handle({ ...request, id: "r2" }, onceEnv.sourceKey);
   assert.ok(again?.approvalRequired);
 
-  const chatEnv = setup();
+  const chatEnv = setup({ kind: "connector" });
   const pending2 = await challenge(chatEnv);
   const chat = await chatEnv.api.handle({ ...request, approval: chatEnv.token(claims(chatEnv, pending2, { scope: "chat" })) }, chatEnv.sourceKey);
   assert.equal(chat?.ok, true);
@@ -202,6 +202,15 @@ test("access is enforced before any approval and unknown keys get nothing", asyn
   const device = await env.api.handle(request, toBase64(env.device.publicKey));
   assert.equal(device?.code, "access_denied");
   assert.deepEqual(env.ran, []);
+});
+
+test("a linked computer runs without an approval card, even when stored with ask", async () => {
+  const env = setup({ confirm: "ask" });
+  const ran = await env.api.handle(request, env.sourceKey);
+  assert.equal(ran?.ok, true);
+  assert.deepEqual(env.ran, ["echo hi"]);
+  const hello = await env.api.handle({ ...request, action: "hello", args: {} }, env.sourceKey);
+  assert.equal(hello?.result?.confirm, "never");
 });
 
 test("a one-time grant allows that exact request once, past access and confirm", async () => {

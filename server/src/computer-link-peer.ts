@@ -256,8 +256,8 @@ export class ComputerLinkPeerApi {
     }
     const request = parsed.data;
     const entry = this.registry.get(publicKey);
-    // Connector clients act here through the same access and approval rules
-    // as linked computers; the AI connector calls handle() with their key.
+    // Connector clients act here through the same access rules as linked
+    // computers; the AI connector calls handle() with their key.
     if (entry?.kind !== "computer" && entry?.kind !== "connector") {
       return this.fail(request, "access_denied", "This computer is not linked here");
     }
@@ -295,7 +295,9 @@ export class ComputerLinkPeerApi {
 
   private async dispatch(request: PeerRequest, entry: DeviceEntry, publicKey: string): Promise<PeerResponse> {
     const access: ComputerAccess = entry.access ?? { read: false, agents: false, commands: false };
-    const confirm: ComputerConfirm = entry.confirm ?? "ask";
+    // A linked computer never asks: the link itself is the user's approval,
+    // permanent or until midnight. Only AI connectors keep per-action cards.
+    const confirm: ComputerConfirm = entry.kind === "computer" ? "never" : entry.confirm ?? "ask";
     const needed = accessFor(request.action);
     if (!(needed && this.consumeOneTime(request, publicKey))) {
       if (needed && !access[needed]) {

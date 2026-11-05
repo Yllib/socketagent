@@ -6046,7 +6046,7 @@ function createConnectionHandler(
           console.log(`[Inject] Session running, injecting user message inline (priority=${priority}, messageId=${messageId})`);
           const injectOptions = activeSession instanceof CodexSession
             ? { fastMode: promptCodexFastMode ?? activeSession.getCodexFastMode() }
-            : undefined;
+            : { replyToOpenCards: true };
           const injectionPromise = activeSession.injectMessage(
             msg.text,
             priority,

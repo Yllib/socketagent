@@ -853,9 +853,18 @@ interface PendingTurn {
   reject: (err: Error) => void;
 }
 
+/** The tool result Claude gets when the user answers a card with a chat message. */
+function chatReplyResult(skipped: string, reply: string): string {
+  return `The user ${skipped}. They replied in chat instead:\n\n${reply}`;
+}
+
 export class ClaudeSession {
   private sessionId: string | null = null;
   private pendingQuestions: Map<string, PendingQuestion> = new Map();
+  /** Open cards Claude is blocked on that a chat message can answer instead. */
+  private _replyableQuestionIds = new Set<string>();
+  /** The chat message that answered each of those cards, until its wait returns. */
+  private _questionReplies = new Map<string, string>();
   /** Set before the first turn; stored on the record that turn creates. */
   sessionLifetime: SessionLifetime | undefined;
   private abortController: AbortController | null = null;
@@ -2602,6 +2611,50 @@ export class ClaudeSession {
     });
   }
 
+  /**
+   * Waits for a card the user may answer either on the card or by sending a
+   * chat message. Claude stays blocked inside the tool call until one of
+   * them happens, so a message cannot wait behind the card.
+   */
+  private async _waitForReplyableQuestion(
+    questionId: string,
+    message: ServerMessage,
+    signal?: AbortSignal,
+  ): Promise<{ answers: Record<string, string> } | { reply: string } | null> {
+    this._replyableQuestionIds.add(questionId);
+    try {
+      const answers = await this._waitForQuestion(questionId, message, signal);
+      const reply = this._questionReplies.get(questionId);
+      if (reply !== undefined) return { reply };
+      return answers ? { answers } : null;
+    } finally {
+      this._replyableQuestionIds.delete(questionId);
+      this._questionReplies.delete(questionId);
+    }
+  }
+
+  /**
+   * Answers every open replyable card with a chat message. The cards show
+   * "Replied in chat"; Claude receives the message as the tool's result.
+   * Returns false when no card was waiting.
+   */
+  private _answerOpenQuestionsWithReply(text: string): boolean {
+    let replied = false;
+    for (const questionId of [...this._replyableQuestionIds]) {
+      const data = this.pendingQuestions.get(questionId)?.questionData;
+      if (data?.type !== "question") continue;
+      const answers = Object.fromEntries(data.questions.map((q) => [q.question, "Replied in chat"]));
+      this._questionReplies.set(questionId, text);
+      if (!this.resolveQuestion(questionId, answers)) {
+        this._questionReplies.delete(questionId);
+        continue;
+      }
+      this.send({ type: "question_answered", questionId, sessionId: data.sessionId || this.sessionId || "", answers });
+      replied = true;
+    }
+    return replied;
+  }
+
   private _cancelPendingQuestions(): void {
     for (const pending of [...this.pendingQuestions.values()]) {
       if (pending.cancel) pending.cancel();
@@ -2636,12 +2689,116 @@ export class ClaudeSession {
     if (this.sessionId) appendHistory(this.sessionId, {
       role: "question", content: "", questionId, questions: message.questions, timestamp: new Date().toISOString(),
     });
-    const waiting = this._waitForQuestion(questionId, message, signal);
+    const waiting = this._waitForReplyableQuestion(questionId, message, signal);
     this.send(message);
-    const answers = await waiting;
-    return answers?.[question] === "Approve"
+    const result = await waiting;
+    if (!result) return { behavior: "deny" as const, message: "Request cancelled" };
+    if ("reply" in result) {
+      return { behavior: "deny" as const, message: chatReplyResult("didn't approve this tool call, so it did not run", result.reply) };
+    }
+    return result.answers[question] === "Approve"
       ? { behavior: "allow" as const, updatedInput: input }
-      : { behavior: "deny" as const, message: answers ? "User declined the tool request" : "Request cancelled" };
+      : { behavior: "deny" as const, message: "User declined the tool request" };
+  }
+
+  /** Shows Claude's AskUserQuestion as a card and returns the user's answers. */
+  private async _askClaudeQuestion(
+    input: Record<string, unknown>,
+    signal?: AbortSignal,
+    agentId?: string,
+    decisionReason?: string,
+  ) {
+    const qId = createInteractiveRequestId("q");
+    const questions: QuestionItem[] = [];
+    for (const q of unknownArray(input.questions).filter(isRecord)) {
+      questions.push({
+        question: typeof q.question === "string" ? q.question : "",
+        header: typeof q.header === "string" ? q.header : undefined,
+        options: unknownArray(q.options).filter(isRecord).map((option) => ({
+          label: typeof option.label === "string" ? option.label : "",
+          description: typeof option.description === "string" ? option.description : undefined,
+          preview: typeof option.preview === "string" ? option.preview || undefined : undefined,
+        })),
+        multiSelect: q.multiSelect === true,
+      });
+    }
+
+    const questionMsg: ServerMessage = {
+      type: "question",
+      questionId: qId,
+      questions,
+      sessionId: this.sessionId || "",
+      agentId: agentId || undefined,
+      decisionReason: decisionReason || undefined,
+    };
+    // Persist to history so questions survive reconnects
+    if (this.sessionId) {
+      appendHistory(this.sessionId, {
+        role: "question",
+        content: "",
+        questionId: qId,
+        questions,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    const waiting = this._waitForReplyableQuestion(qId, questionMsg, signal);
+    this.send(questionMsg);
+    const result = await waiting;
+    if (!result) return { behavior: "deny" as const, message: "Request cancelled" };
+    if ("reply" in result) {
+      return { behavior: "deny" as const, message: chatReplyResult("didn't pick an answer", result.reply) };
+    }
+    return {
+      behavior: "allow" as const,
+      updatedInput: { ...input, answers: result.answers },
+    };
+  }
+
+  /** Shows the plan from ExitPlanMode for approval. */
+  private async _requestClaudePlanApproval(
+    planContent: string,
+    input: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) {
+    const qId = createInteractiveRequestId("q");
+    const planQuestions: QuestionItem[] = [
+      {
+        question: planContent || "Claude has proposed a plan. Approve or reject?",
+        header: "Plan Review",
+        options: [
+          { label: "Approve", description: "Accept this plan and proceed with implementation" },
+          { label: "Reject", description: "Reject this plan" },
+        ],
+        multiSelect: false,
+      },
+    ];
+    const questionMsg: ServerMessage = {
+      type: "question",
+      questionId: qId,
+      questions: planQuestions,
+      sessionId: this.sessionId || "",
+    };
+    // Persist to history so plan reviews survive reconnects
+    if (this.sessionId) {
+      appendHistory(this.sessionId, {
+        role: "question",
+        content: "",
+        questionId: qId,
+        questions: planQuestions,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    const waiting = this._waitForReplyableQuestion(qId, questionMsg, signal);
+    this.send(questionMsg);
+    const result = await waiting;
+    if (!result) return { behavior: "deny" as const, message: "Request cancelled" };
+    if ("reply" in result) {
+      return { behavior: "deny" as const, message: chatReplyResult("didn't approve or reject the plan", result.reply) };
+    }
+    const firstAnswer = Object.values(result.answers)[0] || "";
+    return firstAnswer.toLowerCase().includes("approve")
+      ? { behavior: "allow" as const, updatedInput: input }
+      : { behavior: "deny" as const, message: "User rejected the plan." };
   }
 
   private async _handleClaudeElicitation(request: ElicitationRequest, signal?: AbortSignal): Promise<ElicitationResult> {
@@ -3237,8 +3394,17 @@ export class ClaudeSession {
    *            while Claude is generating: even shouldQuery:false can hit the
    *            SDK's cancellation path at that timing.
    *  'later' - priority 'later'. The backend holds it until the whole task ends.
+   *
+   * Set `replyToOpenCards` only for messages the user typed. Claude is blocked
+   * inside the tool call while a question, plan or approval card is open, so
+   * a queued message would never be read; it answers those cards instead.
    */
-  async injectMessage(text: string, priority: 'now' | 'next' | 'later' = 'next', messageId?: string): Promise<void> {
+  async injectMessage(
+    text: string,
+    priority: 'now' | 'next' | 'later' = 'next',
+    messageId?: string,
+    options: { replyToOpenCards?: boolean } = {},
+  ): Promise<void> {
     if (!this.activeQuery || !this._isRunning) return;
     const atNextBoundary = priority === 'next';
     console.log(
@@ -3247,8 +3413,8 @@ export class ClaudeSession {
     );
 
     const sessionId = this.sessionId || "";
-    // Stable caller IDs let durable external events (such as a completed Work
-    // Review) reuse one transcript/backend identity when delivery is replayed.
+    // Stable caller IDs let durable external events reuse one
+    // transcript/backend identity when delivery is replayed.
     const userMsgUuid = claudeMessageUuid(messageId || crypto.randomUUID());
 
     // Log injected message to history so it persists across sessions
@@ -3259,6 +3425,11 @@ export class ClaudeSession {
         uuid: userMsgUuid,
         clientMessageId: messageId,
       }));
+    }
+
+    if (options.replyToOpenCards && priority !== "later" && this._answerOpenQuestionsWithReply(text)) {
+      console.log(`[Inject] Message answered the open card`);
+      return;
     }
 
     if (atNextBoundary) {
@@ -4263,49 +4434,7 @@ export class ClaudeSession {
             if (signal?.aborted) return { behavior: "deny" as const, message: "Request cancelled" };
 
             if (toolName === "AskUserQuestion") {
-              const qId = createInteractiveRequestId("q");
-              const questions: QuestionItem[] = [];
-              for (const q of unknownArray(input.questions).filter(isRecord)) {
-                questions.push({
-                  question: typeof q.question === "string" ? q.question : "",
-                  header: typeof q.header === "string" ? q.header : undefined,
-                  options: unknownArray(q.options).filter(isRecord).map((option) => ({
-                    label: typeof option.label === "string" ? option.label : "",
-                    description: typeof option.description === "string" ? option.description : undefined,
-                    preview: typeof option.preview === "string" ? option.preview || undefined : undefined,
-                  })),
-                  multiSelect: q.multiSelect === true,
-                });
-              }
-
-              const questionMsg: ServerMessage = {
-                type: "question",
-                questionId: qId,
-                questions,
-                sessionId: this.sessionId || "",
-                agentId: agentID || undefined,
-                decisionReason: decisionReason || undefined,
-              };
-              this.send(questionMsg);
-
-              // Persist to history so questions survive reconnects
-              if (this.sessionId) {
-                appendHistory(this.sessionId, {
-                  role: "question",
-                  content: "",
-                  questionId: qId,
-                  questions,
-                  timestamp: new Date().toISOString(),
-                });
-              }
-
-              const answers = await this._waitForQuestion(qId, questionMsg, signal);
-              if (!answers) return { behavior: "deny" as const, message: "Request cancelled" };
-
-              return {
-                behavior: "allow" as const,
-                updatedInput: { ...input, answers },
-              };
+              return this._askClaudeQuestion(input, signal, agentID, decisionReason);
             }
 
             // Intercept ExitPlanMode — show plan to user for approval
@@ -4340,46 +4469,7 @@ export class ClaudeSession {
                 console.error(`[Plan] Error reading plan file: ${e}`);
               }
 
-              const qId = createInteractiveRequestId("q");
-              const planQuestions: QuestionItem[] = [
-                {
-                  question: planContent || "Claude has proposed a plan. Approve or reject?",
-                  header: "Plan Review",
-                  options: [
-                    { label: "Approve", description: "Accept this plan and proceed with implementation" },
-                    { label: "Reject", description: "Reject this plan" },
-                  ],
-                  multiSelect: false,
-                },
-              ];
-              const questionMsg: ServerMessage = {
-                type: "question",
-                questionId: qId,
-                questions: planQuestions,
-                sessionId: this.sessionId || "",
-              };
-              this.send(questionMsg);
-
-              // Persist to history so plan reviews survive reconnects
-              if (this.sessionId) {
-                appendHistory(this.sessionId, {
-                  role: "question",
-                  content: "",
-                  questionId: qId,
-                  questions: planQuestions,
-                  timestamp: new Date().toISOString(),
-                });
-              }
-
-              const answers = await this._waitForQuestion(qId, questionMsg, signal);
-              if (!answers) return { behavior: "deny" as const, message: "Request cancelled" };
-
-              const firstAnswer = Object.values(answers)[0] || "";
-              if (firstAnswer.toLowerCase().includes("approve")) {
-                return { behavior: "allow" as const, updatedInput: input };
-              } else {
-                return { behavior: "deny" as const, message: "User rejected the plan." };
-              }
+              return this._requestClaudePlanApproval(planContent, input, signal);
             }
 
             return this._requestClaudeToolApproval(toolName, input, signal, decisionReason);

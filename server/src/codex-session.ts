@@ -98,7 +98,7 @@ import { ClaudeSession } from "./claude-session";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { createInteractiveRequestId } from "./interactive-request-id";
-import { waitForInteractiveAnswer } from "./interactive-answer";
+import { oldestOpenedAt, waitForInteractiveAnswer } from "./interactive-answer";
 import { buildCodexRateLimitEvents } from "./rate-limit-events";
 import { recordRateLimitEvent } from "./rate-limit-cache";
 import { codexCaptureHookArgs } from "./codex-capture-hook-config";
@@ -392,6 +392,8 @@ interface PendingQuestion {
   questionId: string;
   resolve: (answers: Record<string, string>) => void;
   questionData?: ServerMessage;
+  /** Date.now() when the card opened. Plugins can add cards without it. */
+  openedAt?: number;
 }
 
 interface ConnectedAppConfirmation {
@@ -829,6 +831,11 @@ export class CodexSession {
   private _queuedPrompts: QueuedPrompt[] = [];
   private _pendingAppServerSteers: PendingAppServerSteer[] = [];
   private pendingQuestions = new Map<string, PendingQuestion>();
+
+  /** When the oldest card this session is waiting on opened, if any. */
+  get oldestOpenCardAt(): number | undefined {
+    return oldestOpenedAt(this.pendingQuestions);
+  }
   private appServerQuestionByRequestId = new Map<string, string>();
   private connectedAppApprovals = new Set<string>();
   private clientSockets = new Set<ClientTransport>();
@@ -4357,7 +4364,7 @@ export class CodexSession {
         });
       }
       const answers = await new Promise<Record<string, string>>((resolve) => {
-        this.pendingQuestions.set(questionId, { questionId, resolve, questionData: message });
+        this.pendingQuestions.set(questionId, { questionId, resolve, questionData: message, openedAt: Date.now() });
       });
       this.clearAppServerQuestionMapping(questionId);
       const answer = String(Object.values(answers)[0] || "");
@@ -4393,7 +4400,7 @@ export class CodexSession {
       `[codex app-server] awaiting MCP elicitation server=${serverName || "unknown"} mode=${prepared.mode} questionId=${questionId} message=${prepared.message.slice(0, 160)}`,
     );
     const answers = await new Promise<Record<string, string>>((resolve) => {
-      this.pendingQuestions.set(questionId, { questionId, resolve, questionData: questionMessage });
+      this.pendingQuestions.set(questionId, { questionId, resolve, questionData: questionMessage, openedAt: Date.now() });
     });
     this.clearAppServerQuestionMapping(questionId);
     if (confirmation && fallbackQuestion) {
@@ -4500,6 +4507,7 @@ export class CodexSession {
         questionId,
         resolve: finish,
         questionData: questionMessage,
+        openedAt: Date.now(),
       });
       if (Number.isFinite(autoResolutionMs) && autoResolutionMs > 0) {
         timer = setTimeout(() => {

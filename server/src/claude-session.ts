@@ -10,7 +10,7 @@ import { claudeMessageUuid } from "./claude-message-uuid";
 import { claudeTotalUsage } from "./claude-usage";
 import { readClaudeSupportedModels } from "./claude-model-discovery";
 import { handleClaudeResumeDialog } from "./claude-resume-dialog";
-import { waitForInteractiveAnswer } from "./interactive-answer";
+import { oldestOpenedAt, waitForInteractiveAnswer } from "./interactive-answer";
 import { prepareCodexMcpElicitation, resolveCodexMcpElicitation } from "./codex-elicitation";
 import { bashCapturePath, removeBashCapture, unwrapBashCapture, wrapBashForCapture } from "./bash-capture";
 import { toolApprovalMarkdown } from "./tool-approval";
@@ -720,6 +720,8 @@ interface PendingQuestion {
   questionId: string;
   resolve: (answers: Record<string, string>) => void;
   questionData?: ServerMessage; // stored so we can re-send on reconnect
+  /** Date.now() when the card opened. Plugins can add cards without it. */
+  openedAt?: number;
 }
 
 interface MonitorState {
@@ -861,6 +863,11 @@ function chatReplyResult(skipped: string, reply: string): string {
 export class ClaudeSession {
   private sessionId: string | null = null;
   private pendingQuestions: Map<string, PendingQuestion> = new Map();
+
+  /** When the oldest card this session is waiting on opened, if any. */
+  get oldestOpenCardAt(): number | undefined {
+    return oldestOpenedAt(this.pendingQuestions);
+  }
   /** Open cards Claude is blocked on that a chat message can answer instead. */
   private _replyableQuestionIds = new Set<string>();
   /** The chat message that answered each of those cards, until its wait returns. */

@@ -6,6 +6,17 @@ export interface PendingInteractiveAnswer {
   questionData?: ServerMessage;
   resolve: (answers: Record<string, string>) => void;
   cancel?: () => void;
+  /** Date.now() when the card opened. Plugins can add cards without it. */
+  openedAt?: number;
+}
+
+/** When the oldest card in [pending] opened, or undefined when none is open. */
+export function oldestOpenedAt(pending: Map<string, { openedAt?: number }>): number | undefined {
+  let oldest: number | undefined;
+  for (const { openedAt } of pending.values()) {
+    if (openedAt !== undefined && (oldest === undefined || openedAt < oldest)) oldest = openedAt;
+  }
+  return oldest;
 }
 
 export function waitForInteractiveAnswer(
@@ -26,7 +37,7 @@ export function waitForInteractiveAnswer(
       resolve(answers);
     };
     const cancel = () => finish(null);
-    pending.set(questionId, { questionId, questionData, resolve: finish, cancel });
+    pending.set(questionId, { questionId, questionData, resolve: finish, cancel, openedAt: Date.now() });
     signal?.addEventListener("abort", cancel, { once: true });
     if (signal?.aborted) cancel();
   });

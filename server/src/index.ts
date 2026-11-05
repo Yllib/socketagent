@@ -1309,6 +1309,18 @@ function describeActiveSessions(): string {
     .join(", ");
 }
 
+/**
+ * A card nobody has answered in this long is not work in progress. The
+ * agent is parked on it, so auto-update stops waiting; the restart recovers
+ * the run and the agent asks again.
+ */
+const STALE_CARD_WAIT_MS = 2 * 60 * 60 * 1000;
+
+function sessionParkedOnStaleCard(session: Session, now: number): boolean {
+  const openedAt = session.oldestOpenCardAt;
+  return openedAt !== undefined && now - openedAt >= STALE_CARD_WAIT_MS;
+}
+
 function autoUpdateBlockReason(): string | null {
   if (activeBackendInstalls.size > 0) {
     return `a backend reinstall is running (${Array.from(activeBackendInstalls.keys()).join(", ")})`;
@@ -1321,7 +1333,7 @@ function autoUpdateBlockReason(): string | null {
     // A command can hang forever — one waiting on stdin it will never get —
     // and deferring on that never resolves, so the server would sit on an
     // update indefinitely with nothing left to wait for.
-    if (sessionAgentIsWorking(session)) {
+    if (sessionAgentIsWorking(session) && !sessionParkedOnStaleCard(session, Date.now())) {
       return `sessions are running (${describeActiveSessions()})`;
     }
   }

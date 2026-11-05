@@ -87,3 +87,19 @@ test("with no open card a chat message is injected as usual", async () => {
   await value.injectMessage("Keep going", "now", "m2", { replyToOpenCards: true });
   assert.equal(streamed.length, 1);
 });
+
+test("an open card records when it opened until it is answered", async () => {
+  const { value, sent } = runningSession();
+  assert.equal(value.oldestOpenCardAt, undefined);
+  const before = Date.now();
+  const waiting = value._askClaudeQuestion({ questions: [{ question: "Which color?", options: [{ label: "Red" }] }] });
+  await tick();
+  const openedAt = value.oldestOpenCardAt;
+  assert.ok(openedAt !== undefined && openedAt >= before && openedAt <= Date.now());
+
+  const question = sent.find(message => message.type === "question");
+  assert.ok(question);
+  value.resolveQuestion(question.questionId, { "Which color?": "Red" });
+  await waiting;
+  assert.equal(value.oldestOpenCardAt, undefined);
+});

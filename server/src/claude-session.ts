@@ -4103,8 +4103,9 @@ export class ClaudeSession {
           ...claudeExecutableQueryOptions(),
           permissionMode: initialPermissionMode,
           // Lets the user switch to Yolo later in the session; without it the
-          // CLI refuses setPermissionMode("bypassPermissions") unless the
-          // session started in that mode. It does not bypass anything itself.
+          // Claude process the SDK starts refuses
+          // setPermissionMode("bypassPermissions") unless the session started
+          // in that mode. It does not bypass anything itself.
           allowDangerouslySkipPermissions: true,
           includePartialMessages: true,
           includeHookEvents: true,

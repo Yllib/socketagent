@@ -4329,6 +4329,9 @@ export class ClaudeSession {
                   const model = input.model || "";
                   const agentType = input.agent_type || "";
                   console.log(`[Hook] SessionStart: source=${source} model=${model} agentType=${agentType}`);
+                  // Claude Code fires this after every compaction. The session
+                  // continues, so it gets the compaction marker, not a card.
+                  if (source === "compact") return { continue: true };
                   // Display only. A refusal fallback reports the fallback model
                   // here, and saving it would pin the session to that model.
                   if (model) this._sessionModel = model;
@@ -4988,19 +4991,25 @@ export class ClaudeSession {
         if (message.type === "system" && message.subtype === "compact_boundary") {
           const meta = message.compact_metadata || {};
           console.log(`[SDK] Compact boundary: trigger=${meta.trigger} preTokens=${meta.pre_tokens}`);
+          // Saved first so the live marker carries the history row's position;
+          // the app then keeps one marker when a history reload replays it.
+          const positioned = this.sessionId
+            ? appendHistory(this.sessionId, {
+              role: "assistant",
+              content: `[compact_boundary:${meta.pre_tokens || 0}:${meta.trigger || "auto"}]`,
+              timestamp: new Date().toISOString(),
+            })
+            : undefined;
           this.send({
             type: "compact_boundary",
             trigger: meta.trigger || "auto",
             preTokens: meta.pre_tokens || 0,
             sessionId: this.sessionId || "",
+            ...(positioned?.entryId ? { entryId: positioned.entryId } : {}),
+            ...(positioned?.sessionSeq ? { sessionSeq: positioned.sessionSeq } : {}),
+            ...(positioned?.revision ? { revision: positioned.revision } : {}),
+            ...(positioned?.timestamp ? { timestamp: positioned.timestamp } : {}),
           });
-          if (this.sessionId) {
-            appendHistory(this.sessionId, {
-              role: "assistant",
-              content: `[compact_boundary:${meta.pre_tokens || 0}:${meta.trigger || "auto"}]`,
-              timestamp: new Date().toISOString(),
-            });
-          }
         }
 
         // Forward background task notifications (type=system, subtype=task_notification)

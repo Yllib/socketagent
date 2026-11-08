@@ -11,6 +11,8 @@
 # WSL at /root/flutter (same version as builds, checked below), e.g.
 #   tar cf - -C ~ flutter | ssh billy@10.10.10.69 wsl.exe -d Ubuntu -- tar xf - -C /root
 # Tests read fonts from $HOME/flutter, which is /root/flutter for WSL's root.
+#
+# Runs stop before testing when any Dart file is unformatted.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="${SOCKETAGENT_APP_DIR:-$(dirname "$ROOT")/socketagent-app}"
@@ -23,6 +25,15 @@ local_flutter="$(flutter_version < "$HOME/flutter/bin/cache/flutter.version.json
 remote_flutter="$("${WSL[@]}" -- cat /root/flutter/bin/cache/flutter.version.json | tr -d '\r' | flutter_version)"
 if [[ "$local_flutter" != "$remote_flutter" ]]; then
   echo "WSL Flutter is $remote_flutter but this server has $local_flutter. Recopy the SDK (see the header)." >&2
+  exit 1
+fi
+
+# Every Dart file stays formatted. The check is local and takes about 2 s.
+DART_DIRS=(lib test test_support)
+unformatted="$(cd "$APP_DIR" && dart format --output=none --set-exit-if-changed "${DART_DIRS[@]}" | grep '^Changed ' || true)"
+if [[ -n "$unformatted" ]]; then
+  echo "$unformatted" >&2
+  echo "Run: (cd $APP_DIR && dart format ${DART_DIRS[*]})" >&2
   exit 1
 fi
 

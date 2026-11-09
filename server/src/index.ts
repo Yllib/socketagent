@@ -806,7 +806,10 @@ const views = new ViewHub({
     key: "",
     compute: () => {
       refreshNativeSessionListInBackground("view_subscribe");
-      return { sessions: immediateEnrichedSessions().map(sessionListSummary) };
+      // The last broadcast list, so a reconnecting app's hash matches. The
+      // quick list differs from the native-refreshed one and would resend
+      // the whole list on every reset.
+      return lastSessionListValue ?? { sessions: immediateEnrichedSessions().map(sessionListSummary) };
     },
   }),
   status: () => ({ kind: "value", key: "", compute: buildStatusSyncPayload }),
@@ -1554,11 +1557,13 @@ function immediateEnrichedSessions(): SessionInfo[] {
 }
 
 let lastSessionListBroadcastJson: string | undefined;
+let lastSessionListValue: { sessions: ReturnType<typeof sessionListSummary>[] } | undefined;
 
 function sendSessionListBroadcast(enriched: SessionInfo[], reason: string, startedAt = Date.now()): void {
   const stringifyStartedAt = Date.now();
   const sessions = enriched.map(sessionListSummary);
-  views.publish("sessions", "", { sessions });
+  lastSessionListValue = { sessions };
+  views.publish("sessions", "", lastSessionListValue);
   const msg = JSON.stringify({ type: "session_list", sessions });
   if (msg === lastSessionListBroadcastJson) return;
   lastSessionListBroadcastJson = msg;

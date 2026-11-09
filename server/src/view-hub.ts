@@ -80,6 +80,7 @@ export class ViewHub {
       connection.queries.clear();
     } else if (message.version !== connection.setVersion + 1) {
       // The app lost track of its own set. It resets when it sees this.
+      console.log(`[Views] ${peerId ?? "direct"} sent set ${message.version}, expected ${connection.setVersion + 1}; asked it to reset`);
       send(JSON.stringify({ type: "view_error", reason: "set_version", expected: connection.setVersion + 1 }));
       return;
     }
@@ -108,6 +109,12 @@ export class ViewHub {
       published.push({ view: add.view, key: query.key, valueJson, hash });
     }
     this.sendTransition(connection, updates, failed, true);
+    const summary = updates.map((update) => {
+      const view = connection.queries.get(update.queryId)?.view ?? "?";
+      return update.valueJson === undefined ? `${view} (unchanged)` : `${view} (${Buffer.byteLength(update.valueJson)} bytes)`;
+    });
+    for (const failure of failed) summary.push(`query ${failure.queryId} failed: ${failure.error}`);
+    console.log(`[Views] ${peerId ?? "direct"} set ${message.version}${message.reset ? " reset" : ""}: ${summary.join(", ") || "no queries"}`);
     // A fresh value is news for every other subscriber too.
     for (const value of published) this.publishSerialized(value.view, value.key, value.valueJson, value.hash, connection);
   }

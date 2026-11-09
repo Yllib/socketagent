@@ -3678,13 +3678,13 @@ export class ClaudeSession {
           ),
           tool(
             "RequestSecureInput",
-            "Ask the user to enter a credential, API key, token, or other secret through a secure app card. The secret is saved to a local 0600 file on the server, and this tool returns only the file path and metadata. Use this instead of asking the user to paste secrets into chat. Not for plain identifiers such as email addresses or usernames; keep those in normal config.",
+            "Ask the user to enter a credential, API key, token, or other secret through a secure app card. Returns at once without waiting: keep working, and the outcome arrives later in this session as a message starting with [Secure input]. A saved secret goes to a local 0600 file on the server and the message holds only its file path and metadata. Use this instead of asking the user to paste secrets into chat. Not for plain identifiers such as email addresses or usernames; keep those in normal config.",
             {
               label: z.string().describe("Short label for the secret, e.g. OPENAI_API_KEY or GitHub token"),
               reason: z.string().optional().describe("Why you need this secret, shown to the user"),
               envHint: z.string().optional().describe("Suggested environment variable name"),
               scope: z.enum(["session", "project", "global"]).optional().describe("Where to store it. Default: session"),
-              timeoutSeconds: z.number().optional().describe("How long to wait for the user, 30-3600 seconds. Default: 600"),
+              timeoutSeconds: z.number().optional().describe("How long the card stays open, 30-86400 seconds. Default: 3600"),
             },
             async (args) => handleRequestSecureInputTool(appToolContext, args)
           ),

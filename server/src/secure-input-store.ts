@@ -457,7 +457,8 @@ export function requestSecureInput(
   onStateChange?: (message: Record<string, unknown>, status: SecureInputRequestStatus) => void,
 ): Promise<SavedSecureInput> {
   const requestId = `secure_${crypto.randomBytes(8).toString("hex")}`;
-  const timeoutMs = Math.max(30, Math.min(args.timeoutSeconds ?? 600, 3600)) * 1000;
+  // Nothing blocks on the answer, so a request can stay open for a day.
+  const timeoutMs = Math.max(30, Math.min(args.timeoutSeconds ?? 3600, 86400)) * 1000;
   const requestMessage = {
     type: "secure_input_request",
     requestId,

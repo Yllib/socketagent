@@ -1215,65 +1215,125 @@ export async function handleSendFileTool(
   }
 }
 
+/**
+ * Delivers text to a session as its next message: injected at a safe point
+ * mid-run, or started as a new turn when the session is idle. index.ts
+ * registers its runSessionReport here at startup.
+ */
+export type SessionReporter = (sessionId: string, text: string, messageId: string, reason: string) => Promise<void>;
+let sessionReporter: SessionReporter | undefined;
+export function setSessionReporter(reporter: SessionReporter): void {
+  sessionReporter = reporter;
+}
+
+const SECURE_INPUT_REPORT_RETRY_MS = 15_000;
+// Ten minutes of retries while the session compacts, restarts or is busy
+// starting up. A secret saved meanwhile still shows in the agent's inventory.
+const SECURE_INPUT_REPORT_ATTEMPTS = 40;
+
+function reportSecureInputOutcome(ctx: AppToolContext, text: string, messageId: string, attempt = 1): void {
+  const sessionId = ctx.getSessionId();
+  if (!sessionReporter || !sessionId) {
+    console.warn(`[SecureInput] No way to tell session ${sessionId || "(none)"} about ${messageId}`);
+    return;
+  }
+  sessionReporter(sessionId, text, messageId, "secure input").catch((error: unknown) => {
+    if (attempt >= SECURE_INPUT_REPORT_ATTEMPTS) {
+      console.warn(`[SecureInput] Gave up telling ${sessionId} about ${messageId}: ${errorMessage(error)}`);
+      return;
+    }
+    setTimeout(
+      () => reportSecureInputOutcome(ctx, text, messageId, attempt + 1),
+      SECURE_INPUT_REPORT_RETRY_MS,
+    ).unref();
+  });
+}
+
+/**
+ * Shows the secure input card and returns at once, like an async question.
+ * The agent keeps working; when the user saves, declines or lets the card
+ * expire, the outcome arrives in the session as a new message.
+ */
 export async function handleRequestSecureInputTool(
   ctx: AppToolContext,
   args: RequestSecureInputArgs,
 ): Promise<McpTextResult> {
   const label = (args.label || "").trim() || "Secret";
-  try {
-    const saved = await requestSecureInput(
-      (msg) => ctx.send(msg),
-      {
-        label,
-        reason: args.reason,
-        envHint: args.envHint,
-        scope: args.scope,
-        timeoutSeconds: args.timeoutSeconds,
-      },
-      ctx.getSessionId(),
-      ctx.getCwd?.(),
-      (request, status: SecureInputRequestStatus) => {
-        if (!ctx.appendHistory) return;
-        const requestId = String(request.requestId || "");
-        const reason = String(request.reason || "");
-        ctx.appendHistory({
-          role: "secure_input",
-          content: reason,
-          questionId: requestId,
-          answered: status !== "pending",
+  let requestId = "";
+  let finalStatus: SecureInputRequestStatus = "pending";
+  const request = requestSecureInput(
+    (msg) => ctx.send(msg),
+    {
+      label,
+      reason: args.reason,
+      envHint: args.envHint,
+      scope: args.scope,
+      timeoutSeconds: args.timeoutSeconds,
+    },
+    ctx.getSessionId(),
+    ctx.getCwd?.(),
+    (request, status: SecureInputRequestStatus) => {
+      requestId = String(request.requestId || "");
+      finalStatus = status;
+      if (!ctx.appendHistory) return;
+      const reason = String(request.reason || "");
+      ctx.appendHistory({
+        role: "secure_input",
+        content: reason,
+        questionId: requestId,
+        answered: status !== "pending",
+        status,
+        toolInput: {
+          label: String(request.label || label),
+          reason,
+          envHint: String(request.envHint || ""),
+          scope: String(request.scope || "session"),
+          multiline: request.multiline === true,
           status,
-          toolInput: {
-            label: String(request.label || label),
-            reason,
-            envHint: String(request.envHint || ""),
-            scope: String(request.scope || "session"),
-            multiline: request.multiline === true,
-            status,
-          },
-          timestamp: new Date().toISOString(),
-        });
-      },
-    );
-    const resultText = [
-      "Secure input saved.",
-      `Label: ${saved.label}`,
-      `Secret ID: ${saved.secretId}`,
-      `Scope: ${saved.scope}`,
-      `File path: ${saved.filePath}`,
-      `Suggested env var: ${saved.envHint}`,
-      "",
-      "Use the file path or suggested env var name in commands. Do not print the secret value.",
-    ].join("\n");
-    appendVisibleToolHistory(
-      ctx,
-      "RequestSecureInput",
-      { label, reason: args.reason || "", scope: saved.scope, envHint: saved.envHint },
-      resultText,
-    );
-    return { content: [{ type: "text", text: resultText }] };
-  } catch (e: unknown) {
-    return { content: [{ type: "text", text: `Secure input request failed: ${errorMessage(e) || e}` }], isError: true };
-  }
+        },
+        timestamp: new Date().toISOString(),
+      });
+    },
+  );
+  request.then(
+    (saved) => {
+      const resultText = [
+        `[Secure input] The user saved "${saved.label}".`,
+        `Secret ID: ${saved.secretId}`,
+        `Scope: ${saved.scope}`,
+        `File path: ${saved.filePath}`,
+        `Suggested env var: ${saved.envHint}`,
+        "",
+        "Use the file path or suggested env var name in commands. Do not print the secret value.",
+      ].join("\n");
+      appendVisibleToolHistory(
+        ctx,
+        "RequestSecureInput",
+        { label, reason: args.reason || "", scope: saved.scope, envHint: saved.envHint },
+        resultText,
+      );
+      reportSecureInputOutcome(ctx, resultText, `secure-input:${requestId}`);
+    },
+    (error: unknown) => {
+      const text = finalStatus === "cancelled"
+        ? `[Secure input] The user declined to enter "${label}".`
+        : finalStatus === "expired"
+          ? `[Secure input] The request for "${label}" expired before the user answered. Ask again if you still need it.`
+          : `[Secure input] The request for "${label}" failed: ${errorMessage(error) || error}`;
+      reportSecureInputOutcome(ctx, text, `secure-input:${requestId}`);
+    },
+  );
+  return {
+    content: [{
+      type: "text",
+      text: [
+        `The secure input card for "${label}" is on the user's phone. This tool does not wait for it.`,
+        "Keep working on anything that doesn't need this secret. When the user saves, declines or lets it expire,"
+          + " a message starting with [Secure input] arrives in this session with the outcome and, if saved, the file path.",
+        "If nothing else is left to do, end your turn; the message continues the session.",
+      ].join(" "),
+    }],
+  };
 }
 
 export async function handleScheduleReminderTool(

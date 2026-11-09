@@ -143,7 +143,7 @@ import { getCachedModelCatalog, invalidateCachedModelCatalog } from "./model-cat
 import { recordModelChange } from "./model-change";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
 import { lastClaudePlanUsage } from "./claude-plan-usage-cache";
-import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors } from "./app-tool-handlers";
+import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors, setSessionReporter } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings, isClaudeEffort } from "./initial-session-settings";
 import { TurnAbortTracker } from "./turn-abort-tracker";
@@ -2593,7 +2593,7 @@ function reportDelegatedQuestion(child: Session, question: QuestionServerMessage
   setImmediate(attempt);
 }
 
-/** Shared continuation route for delegated work and explicitly linked schedules. */
+/** Shared continuation route for delegated work, linked schedules and secure input outcomes. */
 async function runSessionReport(sessionId: string, text: string, messageId: string, reason: string): Promise<void> {
   if (!serverReady || restartPreparing || shuttingDown || continuationStarting.has(sessionId) || isCodexRewinding(sessionId)) {
     throw new Error("Session is not ready for an automated report");
@@ -2665,6 +2665,7 @@ async function runSessionReport(sessionId: string, text: string, messageId: stri
     broadcastStatusSync();
   }
 }
+setSessionReporter(runSessionReport);
 
 function deliverDelegatedAgentReport(record: DelegatedAgentRecord, run: DelegatedAgentRun): Promise<void> {
   if (aiConnectorStore.grantForSession(record.supervisorSessionId)) {

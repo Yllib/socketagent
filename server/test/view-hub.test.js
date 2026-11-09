@@ -162,3 +162,17 @@ test("a row view resumes from the rows the app holds", () => {
   assert.equal(confirmed.upsert, undefined);
   assert.equal(confirmed.hash, patch.hash);
 });
+
+test("a reset on a live connection restarts the chain at 0", () => {
+  const state = { sessions: [{ id: "a" }] };
+  const views = hub(state);
+  const owner = {};
+  const phone = client();
+  views.applySet(owner, "peer", phone.send, { type: "view_set", version: 1, add: [{ queryId: 1, view: "sessions" }] });
+  views.publish("sessions", "", { sessions: [{ id: "b" }] });
+  assert.equal(transition(phone.received[1]).end, 2);
+
+  views.applySet(owner, "peer", phone.send, { type: "view_set", version: 2, reset: true, add: [{ queryId: 1, view: "sessions" }] });
+  const answer = transition(phone.received[2]);
+  assert.deepEqual([answer.start, answer.end, answer.setVersion], [0, 1, 2]);
+});

@@ -120,7 +120,11 @@ export class ViewHub {
     const connection = this.connection(owner, peerId, send);
     connection.send = send;
     if (message.reset) {
+      // The app restarts its chain at 0 on every reset, so the server must
+      // too. Keeping the old count made each answer look like a gap, and the
+      // app reset again, forever.
       connection.queries.clear();
+      connection.transition = 0;
     } else if (message.version !== connection.setVersion + 1) {
       // The app lost track of its own set. It resets when it sees this.
       console.log(`[Views] ${peerId ?? "direct"} sent set ${message.version}, expected ${connection.setVersion + 1}; asked it to reset`);

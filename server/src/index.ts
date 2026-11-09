@@ -41,7 +41,7 @@ import * as path from "path";
 import { RestartRecoveryStore, RestartRecoveryWorker, boundedRecoverySetup, buildFailureNote, RESTART_CONTINUATION_PROMPT } from "./restart-recovery";
 import { finishRecoveredScheduledTask } from "./scheduled-task-store";
 import { ScheduledTaskCallbacks, scheduledTaskReportMarker, scheduledTaskReportPrompt } from "./scheduled-task-callbacks";
-import { flushSessionStore, flushSdkEventQueue } from "./session-store";
+import { flushSessionStore, flushSdkEventQueue, getTranscriptViewPage, onHistoryChanged } from "./session-store";
 import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
@@ -795,16 +795,53 @@ const connectedClients = new Set<ClientTransport>();
  * Server-owned views (docs/sync-views.md). A connection subscribed to a view
  * gets it here and stops getting that view's old broadcast message.
  */
+const transcriptViewArgs = z.object({
+  sessionId: z.string().min(1),
+  fromSeq: z.number().int().positive().optional(),
+});
+
 const views = new ViewHub({
   sessions: () => ({
+    kind: "value",
     key: "",
     compute: () => {
       refreshNativeSessionListInBackground("view_subscribe");
       return { sessions: immediateEnrichedSessions().map(sessionListSummary) };
     },
   }),
-  status: () => ({ key: "", compute: buildStatusSyncPayload }),
+  status: () => ({ kind: "value", key: "", compute: buildStatusSyncPayload }),
+  // Every stored row of one session from `fromSeq` on, sent as row patches.
+  // `fromSeq` is pinned on the first read so new rows never shift the page.
+  transcript: (args) => {
+    const { sessionId, fromSeq } = transcriptViewArgs.parse(args);
+    let pinned = fromSeq;
+    return {
+      kind: "rows",
+      key: sessionId,
+      compute: () => {
+        const page = getTranscriptViewPage(sessionId, pinned);
+        pinned = page.fromSeq;
+        const todos = getTodos(sessionId);
+        const promptSuggestion = getLastPromptSuggestion(sessionId);
+        return {
+          meta: {
+            sessionId,
+            fromSeq: page.fromSeq,
+            offset: page.offset,
+            total: page.total,
+            totalUserPrompts: page.totalUserPrompts,
+            taskStates: getActiveTaskStates(sessionId),
+            runStats: clientRunStats(getSessionRunStats(sessionId)) || { completedCount: 0, totalDurationMs: 0 },
+            ...(todos.length > 0 ? { todos } : {}),
+            ...(promptSuggestion ? { promptSuggestion } : {}),
+          },
+          rows: page.rows,
+        };
+      },
+    };
+  },
 });
+onHistoryChanged((sessionId) => views.invalidate("transcript", sessionId));
 
 /** Sends a legacy broadcast to every connection not subscribed to `view`. */
 function broadcastLegacyView(view: string, raw: string): void {
@@ -1707,7 +1744,7 @@ function serverCapabilitiesPayload(
     },
     uploadAckVersion: UPLOAD_ACK_VERSION,
     commandReceiptVersion: 1,
-    views: { version: 1 },
+    views: { version: 2 },
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 2 },

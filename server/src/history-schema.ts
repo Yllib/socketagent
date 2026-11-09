@@ -99,7 +99,7 @@ export const historyEntrySchema = z.object({
     captureOrigins: z.array(z.string()),
   }).passthrough().optional(),
   subagentStatus: optionalText, parentToolUseId: z.string().nullable().optional(),
-  uuid: optionalText, triggerUserMessageUuid: optionalText,
+  uuid: optionalText, clientMessageId: optionalText, triggerUserMessageUuid: optionalText,
   triggerUserMessageUuids: z.array(z.string()).optional(),
   messagePhase: z.enum(["commentary", "partial_answer", "final_answer"]).optional(),
   toolSummary: optionalBoolean, precedingToolUseIds: z.array(z.string()).optional(),

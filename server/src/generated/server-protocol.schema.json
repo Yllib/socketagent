@@ -4857,6 +4857,9 @@
         "uuid": {
           "type": "string"
         },
+        "clientMessageId": {
+          "type": "string"
+        },
         "triggerUserMessageUuid": {
           "type": "string"
         },

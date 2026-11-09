@@ -1399,6 +1399,7 @@ export function recordUserPrompt(params: {
     role: "user",
     content: params.content,
     uuid: params.uuid,
+    ...(params.clientMessageId ? { clientMessageId: params.clientMessageId } : {}),
     timestamp: params.timestamp || new Date().toISOString(),
   });
   return {
@@ -5536,4 +5537,48 @@ export function listCodexSessions(cwd: string, limit = 30): SdkSessionEntry[] {
   }
 
   return results;
+}
+
+/** Calls `listener` with a session's ID after any write to its transcript. */
+export function onHistoryChanged(listener: (sessionId: string) => void): () => void {
+  return historyDatabase().onChange(listener);
+}
+
+export interface TranscriptViewPage {
+  /** First row of the page. Later rows never shift it, so it stays put while the session grows. */
+  fromSeq: number;
+  /** Index of the first row among all stored rows, for loading older pages. */
+  offset: number;
+  total: number;
+  totalUserPrompts: number;
+  rows: HistoryEntry[];
+}
+
+/**
+ * The rows of a transcript view: every app-visible row from `fromSeq` on.
+ * Without `fromSeq` the page starts where a fresh resume page would. When the
+ * page outgrows `maxRows` it keeps the newest rows and moves `fromSeq` up.
+ */
+export function getTranscriptViewPage(sessionId: string, fromSeq?: number, maxRows = 2000): TranscriptViewPage {
+  ensureHistoryDatabaseSession(sessionId);
+  const database = historyDatabase();
+  const summary = database.summary(sessionId);
+  const total = summary?.entryCount ?? 0;
+  const totalUserPrompts = summary?.userPromptCount ?? 0;
+  let start = fromSeq;
+  if (start === undefined) {
+    start = getResumeHistoryPage(sessionId).entries[0]?.sessionSeq ?? database.maxSessionSeq(sessionId) + 1;
+  }
+  const entries = database.countFrom(sessionId, start) > maxRows
+    ? database.getTail(sessionId, maxRows)
+    : database.getAfter(sessionId, start - 1, maxRows);
+  const first = entries[0]?.sessionSeq;
+  if (first !== undefined && first > start) start = first;
+  return {
+    fromSeq: start,
+    offset: first === undefined ? total : database.offsetForSessionSeq(sessionId, first) ?? Math.max(0, total - entries.length),
+    total,
+    totalUserPrompts,
+    rows: appVisibleHistory(hydrateHistoryEntries(entries)),
+  };
 }

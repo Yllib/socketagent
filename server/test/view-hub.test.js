@@ -10,7 +10,14 @@ const message = z.union([
     start: z.number(),
     end: z.number(),
     setVersion: z.number(),
-    updates: z.array(z.object({ queryId: z.number(), hash: z.string(), value: z.unknown().optional() })),
+    updates: z.array(z.object({
+      queryId: z.number(),
+      hash: z.string(),
+      value: z.unknown().optional(),
+      meta: z.record(z.string(), z.unknown()).optional(),
+      upsert: z.array(z.object({ entryId: z.string(), revision: z.number(), text: z.string() })).optional(),
+      remove: z.array(z.string()).optional(),
+    })),
     failed: z.array(z.object({ queryId: z.number(), error: z.string() })),
   }),
   z.object({ type: z.literal("view_error"), reason: z.string(), expected: z.number() }),
@@ -19,7 +26,7 @@ const message = z.union([
 /** @param {{ sessions: unknown[] }} state */
 function hub(state) {
   return new ViewHub({
-    sessions: () => ({ key: "", compute: () => ({ sessions: state.sessions }) }),
+    sessions: () => ({ kind: "value", key: "", compute: () => ({ sessions: state.sessions }) }),
   });
 }
 
@@ -99,4 +106,59 @@ test("parseViewSet rejects malformed sets", () => {
   assert.deepEqual(parseViewSet({ version: 1, add: [{ queryId: 1, view: "status", knownHash: "h" }] }), {
     type: "view_set", version: 1, reset: false, add: [{ queryId: 1, view: "status", args: undefined, knownHash: "h" }], remove: [],
   });
+});
+
+/** @param {{ entryId: string, revision: number, text: string }[]} rows */
+function transcriptHub(rows) {
+  return new ViewHub({
+    transcript: () => ({ kind: "rows", key: "s1", compute: () => ({ meta: { count: rows.length }, rows }) }),
+  });
+}
+
+test("a row view sends every row first, then only changed and removed rows", async () => {
+  const rows = [{ entryId: "a", revision: 1, text: "hi" }, { entryId: "b", revision: 1, text: "there" }];
+  const views = transcriptHub(rows);
+  const phone = client();
+  views.applySet({}, undefined, phone.send, { type: "view_set", version: 1, add: [{ queryId: 1, view: "transcript" }] });
+  const first = transition(phone.received[0]).updates[0];
+  assert.deepEqual(first.upsert?.map((row) => row.entryId), ["a", "b"]);
+  assert.deepEqual(first.remove, []);
+
+  rows[1] = { entryId: "b", revision: 2, text: "there!" };
+  rows.shift();
+  rows.push({ entryId: "c", revision: 1, text: "new" });
+  views.invalidate("transcript", "s1");
+  views.invalidate("transcript", "s1");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(phone.received.length, 2, "two invalidations in one tick make one transition");
+  const patch = transition(phone.received[1]).updates[0];
+  assert.deepEqual(patch.upsert?.map((row) => `${row.entryId}:${row.revision}`), ["b:2", "c:1"]);
+  assert.deepEqual(patch.remove, ["a"]);
+  assert.deepEqual(patch.meta, { count: 2 });
+
+  views.invalidate("transcript", "other-session");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(phone.received.length, 2, "another session's writes send nothing");
+});
+
+test("a row view resumes from the rows the app holds", () => {
+  const rows = [{ entryId: "a", revision: 1, text: "hi" }, { entryId: "b", revision: 3, text: "there" }];
+  const views = transcriptHub(rows);
+  const phone = client();
+  views.applySet({}, undefined, phone.send, {
+    type: "view_set", version: 1, reset: true,
+    add: [{ queryId: 1, view: "transcript", known: ["a:1", "b:2", "gone:1"] }],
+  });
+  const patch = transition(phone.received[0]).updates[0];
+  assert.deepEqual(patch.upsert?.map((row) => `${row.entryId}:${row.revision}`), ["b:3"]);
+  assert.deepEqual(patch.remove, ["gone"]);
+
+  const again = client();
+  views.applySet({}, undefined, again.send, {
+    type: "view_set", version: 1, reset: true,
+    add: [{ queryId: 1, view: "transcript", knownHash: patch.hash }],
+  });
+  const confirmed = transition(again.received[0]).updates[0];
+  assert.equal(confirmed.upsert, undefined);
+  assert.equal(confirmed.hash, patch.hash);
 });

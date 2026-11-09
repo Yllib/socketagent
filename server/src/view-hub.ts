@@ -8,15 +8,24 @@ import { createHash } from "crypto";
  * messages; each carries the values whose hash changed for it since the last
  * one. The app applies a transition only when its `start` matches the `end` it
  * last applied, and resets its whole set when it does not.
+ *
+ * A value view sends its whole value when it changes. A row view (a
+ * transcript) sends patches: rows whose revision changed, and the IDs of rows
+ * that left it.
  */
 
 export type ViewValue = Record<string, unknown>;
 
-/** A query bound to its arguments. `key` scopes publishes, for example a session ID. */
-export interface ViewQuery {
-  key: string;
-  compute(): ViewValue;
+/** One row of a row view. Rows without an entry ID cannot be patched and are left out. */
+export interface ViewRow {
+  entryId?: string;
+  revision?: number;
 }
+
+/** A query bound to its arguments. `key` scopes publishes and invalidations, for example a session ID. */
+export type ViewQuery =
+  | { kind: "value"; key: string; compute(): ViewValue }
+  | { kind: "rows"; key: string; compute(): { meta: ViewValue; rows: readonly ViewRow[] } };
 
 /** Validates a query's arguments and binds them. Throws when they are invalid. */
 export type ViewResolver = (args: unknown) => ViewQuery;
@@ -26,6 +35,8 @@ export interface ViewSetAdd {
   view: string;
   args?: unknown;
   knownHash?: string;
+  /** For row views: `entryId:revision` for each row the app already holds. */
+  known?: string[];
 }
 
 export interface ViewSetMessage {
@@ -38,8 +49,10 @@ export interface ViewSetMessage {
 
 interface Subscription {
   view: string;
-  key: string;
+  query: ViewQuery;
   hash?: string;
+  /** Row views: the revision of each row this connection holds. */
+  held: Map<string, number>;
 }
 
 interface Connection {
@@ -49,11 +62,11 @@ interface Connection {
   queries: Map<number, Subscription>;
 }
 
+/** One query's part of a transition, already serialized. */
 interface Update {
   queryId: number;
-  hash: string;
-  /** Already serialized, so one publish stringifies its value once for every connection. */
-  valueJson?: string;
+  json: string;
+  summary: string;
 }
 
 interface Failure {
@@ -67,8 +80,36 @@ export function viewHash(valueJson: string): string {
   return createHash("sha256").update(valueJson).digest("base64url").slice(0, 22);
 }
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function rowVersions(rows: readonly ViewRow[]): Map<string, number> {
+  const versions = new Map<string, number>();
+  for (const row of rows) if (row.entryId) versions.set(row.entryId, row.revision ?? 0);
+  return versions;
+}
+
+function rowsHash(metaJson: string, versions: Map<string, number>): string {
+  const parts: string[] = [];
+  for (const [entryId, revision] of versions) parts.push(`${entryId}:${revision}`);
+  return viewHash(`${metaJson}\n${parts.join(",")}`);
+}
+
+function parseKnownRows(known: readonly string[] | undefined): Map<string, number> {
+  const held = new Map<string, number>();
+  for (const item of known ?? []) {
+    const split = item.lastIndexOf(":");
+    const revision = Number(item.slice(split + 1));
+    if (split > 0 && Number.isFinite(revision)) held.set(item.slice(0, split), revision);
+  }
+  return held;
+}
+
 export class ViewHub {
   private readonly connections = new Map<object, Map<string, Connection>>();
+  private readonly pending = new Set<string>();
+  private flushScheduled = false;
 
   constructor(private readonly views: Readonly<Record<string, ViewResolver>>) {}
 
@@ -89,48 +130,87 @@ export class ViewHub {
 
     const updates: Update[] = [];
     const failed: Failure[] = [];
-    const published: { view: string; key: string; valueJson: string; hash: string }[] = [];
+    const fresh: { view: string; key: string; valueJson: string; hash: string }[] = [];
     for (const add of message.add ?? []) {
       const resolver = Object.hasOwn(this.views, add.view) ? this.views[add.view] : undefined;
-      let query: ViewQuery;
-      let valueJson: string;
       try {
         if (!resolver) throw new Error(`Unknown view ${add.view}`);
-        query = resolver(add.args);
-        valueJson = JSON.stringify(query.compute());
+        const query = resolver(add.args);
+        const subscription: Subscription = {
+          view: add.view,
+          query,
+          held: query.kind === "rows" ? parseKnownRows(add.known) : new Map<string, number>(),
+        };
+        const update = this.refresh(add.queryId, subscription, add.knownHash);
+        connection.queries.set(add.queryId, subscription);
+        updates.push(update ?? this.unchanged(add.queryId, subscription));
+        if (query.kind === "value" && update && subscription.hash) {
+          fresh.push({ view: add.view, key: query.key, valueJson: update.valueJson ?? "", hash: subscription.hash });
+        }
       } catch (error: unknown) {
         connection.queries.delete(add.queryId);
-        failed.push({ queryId: add.queryId, error: error instanceof Error ? error.message : String(error) });
-        continue;
+        failed.push({ queryId: add.queryId, error: errorText(error) });
       }
-      const hash = viewHash(valueJson);
-      connection.queries.set(add.queryId, { view: add.view, key: query.key, hash });
-      updates.push(add.knownHash === hash ? { queryId: add.queryId, hash } : { queryId: add.queryId, hash, valueJson });
-      published.push({ view: add.view, key: query.key, valueJson, hash });
     }
     this.sendTransition(connection, updates, failed, true);
-    const summary = updates.map((update) => {
-      const view = connection.queries.get(update.queryId)?.view ?? "?";
-      return update.valueJson === undefined ? `${view} (unchanged)` : `${view} (${Buffer.byteLength(update.valueJson)} bytes)`;
-    });
+    const summary = updates.map((update) => update.summary);
     for (const failure of failed) summary.push(`query ${failure.queryId} failed: ${failure.error}`);
     console.log(`[Views] ${peerId ?? "direct"} set ${message.version}${message.reset ? " reset" : ""}: ${summary.join(", ") || "no queries"}`);
     // A fresh value is news for every other subscriber too.
-    for (const value of published) this.publishSerialized(value.view, value.key, value.valueJson, value.hash, connection);
+    for (const value of fresh) this.publishSerialized(value.view, value.key, value.valueJson, value.hash, connection);
   }
 
-  /** Sends `value` to every connection whose copy of (view, key) is out of date. */
+  /** Sends `value` to every connection whose copy of the value view (view, key) is out of date. */
   publish(view: string, key: string, value: ViewValue): void {
     if (!this.hasSubscribers(view)) return;
     const valueJson = JSON.stringify(value);
     this.publishSerialized(view, key, valueJson, viewHash(valueJson));
   }
 
+  /**
+   * Marks (view, key) as changed. Queries for it are recomputed once, after
+   * the current tick, so a burst of writes costs one transition.
+   */
+  invalidate(view: string, key: string): void {
+    if (!this.hasSubscribers(view)) return;
+    this.pending.add(`${view}\0${key}`);
+    if (this.flushScheduled) return;
+    this.flushScheduled = true;
+    setImmediate(() => this.flush());
+  }
+
+  /** Recomputes every invalidated query now. Normally runs on its own after `invalidate`. */
+  flush(): void {
+    this.flushScheduled = false;
+    if (this.pending.size === 0) return;
+    const pending = new Set(this.pending);
+    this.pending.clear();
+    for (const peers of this.connections.values()) {
+      for (const connection of peers.values()) {
+        const updates: Update[] = [];
+        const failed: Failure[] = [];
+        for (const [queryId, subscription] of connection.queries) {
+          if (!pending.has(`${subscription.view}\0${subscription.query.key}`)) continue;
+          try {
+            const update = this.refresh(queryId, subscription);
+            if (update) updates.push(update);
+          } catch (error: unknown) {
+            subscription.hash = undefined;
+            failed.push({ queryId, error: errorText(error) });
+          }
+        }
+        this.sendTransition(connection, updates, failed, false);
+      }
+    }
+  }
+
   /** Whether this connection receives `view` through the hub instead of its old broadcast. */
-  subscribed(owner: object, peerId: string | undefined, view: string): boolean {
+  subscribed(owner: object, peerId: string | undefined, view: string, key?: string): boolean {
     const connection = this.connections.get(owner)?.get(peerId ?? DIRECT_PEER);
     if (!connection) return false;
-    for (const query of connection.queries.values()) if (query.view === view) return true;
+    for (const query of connection.queries.values()) {
+      if (query.view === view && (key === undefined || query.query.key === key)) return true;
+    }
     return false;
   }
 
@@ -168,17 +248,79 @@ export class ViewHub {
     return connection;
   }
 
+  /**
+   * Recomputes one query and returns its update, or undefined when the
+   * connection already holds the current version. `knownHash` is a hash the
+   * app holds from an earlier connection.
+   */
+  private refresh(
+    queryId: number,
+    subscription: Subscription,
+    knownHash?: string,
+  ): (Update & { valueJson?: string }) | undefined {
+    const query = subscription.query;
+    if (query.kind === "value") {
+      const valueJson = JSON.stringify(query.compute());
+      const hash = viewHash(valueJson);
+      if (hash === subscription.hash) return undefined;
+      subscription.hash = hash;
+      if (hash === knownHash) return undefined;
+      return {
+        queryId,
+        valueJson,
+        json: `{"queryId":${queryId},"hash":${JSON.stringify(hash)},"value":${valueJson}}`,
+        summary: `${subscription.view} (${Buffer.byteLength(valueJson)} bytes)`,
+      };
+    }
+    const { meta, rows } = query.compute();
+    const metaJson = JSON.stringify(meta);
+    const next = rowVersions(rows);
+    const hash = rowsHash(metaJson, next);
+    if (hash === subscription.hash) return undefined;
+    subscription.hash = hash;
+    if (hash === knownHash) {
+      subscription.held = next;
+      return undefined;
+    }
+    const upsert: string[] = [];
+    for (const row of rows) {
+      if (row.entryId && subscription.held.get(row.entryId) !== (row.revision ?? 0)) upsert.push(JSON.stringify(row));
+    }
+    const remove: string[] = [];
+    for (const entryId of subscription.held.keys()) if (!next.has(entryId)) remove.push(entryId);
+    subscription.held = next;
+    return {
+      queryId,
+      json: `{"queryId":${queryId},"hash":${JSON.stringify(hash)},"meta":${metaJson},` +
+        `"upsert":[${upsert.join(",")}],"remove":${JSON.stringify(remove)}}`,
+      summary: `${subscription.view} (+${upsert.length} -${remove.length} rows)`,
+    };
+  }
+
+  /** Confirms that the app's copy is current without resending it. */
+  private unchanged(queryId: number, subscription: Subscription): Update {
+    return {
+      queryId,
+      json: `{"queryId":${queryId},"hash":${JSON.stringify(subscription.hash ?? "")}}`,
+      summary: `${subscription.view} (unchanged)`,
+    };
+  }
+
   private publishSerialized(view: string, key: string, valueJson: string, hash: string, skip?: Connection): void {
     for (const peers of this.connections.values()) {
       for (const connection of peers.values()) {
         if (connection === skip) continue;
         const updates: Update[] = [];
-        for (const [queryId, query] of connection.queries) {
-          if (query.view !== view || query.key !== key || query.hash === hash) continue;
-          query.hash = hash;
-          updates.push({ queryId, hash, valueJson });
+        for (const [queryId, subscription] of connection.queries) {
+          if (subscription.view !== view || subscription.query.key !== key || subscription.hash === hash) continue;
+          subscription.hash = hash;
+          updates.push({
+            queryId,
+            json: `{"queryId":${queryId},"hash":${JSON.stringify(hash)},"value":${valueJson}}`,
+            summary: view,
+          });
         }
-        if (updates.length > 0) this.sendTransition(connection, updates, [], false);
+        this.sendTransition(connection, updates, [], false);
       }
     }
   }
@@ -187,13 +329,9 @@ export class ViewHub {
     if (!always && updates.length === 0 && failed.length === 0) return;
     const start = connection.transition;
     connection.transition = start + 1;
-    const parts = updates.map((update) => {
-      const head = `{"queryId":${update.queryId},"hash":${JSON.stringify(update.hash)}`;
-      return update.valueJson === undefined ? `${head}}` : `${head},"value":${update.valueJson}}`;
-    });
     connection.send(
       `{"type":"view_transition","start":${start},"end":${start + 1},"setVersion":${connection.setVersion},` +
-      `"updates":[${parts.join(",")}],"failed":${JSON.stringify(failed)}}`,
+      `"updates":[${updates.map((update) => update.json).join(",")}],"failed":${JSON.stringify(failed)}}`,
     );
   }
 }
@@ -211,11 +349,18 @@ export function parseViewSet(raw: { version?: unknown; reset?: unknown; add?: un
       const entry: Record<string, unknown> = { ...item };
       if (typeof entry.queryId !== "number" || !Number.isInteger(entry.queryId)) return "view_set add needs an integer queryId";
       if (typeof entry.view !== "string") return "view_set add needs a view name";
+      let known: string[] | undefined;
+      if (entry.known !== undefined) {
+        if (!Array.isArray(entry.known)) return "view_set known must be a list";
+        const values: unknown[] = entry.known;
+        known = values.filter((value): value is string => typeof value === "string");
+      }
       add.push({
         queryId: entry.queryId,
         view: entry.view,
         args: entry.args,
         ...(typeof entry.knownHash === "string" ? { knownHash: entry.knownHash } : {}),
+        ...(known ? { known } : {}),
       });
     }
   }

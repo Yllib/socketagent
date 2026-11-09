@@ -211,6 +211,7 @@ function summaryFromRow(row: StoredSummaryRow): TranscriptSummary {
  */
 export class TranscriptDatabase {
   readonly filePath: string;
+  private readonly changeListeners = new Set<(sessionId: string) => void>();
   private readonly db: DatabaseSync;
   private readonly insertEntry: StatementSync;
   private readonly entryRowId: StatementSync;
@@ -420,6 +421,22 @@ export class TranscriptDatabase {
           )
         `)
       : this.db.prepare("DELETE FROM transcript_search WHERE session_id = ?");
+  }
+
+  /** Calls `listener` after each committed write with the session it touched. */
+  onChange(listener: (sessionId: string) => void): () => void {
+    this.changeListeners.add(listener);
+    return () => { this.changeListeners.delete(listener); };
+  }
+
+  private notifyChanged(...sessionIds: string[]): void {
+    for (const sessionId of sessionIds) {
+      for (const listener of this.changeListeners) {
+        try { listener(sessionId); } catch (error: unknown) {
+          console.error(`[Transcript] Change listener failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
   }
 
   close(): void {
@@ -784,6 +801,7 @@ export class TranscriptDatabase {
         .run(sessionId, sessionSeq);
       this.recomputeSummary(sessionId);
       this.db.exec("COMMIT");
+      this.notifyChanged(sessionId);
       return Number(deleted.changes);
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1186,6 +1204,7 @@ export class TranscriptDatabase {
       this.writeEntry(sessionId, entry, positionKey);
       this.updateSummaryAfterWrites(sessionId, [{ before, after: entry }]);
       this.db.exec("COMMIT");
+      this.notifyChanged(sessionId);
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -1216,6 +1235,7 @@ export class TranscriptDatabase {
       }
       this.updateSummaryAfterWrites(sessionId, [...changes.values()]);
       this.db.exec("COMMIT");
+      this.notifyChanged(sessionId);
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -1274,6 +1294,7 @@ export class TranscriptDatabase {
         );
       }
       this.db.exec("COMMIT");
+      this.notifyChanged(sessionId);
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -1338,6 +1359,7 @@ export class TranscriptDatabase {
         .run(newSessionId, oldSessionId);
       this.db.prepare("DELETE FROM transcript_sessions WHERE session_id = ?").run(oldSessionId);
       this.db.exec("COMMIT");
+      this.notifyChanged(oldSessionId, newSessionId);
       return true;
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1370,6 +1392,7 @@ export class TranscriptDatabase {
       }
       this.recomputeSummary(sessionId);
       this.db.exec("COMMIT");
+      this.notifyChanged(sessionId);
       return rows.length;
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1383,6 +1406,7 @@ export class TranscriptDatabase {
       this.deleteSearchSession.run(sessionId);
       this.db.prepare("DELETE FROM transcript_sessions WHERE session_id = ?").run(sessionId);
       this.db.exec("COMMIT");
+      this.notifyChanged(sessionId);
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

@@ -2679,6 +2679,8 @@ export interface HistoryEntry {
   subagentStatus?: string;
   parentToolUseId?: string | null;
   uuid?: string;
+  /** The app's ID for the prompt this user row records, so the app can swap its pending bubble for this row. */
+  clientMessageId?: string;
   triggerUserMessageUuid?: string;
   triggerUserMessageUuids?: string[];
   /** Codex Responses API message phase when supplied by app-server. */

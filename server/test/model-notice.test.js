@@ -8,7 +8,7 @@ const path = require("node:path");
 process.env.SOCKET_AGENT_DATA_DIR = path.join(os.tmpdir(), `socketagent-model-notice-${crypto.randomUUID()}`);
 fs.mkdirSync(process.env.SOCKET_AGENT_DATA_DIR, { recursive: true });
 
-const { claudeModelVersion, outdatedModelWarning } = require("../dist/model-change.js");
+const { claudeModelVersion, outdatedModelWarning, recordModelChange } = require("../dist/model-change.js");
 
 // Shape of the Claude catalog the CLI reports: aliases carry the newest version in displayName.
 const catalog = [
@@ -37,4 +37,11 @@ test("warns about each model older than the newest of its family", () => {
 test("stays quiet for current models and unknown families", () => {
   assert.equal(outdatedModelWarning(["claude-opus-5-5", "claude-fable-5-1"], catalog), null);
   assert.equal(outdatedModelWarning(["claude-opus-4-8"], []), null);
+});
+
+test("a change card names a Claude model the catalog dropped by its version", () => {
+  const card = recordModelChange("session-1", "claude-fable-5-1", "claude-fable-5-2", [
+    { value: "claude-fable-5-2", displayName: "Fable 5.2" },
+  ]);
+  assert.equal(card?.content, "Model changed from Fable 5.1 to Fable 5.2");
 });

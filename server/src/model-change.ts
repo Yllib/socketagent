@@ -1,11 +1,16 @@
 import type { ModelChangedServerMessage, ModelNotice } from "./protocol";
 import { appendHistory } from "./session-store";
 
-/** A model's display name from `models` (catalog entries), else its id. */
+/**
+ * A model's display name from `models` (catalog entries). A Claude id the
+ * catalog no longer lists reads as "Fable 5.1"; anything else stays its id.
+ */
 function modelLabel(model: string | undefined, models: ReadonlyArray<Record<string, unknown>>): string {
   if (!model) return "the default model";
   const entry = models.find((candidate) => String(candidate.value || candidate.id || "") === model);
-  return String(entry?.displayName || model);
+  if (entry?.displayName) return String(entry.displayName);
+  const version = claudeModelVersion(model);
+  return version ? claudeVersionLabel(version) : model;
 }
 
 /**

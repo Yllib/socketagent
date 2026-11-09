@@ -3659,6 +3659,25 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "view_set"
+            },
+            "version": {},
+            "reset": {},
+            "add": {},
+            "remove": {},
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "set_raw_mode"
             },
             "enabled": {

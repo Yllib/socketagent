@@ -929,6 +929,15 @@ export interface UploadChunkBinMessage {
   data: Buffer;
 }
 
+/** Changes the connection's view subscriptions. Validated by parseViewSet in view-hub.ts. */
+export interface ViewSetClientMessage {
+  type: "view_set";
+  version?: unknown;
+  reset?: unknown;
+  add?: unknown;
+  remove?: unknown;
+}
+
 /** Phone announces its wire-format support after key exchange. */
 export interface ClientCapabilitiesMessage {
   type: "client_capabilities";
@@ -1667,6 +1676,7 @@ export type ClientMessage = { commandId?: string } & (
   | UploadChunkBinMessage
   | FileDownloadAckMessage
   | ClientCapabilitiesMessage
+  | ViewSetClientMessage
   | SetRawModeMessage
   | DirectAuthMessage
   | TerminalAttachMessage

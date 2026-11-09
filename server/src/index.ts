@@ -79,6 +79,7 @@ import { SocketAgentPlugin, PluginContext, SessionContext } from "./plugin-api";
 import { parseSocketAgentPlugin } from "./plugin-contract";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
 import { RelayClient, RelayStatus, relayPeerForMessage, relayPeerKeyForMessage } from "./relay-client";
+import { ViewHub, parseViewSet } from "./view-hub";
 import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
 import { DeviceAuthGate } from "./device-auth";
 import {
@@ -790,6 +791,32 @@ class DirectClientTransport implements ClientTransport {
 // this transport; relay clients encrypt in RelayClient before they get here.
 const connectedClients = new Set<ClientTransport>();
 
+/**
+ * Server-owned views (docs/sync-views.md). A connection subscribed to a view
+ * gets it here and stops getting that view's old broadcast message.
+ */
+const views = new ViewHub({
+  sessions: () => ({
+    key: "",
+    compute: () => {
+      refreshNativeSessionListInBackground("view_subscribe");
+      return { sessions: immediateEnrichedSessions().map(sessionListSummary) };
+    },
+  }),
+  status: () => ({ key: "", compute: buildStatusSyncPayload }),
+});
+
+/** Sends a legacy broadcast to every connection not subscribed to `view`. */
+function broadcastLegacyView(view: string, raw: string): void {
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN && !views.subscribed(client, undefined, view)) client.send(raw);
+  }
+  if (relayConnectionHandler && relayClient) {
+    const socket = relayClient.getVirtualSocket();
+    socket.sendExcept(raw, (peerId) => views.subscribed(socket, peerId, view));
+  }
+}
+
 function loadServerKeyPair(): KeyPair {
   return loadOrCreateKeyPair(socketAgentDataPath("relay-keys.json"));
 }
@@ -1489,7 +1516,9 @@ let lastSessionListBroadcastJson: string | undefined;
 
 function sendSessionListBroadcast(enriched: SessionInfo[], reason: string, startedAt = Date.now()): void {
   const stringifyStartedAt = Date.now();
-  const msg = JSON.stringify({ type: "session_list", sessions: enriched.map(sessionListSummary) });
+  const sessions = enriched.map(sessionListSummary);
+  views.publish("sessions", "", { sessions });
+  const msg = JSON.stringify({ type: "session_list", sessions });
   if (msg === lastSessionListBroadcastJson) return;
   lastSessionListBroadcastJson = msg;
   logSlowWs("ws_send_session_list_stringify", stringifyStartedAt, {
@@ -1497,10 +1526,7 @@ function sendSessionListBroadcast(enriched: SessionInfo[], reason: string, start
     count: enriched.length,
     bytes: Buffer.byteLength(msg),
   });
-  for (const client of connectedClients) {
-    if (client.readyState === WebSocket.OPEN) client.send(msg);
-  }
-  if (relayConnectionHandler) relayConnectionHandler.sendRaw(msg);
+  broadcastLegacyView("sessions", msg);
   logSlowWs("ws_send_session_list", startedAt, { reason, count: enriched.length });
 }
 
@@ -1681,6 +1707,7 @@ function serverCapabilitiesPayload(
     },
     uploadAckVersion: UPLOAD_ACK_VERSION,
     commandReceiptVersion: 1,
+    views: { version: 1 },
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 2 },
@@ -6772,6 +6799,20 @@ function createConnectionHandler(
         break;
       }
 
+      case "view_set": {
+        const parsed = parseViewSet(msg);
+        if (typeof parsed === "string") {
+          sendJson({ type: "view_error", reason: "invalid", message: parsed });
+          break;
+        }
+        views.applySet(transport, peerId, (json) => {
+          if (transport.readyState !== WebSocket.OPEN) return;
+          if (peerId && transport.sendReply) transport.sendReply(peerId, json);
+          else transport.send(json);
+        }, parsed);
+        break;
+      }
+
       case "list_sessions": {
         sendJson({
           type: "session_list",
@@ -11648,25 +11689,20 @@ const STATUS_SYNC_RUNNING_INTERVAL = 3000; // 3s when running
 function broadcastStatusSync(): void {
   if (connectedClients.size === 0 && !relayConnectionHandler) return;
 
-  const msg = buildStatusSyncMessage();
-  for (const client of connectedClients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(msg);
-    }
-  }
-  if (relayConnectionHandler) {
-    relayConnectionHandler.sendRaw(msg);
-  }
+  const payload = buildStatusSyncPayload();
+  views.publish("status", "", payload);
+  broadcastLegacyView("status", JSON.stringify({ type: "status_sync", ...payload }));
 }
 
 /** Send status_sync to a single client. */
 function sendStatusSyncTo(transport: ClientTransport): void {
   if (transport.readyState === WebSocket.OPEN) {
-    transport.send(buildStatusSyncMessage());
+    transport.send(JSON.stringify({ type: "status_sync", ...buildStatusSyncPayload() }));
   }
 }
 
-function buildStatusSyncMessage(): string {
+/** The status_sync message without its type. Also the value of the `status` view. */
+function buildStatusSyncPayload(): Record<string, unknown> {
   let anyRunning = false;
   const runningSessions: string[] = [];
   // Supervisors whose own agent is idle while delegated agents work. Also
@@ -11764,8 +11800,7 @@ function buildStatusSyncMessage(): string {
       height: 860,
       active: true,
     }));
-  return JSON.stringify({
-    type: "status_sync",
+  return {
     running: anyRunning || compactingSessions.length > 0,
     runningSessions,
     waitingSessions,
@@ -11786,7 +11821,7 @@ function buildStatusSyncMessage(): string {
     ...(Object.keys(sessionTitles).length > 0 ? { sessionTitles } : {}),
     ...(Object.keys(sessionModels).length > 0 ? { sessionModels } : {}),
     plugins: plugins.map(p => p.name),
-  });
+  };
 }
 
 // Adaptive heartbeat: 3s when any session is running, 10s when idle
@@ -12437,6 +12472,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
     handler.close();
     transport.close();
     connectedClients.delete(transport);
+    views.dropOwner(transport);
     // Clean up session client mapping for this connection
     if (handler.activeSessionId) {
       const client = sessionClients.get(handler.activeSessionId);
@@ -12492,6 +12528,9 @@ function startRelayClient(): void {
     sessionKeyedPeers,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
+    onPeerClosed: (peerId) => {
+      if (relayClient) views.dropPeer(relayClient.getVirtualSocket(), peerId);
+    },
     serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey)),
     onMessage: (msg: ClientMessage) => {
       if (!relayConnectionHandler) {

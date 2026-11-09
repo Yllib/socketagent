@@ -359,8 +359,11 @@ export class RelayClient {
     });
   }
 
-  /** Send a server→client message through the relay (encrypted if paired) */
-  send(msg: Record<string, unknown>): void {
+  /**
+   * Send a server→client message through the relay (encrypted if paired).
+   * `skipPeer` leaves out peers that get this state another way.
+   */
+  send(msg: Record<string, unknown>, skipPeer?: (peerId: string) => boolean): void {
     const pairedPeers = Array.from(this.peers.entries())
       .filter(([, peer]) => peer.auth === "approved" && peer.publicKey !== null);
 
@@ -371,6 +374,7 @@ export class RelayClient {
     }
 
     for (const [peerId, peer] of pairedPeers) {
+      if (skipPeer?.(peerId)) continue;
       this.sendToPeer(peerId, msg, peer);
     }
   }
@@ -1045,6 +1049,11 @@ export class VirtualRelaySocket {
 
   sendReply(peerId: string, data: string): void {
     this.relay.sendReply(peerId, parseJsonObject(data));
+  }
+
+  /** Broadcasts a JSON message to every peer except those `skipPeer` names. */
+  sendExcept(data: string, skipPeer: (peerId: string) => boolean): void {
+    this.relay.send(parseJsonObject(data), skipPeer);
   }
 
   /** Called by RelayClient when pairing status changes */

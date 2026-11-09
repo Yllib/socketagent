@@ -10,8 +10,14 @@ process.env.SOCKET_AGENT_DATA_DIR = dataDir;
 const { handleRequestSecureInputTool, setSessionReporter } = require("#server/app-tool-handlers");
 const { completeSecureInputRequest, cancelSecureInputRequest } = require("#server/secure-input-store");
 
+/** @typedef {import("#server/protocol").ServerMessage} ServerMessage */
+
 test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
+/**
+ * @param {ServerMessage[]} sent
+ * @returns {import("#server/app-tool-handlers").AppToolContext}
+ */
 function context(sent) {
   return {
     getSessionId: () => "session-async",
@@ -23,18 +29,25 @@ function context(sent) {
   };
 }
 
+/** @returns {Promise<{ sessionId: string, text: string }>} */
 function nextReport() {
   return new Promise((resolve) => {
     setSessionReporter(async (sessionId, text) => resolve({ sessionId, text }));
   });
 }
 
+/** @param {ServerMessage[]} sent */
+function secureInputCard(sent) {
+  for (const message of sent) if (message.type === "secure_input_request") return message;
+  throw new Error("No secure input card was sent");
+}
+
 test("returns before the user answers, then reports the saved file path", async () => {
+  /** @type {ServerMessage[]} */
   const sent = [];
   const result = await handleRequestSecureInputTool(context(sent), { label: "API_TOKEN" });
   assert.match(result.content[0].text, /does not wait/);
-  const card = sent.find((message) => message.type === "secure_input_request");
-  assert.ok(card);
+  const card = secureInputCard(sent);
 
   const report = nextReport();
   const saved = completeSecureInputRequest(card.requestId, "token-value-must-not-leak");
@@ -46,9 +59,10 @@ test("returns before the user answers, then reports the saved file path", async 
 });
 
 test("reports a declined card", async () => {
+  /** @type {ServerMessage[]} */
   const sent = [];
   await handleRequestSecureInputTool(context(sent), { label: "DB_PASSWORD" });
-  const card = sent.find((message) => message.type === "secure_input_request");
+  const card = secureInputCard(sent);
 
   const report = nextReport();
   cancelSecureInputRequest(card.requestId);

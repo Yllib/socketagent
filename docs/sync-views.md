@@ -123,8 +123,8 @@ command ID so a retried mutation after reconnect is not run twice.
 ## Phases
 
 - [x] Design (this file).
-- [ ] Phase 1 server: view hub, `sessions` and `status` views, tests.
-- [ ] Phase 1 app: subscribe on `views.version >= 1`, feed values into the
+- [x] Phase 1 server: view hub, `sessions` and `status` views, tests.
+- [x] Phase 1 app: subscribe on `views.version >= 1`, feed values into the
   existing session list and status handlers, reset on chain break.
 - [ ] Phase 2 server: `transcript` view with row patches, draft channel,
   mutations for prompt and card answers.

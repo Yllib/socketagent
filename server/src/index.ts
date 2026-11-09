@@ -819,7 +819,11 @@ const views = new ViewHub({
       kind: "rows",
       key: sessionId,
       compute: () => {
+        const started = performance.now();
         const page = getTranscriptViewPage(sessionId, pinned);
+        const elapsed = performance.now() - started;
+        // Every committed write recomputes the page; flag the slow ones.
+        if (elapsed > 50) console.log(`[Views] transcript ${sessionId.slice(0, 8)} took ${Math.round(elapsed)}ms for ${page.rows.length} rows`);
         pinned = page.fromSeq;
         const todos = getTodos(sessionId);
         const promptSuggestion = getLastPromptSuggestion(sessionId);

@@ -80,31 +80,56 @@ Phase 1:
 | `sessions` | none | `{ sessions }`, the `session_list` payload | every `session_list` broadcast |
 | `status` | none | the `status_sync` payload without `type` | every `status_sync` broadcast |
 
-Phase 2:
+Phase 2 (`views.version` 2):
 
-| View | Args | Value |
-| --- | --- | --- |
-| `transcript` | `{ sessionId, before?, limit }` | one page of history rows plus `sessionSeq` |
+| View | Args | Rows | Meta |
+| --- | --- | --- | --- |
+| `transcript` | `{ sessionId, fromSeq? }` | history rows from `fromSeq` on, at most 2000 (the newest) | `sessionId, fromSeq, offset, total, totalUserPrompts, taskStates, runStats, todos?, promptSuggestion?` |
 
-Transcript pages differ from phase 1 views in two ways.
+A transcript is a row view. A transition carries row patches instead of the
+whole page:
 
-- Row patches. A transcript page can be hundreds of KB, so a transition
-  carries row patches (`upsert` by `entryId` + `revision`, `remove`) instead
-  of the whole page. The value hash still covers the whole page, so a
-  reconnect with a matching hash costs nothing.
-- Draft row. Token streaming changes the last row many times a second. Those
-  deltas go on a side channel (`view_draft`, keyed by queryId and entryId) and
-  are not versioned. The finished row arrives through the view and replaces
-  the draft. A lost draft delta is harmless because the finished row wins.
+```json
+{ "queryId": 101, "hash": "…", "meta": { }, "upsert": [ rows ], "remove": ["entryId"] }
+```
 
-Pages: only the newest page is open-ended. Older pages are pinned to an
-`entryId` range, so new rows never shift them. When the open page grows past
-its limit, the server splits it and the app swaps both halves in at once
-(Convex does the same, so there is never a gap).
+- The server diffs by `entryId` + `revision` against the rows it last sent
+  that connection. The hash covers the meta and every `entryId:revision`.
+- On reset the app sends `knownHash` and `known: ["entryId:revision", …]`
+  for the rows it holds, so a reconnect sends only rows that changed while it
+  was away, and nothing when the hash matches.
+- Without `fromSeq` the page starts where the resume page starts. The first
+  compute pins it, and the app sends it back on reset so the range holds
+  still across reconnects.
+- The transcript database notifies on every committed write. Each write
+  invalidates that session's view; the hub coalesces a burst into one
+  transition.
+- User rows store `clientMessageId`, the app's local message ID the prompt
+  was sent with.
 
-## Mutations
+The app follows the open session: when it changes, it removes the old query
+and adds a new one in the next `view_set`. Older pages the user scrolls back
+to still load through `load_more_history`.
 
-Prompts and card answers become mutations:
+How the app shows a page during the migration: it rebuilds through the
+existing history handler with `historyKind: 'view'`, reusing the row
+converter, then `reconcileViewTranscript` merges the result with the chat.
+The page is exact for its range, so a visible row in that range the page
+lacks is dropped. Older pages stay. A row that matches a visible card reuses
+that card when it is unchanged or still streaming. Messages with no server
+position (live stream cards, local cards, the pending prompt) are drafts and
+keep their place until a row covers them; the pending prompt matches its row
+by `clientMessageId`. The app applies at most one page per 150 ms.
+
+Live stream events stay as the draft channel. Phase 2 did not add a separate
+`view_draft` message or prompt mutations: the existing events already carry
+token deltas, and `clientMessageId` releases the optimistic prompt. Both can
+be revisited in phase 3 once the old merge paths are gone.
+
+## Mutations (not built)
+
+Phase 2 matched prompts to rows by `clientMessageId` instead. The original
+idea, kept for phase 3: prompts and card answers become mutations:
 
 ```json
 { "type": "view_mutation", "mutationId": "m-123", "name": "prompt", "args": { } }
@@ -126,10 +151,11 @@ command ID so a retried mutation after reconnect is not run twice.
 - [x] Phase 1 server: view hub, `sessions` and `status` views, tests.
 - [x] Phase 1 app: subscribe on `views.version >= 1`, feed values into the
   existing session list and status handlers, reset on chain break.
-- [ ] Phase 2 server: `transcript` view with row patches, draft channel,
-  mutations for prompt and card answers.
-- [ ] Phase 2 app: transcript view store, optimistic rows released by
-  transition, draft row rendering.
+- [x] Phase 2 server: `transcript` row view with patches and `known` resume,
+  write notifications from the transcript database, `clientMessageId` on
+  user rows.
+- [x] Phase 2 app: follow the open session, row store, exact reconcile of
+  each page, pending prompt released by its row.
 - [ ] Phase 3: delete the old routes from the app (`_handleSessionHistory`
   merge paths, `message_reconciliation.dart`, pending ID protection) and the
   server's per-session delivery acks. Blocked until a deployed app with views

@@ -2000,7 +2000,42 @@ function notifySessionActivity(): void {
   broadcastStatusSync();
 }
 
+/**
+ * Starts a turn on `owner` with output from a Monitor that finished or printed
+ * while the agent was idle. Bound to the session object itself, never to a
+ * connection's current session, which changes when the phone opens another.
+ */
+function deliverIdleMonitorOutput(owner: Session, text: string): void {
+  const monitorSid = sessionInstanceId(owner);
+  if (monitorSid && sessionAutomationLocks.isLocked(monitorSid)) {
+    console.log(`[StopLock] Monitor output cannot resume stopped session ${monitorSid}`);
+    return;
+  }
+  void routeMonitorOutputToSession(owner, text, {
+    beforeIdleRun: (sid) => {
+      console.log(`[Monitor] Starting query for owning session ${sid}`);
+      attachSessionLifecycleCallbacks(owner);
+    },
+    afterIdleRun: () => {
+      const sid = owner.getSessionId();
+      if (sid && activeSessions.get(sid) === owner && !sessionShouldRemainPooled(owner)) {
+        activeSessions.delete(sid);
+      }
+      broadcastSessionList();
+    },
+    onError: (error: unknown) => {
+      console.error(`[Monitor] Owning-session delivery failed: ${errorMessage(error)}`);
+    },
+  });
+}
+
+/**
+ * Every route that starts a session calls this: prompts, restart recovery,
+ * delegated reports, schedules and card answers. A callback set anywhere else
+ * is missing from the routes that skip that place.
+ */
 function attachSessionLifecycleCallbacks(session: Session): void {
+  session.onMonitorOutput = (text: string) => deliverIdleMonitorOutput(session, text);
   session.onBeforeRun = resumeSessionId => {
     if (restartPreparing || shuttingDown) throw new Error("Server is preparing to restart. Retry after reconnecting.");
     if (isCodexRewinding(resumeSessionId || sessionInstanceId(session) || "")) throw new Error("Wait for conversation rewind to finish");
@@ -2233,7 +2268,7 @@ function durableMonitorContext(record: DurableMonitorRecord): AppToolContext {
     // durable agent offset advances only after the resumed session accepts it.
     isRunning: () => true,
     injectMessage: (text) => queueDurableMonitorPrompt(record, text),
-    onMonitorOutput: (text) => { void queueDurableMonitorPrompt(record, text); },
+    onMonitorOutput: (text) => { void queueDurableMonitorPrompt(record, text); return true; },
   };
 }
 
@@ -6196,38 +6231,6 @@ function createConnectionHandler(
             setActiveSession: (s: Session) => { activeSession = s; },
           });
         }
-
-        // Bind delivery to this exact session object. The connection's
-        // activeSession variable changes whenever the phone opens another
-        // session and must never determine a Monitor's destination.
-        const monitorOwner = activeSession;
-        monitorOwner.onMonitorOutput = (text: string) => {
-          const monitorSid = sessionInstanceId(monitorOwner);
-          if (monitorSid && sessionAutomationLocks.isLocked(monitorSid)) {
-            console.log(`[StopLock] Monitor output cannot resume stopped session ${monitorSid}`);
-            return;
-          }
-          void routeMonitorOutputToSession(monitorOwner, text, {
-            beforeIdleRun: (monitorSid) => {
-              console.log(`[Monitor] Starting query for owning session ${monitorSid}`);
-              attachSessionLifecycleCallbacks(monitorOwner);
-            },
-            afterIdleRun: () => {
-              const sid = monitorOwner.getSessionId();
-              if (
-                sid
-                && activeSessions.get(sid) === monitorOwner
-                && !sessionShouldRemainPooled(monitorOwner)
-              ) {
-                activeSessions.delete(sid);
-              }
-              broadcastSessionList();
-            },
-            onError: (error: unknown) => {
-              console.error(`[Monitor] Owning-session delivery failed: ${errorMessage(error)}`);
-            },
-          });
-        };
 
         const sessionForRun = activeSession;
         if (promptMessageId) firstPromptReceipts.set(sessionForRun, { commandId: msg.commandId || promptMessageId, messageId: promptMessageId });

@@ -78,7 +78,8 @@ export interface AppToolContext {
   getKokoroSpeed(): number;
   isRunning?(): boolean;
   injectMessage?(text: string, priority?: "now" | "next" | "later"): Promise<void>;
-  onMonitorOutput?(text: string): void;
+  /** Starts a turn with Monitor output while the agent is idle. False when nothing can take it. */
+  onMonitorOutput?(text: string): boolean;
   manageAgentSession?: AgentSessionToolExecutor;
   /** Acts on linked computers. Attached by index.ts like manageAgentSession. */
   manageComputers?: ComputersToolExecutor;
@@ -1945,11 +1946,25 @@ async function deliverMonitorBuffer(taskId: string, state: AppMonitorState): Pro
     }
   }
 
+  if (state.ctx.onMonitorOutput?.(text) !== true) {
+    // Keep the output in the durable record. It goes to the agent when the
+    // session's next turn rebinds this Monitor, or after a restart.
+    state.agentReadOffset = getDurableMonitorRecord(taskId)?.agentOffset || 0;
+    state.outputBuffer = [];
+    if (!undeliveredMonitorsLogged.has(taskId)) {
+      undeliveredMonitorsLogged.add(taskId);
+      console.error(`[AppMonitor] ${taskId} has output for idle session ${state.record.sessionId} and nothing to start its turn; keeping it`);
+    }
+    return false;
+  }
+  undeliveredMonitorsLogged.delete(taskId);
   state.outputBuffer.splice(0, deliveredLines);
   updateDurableMonitorRecord(taskId, { agentOffset: deliveredEnd });
-  state.ctx.onMonitorOutput?.(text);
   return true;
 }
+
+/** Monitors already reported as undeliverable, so the retry loop logs once. */
+const undeliveredMonitorsLogged = new Set<string>();
 
 async function flushMonitorBuffer(taskId: string): Promise<boolean> {
   const state = appMonitors.get(taskId);

@@ -4033,7 +4033,11 @@ export class CodexSession {
       getKokoroSpeed: () => this._kokoroSpeed,
       isRunning: () => this.isRunning,
       injectMessage: (text, priority) => this.injectMessage(text, priority),
-      onMonitorOutput: (text) => this.onMonitorOutput?.(text),
+      onMonitorOutput: (text) => {
+        if (!this.onMonitorOutput) return false;
+        this.onMonitorOutput(text);
+        return true;
+      },
       manageAgentSession: (args) => {
         if (!this.onAgentSessionRequest) {
           throw new Error("AgentSession runtime is not attached");

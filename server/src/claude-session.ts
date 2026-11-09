@@ -3625,7 +3625,11 @@ export class ClaudeSession {
         getKokoroSpeed: () => this._kokoroSpeed,
         isRunning: () => this._isRunning,
         injectMessage: (text, priority) => this.injectMessage(text, priority),
-        onMonitorOutput: (text) => this.onMonitorOutput?.(text),
+        onMonitorOutput: (text) => {
+        if (!this.onMonitorOutput) return false;
+        this.onMonitorOutput(text);
+        return true;
+      },
         requestTranscriptAccess: (detail) => this._stopRequested ? Promise.resolve(false) : requestTranscriptAccess(this.getSessionContext(), detail, this.abortController?.signal),
         manageAgentSession: (args) => {
           if (!this.onAgentSessionRequest) {

@@ -17,6 +17,7 @@ const {
   stopAppMonitor,
   stopAppMonitorsForSession,
 } = require("#server/app-tool-handlers");
+const { getDurableMonitorRecord } = require("#server/durable-monitor-store");
 
 test("rejects pgrep -f patterns that match their own watcher shell", async () => {
   assert.equal(
@@ -188,7 +189,10 @@ test("a persistent Monitor rebinds away from a completed Claude turn", async () 
       getKokoroVoice: () => "",
       getKokoroSpeed: () => 1,
       isRunning: () => false,
-      onMonitorOutput: (text) => durable.push({ type: "agent_output", text }),
+      onMonitorOutput: (text) => {
+        durable.push({ type: "agent_output", text });
+        return true;
+      },
     })),
     1,
   );
@@ -207,6 +211,55 @@ test("a persistent Monitor rebinds away from a completed Claude turn", async () 
     original.some((message) => message.type === "task_notification"),
     false,
   );
+});
+
+test("output an idle session cannot take waits for the next turn instead of being dropped", async () => {
+  if (process.platform === "win32") return;
+  const sessionId = `monitor-undelivered-${Date.now()}`;
+  /** @type {string[]} */
+  const offered = [];
+  const result = await handleMonitorTool(
+    {
+      getSessionId: () => sessionId,
+      getCwd: () => process.cwd(),
+      getBackend: () => "claude",
+      send: () => {},
+      getTtsEngine: () => "system",
+      getKokoroVoice: () => "",
+      getKokoroSpeed: () => 1,
+      isRunning: () => false,
+      // A session resumed without a turn-starting callback, as restart
+      // recovery left one before the fix.
+      onMonitorOutput: (text) => {
+        offered.push(text);
+        return false;
+      },
+    },
+    { command: "printf 'deploy finished\\n'", description: "deploy watcher" },
+  );
+  const taskId = /Task ID: ([A-Za-z0-9_-]+)/.exec(result.content[0].text)?.[1];
+  assert.ok(taskId);
+  await waitFor(() => offered.length > 0, 5_000);
+  assert.ok(getDurableMonitorRecord(taskId), "the record and its output are kept");
+
+  /** @type {string[]} */
+  const delivered = [];
+  rebindAppMonitorsForSession(sessionId, (record) => ({
+    getSessionId: () => record.sessionId,
+    getCwd: () => record.cwd,
+    getBackend: () => record.backend,
+    send: () => {},
+    getTtsEngine: () => "system",
+    getKokoroVoice: () => "",
+    getKokoroSpeed: () => 1,
+    isRunning: () => false,
+    onMonitorOutput: (text) => {
+      delivered.push(text);
+      return true;
+    },
+  }));
+  await waitFor(() => delivered.length > 0, 5_000);
+  assert.match(delivered[0], /deploy finished/);
 });
 
 test("hard stop terminates detached Monitor process trees owned by the session", async () => {

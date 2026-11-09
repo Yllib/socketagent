@@ -3665,6 +3665,7 @@
             "reset": {},
             "add": {},
             "remove": {},
+            "reason": {},
             "commandId": {
               "type": "string"
             }

@@ -45,6 +45,8 @@ export interface ViewSetMessage {
   reset?: boolean;
   add?: ViewSetAdd[];
   remove?: number[];
+  /** Why the app reset, for the log. */
+  reason?: string;
 }
 
 interface Subscription {
@@ -155,7 +157,8 @@ export class ViewHub {
     this.sendTransition(connection, updates, failed, true);
     const summary = updates.map((update) => update.summary);
     for (const failure of failed) summary.push(`query ${failure.queryId} failed: ${failure.error}`);
-    console.log(`[Views] ${peerId ?? "direct"} set ${message.version}${message.reset ? " reset" : ""}: ${summary.join(", ") || "no queries"}`);
+    const why = message.reason ? ` (${message.reason})` : "";
+    console.log(`[Views] ${peerId ?? "direct"} set ${message.version}${message.reset ? " reset" : ""}${why}: ${summary.join(", ") || "no queries"}`);
     // A fresh value is news for every other subscriber too.
     for (const value of fresh) this.publishSerialized(value.view, value.key, value.valueJson, value.hash, connection);
   }
@@ -337,7 +340,7 @@ export class ViewHub {
 }
 
 /** Narrows an incoming message to a `view_set`, or returns an error for the app. */
-export function parseViewSet(raw: { version?: unknown; reset?: unknown; add?: unknown; remove?: unknown }): ViewSetMessage | string {
+export function parseViewSet(raw: { version?: unknown; reset?: unknown; add?: unknown; remove?: unknown; reason?: unknown }): ViewSetMessage | string {
   const version = raw.version;
   if (typeof version !== "number" || !Number.isInteger(version) || version < 1) return "view_set needs a positive integer version";
   const add: ViewSetAdd[] = [];
@@ -373,5 +376,6 @@ export function parseViewSet(raw: { version?: unknown; reset?: unknown; add?: un
       remove.push(queryId);
     }
   }
-  return { type: "view_set", version, reset: raw.reset === true, add, remove };
+  const reason = typeof raw.reason === "string" ? raw.reason.slice(0, 200) : undefined;
+  return { type: "view_set", version, reset: raw.reset === true, add, remove, ...(reason ? { reason } : {}) };
 }

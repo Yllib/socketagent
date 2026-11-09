@@ -936,6 +936,8 @@ export interface ViewSetClientMessage {
   reset?: unknown;
   add?: unknown;
   remove?: unknown;
+  /** Why the app reset, for the server log. */
+  reason?: unknown;
 }
 
 /** Phone announces its wire-format support after key exchange. */

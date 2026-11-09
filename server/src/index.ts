@@ -6851,6 +6851,7 @@ function createConnectionHandler(
       case "view_set": {
         const parsed = parseViewSet(msg);
         if (typeof parsed === "string") {
+          console.log(`[Views] ${peerId ?? "direct"} sent an invalid view_set: ${parsed}`);
           sendJson({ type: "view_error", reason: "invalid", message: parsed });
           break;
         }

@@ -36,7 +36,9 @@ import {
   AgentSessionSettings,
   Backend,
   WorkflowStatePayload,
+  ErrorServerMessage,
 } from "./protocol";
+import { ConnectionFailureReporter, isBackendConnectionError } from "./backend-connection";
 import { saveSession, getSession, updateSessionActivity, updateSessionContextUsage, updateSessionAgentSettings, appendHistory, recordUserPrompt, saveTodos, getTodos, remapSession, markQuestionAnswered, appendSdkEvent, cacheToolImage, positionSessionMessage, recordSessionError, clearSessionPendingHandoffContext, removeHistoryEntriesByUuids } from "./session-store";
 import { SocketAgentPlugin, SessionContext } from "./plugin-api";
 import {
@@ -941,6 +943,14 @@ export class ClaudeSession {
   // rules) is allowed without a card. Survives a plan excursion.
   private _superYolo = false;
   private _authErrorSent = false;  // suppress duplicate exit-code error after auth failure
+  /** Shows one card with the cause when this computer cannot reach the provider. */
+  readonly connectionFailures = new ConnectionFailureReporter("claude", (message) => {
+    const card: ErrorServerMessage = { type: "error", message, sessionId: this.sessionId || undefined };
+    this.connectionChecked.add(card);
+    this.send(card);
+  });
+  /** Error messages the connection check has already seen, so `send` passes them through. */
+  private readonly connectionChecked = new WeakSet<ErrorServerMessage>();
   private _authRequest: ClaudeAuthRequest | null = null;
   private _lastContextWindow = 0;  // last known context window size from modelUsage
   private _sessionModel: string | null = null;  // model reported by SessionStart hook
@@ -2989,6 +2999,16 @@ export class ClaudeSession {
   }
 
   public send(msg: ServerMessage): void {
+    if (msg.type === "error" && !this.connectionChecked.has(msg) && isBackendConnectionError(msg.message)) {
+      // One lost connection produces several of these. The reporter shows
+      // one card naming the cause; the original stands only when this
+      // computer can reach the provider after all.
+      this.connectionChecked.add(msg);
+      void this.connectionFailures.report().then((covered) => {
+        if (!covered) this.send(msg);
+      });
+      return;
+    }
     if (msg.type === "question") this.onQuestionAsked?.(msg);
     if (msg.type === "error") {
       try {
@@ -3539,6 +3559,7 @@ export class ClaudeSession {
     resumeSessionId?: string,
     messageId?: string,
   ): Promise<void> {
+    this.connectionFailures.reset();
     this.onBeforeRun?.(resumeSessionId);
     // The SDK stream also remains reusable while a completed root turn waits
     // for background work. A new phone prompt must join that process rather
@@ -5248,6 +5269,11 @@ export class ClaudeSession {
           const ar = message;
           const delayMs = claudeApiRetryDelayMs(ar);
           console.log(`[SDK] API retry: attempt=${ar.attempt}/${ar.max_retries} delay=${delayMs}ms`);
+          // A retry with no HTTP status never reached Anthropic. The second
+          // one in a row is worth a network check and a card naming the cause.
+          if (ar.error_status == null && (ar.attempt || 0) >= 2) {
+            void this.connectionFailures.report({ retrying: true });
+          }
           this.send({
             type: "api_retry",
             attempt: ar.attempt || 0,

@@ -3947,6 +3947,9 @@
         },
         "message": {
           "type": "string"
+        },
+        "errorShown": {
+          "type": "boolean"
         }
       },
       "required": [

@@ -142,6 +142,7 @@ import {
 } from "./managed-backend-update";
 import { getCachedModelCatalog, invalidateCachedModelCatalog } from "./model-catalog-store";
 import { recordModelChange } from "./model-change";
+import { isBackendConnectionError } from "./backend-connection";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
 import { lastClaudePlanUsage } from "./claude-plan-usage-cache";
 import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors, setSessionReporter } from "./app-tool-handlers";
@@ -6332,19 +6333,25 @@ function createConnectionHandler(
           }
           clearBackendHealthOverride(sessionForRun instanceof CodexSession ? "codex" : "claude");
           broadcastSessionList();
-        }).catch((err: unknown) => {
+        }).catch(async (err: unknown) => {
           bindClientConversation(sessionForRun);
           // A restart or a Windows handoff ended the turn, and the recovery
           // journal resumes it on the next server, which the session's
           // server_recovery notices say. The client reconnects and sees it
           // continue, so this is no failure to report.
           if (shuttingDown && recoveryOwners.has(sessionForRun)) return;
+          const failure = errorMessage(err) || "Query failed";
+          // A lost connection gets one card naming the cause, from the
+          // session. `report` never rejects.
+          const connectionCardShown = isBackendConnectionError(failure)
+            && await sessionForRun.connectionFailures.report();
           const sid = sessionForRun.getSessionId();
           sendJson({
             type: "prompt_failed",
             messageId: promptMessageId,
             ...(sid ? { sessionId: sid } : {}),
-            message: errorMessage(err) || "Query failed",
+            message: failure,
+            ...(connectionCardShown ? { errorShown: true } : {}),
           });
           if (sid && activeSessions.get(sid) === sessionForRun && !sessionShouldRemainPooled(sessionForRun)) {
             activeSessions.delete(sid);
@@ -6394,11 +6401,11 @@ function createConnectionHandler(
               codexCollaborationMode: "default",
             });
             broadcastServerCapabilities();
-          } else if (!(isRecord(err) && err.socketAgentSurfaced === true)) {
+          } else if (!connectionCardShown && !(isRecord(err) && err.socketAgentSurfaced === true)) {
             settleLogicalRun(sessionForRun, "failed", resumeId);
             sendJson({
               type: "error",
-              message: errorMessage(err) || "Query failed",
+              message: failure,
             });
           } else {
             settleLogicalRun(sessionForRun, "failed", resumeId);

@@ -67,6 +67,8 @@ export interface PromptFailedServerMessage {
   messageId: string;
   sessionId?: string;
   message: string;
+  /** The session already showed an error card for this failure, so the app adds none. */
+  errorShown?: boolean;
 }
 
 export type CodexGoalStatus =

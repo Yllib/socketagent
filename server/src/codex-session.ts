@@ -50,7 +50,9 @@ import {
   SdkEventServerMessage,
   McpServerConnectionState,
   McpServerStatusEntry,
+  ErrorServerMessage,
 } from "./protocol";
+import { ConnectionFailureReporter, isBackendConnectionError } from "./backend-connection";
 import { SessionContext, SocketAgentPlugin } from "./plugin-api";
 import {
   saveSession,
@@ -848,6 +850,14 @@ export class CodexSession {
   private appServerAuthCheck: Promise<CodexAuthScope> | null = null;
   private lastPrimaryAuthRequiredAt = 0;
   private surfacedMcpAuth = new Set<string>();
+  /** Shows one card with the cause when this computer cannot reach the provider. */
+  readonly connectionFailures = new ConnectionFailureReporter("codex", (message) => {
+    const card: ErrorServerMessage = { type: "error", message, sessionId: this.sessionId || undefined };
+    this.connectionChecked.add(card);
+    this.send(card);
+  });
+  /** Error messages the connection check has already seen, so `send` passes them through. */
+  private readonly connectionChecked = new WeakSet<ErrorServerMessage>();
 
   public onActivity?: () => void;
   public onBeforeRun?: (resumeSessionId?: string) => void;
@@ -2849,6 +2859,16 @@ export class CodexSession {
   }
 
   public send(msg: ServerMessage): void {
+    if (msg.type === "error" && !this.connectionChecked.has(msg) && isBackendConnectionError(msg.message)) {
+      // One lost connection produces several of these. The reporter shows
+      // one card naming the cause; the original stands only when this
+      // computer can reach the provider after all.
+      this.connectionChecked.add(msg);
+      void this.connectionFailures.report().then((covered) => {
+        if (!covered) this.send(msg);
+      });
+      return;
+    }
     if (msg.type === "question") this.onQuestionAsked?.(msg);
     if (msg.type === "error") {
       try {
@@ -2986,6 +3006,7 @@ export class CodexSession {
   }
 
   async runQuery(prompt: string, resumeSessionId?: string): Promise<void> {
+    this.connectionFailures.reset();
     if (this._rewindPending || isCodexRewinding(resumeSessionId || this.sessionId || this._resumeSessionId || "")) throw new Error("Wait for conversation rewind to finish");
     this.onBeforeRun?.(resumeSessionId);
     if (playReviewModeEnabled()) {

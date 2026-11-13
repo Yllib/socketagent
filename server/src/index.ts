@@ -88,6 +88,7 @@ import { hasOriginHeader, isLoopbackRequest } from "./loopback-request";
 import { ViewHub, parseViewSet } from "./view-hub";
 import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
 import { DeviceAuthGate } from "./device-auth";
+import { constantTimeEqual } from "./secret-compare";
 import {
   ComputerLinkPeerApi, accessFor, approvalSummary, oneTimeDigest,
   type PeerAction, type PeerEvent, type PeerResponse, type RemoteSupervisor,
@@ -517,6 +518,11 @@ if (!AUTH_TOKEN) {
  * the upgrade handler, direct E2E auth, capabilities). Scripts read .env when
  * they run, and process.env is updated for anything spawned later.
  */
+/** Whether [candidate] is the current AUTH_TOKEN. Compared in constant time. */
+function isAuthToken(candidate: string | null | undefined): boolean {
+  return typeof candidate === "string" && candidate !== "" && constantTimeEqual(candidate, AUTH_TOKEN);
+}
+
 function rotateAuthToken(): void {
   AUTH_TOKEN = rotateAuthTokenInEnv(ENV_PATH);
   process.env.AUTH_TOKEN = AUTH_TOKEN;
@@ -10947,7 +10953,7 @@ const httpServer = http.createServer((req, res) => {
   // The owner's wrapper calls this when the owner signs in while the SYSTEM
   // copy serves; see windows-machine-service.
   if (req.method === "POST" && req.url?.split("?")[0] === "/internal/machine/yield") {
-    if (!isLoopbackRequest(req) || getBearerToken(req) !== AUTH_TOKEN) { res.writeHead(401); res.end("Unauthorized"); return; }
+    if (!isLoopbackRequest(req) || !isAuthToken(getBearerToken(req))) { res.writeHead(401); res.end("Unauthorized"); return; }
     if (!serviceState.service) { res.writeHead(409); res.end("This server already runs as the owner"); return; }
     for (const [sid, session] of activeSessions) {
       if (sessionIsBusy(session)) appendRecoveryNotice(sessionInstanceId(session) || sid, "The owner signed in, so their own server takes over. Interrupted work will resume there.");
@@ -10959,7 +10965,7 @@ const httpServer = http.createServer((req, res) => {
   // `socketagent pair --reset` asks the running server to start pairing
   // over, so one process owns the state file.
   if (req.method === "POST" && req.url?.split("?")[0] === "/internal/pairing/reset") {
-    if (!isLoopbackRequest(req) || getBearerToken(req) !== AUTH_TOKEN) { res.writeHead(401); res.end("Unauthorized"); return; }
+    if (!isLoopbackRequest(req) || !isAuthToken(getBearerToken(req))) { res.writeHead(401); res.end("Unauthorized"); return; }
     try {
       startPairingOver();
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -10972,7 +10978,7 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
   if (req.url?.startsWith("/internal/restart/")) {
-    if (!isLoopbackRequest(req) || getBearerToken(req) !== AUTH_TOKEN) {
+    if (!isLoopbackRequest(req) || !isAuthToken(getBearerToken(req))) {
       res.writeHead(401); res.end("Unauthorized"); return;
     }
     try {
@@ -11045,7 +11051,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "POST" && req.url?.startsWith("/internal/session-history")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = getBearerToken(req) || url.searchParams.get("token");
-    if (!isLoopbackRequest(req) || token !== AUTH_TOKEN) {
+    if (!isLoopbackRequest(req) || !isAuthToken(token)) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11110,7 +11116,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "POST" && req.url?.startsWith("/continue")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = getBearerToken(req) || url.searchParams.get("token");
-    if (token !== AUTH_TOKEN) {
+    if (!isAuthToken(token)) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11173,7 +11179,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "GET" && req.url?.startsWith("/running-sessions")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = url.searchParams.get("token");
-    if (token !== AUTH_TOKEN) {
+    if (!isAuthToken(token)) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11192,7 +11198,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "GET" && req.url?.startsWith("/download-file")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = url.searchParams.get("token");
-    if (token !== AUTH_TOKEN) {
+    if (!isAuthToken(token)) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11222,7 +11228,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "GET" && req.url?.startsWith("/tts-model")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = url.searchParams.get("token");
-    if (token !== AUTH_TOKEN) {
+    if (!isAuthToken(token)) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11287,7 +11293,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "GET" && req.url?.startsWith("/skills")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = url.searchParams.get("token");
-    if (token !== AUTH_TOKEN) {
+    if (!isAuthToken(token)) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11309,7 +11315,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "PUT" && req.url?.startsWith("/skills")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = url.searchParams.get("token");
-    if (token !== AUTH_TOKEN) {
+    if (!isAuthToken(token)) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11356,7 +11362,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "DELETE" && req.url?.startsWith("/skills")) {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = url.searchParams.get("token");
-    if (token !== AUTH_TOKEN) {
+    if (!isAuthToken(token)) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11486,7 +11492,7 @@ httpServer.on("upgrade", (req, socket, head) => {
   const wantsEncryptedDirectAuth = e2e === "1";
   const transportLane: TransportLane =
     url.searchParams.get("lane") === "bulk" ? "bulk" : "control";
-  if (token && token !== AUTH_TOKEN) {
+  if (token && !isAuthToken(token)) {
     refuse("401 Unauthorized", "invalid token");
     return;
   }
@@ -11505,7 +11511,7 @@ httpServer.on("upgrade", (req, socket, head) => {
     return;
   }
   directUpgradeAuth.set(req, {
-    authenticated: token === AUTH_TOKEN,
+    authenticated: isAuthToken(token),
     wantsEncryptedDirectAuth,
     transportLane,
     transport: 1,
@@ -12501,7 +12507,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(authMessage);
         transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(authMessage);
         console.log(
-          `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane}, ${authMessage.token === AUTH_TOKEN ? "token" : "device key"})`,
+          `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane}, ${holdsToken ? "token" : "device key"})`,
         );
         if (transportLane === "control") {
           connectedClients.add(transport);
@@ -12527,8 +12533,8 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       // an unknown key needs the right token, locked or not; see
       // DeviceAuthGate.directAuth for why, and for what a socket from this
       // computer adds.
-      const holdsToken = msg.token === AUTH_TOKEN;
-      const outcome = deviceAuthGate.directAuth(publicKey, { token: msg.token, name: msg.name, platform: msg.platform }, transport.fromThisComputer);
+      const holdsToken = isAuthToken(msg.token);
+      const outcome = deviceAuthGate.directAuth(publicKey, { token: msg.token, name: msg.name, platform: msg.platform }, transport.fromThisComputer, req.socket.remoteAddress);
       const peer: { publicKey: string; close: (reason: string) => void; open?: () => void } = {
         publicKey,
         close: (reason) => ws.close(1008, reason),

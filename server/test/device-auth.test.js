@@ -438,6 +438,38 @@ test("the wrong-token limit stays", () => {
   assert.equal(registry.get(key), undefined);
 });
 
+test("wrong tokens are counted against where they came from, so a new key for every try does not reset the count", () => {
+  const registry = migratedRegistry({ mode: "learning" });
+  const gate = new DeviceAuthGate(registry, () => AUTH_TOKEN);
+  const freshKey = () => toBase64(generateKeyPair().publicKey);
+  const refused = { ok: false, reason: "not_approved", close: true };
+  const spent = { ok: false, reason: "too_many_attempts", close: true };
+
+  // One direct address, a new key each time.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    assert.deepEqual(gate.directAuth(freshKey(), { token: `wrong-${attempt}` }, false, "192.0.2.7"), refused);
+  }
+  assert.deepEqual(gate.directAuth(freshKey(), { token: "wrong-again" }, false, "192.0.2.7"), spent);
+  assert.deepEqual(gate.directAuth(freshKey(), { token: "wrong" }, false, "192.0.2.8"), refused, "another address has its own count");
+
+  // One relay peer, a new key each time. The relay names the peer.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    assert.deepEqual(gate.deviceAuth(freshKey(), "control", { token: `wrong-${attempt}` }, "peer-1"), refused);
+  }
+  assert.deepEqual(gate.deviceAuth(freshKey(), "control", { token: "wrong-again" }, "peer-1"), spent);
+  assert.deepEqual(gate.deviceAuth(freshKey(), "control", { token: "wrong" }, "peer-2"), refused);
+
+  // Programs on this computer share the loopback address, so it is not counted.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    assert.deepEqual(gate.directAuth(freshKey(), { token: `wrong-${attempt}` }, true, "127.0.0.1"), refused);
+  }
+
+  // The right token gets in from an address that has spent its wrong tries.
+  const phone = freshKey();
+  assert.equal(gate.directAuth(phone, { token: AUTH_TOKEN, name: "Phone", platform: "android" }, false, "192.0.2.7").ok, true);
+  assert.equal(registry.get(phone)?.kind, "device");
+});
+
 test("removing a device rotates the token and the old token no longer enrolls", () => {
   const envPath = path.join(dataDir, `env-${++counter}`);
   fs.writeFileSync(envPath, "PORT=1\nAUTH_TOKEN=old-token\nRELAY_URL=wss://x\n");

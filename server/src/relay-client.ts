@@ -286,7 +286,8 @@ export type RelayStatus = "disconnected" | "connecting" | "waiting_for_peer" | "
 /** Decides what a relay peer may do. Index.ts backs this with the device registry. */
 export interface RelayPeerAuthorizer {
   authorize(publicKey: string, lane: RelayLane): PeerAdmission;
-  deviceAuth(publicKey: string, lane: RelayLane, request: { token?: string; name?: string; platform?: DevicePlatform }): DeviceAuthOutcome;
+  /** [peerId] is the relay's name for the peer, which the peer does not choose. */
+  deviceAuth(publicKey: string, lane: RelayLane, request: { token?: string; name?: string; platform?: DevicePlatform }, peerId?: string): DeviceAuthOutcome;
 }
 
 export interface RelayClientOptions {
@@ -790,7 +791,7 @@ export class RelayClient {
     }
     const outcome = this.opts.peerAuth.deviceAuth(peer.publicKeyBase64, this.opts.lane || "control", {
       token: msg.token, name: msg.name, platform: msg.platform,
-    });
+    }, peerId);
     if (outcome.ok) {
       this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
       if (peer.auth === "pending") this.openPeer(peerId, peer);

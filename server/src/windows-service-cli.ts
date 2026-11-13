@@ -1,4 +1,5 @@
 import { spawnSync } from "child_process";
+import { constantTimeEqual } from "./secret-compare";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
 import * as http from "http";
@@ -222,7 +223,7 @@ function probe(args: string[]): void {
       response.writeHead(404).end();
       return;
     }
-    if (env.AUTH_TOKEN && request.headers.authorization !== `Bearer ${env.AUTH_TOKEN}`) {
+    if (env.AUTH_TOKEN && !constantTimeEqual(request.headers.authorization ?? "", `Bearer ${env.AUTH_TOKEN}`)) {
       response.writeHead(401).end();
       return;
     }

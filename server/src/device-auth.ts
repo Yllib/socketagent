@@ -1,5 +1,6 @@
-import * as crypto from "crypto";
 import { DeviceRegistry, DevicePlatform, deviceFingerprint } from "./device-registry";
+import { constantTimeEqual } from "./secret-compare";
+import { isLoopbackAddress } from "./loopback-request";
 
 /** Relay lanes. Device keys use control and bulk; computer keys use link only. */
 export type RelayLane = "control" | "bulk" | "link";
@@ -43,19 +44,11 @@ export type DeviceAuthOutcome =
 
 const WRONG_TOKEN_LIMIT = 5;
 const WRONG_TOKEN_WINDOW_MS = 10 * 60 * 1000;
+/** Counters kept at once. A sender can make a new key for every try, so the table is bounded. */
+const MAX_WRONG_TOKEN_COUNTERS = 4096;
 
 const NOT_APPROVED: DeviceAuthOutcome = { ok: false, reason: "not_approved", close: true };
 
-function constantTimeEqual(left: string, right: string): boolean {
-  const a = Buffer.from(left, "utf8");
-  const b = Buffer.from(right, "utf8");
-  if (a.length !== b.length) {
-    // Compare something of equal length so timing does not leak the length.
-    crypto.timingSafeEqual(a, a);
-    return false;
-  }
-  return crypto.timingSafeEqual(a, b);
-}
 
 /**
  * The old path's admission rules, kept under the lid of wire spec section 9
@@ -106,9 +99,9 @@ export class DeviceAuthGate {
    * only with the right token on an unlocked computer, and is otherwise told
    * `not_approved` and dropped.
    */
-  deviceAuth(publicKey: string, lane: RelayLane, request: DeviceAuthRequest): DeviceAuthOutcome {
+  deviceAuth(publicKey: string, lane: RelayLane, request: DeviceAuthRequest, peerId?: string): DeviceAuthOutcome {
     if (lane === "link") return { ok: false, reason: "wrong_lane", close: true };
-    return this.admit(publicKey, request, "relay", false);
+    return this.admit(publicKey, request, "relay", false, peerId ? `relay:${lane}:${peerId}` : undefined);
   }
 
   /**
@@ -129,11 +122,17 @@ export class DeviceAuthGate {
    * loopback with no proxy in front, may also send no token and raise an
    * approval prompt, for the old desktop app under another Windows account.
    */
-  directAuth(publicKey: string, request: DeviceAuthRequest, fromThisComputer: boolean): DeviceAuthOutcome {
-    return this.admit(publicKey, request, "direct", fromThisComputer);
+  directAuth(publicKey: string, request: DeviceAuthRequest, fromThisComputer: boolean, remoteAddress?: string): DeviceAuthOutcome {
+    // Every program on this computer shares the loopback address, so it is no source to count.
+    return this.admit(publicKey, request, "direct", fromThisComputer, remoteAddress && !isLoopbackAddress(remoteAddress) ? `direct:${remoteAddress}` : undefined);
   }
 
-  private admit(publicKey: string, request: DeviceAuthRequest, path: "relay" | "direct", fromThisComputer: boolean): DeviceAuthOutcome {
+  /**
+   * [source] is where the request came from, in a form the sender cannot
+   * pick: the relay peer or the direct remote address. Wrong tokens are
+   * counted against it as well as against the key, which the sender does pick.
+   */
+  private admit(publicKey: string, request: DeviceAuthRequest, path: "relay" | "direct", fromThisComputer: boolean, source?: string): DeviceAuthOutcome {
     if (!this.registry.readable) {
       // Nothing can be recorded or looked up. This computer's own tools still
       // get in by the token, and nobody else does.
@@ -150,7 +149,7 @@ export class DeviceAuthGate {
     }
     if (typeof request.token === "string" && request.token) {
       if (!constantTimeEqual(request.token, this.currentToken())) {
-        return this.noteWrongToken(publicKey) ? { ok: false, reason: "too_many_attempts", close: true } : NOT_APPROVED;
+        return this.noteWrongToken(publicKey, source) ? { ok: false, reason: "too_many_attempts", close: true } : NOT_APPROVED;
       }
       // The lock holds on the relay, where every device that exists is
       // already on record. A direct token holder was never recorded by the
@@ -158,7 +157,7 @@ export class DeviceAuthGate {
       // The record made below lasts and can carry over to v2: see directAuth.
       if (this.registry.locked && path === "relay") return NOT_APPROVED;
       this.registry.enroll({ publicKey, kind: "device", name, platform: platform || "android", via: "token" });
-      this.wrongTokens.delete(publicKey);
+      this.wrongTokens.delete(`key:${publicKey}`);
       return { ok: true, enrolled: true };
     }
     if (!fromThisComputer) return NOT_APPROVED;
@@ -169,12 +168,24 @@ export class DeviceAuthGate {
     };
   }
 
-  /** Returns true once the key has used up its wrong-token budget. */
-  private noteWrongToken(publicKey: string): boolean {
+  /**
+   * Counts one wrong token against the key and against where it came from.
+   * Returns true once either has used up its budget. That changes the answer
+   * to a wrong token and nothing else: a right token is never refused for
+   * earlier wrong ones, so nobody can lock a device out by guessing.
+   */
+  private noteWrongToken(publicKey: string, source: string | undefined): boolean {
     const now = Date.now();
-    const recent = (this.wrongTokens.get(publicKey) || []).filter((at) => now - at < WRONG_TOKEN_WINDOW_MS);
-    recent.push(now);
-    this.wrongTokens.set(publicKey, recent);
-    return recent.length > WRONG_TOKEN_LIMIT;
+    if (this.wrongTokens.size >= MAX_WRONG_TOKEN_COUNTERS) {
+      for (const [counter, times] of this.wrongTokens) if (times.every((at) => now - at >= WRONG_TOKEN_WINDOW_MS)) this.wrongTokens.delete(counter);
+    }
+    let spent = false;
+    for (const counter of [`key:${publicKey}`, ...(source ? [`from:${source}`] : [])]) {
+      const recent = (this.wrongTokens.get(counter) || []).filter((at) => now - at < WRONG_TOKEN_WINDOW_MS).slice(-WRONG_TOKEN_LIMIT);
+      recent.push(now);
+      if (this.wrongTokens.has(counter) || this.wrongTokens.size < MAX_WRONG_TOKEN_COUNTERS) this.wrongTokens.set(counter, recent);
+      spent ||= recent.length > WRONG_TOKEN_LIMIT;
+    }
+    return spent;
   }
 }

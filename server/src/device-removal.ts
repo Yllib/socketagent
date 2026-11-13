@@ -30,7 +30,8 @@ export interface DeviceRemovalSteps {
  * carries the new AUTH_TOKEN to old-path clients that hold the token, so no
  * socket of the removed device may be open when it goes out. The new pairing
  * secret is made last and reaches only the devices that stay. [keepToken] is
- * Forget: the key goes, the token and the secret stay.
+ * Forget: the key goes and the secret is renewed, so the forgotten install
+ * cannot pair again with the secret it holds, but AUTH_TOKEN stays.
  */
 export function removeRegisteredKey(entry: DeviceEntry, keepToken: boolean, steps: DeviceRemovalSteps): void {
   const { publicKey } = entry;
@@ -41,7 +42,7 @@ export function removeRegisteredKey(entry: DeviceEntry, keepToken: boolean, step
   steps.revoke(publicKey);
   steps.clearPending(publicKey);
   if (entry.kind === "device") {
-    if (!keepToken) steps.renewPairingSecret();
+    steps.renewPairingSecret();
   } else if (entry.kind === "connector") {
     steps.revokeConnector(publicKey);
   } else {

@@ -178,7 +178,7 @@ test("a socket whose key is no longer recorded is not sent the token, even while
   assert.deepEqual(tokensSent(removed), ["token-before", undefined, undefined]);
 });
 
-test("Forget keeps the token and the pairing secret, and still closes the device's sockets first", async (t) => {
+test("Forget keeps the token, renews the pairing secret, and still closes the device's sockets first", async (t) => {
   const { registry, twoDevices, steps } = await listener(t);
   const [forgotten, kept] = await twoDevices("Forgotten phone", "Kept phone");
   const entry = registry.get(forgotten.publicKey);
@@ -191,5 +191,6 @@ test("Forget keeps the token and the pairing secret, and still closes the device
   await forgotten.closed();
   assert.deepEqual(tokensSent(kept), ["token-before", "token-before"]);
   assert.deepEqual(tokensSent(forgotten), ["token-before"]);
-  assert.equal(registry.currentSecret().secret, secret);
+  // The forgotten install still holds the old secret. It is no longer the current one.
+  assert.notEqual(registry.currentSecret().secret, secret);
 });

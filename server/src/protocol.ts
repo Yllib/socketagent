@@ -1413,8 +1413,8 @@ export interface DeviceDenyMessage {
 
 /** Moves the key to the removed list and closes its channels on every path.
  *  For device keys this also makes a new pairing secret and rotates
- *  AUTH_TOKEN, unless `keepToken` is set: the app forgets a device whose
- *  install is gone, so nothing that knows them is left to shut out. */
+ *  AUTH_TOKEN. `keepToken` skips only the token rotation: the app forgets a
+ *  device whose install is gone, and the devices that stay keep their token. */
 export interface DeviceRemoveMessage {
   type: "device_remove";
   requestId?: string;

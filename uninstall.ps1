@@ -36,7 +36,9 @@ if ($removed -eq 0) {
 Remove-Item -LiteralPath (Join-Path $env:ProgramData "SocketAgent\machine-server.json") -Force -ErrorAction SilentlyContinue
 
 # Remove log file
-$logFile = Join-Path $PSScriptRoot "server" "socketagent.log"
+# Windows PowerShell 5.1 takes one child path per Join-Path.
+$serverDir = Join-Path $PSScriptRoot "server"
+$logFile = Join-Path $serverDir "socketagent.log"
 if (Test-Path $logFile) {
     Remove-Item $logFile -Force
     Write-Host "  [OK] Removed log file" -ForegroundColor Green
@@ -56,7 +58,7 @@ if ($removeData -eq "y") {
 # Ask about .env removal
 $removeEnv = Read-Host "  Remove server config (server\.env)? (y/N)"
 if ($removeEnv -eq "y") {
-    $envFile = Join-Path $PSScriptRoot "server" ".env"
+    $envFile = Join-Path $serverDir ".env"
     if (Test-Path $envFile) {
         Remove-Item $envFile -Force
         Write-Host "  [OK] Removed .env" -ForegroundColor Green

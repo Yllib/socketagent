@@ -119,7 +119,7 @@ import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store
 import type { AiConnectorStatusServerMessage } from "./protocol";
 import { isAuthFailureMessage } from "./backend-auth";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
-import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, relayPushTokens, sendPushNotification, setPushTransport, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
+import { clearPushRegistrations, dropDeviceRegistrations, getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, relayPushTokens, sendPushNotification, setPushTransport, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { pushSealingSecrets } from "./push-sealing";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
@@ -1546,8 +1546,9 @@ const pairingResetGate = new PairingResetGate(() => AUTH_TOKEN);
 /**
  * `socketagent pair --reset`: a full start over. A new room ID, pairing
  * secret and AUTH_TOKEN, previous secrets cleared, the lock off, and the
- * device records still on the old path deleted. Every device has to scan the
- * new code, or on the old path be given the new token. It is also the way
+ * device records still on the old path deleted, and every push registration
+ * dropped. Every device has to scan the new code, or on the old path be
+ * given the new token. It is also the way
  * out of an unreadable state file and of a relay room another key has
  * claimed.
  *
@@ -1559,6 +1560,9 @@ const pairingResetGate = new PairingResetGate(() => AUTH_TOKEN);
 function startPairingOver(): void {
   directV2Sockets.dropAll("Pairing reset");
   for (const socket of [...legacyDirectSockets]) socket.drop("Pairing reset");
+  // No phone keeps getting notifications across a reset. The relay is sent
+  // the empty list for the room this computer is about to leave.
+  clearPushRegistrations();
   const { newOwnerKey } = deviceRegistry.resetPairing();
   const hadState = !newOwnerKey;
   rotateAuthToken("pairing was started over");
@@ -5152,6 +5156,7 @@ function createConnectionHandler(
             deliveryRoute,
             firebaseProjectId || undefined,
             channelKindForMessage(msg) === "v2",
+            relayPeerKeyForMessage(msg),
           );
           sendJson({
             type: "push_token_registered",
@@ -10311,6 +10316,7 @@ function createConnectionHandler(
           revoke: (key) => { deviceRegistry.revoke(key); },
           clearPending: clearDevicePending,
           renewPairingSecret,
+          dropPushRegistrations: dropDeviceRegistrations,
           // Its tokens stop working at once; the next MCP call gets a 401.
           revokeConnector: (key) => aiConnectorOAuth.revokeKey(key),
           dropLinkPeers: (key) => relayLinkClient?.dropPeersWithKey(key, "removed"),

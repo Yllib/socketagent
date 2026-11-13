@@ -113,6 +113,8 @@ async function listener(t) {
     return [await connect(pairs[0].name, pairs[0].keys), await connect(pairs[1].name, pairs[1].keys)];
   };
 
+  /** Every call to drop push registrations, in order. @type {{ key: string, alsoUnkeyed: boolean }[]} */
+  const pushDrops = [];
   /** @type {import("#server/device-removal").DeviceRemovalSteps} */
   const steps = {
     dropDeviceChannels: (key) => { for (const transport of sockets.keys()) if (transport.peerKey === key) transport.drop("Removed"); },
@@ -120,24 +122,27 @@ async function listener(t) {
     revoke: (key) => { registry.revoke(key); },
     clearPending: () => {},
     renewPairingSecret: () => { registry.rotateSecret(); },
+    dropPushRegistrations: (key, alsoUnkeyed) => { pushDrops.push({ key, alsoUnkeyed }); },
     revokeConnector: () => assert.fail("not a connector"),
     dropLinkPeers: () => assert.fail("not a linked computer"),
   };
   /** The server's end of a device's socket. */
   const transportOf = (/** @type {string} */ key) => [...sockets.keys()].find((transport) => transport.peerKey === key);
-  return { registry, twoDevices, steps, transportOf };
+  return { registry, twoDevices, steps, transportOf, pushDrops };
 }
 
 /** Every token a device was sent in capabilities, in order. */
 const tokensSent = (/** @type {{ received: Record<string, unknown>[] }} */ device) => device.received.map((message) => parseJsonObject(JSON.stringify(message.directRoute ?? {})).token);
 
 test("a removed device's open direct socket closes before the new AUTH_TOKEN is broadcast", async (t) => {
-  const { registry, twoDevices, steps } = await listener(t);
+  const { registry, twoDevices, steps, pushDrops } = await listener(t);
   const [removed, kept] = await twoDevices("Removed phone", "Kept phone");
   const entry = registry.get(removed.publicKey);
   assert.ok(entry);
 
   removeRegisteredKey(entry, false, steps);
+  // Its push registrations go, and so do those under no key, which may be its own.
+  assert.deepEqual(pushDrops, [{ key: removed.publicKey, alsoUnkeyed: true }]);
 
   // The device that stays hears the new token: once for the removal, once for the new secret.
   await kept.until(3);
@@ -179,13 +184,15 @@ test("a socket whose key is no longer recorded is not sent the token, even while
 });
 
 test("Forget keeps the token, renews the pairing secret, and still closes the device's sockets first", async (t) => {
-  const { registry, twoDevices, steps } = await listener(t);
+  const { registry, twoDevices, steps, pushDrops } = await listener(t);
   const [forgotten, kept] = await twoDevices("Forgotten phone", "Kept phone");
   const entry = registry.get(forgotten.publicKey);
   assert.ok(entry);
   const secret = registry.currentSecret().secret;
 
   removeRegisteredKey(entry, true, steps);
+  // Forget drops only the registrations stored under the forgotten key.
+  assert.deepEqual(pushDrops, [{ key: forgotten.publicKey, alsoUnkeyed: false }]);
 
   // The removal and the new secret each broadcast capabilities to the device that stays.
   await kept.until(3);

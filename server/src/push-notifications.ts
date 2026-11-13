@@ -16,6 +16,12 @@ export interface StoredPushToken {
   firebaseProjectId?: string;
   /** The phone registered on a transport v2 channel, so it gets sealed pushes. */
   v2?: boolean;
+  /**
+   * The device key the registration arrived under, so it can go when that
+   * device is removed. Absent for one that came over the loopback token
+   * socket, and for one stored before keys were kept.
+   */
+  deviceKey?: string;
   updatedAt: string;
 }
 
@@ -137,7 +143,8 @@ function readStore(): StoredPushToken[] {
       const result = z.object({
         token: z.string().min(1), platform: z.string().default("android"),
         appServerId: z.string().optional(), deliveryRoute: z.enum(["relay", "direct"]).optional(),
-        firebaseProjectId: z.string().optional(), v2: z.boolean().optional(), updatedAt: z.string().default(""),
+        firebaseProjectId: z.string().optional(), v2: z.boolean().optional(), deviceKey: z.string().optional(),
+        updatedAt: z.string().default(""),
       }).safeParse(entry);
       return result.success ? [result.data] : [];
     });
@@ -179,11 +186,15 @@ export function registerPushToken(
   firebaseProjectId?: string,
   /** Whether `register_push_token` arrived on a transport v2 channel. */
   v2 = false,
+  /** The device key the channel proved. A registration made again without one keeps the key it had. */
+  deviceKey?: string,
 ): void {
   const token = fcmToken.trim();
   if (!token) return;
 
-  const withoutToken = readStore().filter((entry) => {
+  const stored = readStore();
+  const key = deviceKey ?? stored.find((entry) => entry.token === token)?.deviceKey;
+  const withoutToken = stored.filter((entry) => {
     if (entry.token === token) return false;
     return !(
       appServerId
@@ -201,9 +212,27 @@ export function registerPushToken(
       ...(deliveryRoute ? { deliveryRoute } : {}),
       ...(firebaseProjectId ? { firebaseProjectId } : {}),
       ...(v2 ? { v2 } : {}),
+      ...(key ? { deviceKey: key } : {}),
       updatedAt: new Date().toISOString(),
     },
   ].slice(-20));
+}
+
+/**
+ * Drops the registrations of a device that was removed: every one stored
+ * under [deviceKey]. With [alsoUnkeyed], every one stored under no key goes
+ * too, because the removed phone's may be among them. The phones that stay
+ * register again when they next connect.
+ */
+export function dropDeviceRegistrations(deviceKey: string, alsoUnkeyed: boolean): void {
+  const stored = readStore();
+  const kept = stored.filter((entry) => (entry.deviceKey ? entry.deviceKey !== deviceKey : !alsoUnkeyed));
+  if (kept.length !== stored.length) writeStore(kept);
+}
+
+/** Drops every registration. Pairing was started over, so every phone has to pair and register again. */
+export function clearPushRegistrations(): void {
+  if (readStore().length > 0) writeStore([]);
 }
 
 export function unregisterPushToken(

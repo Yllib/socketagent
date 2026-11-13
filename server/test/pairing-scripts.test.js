@@ -117,8 +117,11 @@ test("show-pairing --reset with no server running starts over in the files", () 
   const state = computer.state();
   fs.writeFileSync(path.join(computer.folder, "transport.json"), JSON.stringify({ ...state, locked: true, removed: ["removed-key"] }));
   const tokenBefore = computer.envValue("AUTH_TOKEN");
+  const pushStore = path.join(computer.folder, "push-tokens.json");
+  fs.writeFileSync(pushStore, JSON.stringify([{ token: "fcm-old-phone", platform: "android", deliveryRoute: "relay", updatedAt: "" }]));
 
   const second = computer.showPairing("--reset").split("|");
+  assert.deepEqual(JSON.parse(fs.readFileSync(pushStore, "utf8")), [], "no phone stays registered for notifications");
   // A full start over: the old path's token is new as well.
   assert.match(computer.envValue("AUTH_TOKEN"), /^[0-9a-f]{64}$/);
   assert.notEqual(computer.envValue("AUTH_TOKEN"), tokenBefore);

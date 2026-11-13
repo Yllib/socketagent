@@ -9,10 +9,10 @@
 // and a new AUTH_TOKEN, clears the previous secrets and takes the lock off.
 // Devices on the new transport stay on the list, but every one has to scan
 // the new code. Devices still on the old path are taken off the list and
-// have to be given the new token. It is the fix for a damaged transport.json
-// and for a relay room another computer has claimed. A running server does
-// the reset itself, so one process owns the files; without one this script
-// writes them.
+// have to be given the new token. No phone stays registered for
+// notifications. It is the fix for a damaged transport.json and for a relay
+// room another computer has claimed. A running server does the reset itself,
+// so one process owns the files; without one this script writes them.
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) {
@@ -55,10 +55,15 @@ function readEnv(file) {
 
 /**
  * Starts pairing over in the files, for when no server is running: the
- * state file, then a new room ID and a new AUTH_TOKEN in .env.
+ * state file, then a new room ID and a new AUTH_TOKEN in .env, and no push
+ * registration left for the server to list when it next starts.
  */
 function resetInFiles() {
   const { newOwnerKey } = openTransportState(keysFile).resetPairing();
+  // The server reads the store's place from its environment, which .env is part of.
+  const storePath = readEnv(envFile).PUSH_TOKEN_STORE;
+  if (storePath && !process.env.PUSH_TOKEN_STORE) process.env.PUSH_TOKEN_STORE = storePath;
+  require("#server/push-notifications").clearPushRegistrations();
   writeEnvValue(envFile, "PAIRING_TOKEN", crypto.randomBytes(32).toString("hex"));
   rotateAuthTokenInEnv(envFile);
   if (!newOwnerKey) return;

@@ -10,6 +10,8 @@ require("./test-data-dir");
 
 const { generateKeyPair } = require("#server/noise-ikpsk1");
 const {
+  clearPushRegistrations,
+  dropDeviceRegistrations,
   getPushDeliveryCapabilities,
   isPushConfigured,
   registerPushToken,
@@ -293,6 +295,51 @@ test("every registration an app gives this computer is on the list for the relay
     assert.deepEqual(relayPushTokens().map((entry) => entry.token), ["fcm-new-app", "fcm-no-route"]);
   } finally {
     for (const token of ["fcm-new-app", "fcm-direct", "fcm-no-route"]) unregisterPushToken(token);
+    setPushTransport(null);
+  }
+});
+
+test("a removed device's registrations leave the list for the relay, and a reset leaves none", () => {
+  let changes = 0;
+  setPushTransport({
+    sealingSecrets: () => [],
+    plaintextAllowed: () => false,
+    relayPush: () => Promise.reject(new Error("unused")),
+    relayTokensChanged: () => { changes += 1; },
+  });
+  const listed = () => relayPushTokens().map((entry) => entry.token);
+  try {
+    registerPushToken("fcm-lost-phone", "android", "phone-a-id", "relay", undefined, true, "key-lost");
+    registerPushToken("fcm-kept-phone", "android", "phone-b-id", "relay", undefined, true, "key-kept");
+    // Stored before keys were kept, or sent over the loopback token socket.
+    registerPushToken("fcm-no-key", "android", "phone-c-id", "relay");
+    registerPushToken("fcm-no-key-2", "android", "phone-d-id", "relay");
+
+    // A phone that registers again under a key takes that key. One that registers again without one keeps it.
+    registerPushToken("fcm-no-key-2", "android", "phone-d-id", "relay", undefined, true, "key-kept");
+    registerPushToken("fcm-lost-phone", "android", "phone-a-id", "relay", undefined, true);
+    assert.deepEqual(listed(), ["fcm-kept-phone", "fcm-no-key", "fcm-no-key-2", "fcm-lost-phone"]);
+
+    // Forget: the forgotten key's registrations only.
+    changes = 0;
+    dropDeviceRegistrations("key-lost", false);
+    assert.deepEqual(listed(), ["fcm-kept-phone", "fcm-no-key", "fcm-no-key-2"]);
+    assert.equal(changes, 1, "the relay is sent the new list");
+    dropDeviceRegistrations("key-lost", false);
+    assert.equal(changes, 1, "nothing to drop, nothing to send");
+
+    // Remove: also every registration under no key, since the removed phone's may be one of them.
+    registerPushToken("fcm-lost-phone", "android", "phone-a-id", "relay", undefined, true, "key-lost");
+    dropDeviceRegistrations("key-lost", true);
+    assert.deepEqual(listed(), ["fcm-kept-phone", "fcm-no-key-2"]);
+
+    // pair --reset: nobody stays registered.
+    changes = 0;
+    clearPushRegistrations();
+    assert.deepEqual(listed(), []);
+    assert.equal(changes, 1);
+  } finally {
+    clearPushRegistrations();
     setPushTransport(null);
   }
 });

@@ -20,6 +20,8 @@ export interface DeviceRemovalSteps {
   revoke(publicKey: string): void;
   clearPending(publicKey: string): void;
   renewPairingSecret(): void;
+  /** Takes the device's push registrations off this computer's list, and those under no key when [alsoUnkeyed]. */
+  dropPushRegistrations(publicKey: string, alsoUnkeyed: boolean): void;
   revokeConnector(publicKey: string): void;
   dropLinkPeers(publicKey: string): void;
 }
@@ -32,6 +34,10 @@ export interface DeviceRemovalSteps {
  * secret is made last and reaches only the devices that stay. [keepToken] is
  * Forget: the key goes and the secret is renewed, so the forgotten install
  * cannot pair again with the secret it holds, but AUTH_TOKEN stays.
+ *
+ * A removed device gets no more notifications: the push registrations stored
+ * under its key are dropped. Remove also drops those stored under no key,
+ * since the removed phone's may be one of them. Forget leaves those.
  */
 export function removeRegisteredKey(entry: DeviceEntry, keepToken: boolean, steps: DeviceRemovalSteps): void {
   const { publicKey } = entry;
@@ -42,6 +48,7 @@ export function removeRegisteredKey(entry: DeviceEntry, keepToken: boolean, step
   steps.revoke(publicKey);
   steps.clearPending(publicKey);
   if (entry.kind === "device") {
+    steps.dropPushRegistrations(publicKey, !keepToken);
     steps.renewPairingSecret();
   } else if (entry.kind === "connector") {
     steps.revokeConnector(publicKey);

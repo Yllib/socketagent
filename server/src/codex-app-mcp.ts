@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { errorMessage } from "./value-guards";
+import { isLoopbackRequest } from "./loopback-request";
 import { LIFETIME_GUIDANCE } from "./fleeting-sessions";
 import {
   AppToolContext,
@@ -475,14 +476,9 @@ export function isCodexAppMcpRequest(req: IncomingMessage): boolean {
   return !!req.url?.startsWith("/codex-mcp/");
 }
 
-function isLoopbackRemoteAddress(address: string | undefined): boolean {
-  if (!address) return false;
-  const normalized = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
-  return normalized === "::1" || normalized === "localhost" || /^127(?:\.\d{1,3}){3}$/.test(normalized);
-}
-
 export async function handleCodexAppMcpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  if (!isLoopbackRemoteAddress(req.socket.remoteAddress)) {
+  // Codex on this computer is the only caller. A proxy in front is not this computer.
+  if (!isLoopbackRequest(req)) {
     writeJson(res, 403, {
       jsonrpc: "2.0",
       error: { code: -32000, message: "SocketAgent MCP is only available from loopback" },

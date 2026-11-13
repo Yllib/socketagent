@@ -99,6 +99,7 @@ import { ComputerAccessRequests } from "./computer-access-requests";
 import type { ComputersToolArgs, ComputersToolListEntry } from "./computers-tool";
 import { parseStoredData } from "./stored-data";
 import { rotateAuthTokenInEnv, writeEnvValue } from "./env-file";
+import { PairingResetGate, answerPairingResetRequest } from "./pairing-reset-request";
 import { parseClientMessage } from "./client-message";
 import { listBackendConfigFiles, readBackendConfigFile, writeBackendConfigFile } from "./backend-config-files";
 import {
@@ -1538,6 +1539,9 @@ function renewPairingSecret(): void {
   ]);
   console.log("[Devices] New pairing secret");
 }
+
+/** Checks that a reset request comes from someone who holds AUTH_TOKEN, as it is at that moment. */
+const pairingResetGate = new PairingResetGate(() => AUTH_TOKEN);
 
 /**
  * `socketagent pair --reset`: a full start over. A new room ID, pairing
@@ -10985,20 +10989,9 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
   // `socketagent pair --reset` asks the running server to start pairing
-  // over, so one process owns the state file.
-  if (req.method === "POST" && req.url?.split("?")[0] === "/internal/pairing/reset") {
-    if (!isLoopbackRequest(req) || !isAuthToken(getBearerToken(req))) { res.writeHead(401); res.end("Unauthorized"); return; }
-    try {
-      startPairingOver();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end("{}");
-    } catch (error: unknown) {
-      console.error(`[Devices] Could not start pairing over: ${errorMessage(error)}`);
-      res.writeHead(500);
-      res.end("Could not reset pairing");
-    }
-    return;
-  }
+  // over, so one process owns the state file. The script and the server
+  // prove AUTH_TOKEN to each other and the token is never sent.
+  if (answerPairingResetRequest(req, res, pairingResetGate, startPairingOver)) return;
   if (req.url?.startsWith("/internal/restart/")) {
     if (!isLoopbackRequest(req) || !isAuthToken(getBearerToken(req))) {
       res.writeHead(401); res.end("Unauthorized"); return;

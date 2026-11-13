@@ -21,13 +21,13 @@ function isRecord(value) {
 
 const crypto = require("crypto");
 const fs = require("fs");
-const http = require("http");
 const os = require("os");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
 const { localIpv4Addresses, openTransportState, pairingCode, relayUrlForCode } = require("./pairing-code");
 // Needs the built server (`npx tsc`), as the transport state does.
 const { rotateAuthTokenInEnv, writeEnvValue } = require("#server/env-file");
+const { requestPairingReset } = require("#server/pairing-reset-request");
 
 const serverDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(serverDir, "..");
@@ -51,38 +51,6 @@ function readEnv(file) {
     if (match) result[match[1]] = match[2];
   }
   return result;
-}
-
-/**
- * Asks the running server to start pairing over. Resolves true when it did,
- * false when no server answers on this computer, and rejects when a server
- * answered but refused.
- * @param {Record<string, string>} env
- * @returns {Promise<boolean>}
- */
-function resetThroughServer(env) {
-  return new Promise((resolve, reject) => {
-    const request = http.request({
-      host: "127.0.0.1",
-      port: Number(env.PORT || "8085"),
-      path: "/internal/pairing/reset",
-      method: "POST",
-      headers: { Authorization: `Bearer ${env.AUTH_TOKEN || ""}` },
-      timeout: 10_000,
-    }, (response) => {
-      response.resume();
-      response.on("end", () => {
-        if (response.statusCode === 200) resolve(true);
-        else reject(new Error(`The running server refused the reset (HTTP ${response.statusCode})`));
-      });
-    });
-    request.on("timeout", () => request.destroy(new Error("The running server did not answer the reset")));
-    request.on("error", (/** @type {NodeJS.ErrnoException} */ error) => {
-      if (error.code === "ECONNREFUSED") resolve(false);
-      else reject(error);
-    });
-    request.end();
-  });
 }
 
 /**
@@ -110,7 +78,12 @@ async function main() {
   }
 
   if (process.argv.includes("--reset")) {
-    if (!(await resetThroughServer(readEnv(envFile)))) resetInFiles();
+    // A running server does the reset. It and this script first prove to
+    // each other that they hold this install's AUTH_TOKEN, which is never
+    // sent. When something else answers on the port this throws, with
+    // nothing changed and no reset reported.
+    const before = readEnv(envFile);
+    if ((await requestPairingReset(Number(before.PORT || "8085"), before.AUTH_TOKEN || "")) === "no-server") resetInFiles();
     console.error("Pairing started over. Every device has to scan the new code.");
   }
 

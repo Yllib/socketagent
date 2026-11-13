@@ -12347,12 +12347,13 @@ function detachDirectClient(transport: ClientTransport, handler: ReturnType<type
  * A direct `?e2e=2` socket. Its lane is only known once the handshake is
  * done, so the handler is made when the channel opens.
  */
-function acceptDirectV2Socket(ws: WebSocket, fromThisComputer: boolean): void {
+function acceptDirectV2Socket(ws: WebSocket, fromThisComputer: boolean, remoteAddress: string | undefined): void {
   let handler: ReturnType<typeof createConnectionHandler> | null = null;
   let runMessage: ((msg: ClientMessage) => void) | null = null;
   const socket = new DirectV2Transport(ws, {
     responder: transportResponder,
     fromThisComputer,
+    remoteAddress,
     serverCapabilities: (binaryEnvelope, lane) => serverCapabilitiesPayload(binaryEnvelope, lane, false, 2),
     pairingGrant: () => ({ type: "pairing_grant", ...pairingHandover() }),
     onOpen: (transport) => {
@@ -12386,7 +12387,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
     return;
   }
   if (auth.transport === 2) {
-    acceptDirectV2Socket(ws, isLoopbackRequest(req));
+    acceptDirectV2Socket(ws, isLoopbackRequest(req), req.socket.remoteAddress);
     return;
   }
   const { wantsEncryptedDirectAuth, transportLane } = auth;

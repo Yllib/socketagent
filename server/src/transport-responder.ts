@@ -1,6 +1,7 @@
 import type { DeviceRegistry, DevicePlatform, PairingSecret } from "./device-registry";
 import { NoiseError, readMessage1, type NoiseAcceptedMessage1, type NoiseKeyPair } from "./noise-ikpsk1";
 import { isRecord } from "./value-guards";
+import { isLoopbackAddress } from "./loopback-request";
 import {
   approvalCode,
   buildPrologue,
@@ -53,6 +54,8 @@ import {
 export interface Hs1Arrival {
   path: "relay" | "direct" | "local-request";
   lane: "control" | "bulk" | "link";
+  /** The remote address of a direct socket. Failed handshakes are counted against it. */
+  remoteAddress?: string;
 }
 
 export type DeviceLane = "control" | "bulk";
@@ -137,11 +140,40 @@ export interface TransportResponderOptions {
   now?: () => number;
 }
 
+/**
+ * How many peers may wait for Allow at once. A captured `hs1` that ended
+ * `pending` can be replayed, and each replay takes one of these places for up
+ * to ten seconds and one of the thirty answers below. So someone who can see
+ * or carry the frames, the relay included, can keep new devices out of the
+ * Allow queue. That is accepted: the relay can deny service anyway, and a
+ * replay changes no state and shows the owner no device they had not seen.
+ */
 export const MAX_HELD_PEERS = 8;
-export const MAX_FAILED_HS1_PER_MINUTE = 20;
+/**
+ * Failed `hs1` frames one direct remote address may send in a minute. After
+ * that the address is ignored for the rest of the minute. A failure costs the
+ * computer a few X25519 operations, and the limits exist to bound that work,
+ * not guesses at a 32-byte secret.
+ */
+export const MAX_FAILED_HS1_PER_ADDRESS = 20;
+/**
+ * Failed `hs1` frames on one lane in a minute, from everyone together. The
+ * tag in an `hs1` is public, so anyone in the room or on the network can
+ * send frames that fail. This cap is high enough to bind only under a flood:
+ * below it, nobody's failures make the computer skip a good handshake.
+ */
+export const MAX_FAILED_HS1_PER_LANE = 600;
 export const MAX_PENDING_ANSWERS = 30;
 const PENDING_ANSWER_WINDOW_MS = 10 * 60 * 1000;
 const FAILED_HS1_WINDOW_MS = 60 * 1000;
+/** Counters kept at once. Past this a new address goes uncounted until old minutes clear. The lane cap still holds. */
+const MAX_FAILURE_COUNTERS = 4096;
+
+/** One counter of failed `hs1` frames and how many it allows in a minute. */
+interface FailureLimit {
+  key: string;
+  max: number;
+}
 const MAX_PSK_TRIES = 4;
 /** How long a responder waits for `transport_ready` after `hs2`, and a direct socket for `hs1`. */
 export const HANDSHAKE_WAIT_MS = 10 * 1000;
@@ -182,6 +214,7 @@ export class TransportResponder {
   private readonly finished = new WeakSet<AcceptedHandshake>();
   /** The link secret each link handshake proved, checked again at `ready`. */
   private readonly provedLinkSecrets = new WeakMap<AcceptedHandshake, string>();
+  /** Failed `hs1` counts for the current minute, by lane (`lane:`) and by direct address (`address:`). */
   private readonly failedHs1 = new Map<string, { startedAt: number; count: number }>();
   private pendingAnswers: number[] = [];
 
@@ -199,21 +232,40 @@ export class TransportResponder {
     return entry.kind === "device" ? "device" : "other-kind";
   }
 
-  /** Whether this lane has used up its failed handshakes for the current minute. */
-  private skipping(lane: string): boolean {
-    const window = this.failedHs1.get(lane);
-    if (!window) return false;
-    if (this.now() - window.startedAt >= FAILED_HS1_WINDOW_MS) {
-      this.failedHs1.delete(lane);
-      return false;
-    }
-    return window.count >= MAX_FAILED_HS1_PER_MINUTE;
+  /**
+   * The counters one `hs1` falls under: its lane, and its remote address on
+   * a direct socket. A loopback address is not counted by itself, because
+   * every program on this computer, and everything behind a proxy on it,
+   * shares that address.
+   */
+  private failureLimits(limitKey: string, remoteAddress: string | undefined): FailureLimit[] {
+    const limits: FailureLimit[] = [{ key: `lane:${limitKey}`, max: MAX_FAILED_HS1_PER_LANE }];
+    if (remoteAddress && !isLoopbackAddress(remoteAddress)) limits.push({ key: `address:${remoteAddress}`, max: MAX_FAILED_HS1_PER_ADDRESS });
+    return limits;
   }
 
-  private noteFailedHs1(lane: string): void {
-    const window = this.failedHs1.get(lane);
-    if (window) window.count++;
-    else this.failedHs1.set(lane, { startedAt: this.now(), count: 1 });
+  /** Whether a counter has used up its failed handshakes for the current minute. */
+  private skipping(limit: FailureLimit): boolean {
+    const window = this.failedHs1.get(limit.key);
+    if (!window) return false;
+    if (this.now() - window.startedAt >= FAILED_HS1_WINDOW_MS) {
+      this.failedHs1.delete(limit.key);
+      return false;
+    }
+    return window.count >= limit.max;
+  }
+
+  private noteFailedHs1(limits: readonly FailureLimit[]): void {
+    const now = this.now();
+    // Addresses come and go, so finished minutes are cleared before the table grows.
+    if (this.failedHs1.size >= MAX_FAILURE_COUNTERS) {
+      for (const [key, window] of this.failedHs1) if (now - window.startedAt >= FAILED_HS1_WINDOW_MS) this.failedHs1.delete(key);
+    }
+    for (const { key } of limits) {
+      const window = this.failedHs1.get(key);
+      if (window && now - window.startedAt < FAILED_HS1_WINDOW_MS) window.count++;
+      else if (window || this.failedHs1.size < MAX_FAILURE_COUNTERS || key.startsWith("lane:")) this.failedHs1.set(key, { startedAt: now, count: 1 });
+    }
   }
 
   /** Counts one `pending` answer. False once the computer has given 30 in ten minutes. */
@@ -238,12 +290,14 @@ export class TransportResponder {
   private proveKey(input: {
     frame: Hs1Frame;
     limitKey: string;
+    remoteAddress?: string;
     prologue: Uint8Array;
     laneTags: readonly string[] | null;
     candidatesFor: (claimedKey: string) => readonly SecretCandidate[];
   }): ProvedKey | null {
-    const { frame, limitKey } = input;
-    if (this.skipping(limitKey)) return null;
+    const { frame } = input;
+    const limits = this.failureLimits(input.limitKey, input.remoteAddress);
+    if (limits.some((limit) => this.skipping(limit))) return null;
     if (input.laneTags && !input.laneTags.includes(frame.tag)) return null;
 
     let message1: ReturnType<typeof readMessage1>;
@@ -251,7 +305,7 @@ export class TransportResponder {
       message1 = readMessage1({ prologue: input.prologue, staticKeyPair: this.options.keyPair(), message: frame.message });
     } catch (err: unknown) {
       if (!(err instanceof NoiseError)) throw err;
-      this.noteFailedHs1(limitKey);
+      this.noteFailedHs1(limits);
       return null;
     }
 
@@ -265,7 +319,7 @@ export class TransportResponder {
       const payload = parseHandshakePayload(accepted.payload);
       return payload ? { publicKey, candidate, accepted, payload } : null;
     }
-    this.noteFailedHs1(limitKey);
+    this.noteFailedHs1(limits);
     return null;
   }
 
@@ -323,6 +377,7 @@ export class TransportResponder {
     const proved = this.proveKey({
       frame,
       limitKey: `${arrival.path}:${lane}`,
+      remoteAddress: arrival.remoteAddress,
       prologue: buildPrologue(arrival.path, lane, this.options.roomId()),
       laneTags: secrets.flatMap((secret) => secret.tag ?? []),
       candidatesFor: (claimedKey) => {

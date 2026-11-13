@@ -12,7 +12,8 @@ const { DirectV2Sockets, DirectV2Transport } = require("#server/direct-v2-transp
 const { hasOriginHeader, isLoopbackRequest } = require("#server/loopback-request");
 const { generateKeyPair } = require("#server/noise-ikpsk1");
 const { channelKindForMessage, relayPeerKeyForMessage } = require("#server/relay-client");
-const { TransportResponder } = require("#server/transport-responder");
+const { MAX_FAILED_HS1_PER_ADDRESS, TransportResponder } = require("#server/transport-responder");
+const { encodeHs1Frame, parseHs1Frame, secretTag } = require("#server/transport-v2");
 const { parseJsonObject } = require("#server/value-guards");
 const { dial } = require("./v2-initiator");
 
@@ -27,8 +28,9 @@ let counter = 0;
  * A listener that hands every socket to a DirectV2Transport, as the index
  * does for an `e2e=2` upgrade.
  * @param {import("node:test").TestContext} t
+ * @param {string} [remoteAddress] The address the sockets are taken to come from. Loopback when left out.
  */
-async function listener(t) {
+async function listener(t, remoteAddress) {
   const registry = new DeviceRegistry(path.join(dataDir, `direct-v2-${++counter}.json`));
   const serverKeys = generateKeyPair();
   const responder = new TransportResponder({ registry, keyPair: () => serverKeys, roomId: () => ROOM_ID, serverVersion: "1.1.530" });
@@ -46,6 +48,7 @@ async function listener(t) {
     sockets.add(new DirectV2Transport(ws, {
       responder,
       fromThisComputer: isLoopbackRequest(req),
+      remoteAddress: remoteAddress ?? req.socket.remoteAddress,
       serverCapabilities: (_binary, lane) => ({ type: "server_capabilities", lane, transport: { version: 2 } }),
       pairingGrant: () => ({ type: "pairing_grant", secret: registry.currentSecret().secret, roomId: ROOM_ID, port: 8085, hosts: ["192.168.1.20"] }),
       onOpen: () => { opened++; },
@@ -186,6 +189,25 @@ test("a direct v2 socket closes on any frame it does not expect", async (t) => {
   assert.deepEqual(env.delivered.map((message) => message.type), ["list_sessions"]);
   // Only the two that sent transport_ready were ever recorded.
   assert.equal(env.registry.list().length, 2);
+});
+
+test("failed handshakes are counted against the direct socket's address", async (t) => {
+  const env = await listener(t, "192.168.1.66");
+  // The public tag of the current secret over a handshake made under another secret.
+  const tag = secretTag(Buffer.from(env.registry.currentSecret().secret, "base64"));
+  for (let attempt = 0; attempt < MAX_FAILED_HS1_PER_ADDRESS; attempt++) {
+    const frame = parseHs1Frame(env.device({ secret: Buffer.alloc(32, 4).toString("base64") }).hs1);
+    assert.ok(frame);
+    const socket = await env.connect();
+    socket.ws.send(encodeHs1Frame({ ...frame, tag }));
+    await socket.settled();
+    socket.ws.close();
+  }
+  // The right secret from that address is now ignored for the rest of the minute.
+  const socket = await env.connect();
+  socket.ws.send(env.device().hs1);
+  await socket.settled();
+  assert.deepEqual(socket.received, []);
 });
 
 test("a wrong secret or a second hs1 on a direct v2 socket gets no answer", async (t) => {

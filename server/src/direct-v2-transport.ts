@@ -34,6 +34,8 @@ export interface DirectV2Hooks {
   responder: TransportResponder;
   /** The socket comes from this computer itself: loopback with no proxy in front. */
   fromThisComputer: boolean;
+  /** The socket's remote address. The responder counts failed handshakes against it. */
+  remoteAddress?: string;
   serverCapabilities: (binaryEnvelope: boolean, lane: TransportLane) => Record<string, unknown>;
   /** The `pairing_grant` message for a `local-request` peer that is a recorded device. */
   pairingGrant: () => Record<string, unknown>;
@@ -200,7 +202,7 @@ export class DirectV2Transport implements ClientTransport {
     if (!frame) return null;
     if (frame.path === "local-request") return this.fromThisComputer ? { path: "local-request", lane: "control" } : null;
     if (frame.path !== "direct" || (frame.lane !== "control" && frame.lane !== "bulk")) return null;
-    return { path: "direct", lane: frame.lane };
+    return { path: "direct", lane: frame.lane, remoteAddress: this.hooks.remoteAddress };
   }
 
   private handleBinary(frame: Buffer): void {

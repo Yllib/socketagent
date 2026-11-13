@@ -8,7 +8,8 @@ const { DeviceRegistry } = require("#server/device-registry");
 const { generateKeyPair } = require("#server/noise-ikpsk1");
 const {
   admissionFor,
-  MAX_FAILED_HS1_PER_MINUTE,
+  MAX_FAILED_HS1_PER_ADDRESS,
+  MAX_FAILED_HS1_PER_LANE,
   MAX_HELD_PEERS,
   MAX_PENDING_ANSWERS,
   TransportResponder,
@@ -301,7 +302,7 @@ test("an unreadable state file answers nobody", () => {
   assert.deepEqual(responder.handleHs1(device.hs1, { path: "relay", lane: "control" }), { result: "silent" });
 });
 
-test("limits: eight held peers, thirty pending answers in ten minutes, twenty failed hs1 a minute per lane", () => {
+test("limits: eight held peers and thirty pending answers in ten minutes", () => {
   const env = setup();
   env.registry.lock();
   /** @type {import("#server/transport-responder").AcceptedHandshake[]} */
@@ -326,20 +327,50 @@ test("limits: eight held peers, thirty pending answers in ten minutes, twenty fa
   assert.equal(answer(env, env.device()).finished?.answer.reason, "too_many_pending");
   env.advance(10 * 60 * 1000 + 1);
   assert.equal(answer(env, env.device()).status, "pending");
+});
 
-  // Failed handshakes: the tag fits, the PSK does not.
-  const failing = setup();
-  const tag = secretTag(Buffer.from(failing.registry.currentSecret().secret, "base64"));
-  const bad = () => {
-    const frame = parseHs1Frame(failing.device({ secret: Buffer.alloc(32, 5).toString("base64") }).hs1);
+test("failed hs1 frames: twenty a minute shut out one direct address, and only a flood shuts a lane", () => {
+  const env = setup();
+  const tag = secretTag(Buffer.from(env.registry.currentSecret().secret, "base64"));
+  /** An hs1 anyone can make: the public tag of the current secret over a handshake under another secret. */
+  const bad = (/** @type {"relay" | "direct"} */ path) => {
+    const frame = parseHs1Frame(env.device({ path, secret: Buffer.alloc(32, 5).toString("base64") }).hs1);
     assert.ok(frame);
     return encodeHs1Frame({ ...frame, tag });
   };
-  for (let attempt = 0; attempt < MAX_FAILED_HS1_PER_MINUTE; attempt++) failing.responder.handleHs1(bad(), { path: "relay", lane: "control" });
-  assert.equal(answer(failing, failing.device()).status, "silent", "the lane skips handshakes for the rest of the minute");
-  assert.equal(answer(failing, failing.device({ path: "direct" }), "control", "direct").status, "open", "another path is not held back");
-  failing.advance(60 * 1000);
-  assert.equal(answer(failing, failing.device()).status, "open");
+  /** A good handshake on a direct socket from [remoteAddress]. */
+  const direct = (/** @type {string} */ remoteAddress) => {
+    const device = env.device({ path: "direct" });
+    const outcome = env.responder.handleHs1(device.hs1, { path: "direct", lane: "control", remoteAddress });
+    return outcome.result === "silent" ? "silent" : String(device.finish(outcome.hs2).answer.status);
+  };
+
+  // One address on the network sends twenty frames that fail.
+  for (let attempt = 0; attempt < MAX_FAILED_HS1_PER_ADDRESS; attempt++) {
+    assert.equal(env.responder.handleHs1(bad("direct"), { path: "direct", lane: "control", remoteAddress: "192.168.1.66" }).result, "silent");
+  }
+  assert.equal(direct("192.168.1.66"), "silent", "that address is ignored for the rest of the minute");
+  assert.equal(direct("192.168.1.20"), "open", "a good handshake from another address is not skipped");
+  assert.equal(answer(env, env.device()).status, "open", "nor is one over the relay");
+  env.advance(60 * 1000);
+  assert.equal(direct("192.168.1.66"), "open", "the address is heard again in the next minute");
+
+  // Every program on this computer shares the loopback address, so it has no count of its own.
+  for (let attempt = 0; attempt < MAX_FAILED_HS1_PER_ADDRESS + 5; attempt++) {
+    env.responder.handleHs1(bad("direct"), { path: "direct", lane: "control", remoteAddress: "127.0.0.1" });
+  }
+  assert.equal(direct("127.0.0.1"), "open");
+
+  // In a relay room there is no address to count. Twenty failures, which once shut the lane, change nothing.
+  env.advance(60 * 1000);
+  for (let attempt = 0; attempt < MAX_FAILED_HS1_PER_ADDRESS; attempt++) env.responder.handleHs1(bad("relay"), { path: "relay", lane: "control" });
+  assert.equal(answer(env, env.device()).status, "open");
+  // Only a flood shuts the lane, and then for the rest of that minute.
+  for (let attempt = MAX_FAILED_HS1_PER_ADDRESS; attempt < MAX_FAILED_HS1_PER_LANE; attempt++) env.responder.handleHs1(bad("relay"), { path: "relay", lane: "control" });
+  assert.equal(answer(env, env.device()).status, "silent");
+  assert.equal(direct("192.168.1.20"), "open", "another path is not held back");
+  env.advance(60 * 1000);
+  assert.equal(answer(env, env.device()).status, "open");
 });
 
 /** A linked computer's record, as `device_authorize` writes it. @param {ReturnType<typeof setup>} env */

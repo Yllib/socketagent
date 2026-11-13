@@ -187,9 +187,10 @@ test("Forget keeps the token, renews the pairing secret, and still closes the de
 
   removeRegisteredKey(entry, true, steps);
 
-  await kept.until(2);
+  // The removal and the new secret each broadcast capabilities to the device that stays.
+  await kept.until(3);
   await forgotten.closed();
-  assert.deepEqual(tokensSent(kept), ["token-before", "token-before"]);
+  assert.deepEqual(tokensSent(kept), ["token-before", "token-before", "token-before"]);
   assert.deepEqual(tokensSent(forgotten), ["token-before"]);
   // The forgotten install still holds the old secret. It is no longer the current one.
   assert.notEqual(registry.currentSecret().secret, secret);

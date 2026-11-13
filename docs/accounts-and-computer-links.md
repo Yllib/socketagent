@@ -150,13 +150,22 @@ between their devices. The user signs in with Google and nothing else. There
 are no codes to scan or type. (Changed 2026-10-12 at the user's request: "id
 like google sign in, not their weird code linking.")
 
-The trust split:
-- The master key lives in the user's Google Drive app data folder
-  (`appDataFolder`, scope `https://www.googleapis.com/auth/drive.appdata`).
-  Only this app can read that folder, using the user's Google login.
-- The vault lives on the relay as ciphertext.
-- Neither Google nor the relay can read the vault alone. The relay never sees
-  the Google identity or the key.
+The trust split (changed 2026-11-13, when the account PIN was added):
+- The user's Google Drive app data folder (`appDataFolder`, scope
+  `https://www.googleapis.com/auth/drive.appdata`) holds the master key
+  sealed in a box. Opening the box takes the account PIN and a secret the
+  relay hands over only for a right PIN.
+- The vault lives on the relay as ciphertext. The relay also keeps the PIN
+  record: a value that proves the PIN, the secret it hands over, and the
+  count of tries.
+- Nobody reads the vault with one of the three alone. Someone in the Google
+  account gets 10 guesses at the PIN, then one every 24 hours. Google and the
+  relay together can search the PIN offline, at the cost of one Argon2id
+  stretch per guess. The relay never sees the Google identity, the PIN or
+  the master key.
+- An account made before the PIN has a plain key in Drive until one of its
+  signed-in devices sets a PIN. Until then no new device can join it. See
+  "A plain account" below.
 
 ### Keys (app only, the relay never sees any of these)
 
@@ -167,7 +176,36 @@ The trust split:
   Ed25519 seed. The public key, base64url, is the `accountId`.
 - The optional recovery key is the master key itself in Crockford base32,
   grouped in fours: `SAR1-XXXX-XXXX-...`. The `SAR1` prefix is the version.
-  It's for users who want a copy outside Google. It's never required.
+  It opens the account with no Google login and no PIN, and it changes with
+  every change of master key.
+
+The PIN is 6 to 64 printable ASCII characters with no spaces. For each new
+PIN the app makes a random `salt` (16 bytes), `pinId` (16 bytes) and
+`relayKey` (32 bytes), then:
+
+```
+stretched  = Argon2id13(PIN, salt, opslimit 3, memlimit 67108864), 32 bytes
+authKey    = HMAC(stretched, "socketagent-pin-auth-v1")
+wrapSeed   = HMAC(stretched, "socketagent-pin-wrap-v1")
+pinPrivate = HMAC(wrapSeed, "socketagent-pin-key-v1" || relayKey)
+pinPublic  = X25519(pinPrivate, basepoint)
+```
+
+- The relay stores `authKey` and `relayKey`. It returns `relayKey` to a
+  caller who sends the right `authKey`.
+- The vault's `pin` field holds `{id, salt, publicKey, setAt, setBy}`, all
+  public. With `pinPublic` a signed-in device can seal a new master key for
+  whoever knows the PIN. It holds nothing a guess can be tested against.
+- Nothing made from the PIN is stored on a device.
+
+The Drive file `socketagent-account-key.json` is
+`{"v": 2, "body": <base64>, "sig": <base64>}`. The body is the JSON
+`{account, pinId, salt, box}`, signed with the account's Ed25519 key over
+`"socketagent-drive-file-v2\n" || body`. `box` is a NaCl box of
+`{"t":"socketagent-pin-box-v1","masterKey"}` from a one-time sender key to
+`pinPublic`, laid out as `senderPublic || nonce || ciphertext`. Writing the
+file means deleting every file under the name and then creating one. The app
+never writes the old `v: 1` file, which held the master key in the clear.
 
 ### Relay API (new file `src/account-vault.ts`, JSON store like entitlements)
 
@@ -188,20 +226,40 @@ JWK `{kty:"OKP", crv:"Ed25519", x}`). It rejects times more than 5 minutes off.
 
 | route | body | reply |
 |---|---|---|
-| `GET /api/account/vault` | none | `200 {version, ciphertext, updatedAt}` or `404` |
-| `PUT /api/account/vault` | `{expectedVersion, ciphertext}` | `200 {version}`, or `409 {version}` if `expectedVersion` isn't the stored version (0 = create) |
-| `DELETE /api/account` | none | `204` |
+| `GET /api/account/vault` | none | `200 {version, ciphertext, updatedAt, pin}`, where `pin` is `{id, setAt, triesLeft, wrongTotal, lastWrongAt, lastUnlockAt}` or null. A moved account answers `404 {"error":"moved", version, ciphertext, wrapped}`, a deleted one `404 {"error":"gone"}`, a missing one `404 {"error":"not_found"}` |
+| `PUT /api/account/vault` | `{expectedVersion, ciphertext, rotation?}` | `200 {version}`, or `409 {version}` if `expectedVersion` isn't the stored version (0 = create). `410` on a deleted account. A first write may not carry `rotation` |
+| `DELETE /api/account` | none | `204`, or `409 {"error":"rotated"}` on a moved account |
+| `PUT /api/account/pin` | `{expectedId, id, authKey, relayKey}` | `200 {id, setAt}`, or `409 {id}` when `expectedId` isn't the current id. `id` must be new |
+| `POST /api/account/pin/reset` | none | `204`, gives the 10 tries back, at most once in 24 hours |
+| `POST /api/account/pin/claim` | `{from}` | Signed by the account that `from` moved to. Carries the PIN record over |
+| `POST /api/account/pin/unlock` | `{account, id, authKey}` | Not signed. `200 {relayKey}`, `403 wrong_pin` with `triesLeft`, `429 locked` with `retryAt`, `409 changed`, `404 no_pin` |
+
+The count: 10 tries, and one comes back every 24 hours. The relay saves the
+spent try to disk before it compares, and compares in constant time. A right
+PIN gives all 10 back. Nothing clears `wrongTotal`, which signed-in devices
+show as a notice.
+
+A deleted account leaves a record for good, so a device that held its key
+cannot bring it back. A moved account is frozen: no route changes it again.
 
 Limits:
 - `ciphertext` is base64 and at most 512 KiB decoded.
-- Store at most 50,000 accounts.
-- Rate-limit per IP and per account, the way reports are limited.
+- Store at most 50,000 account records, deleted and moved ones included.
+- Per address an hour: 600 signed requests and 30 `unlock` calls. Per
+  account and address together: 300 signed requests an hour. Per address a
+  day: 30 new accounts. An IPv6 address counts by its first 64 bits, and by
+  its first 48 for new accounts.
+- While the account folder holds no account file, every account route
+  answers `503 storage_unavailable`, so a volume that failed to mount is
+  never read as "no such account". `ACCOUNT_VAULT_FIRST_START=1` turns that
+  off for an install that has never had an account.
 
 The relay doesn't require a subscription for vault storage. It's ciphertext
 only, and free direct-mode users benefit too.
 
-The store holds only `{accountId, version, ciphertext, updatedAt, createdAt}`,
-plus the rotation record below. Write it atomically with a temp file and
+The store holds `{accountId, version, ciphertext, updatedAt, createdAt}`,
+plus the rotation record below, and the PIN record in a file of its own
+beside it (`<hex>.pin.json`). Write each atomically with a temp file and
 rename.
 
 ### Vault plaintext (inside secretbox, app-defined, JSON)
@@ -237,48 +295,80 @@ refuse a newer vault and write nothing, so they can't drop fields they don't
 know. From 2 on, a build keeps top-level fields it doesn't recognize and
 writes them back, so a new field doesn't need another bump.
 
-### Signing in (every device, first or not)
+### Signing in
 
 1. Sign in with Google and request the `drive.appdata` scope.
    - Android uses `google_sign_in`.
    - Windows uses the installed-app OAuth flow: system browser, loopback
      redirect, PKCE.
    - The OAuth client IDs are app config, not secrets.
-2. Look in `appDataFolder` for `socketagent-account-key.json`, which holds
-   `{v:1, masterKey:<b64>, createdAt, rotatedAt?, rotatedBy?}`.
-   - If it's missing, make a master key and write the file.
-   - Two first devices can race. After writing, list again and keep the file
-     with the oldest `createdTime`, and delete the other.
-3. Derive the keys and GET the vault. A 404 means a new account, so create it
-   from this device's computers.
+2. Read every file named `socketagent-account-key.json` in `appDataFolder`.
+   - No file: this is a first account. The user must set a PIN. The app
+     makes a master key, writes the vault and the PIN record to the relay,
+     then writes the Drive file.
+   - One valid `v: 2` file: ask for the PIN, stretch it, send `authKey` to
+     `unlock`, and open the box with the `relayKey` that comes back. The
+     account ID made from the master key must equal the file's `account`.
+   - A plain `v: 1` file: the device does not take the key. It tells the
+     user to set a PIN on a signed-in device, restore with the recovery
+     key, or start over.
+3. Derive the keys and GET the vault.
 4. Merge, add this device to `devices`, PUT, and adopt the computers.
 5. Enroll on each computer with the stored token (section 1). For computers
    with no token in the vault, this device asks to be approved, and any
    account device that is connected to that computer sends `device_approve`
    for keys listed in the vault's `devices`. That approval is automatic,
-   because the user already proved the account through Google.
+   because the user already proved the account through Google and the PIN.
 
-On every app start and every vault sync, the device re-reads the Drive file. If
-the master key changed, the device moves to the new account. Drive is the
-source of truth, and only Google-authenticated devices can write it.
+A signed-in device never takes a key from Drive. On each sync it asks the
+relay for the vault first. It moves to a new key only when the relay's
+frozen record of its account holds a handover box for it, sealed by a device
+that account listed. It then checks Drive and puts the right file back if
+the one there is missing, damaged or stale.
 
 Restoring with a recovery key is steps 3 to 5, for users without their Google
-account.
+account or their PIN.
 
-### Removing a device from the account
+### A plain account
 
-1. Send `device_remove` for the removed key on every reachable computer. That
-   also rotates each computer's AUTH_TOKEN. Computers that are offline get it
-   later: every account device, whenever it connects to a computer, removes any
-   key in `revokedDevices` that the computer still lists.
-2. Make a new master key and write the vault under the new accountId, with
-   current tokens and the removed key in `revokedDevices`.
-3. Replace the Drive key file with the new key, then DELETE the old account
-   on the relay.
-4. Tell the user plainly that a removed device that's still signed in to their
-   Google account can read the new key. To cut it off completely, they also
-   remove it from their Google account. The computers refuse its device key
-   either way.
+An account from before the PIN keeps working on its signed-in devices with a
+plain key in Drive. Each of those devices asks once whether to set a PIN,
+and the user may say Later. Until a PIN is set, no new device can join.
+Setting the first PIN is a change of master key, so devices on an older app
+version are signed out until they update, and the old recovery key stops
+working.
+
+### Changing the master key
+
+The first PIN on an existing account, Remove, and Remove with a new PIN are
+one procedure with one commit point.
+
+1. Sync the old account. Make the new master key, and the new PIN values
+   when a new PIN is set. Save a pending record on the device before any
+   request.
+2. PUT the new account's vault, with the removed devices revoked. With a new
+   PIN, also `PUT /api/account/pin` on the new account.
+3. The commit: PUT the old account's vault with `rotation.newAccountId` and
+   `rotation.wrapped`, a handover box for every device that stays. The relay
+   freezes the old account. A handover box is a NaCl box of
+   `{"t":"socketagent-handover-v1","from","masterKey"}` between two device
+   keys from the vault's `devices` list.
+4. Take the new key, sync the new account, and `claim` the old account's PIN
+   record.
+5. Write the Drive file.
+6. Send `device_remove` for each removed key to every connected computer.
+   That also rotates each computer's AUTH_TOKEN. Computers that are offline
+   get it later: every account device, whenever it connects to a computer,
+   removes any key in `revokedDevices` that the computer still lists.
+7. Clear the pending record.
+
+A device that stays finds the frozen record and its box, and follows. A
+removed device finds no box and leaves without learning the new account ID.
+A device that dies part way finishes or undoes the change on its next sync,
+and deletes the new account only on proof that another device's change won.
+A revocation always beats a device entry for the same key, whatever the
+times on them say, so a removed device comes back only with a new device
+key.
 
 ### Forgetting a device
 
@@ -293,8 +383,6 @@ drops it without the cost of Remove:
 Forget is only safe when nothing holds the old key or the computers' tokens.
 For a lost device that may still have the app, use Remove.
 
-The relay's rotation record (`rotation` on PUT) isn't used in this design.
-
 ### App surface
 
 Settings gets an Account screen with these actions:
@@ -304,6 +392,10 @@ Settings gets an Account screen with these actions:
 - show or export the recovery key, behind the device unlock check the app
   already uses for secrets
 - restore with a recovery key
+- set the account PIN, or set a new one without the old one, behind the
+  device unlock on Android
+- see when the PIN was set, when it was last used on a new device, and how
+  many wrong tries it has had
 
 ## 3. Computer links and the agent tools (relay + server + app)
 

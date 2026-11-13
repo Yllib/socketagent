@@ -523,7 +523,13 @@ export class RelayClient {
     return Array.from(this.peers.values()).some((peer) => peer.auth === "pending" && peer.publicKeyBase64 === publicKey);
   }
 
-  /** An enrolled device approved this key: open every peer held under it. */
+  /**
+   * An enrolled device approved this key. A held v2 peer proved the key in
+   * its handshake and opens now. An old-path peer held under the key has only
+   * named it in a key exchange, so it is admitted and opens on its first
+   * frame that the channel can open, like any other old-path peer. Returns
+   * how many peers opened.
+   */
   approvePeersWithKey(publicKey: string): number {
     let opened = 0;
     for (const [peerId, peer] of this.peers) {
@@ -536,11 +542,11 @@ export class RelayClient {
         }
         this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
         this.openV2Peer(peerId, peer, peer.handshake, approved.pairingUpdate);
+        opened++;
       } else {
-        this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
-        this.openPeer(peerId, peer);
+        this.clearPendingTimer(peer);
+        peer.auth = "admitted";
       }
-      opened++;
     }
     return opened;
   }

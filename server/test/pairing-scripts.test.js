@@ -116,8 +116,13 @@ test("show-pairing --reset with no server running starts over in the files", () 
   fs.appendFileSync(computer.envFile, `LINK_ROOM_TOKEN=${"cd".repeat(32)}\n`);
   const state = computer.state();
   fs.writeFileSync(path.join(computer.folder, "transport.json"), JSON.stringify({ ...state, locked: true, removed: ["removed-key"] }));
+  const tokenBefore = computer.envValue("AUTH_TOKEN");
 
   const second = computer.showPairing("--reset").split("|");
+  // A full start over: the old path's token is new as well.
+  assert.match(computer.envValue("AUTH_TOKEN"), /^[0-9a-f]{64}$/);
+  assert.notEqual(computer.envValue("AUTH_TOKEN"), tokenBefore);
+  assert.equal(fs.readFileSync(computer.envFile, "utf8").includes(tokenBefore), false);
   assert.notEqual(second[1], first[1]);
   assert.match(second[1], /^[0-9a-f]{64}$/);
   assert.notEqual(second[3], first[3]);

@@ -482,8 +482,12 @@ export class DeviceRegistry {
 
   /**
    * `show-pairing --reset`: one new pairing secret, previous secrets
-   * cleared, the lock off. The device and removed lists stay. The caller
-   * also makes a new room ID, so every device has to scan again.
+   * cleared, the lock off. Device records still on transport 1 are deleted:
+   * the old path admits a recorded key with no token, so a record left
+   * behind would let its device back in without the new code. They are not
+   * put on the removed list. Records on transport 2, linked computers, AI
+   * clients and the removed list stay. The caller also makes a new room ID
+   * and a new AUTH_TOKEN, so every device has to scan again.
    *
    * It is the recovery for an unreadable state file too. Then nothing can be
    * kept: the lists start empty with a new relay owner key, and the old file
@@ -498,6 +502,7 @@ export class DeviceRegistry {
       const nextId = Math.max(...this.state.secrets.map((secret) => secret.id)) + 1;
       this.state.secrets = [{ id: nextId, secret: randomSecret(), createdAt: now }];
       this.state.locked = false;
+      this.state.devices = this.state.devices.filter((entry) => entry.kind !== "device" || entry.transport === 2);
     } else {
       if (fs.existsSync(this.filePath)) fs.renameSync(this.filePath, `${this.filePath}.unreadable`);
       this.state = {

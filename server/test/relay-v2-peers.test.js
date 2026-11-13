@@ -293,6 +293,29 @@ test("the bulk lane opens a recorded device and refuses a key control would add"
   assert.equal(h.delivered.length, 1);
 });
 
+test("moving to another room forgets every peer and stops reading the old room in the same call", () => {
+  const h = harness();
+  const device = h.device();
+  const channel = h.handshake(device);
+  h.fromPeer(channel.ready());
+  assert.deepEqual(h.client.openPeerKeys(), [device.publicKey]);
+
+  /** @type {string[]} */
+  const socketCalls = [];
+  h.client.ws = {
+    readyState: 1,
+    removeAllListeners: (/** @type {string} */ event) => { socketCalls.push(`removeAllListeners ${event}`); },
+    close: () => { socketCalls.push("close"); },
+  };
+  h.client.moveRoom("the-new-room");
+
+  // The old room's socket is still closing. Nothing more is read from it,
+  // and the peers it carried are gone before the relay has said so.
+  assert.deepEqual(socketCalls, ["removeAllListeners message", "close"]);
+  assert.deepEqual(h.client.openPeerKeys(), []);
+  assert.equal(h.client.isPaired, false);
+});
+
 test("the relay client joins new-style, proves it owns the room, and never falls back to an old-style join", { timeout: 10_000 }, async (t) => {
   const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   t.after(() => { for (const socket of relay.clients) socket.terminate(); relay.close(); });

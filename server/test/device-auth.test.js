@@ -495,6 +495,30 @@ test("removing a device rotates the token and the old token no longer enrolls", 
   assert.equal(gate.deviceAuth(fresh, "control", { token: current, name: "New", platform: "android" }).ok, true);
 });
 
+test("after pair --reset the old direct path admits neither a device recorded before it nor the old token", () => {
+  let current = "token-before-the-reset";
+  const recorded = toBase64(generateKeyPair().publicKey);
+  const registry = migratedRegistry({ mode: "enforced", devices: [recorded] });
+  const gate = new DeviceAuthGate(registry, () => current);
+  assert.deepEqual(gate.directAuth(recorded, {}, false, "192.168.1.50"), { ok: true, enrolled: false });
+
+  // What both reset paths do: the state file, then a new AUTH_TOKEN.
+  registry.resetPairing();
+  const old = current;
+  current = "token-after-the-reset";
+
+  // The device recorded before the reset, with no token and with the old one.
+  assert.equal(gate.directAuth(recorded, {}, false, "192.168.1.50").ok, false);
+  assert.equal(gate.directAuth(recorded, { token: old }, false, "192.168.1.50").ok, false);
+  assert.equal(gate.authorize(recorded, "control").admission, "pending", "over the relay it is an unknown key again");
+  // A key never seen before, with the token from a code shown before the reset.
+  const stranger = toBase64(generateKeyPair().publicKey);
+  assert.equal(gate.directAuth(stranger, { token: old, name: "Stranger" }, false, "192.168.1.51").ok, false);
+  assert.equal(registry.get(stranger), undefined);
+  // Given the new token, the old-path device pairs again.
+  assert.deepEqual(gate.directAuth(recorded, { token: current, name: "Pixel" }, false, "192.168.1.50"), { ok: true, enrolled: true });
+});
+
 test("the legacy switch off: a key exchange gets no answer in any room", () => {
   const phone = generateKeyPair();
   const key = toBase64(phone.publicKey);

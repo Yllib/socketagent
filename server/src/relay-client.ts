@@ -606,15 +606,19 @@ export class RelayClient {
   }
 
   /**
-   * Moves to another relay room. Peers in the old room are dropped, and the
-   * client reconnects with `pairingToken` right away, also when it was
-   * waiting out a refused join.
+   * Moves to another relay room. Peers in the old room are forgotten in
+   * this call and nothing more is read from the old room's socket, so no
+   * frame from it is acted on while the socket closes. The client
+   * reconnects with `pairingToken` right away, also when it was waiting out
+   * a refused join.
    */
   moveRoom(pairingToken: string): void {
     this.opts = { ...this.opts, pairingToken };
     this.reconnectDelay = 1000;
     this.refusedAsOwner = false;
     if (this.ws) {
+      this.ws.removeAllListeners("message");
+      for (const id of Array.from(this.peers.keys())) this.removePeer(id);
       this.ws.close();
       return;
     }

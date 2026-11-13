@@ -5,9 +5,11 @@
 //   socketagent pair --raw      print only the code
 //   socketagent pair --reset    start over, then show the new code
 //
-// --reset makes a new room ID and a new pairing secret, clears the previous
-// secrets and takes the lock off. Paired devices stay on the list, but every
-// one has to scan the new code. It is the fix for a damaged transport.json
+// --reset is a full start over. It makes a new room ID, a new pairing secret
+// and a new AUTH_TOKEN, clears the previous secrets and takes the lock off.
+// Devices on the new transport stay on the list, but every one has to scan
+// the new code. Devices still on the old path are taken off the list and
+// have to be given the new token. It is the fix for a damaged transport.json
 // and for a relay room another computer has claimed. A running server does
 // the reset itself, so one process owns the files; without one this script
 // writes them.
@@ -24,6 +26,8 @@ const os = require("os");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
 const { localIpv4Addresses, openTransportState, pairingCode, relayUrlForCode } = require("./pairing-code");
+// Needs the built server (`npx tsc`), as the transport state does.
+const { rotateAuthTokenInEnv, writeEnvValue } = require("#server/env-file");
 
 const serverDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(serverDir, "..");
@@ -81,17 +85,18 @@ function resetThroughServer(env) {
   });
 }
 
-/** Starts pairing over in the files, for when no server is running. */
+/**
+ * Starts pairing over in the files, for when no server is running: the
+ * state file, then a new room ID and a new AUTH_TOKEN in .env.
+ */
 function resetInFiles() {
   const { newOwnerKey } = openTransportState(keysFile).resetPairing();
-  const roomId = crypto.randomBytes(32).toString("hex");
-  const content = fs.readFileSync(envFile, "utf8");
-  const next = /^PAIRING_TOKEN=.*$/m.test(content)
-    ? content.replace(/^PAIRING_TOKEN=.*$/m, `PAIRING_TOKEN=${roomId}`)
-    : `${content.trimEnd()}\nPAIRING_TOKEN=${roomId}\n`;
+  writeEnvValue(envFile, "PAIRING_TOKEN", crypto.randomBytes(32).toString("hex"));
+  rotateAuthTokenInEnv(envFile);
+  if (!newOwnerKey) return;
   // With a new owner key the relay refuses the old link room, so that ID
   // goes too. The server makes a new one when it starts.
-  fs.writeFileSync(envFile, newOwnerKey ? next.replace(/^LINK_ROOM_TOKEN=.*\n?/m, "") : next, { mode: 0o600 });
+  fs.writeFileSync(envFile, fs.readFileSync(envFile, "utf8").replace(/^LINK_ROOM_TOKEN=.*\n?/m, ""), { mode: 0o600 });
 }
 
 async function main() {

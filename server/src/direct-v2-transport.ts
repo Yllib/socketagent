@@ -427,6 +427,11 @@ export class DirectV2Sockets {
     for (const transport of this.withKey(publicKey)) transport.drop(reason);
   }
 
+  /** Closes every socket, whatever state its handshake is in. */
+  dropAll(reason: string): void {
+    for (const transport of [...this.sockets]) transport.drop(reason);
+  }
+
   /** Keys of open channels. */
   openKeys(): string[] {
     return [...this.sockets].flatMap((transport) => (transport.isOpen && transport.peerKey ? [transport.peerKey] : []));

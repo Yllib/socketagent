@@ -523,10 +523,10 @@ function isAuthToken(candidate: string | null | undefined): boolean {
   return typeof candidate === "string" && candidate !== "" && constantTimeEqual(candidate, AUTH_TOKEN);
 }
 
-function rotateAuthToken(): void {
+function rotateAuthToken(why = "a device was removed"): void {
   AUTH_TOKEN = rotateAuthTokenInEnv(ENV_PATH);
   process.env.AUTH_TOKEN = AUTH_TOKEN;
-  console.log("[Devices] Rotated AUTH_TOKEN after a device was removed");
+  console.log(`[Devices] Rotated AUTH_TOKEN after ${why}`);
 }
 
 // The pairing secrets, the lock and the record of keys that paired. The first
@@ -1540,18 +1540,28 @@ function renewPairingSecret(): void {
 }
 
 /**
- * `socketagent pair --reset`: a new room ID and pairing secret, previous
- * secrets cleared, the lock off. Every device has to scan the new code, so
- * every device channel is closed. It is also the way out of an unreadable
- * state file and of a relay room another key has claimed.
+ * `socketagent pair --reset`: a full start over. A new room ID, pairing
+ * secret and AUTH_TOKEN, previous secrets cleared, the lock off, and the
+ * device records still on the old path deleted. Every device has to scan the
+ * new code, or on the old path be given the new token. It is also the way
+ * out of an unreadable state file and of a relay room another key has
+ * claimed.
+ *
+ * Every open channel closes, and the direct ones close first: the registry
+ * change below broadcasts capabilities, and nothing that is connected now
+ * may be sent the new token or secret. The relay rooms are left further
+ * down, in this same call, so no frame from a relay peer is read in between.
  */
 function startPairingOver(): void {
+  directV2Sockets.dropAll("Pairing reset");
+  for (const socket of [...legacyDirectSockets]) socket.drop("Pairing reset");
   const { newOwnerKey } = deviceRegistry.resetPairing();
   const hadState = !newOwnerKey;
+  rotateAuthToken("pairing was started over");
   PAIRING_TOKEN = crypto.randomBytes(32).toString("hex");
   process.env.PAIRING_TOKEN = PAIRING_TOKEN;
   writeEnvValue(ENV_PATH, "PAIRING_TOKEN", PAIRING_TOKEN);
-  console.log("[Devices] Pairing started over: new room ID and pairing secret");
+  console.log("[Devices] Pairing started over: new room ID, pairing secret and AUTH_TOKEN");
   // The link room keeps its ID unless this computer can no longer use it:
   // its owner key is new, or the relay says another key owns the room.
   // Other computers then have to be linked to this one again.
@@ -1560,11 +1570,6 @@ function startPairingOver(): void {
     writeEnvValue(ENV_PATH, "LINK_ROOM_TOKEN", LINK_ROOM_TOKEN);
     relayLinkClient?.moveRoom(LINK_ROOM_TOKEN);
     console.log("[Links] New link room ID. Link other computers to this one again from the app.");
-  }
-  for (const entry of deviceRegistry.list()) {
-    if (entry.kind !== "device") continue;
-    dropDirectPeersWithKey(entry.publicKey, "Pairing reset");
-    directV2Sockets.dropKey(entry.publicKey, "Pairing reset");
   }
   if (!RELAY_URL) return;
   if (hadState && relayClient) {
@@ -4019,6 +4024,9 @@ function clearDevicePending(publicKey: string): void {
   if (!pendingDeviceNotices.delete(publicKey)) return;
   broadcastControlMessage({ type: "device_pending_cleared", publicKey });
 }
+
+/** Every old-path direct socket that is up, signed in or not. `pair --reset` closes them all. */
+const legacyDirectSockets = new Set<DirectClientTransport>();
 
 /**
  * Direct sockets from this computer let in by their device key rather than
@@ -10178,7 +10186,7 @@ function createConnectionHandler(
           sendJson({ type: "pairing_reset_result", requestId: msg.requestId, ok: false, error: "Only a device paired with this computer's code can reset it" });
         } else {
           // Rotate first: the new secret's broadcast must carry the new token.
-          rotateAuthToken();
+          rotateAuthToken("the pairing code was reset");
           renewPairingSecret();
           sendJson({ type: "pairing_reset_result", requestId: msg.requestId, ok: true });
         }
@@ -12422,6 +12430,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
     requireEncryptedAuth: wantsEncryptedDirectAuth,
   });
   transport.fromThisComputer = isLoopbackRequest(req);
+  legacyDirectSockets.add(transport);
   console.log(
     `${wantsEncryptedDirectAuth ? "Client connected (direct E2E pending auth)" : "Client connected (authenticated)"} lane=${transportLane}`,
   );
@@ -12608,6 +12617,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
 
   ws.on("close", () => {
     console.log(`Client disconnected lane=${transportLane}`);
+    legacyDirectSockets.delete(transport);
     transport.close();
     detachDirectClient(transport, handler);
     // DON'T abort — let the session keep running in the background

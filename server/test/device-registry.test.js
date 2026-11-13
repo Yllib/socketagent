@@ -111,11 +111,13 @@ test("an unreadable transport.json is not replaced until pairing is reset", () =
   assert.equal(new DeviceRegistry(state, legacy).readable, true);
 });
 
-test("reset keeps the lists, clears previous secrets and unlocks", () => {
+test("reset keeps v2 devices and the removed list, deletes old-path device records, clears previous secrets and unlocks", () => {
   const { state } = paths();
   const registry = new DeviceRegistry(state);
-  const [phone, removed] = [newKey(), newKey()];
+  const [phone, removed, oldPathPhone, linked] = [newKey(), newKey(), newKey(), newKey()];
   registry.enroll({ publicKey: phone, kind: "device", name: "Pixel", platform: "android", via: "token", transport: 2 });
+  registry.enroll({ publicKey: oldPathPhone, kind: "device", name: "Old path", platform: "android", via: "migration" });
+  registry.enroll({ publicKey: linked, kind: "computer", name: "Laptop", platform: "computer", via: "link" });
   registry.enroll({ publicKey: removed, kind: "device", name: "Old", platform: "android", via: "token" });
   registry.revoke(removed);
   registry.lock();
@@ -128,8 +130,14 @@ test("reset keeps the lists, clears previous secrets and unlocks", () => {
   assert.equal(registry.currentSecret().id, before.id + 1, "secret ids are never reused");
   assert.deepEqual(registry.previousSecrets(), []);
   assert.equal(registry.get(phone)?.transport, 2);
+  // The old path lets a recorded key in with no token, so that record goes.
+  // It is deleted, not removed: the device may pair again with the new token.
+  assert.equal(registry.get(oldPathPhone), undefined);
+  assert.equal(registry.isRevoked(oldPathPhone), false);
+  assert.equal(registry.get(linked)?.kind, "computer", "a link is not a pairing and stays");
   assert.equal(registry.isRevoked(removed), true);
   assert.equal(toBase64(registry.relayOwnerKey().publicKey), ownerKey);
+  assert.equal(new DeviceRegistry(state).get(oldPathPhone), undefined, "the deletion is saved");
 });
 
 test("a rotated secret stays honoured for 90 days, eight at most", () => {

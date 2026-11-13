@@ -22,6 +22,7 @@ import { supportsBinaryBrowserFrames } from "./browser-frame-wire";
 import type { DeviceAuthOutcome, PeerAdmission, RelayLane } from "./device-auth";
 import { STATE_RESET_HINT, type DevicePlatform } from "./device-registry";
 import { MAX_HANDSHAKE_FRAME_BYTES, TRANSPORT_VERSION, type TransportChannel } from "./transport-v2";
+import type { RelayPushRequest } from "./push-sealing";
 import {
   HANDSHAKE_WAIT_MS,
   HELD_PEER_WAIT_MS,
@@ -48,6 +49,14 @@ const OWNER_MISMATCH_RETRY_MS = 10 * 60 * 1000;
 const RELAY_CLOSE_CLAIM_LIMIT = 1013;
 const CLAIM_LIMIT_RETRY_MS = 5 * 60 * 1000;
 const RELAY_AUTH_LABEL = "socketagent-relay-auth-v1";
+/** How long `relayPush` waits for the relay's `relay_push_result`. */
+const RELAY_PUSH_WAIT_MS = 10_000;
+
+interface PendingRelayPush {
+  resolve: (result: { sent: number; attempted: number }) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 /**
  * How the channel a message arrived on was keyed. `v2` is a transport v2
@@ -344,6 +353,10 @@ export class RelayClient {
   private ws: WebSocket | null = null;
   private peers = new Map<string, RelayPeer>();
   private relaySupportsMultiDevice = false;
+  /** The relay accepted this socket as the room's owner. Only then does it take `relay_push`. */
+  private ownsRoom = false;
+  private pendingPushes = new Map<string, PendingRelayPush>();
+  private nextPushId = 1;
   private status: RelayStatus = "disconnected";
   private reconnectDelay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -442,6 +455,7 @@ export class RelayClient {
       this.virtualWs.supportsMonitorOutputAck = false;
       this.virtualWs.supportsRawSdkEvents = false;
       this.relaySupportsMultiDevice = false;
+      this.failPendingPushes();
       this.virtualWs._noteTransportReset();
       this.setStatus("disconnected");
       if (!this.closed) this.scheduleReconnect();
@@ -604,8 +618,58 @@ export class RelayClient {
     this.virtualWs.supportsMonitorOutputAck = false;
     this.virtualWs.supportsRawSdkEvents = false;
     this.relaySupportsMultiDevice = false;
+    this.failPendingPushes();
     this.virtualWs._setOpen(false);
     this.setStatus("disconnected");
+  }
+
+  /**
+   * Asks the relay to send a push to the phones registered for this room
+   * (wire spec 11.2). The frame goes over this socket, which already proved
+   * the room is this computer's, so there is nothing else to sign. Rejects
+   * when the socket is down, when the relay reports an error, and after 10 s
+   * with no answer.
+   */
+  relayPush(push: RelayPushRequest): Promise<{ sent: number; attempted: number }> {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !this.ownsRoom) {
+      return Promise.reject(new Error("the relay socket is down"));
+    }
+    const id = `push-${this.nextPushId++}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingPushes.delete(id);
+        reject(new Error("the relay did not answer in 10 s"));
+      }, RELAY_PUSH_WAIT_MS);
+      this.pendingPushes.set(id, { resolve, reject, timer });
+      ws.send(JSON.stringify({ type: "relay_push", id, ...push }));
+    });
+  }
+
+  /** Settles the push a `relay_push_result` answers. A result for no waiting push is dropped. */
+  private handlePushResult(result: Record<string, unknown>): void {
+    const { id, error } = result;
+    const pending = typeof id === "string" ? this.pendingPushes.get(id) : undefined;
+    if (!pending || typeof id !== "string") return;
+    this.pendingPushes.delete(id);
+    clearTimeout(pending.timer);
+    if (error !== undefined) {
+      // `invalid_push`: the relay could not use the frame. `send_failed`: Firebase failed.
+      const known = error === "invalid_push" || error === "send_failed";
+      pending.reject(new Error(`the relay answered ${known ? error : "an unknown error"}`));
+      return;
+    }
+    const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
+    pending.resolve({ sent: count(result.sent), attempted: count(result.attempted) });
+  }
+
+  private failPendingPushes(): void {
+    this.ownsRoom = false;
+    for (const pending of this.pendingPushes.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("the relay socket closed"));
+    }
+    this.pendingPushes.clear();
   }
 
   private getPeer(peerId = LEGACY_PEER_ID): RelayPeer {
@@ -799,9 +863,15 @@ export class RelayClient {
     if (!isRecord(parsed)) throw new Error("Invalid relay control message");
     if (parsed.type === "relay_capabilities") {
       this.relaySupportsMultiDevice = !!parsed.multiDevice;
+      this.ownsRoom = parsed.owner === true;
       if (this.relaySupportsMultiDevice) {
         console.log(`[Relay] Relay supports multi-device routing`);
       }
+      return;
+    }
+
+    if (parsed.type === "relay_push_result") {
+      this.handlePushResult(parsed);
       return;
     }
 

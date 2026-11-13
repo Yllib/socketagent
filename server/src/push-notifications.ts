@@ -4,24 +4,39 @@ import { isRecord, unknownArray, errorMessage, parseJsonObject } from "./value-g
 import * as path from "path";
 import { GoogleAuth } from "google-auth-library";
 import { socketAgentDataPath } from "./socket-agent-paths";
+import { legacyPushFields, plainPushData, sealPush, type PushNotificationPayload, type RelayPushRequest } from "./push-sealing";
 
-interface StoredPushToken {
+export type { PushNotificationPayload } from "./push-sealing";
+
+export interface StoredPushToken {
   token: string;
   platform: string;
   appServerId?: string;
   deliveryRoute?: "relay" | "direct";
   firebaseProjectId?: string;
+  /** The phone registered on a transport v2 channel, so it gets sealed pushes. */
+  v2?: boolean;
   updatedAt: string;
 }
 
-export interface PushNotificationPayload {
-  title: string;
-  body?: string;
-  sessionId?: string;
-  status?: string;
-  kind?: string;
-  data?: Record<string, string | number | boolean | null | undefined>;
-  showNotification?: boolean;
+/**
+ * What a push needs from the running server. index.ts sets it once the
+ * device registry and the control-room relay client exist. Until then
+ * nothing is sealed and nothing goes to the relay.
+ */
+export interface PushTransport {
+  /** The pairing secrets to seal for, newest first (push-sealing.ts). */
+  sealingSecrets(): Uint8Array[];
+  /** True while the old path is on and a recorded device is still on it. Only then may a push leave in plaintext. */
+  plaintextAllowed(): boolean;
+  /** Sends a `relay_push` over the control-room socket. Rejects when that socket is down. */
+  relayPush(push: RelayPushRequest): Promise<{ sent: number; attempted: number }>;
+}
+
+let pushTransport: PushTransport | null = null;
+
+export function setPushTransport(transport: PushTransport | null): void {
+  pushTransport = transport;
 }
 
 export type DirectFcmConfigurationIssue = "missing" | "invalid" | "unreadable";
@@ -110,7 +125,7 @@ function readStore(): StoredPushToken[] {
       const result = z.object({
         token: z.string().min(1), platform: z.string().default("android"),
         appServerId: z.string().optional(), deliveryRoute: z.enum(["relay", "direct"]).optional(),
-        firebaseProjectId: z.string().optional(), updatedAt: z.string().default(""),
+        firebaseProjectId: z.string().optional(), v2: z.boolean().optional(), updatedAt: z.string().default(""),
       }).safeParse(entry);
       return result.success ? [result.data] : [];
     });
@@ -130,6 +145,8 @@ export function registerPushToken(
   appServerId?: string,
   deliveryRoute?: "relay" | "direct",
   firebaseProjectId?: string,
+  /** Whether `register_push_token` arrived on a transport v2 channel. */
+  v2 = false,
 ): void {
   const token = fcmToken.trim();
   if (!token) return;
@@ -151,6 +168,7 @@ export function registerPushToken(
       ...(appServerId ? { appServerId } : {}),
       ...(deliveryRoute ? { deliveryRoute } : {}),
       ...(firebaseProjectId ? { firebaseProjectId } : {}),
+      ...(v2 ? { v2 } : {}),
       updatedAt: new Date().toISOString(),
     },
   ].slice(-20));
@@ -174,6 +192,8 @@ export function isPushTokenRegistered(
   fcmToken: string,
   appServerId?: string,
   deliveryRoute?: "relay" | "direct",
+  /** Asked on a v2 channel: a registration made on the old path does not count, so the phone registers again. */
+  v2Only = false,
 ): boolean {
   const token = fcmToken.trim();
   if (!token) return false;
@@ -181,6 +201,7 @@ export function isPushTokenRegistered(
     entry.token === token
       && (!appServerId || entry.appServerId === appServerId)
       && (!deliveryRoute || entry.deliveryRoute === deliveryRoute)
+      && (!v2Only || entry.v2 === true)
   ));
 }
 
@@ -262,7 +283,7 @@ function directFcmConfiguration(): Pick<
 export function getPushDeliveryCapabilities(): PushDeliveryCapabilities {
   return {
     ...directFcmConfiguration(),
-    relayConfigured: relayPushEndpoint() !== null,
+    relayConfigured: relayPushConfigured(),
   };
 }
 
@@ -271,55 +292,54 @@ export function isPushConfigured(): boolean {
   return capabilities.directFcmConfigured || capabilities.relayConfigured;
 }
 
-function relayPushEndpoint(): string | null {
+/** Whether this computer has a relay room for the relay to send pushes for. */
+function relayPushConfigured(): boolean {
   const relayUrl = String(process.env.RELAY_URL || "").trim();
   const pairingToken = String(process.env.PAIRING_TOKEN || "").trim();
-  if (!relayUrl || !pairingToken) return null;
+  if (!relayUrl || !pairingToken) return false;
   try {
-    const url = new URL(relayUrl);
-    url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
-    url.pathname = "/api/push/send";
-    url.search = "";
-    url.hash = "";
-    return url.toString();
+    new URL(relayUrl);
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }
 
-// The relay stamps each phone's push with the ID that phone registered for
-// this computer. appServerId only fills in for phones registered without one.
-async function sendPushViaRelay(
-  endpoint: string,
-  pairingToken: string,
+/**
+ * The `relay_push` for a notification (wire spec 11.2). `legacy` rides along
+ * only when [plaintextAllowed]. [entries] are this computer's registrations
+ * that the relay delivers for. Registrations are appended, so the last one
+ * with a server ID is the newest, and it fills in for phones the relay holds
+ * without an ID.
+ */
+export function buildRelayPush(
   payload: PushNotificationPayload,
-  appServerId?: string,
-): Promise<{ sent: number; attempted: number }> {
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      pairingToken,
-      title: payload.title,
-      body: payload.body || "",
-      sessionId: payload.sessionId || "",
-      ...(appServerId ? { serverId: appServerId } : {}),
-      status: payload.status || "manual",
-      kind: payload.kind || "",
-      showNotification: payload.showNotification !== false,
-      data: payload.data || {},
-    }),
-    signal: AbortSignal.timeout(10_000),
-  });
-  const rawBody: unknown = await response.json();
-  const body = isRecord(rawBody) ? rawBody : {};
-  if (!response.ok || body?.ok !== true) {
-    throw new Error(`relay FCM request failed (${response.status}): ${body?.error || "unknown error"}`);
-  }
+  sealed: string,
+  entries: readonly StoredPushToken[],
+  plaintextAllowed: boolean,
+): RelayPushRequest {
+  const serverId = [...entries].reverse().find((entry) => entry.appServerId)?.appServerId;
   return {
-    sent: Number.isFinite(Number(body.sent)) ? Number(body.sent) : 0,
-    attempted: Number.isFinite(Number(body.attempted)) ? Number(body.attempted) : 0,
+    sealed,
+    ...(serverId ? { serverId } : {}),
+    ...(plaintextAllowed ? { legacy: legacyPushFields(payload) } : {}),
   };
+}
+
+/**
+ * The FCM `data` this computer's own Firebase path sends to one registration
+ * (wire spec 11.3). A phone that registered on a v2 channel gets the sealed
+ * text, and any other phone today's plaintext map while [plaintextAllowed].
+ * Null means that phone gets nothing.
+ */
+export function directPushData(
+  entry: StoredPushToken,
+  payload: PushNotificationPayload,
+  sealed: string | null,
+  plaintextAllowed: boolean,
+): Record<string, string> | null {
+  if (entry.v2) return sealed ? { v: "2", serverId: entry.appServerId ?? "", sealed } : null;
+  return plaintextAllowed ? plainPushData(payload, entry.appServerId ?? "") : null;
 }
 
 function loadServiceAccountCredentials(): Record<string, unknown> | null {
@@ -422,7 +442,8 @@ async function sendFcmHttpV1(
   projectId: string,
   token: string,
   data: Record<string, string>,
-  payload: PushNotificationPayload,
+  /** The plaintext to show as a system notification. Null for a sealed push, which is data only. */
+  payload: PushNotificationPayload | null,
 ): Promise<void> {
   const client = await auth.getClient();
   const message: Record<string, unknown> = {
@@ -433,7 +454,7 @@ async function sendFcmHttpV1(
     },
   };
 
-  if (payload.showNotification !== false) {
+  if (payload && payload.showNotification !== false) {
     message.notification = {
       title: payload.title,
       body: payload.body || "",
@@ -456,6 +477,12 @@ async function sendFcmHttpV1(
   });
 }
 
+/**
+ * Sends one notification to this computer's phones. The relay gets a
+ * `relay_push` for the phones registered with it. This computer's own
+ * Firebase credentials serve the phones registered as direct, and every
+ * registered phone when the relay reached none.
+ */
 export async function sendPushNotification(
   payload: PushNotificationPayload,
 ): Promise<{ sent: number; attempted: number }> {
@@ -465,31 +492,25 @@ export async function sendPushNotification(
     return { sent: 0, attempted: 0 };
   }
   const entries = readStore();
-  const endpoint = relayPushEndpoint();
-  const pairingToken = String(process.env.PAIRING_TOKEN || "").trim();
+  const sealed = pushTransport ? sealPush(payload, pushTransport.sealingSecrets()) : null;
+  const plaintextAllowed = pushTransport?.plaintextAllowed() ?? false;
   const relayEntries = entries.filter(
     (entry) => entry.deliveryRoute !== "direct",
   );
   let relayResult: { sent: number; attempted: number } | null = null;
   if (
-    endpoint &&
-    pairingToken &&
+    pushTransport &&
+    relayPushConfigured() &&
     (entries.length === 0 || relayEntries.length > 0)
   ) {
-    try {
-      relayResult = await sendPushViaRelay(
-        endpoint,
-        pairingToken,
-        payload,
-        // Registrations are appended, so the last one is the newest. A phone
-        // that re-added this computer leaves its old ID behind earlier on.
-        [...relayEntries].reverse().find((entry) => entry.appServerId)?.appServerId,
-      );
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(
-        `[Push] Relay delivery failed, checking direct Firebase fallback: ${message}`,
-      );
+    if (sealed) {
+      try {
+        relayResult = await pushTransport.relayPush(buildRelayPush(payload, sealed, relayEntries, plaintextAllowed));
+      } catch (error: unknown) {
+        console.warn(`[Push] Relay delivery failed, checking direct Firebase fallback: ${errorMessage(error)}`);
+      }
+    } else {
+      console.warn("[Push] Nothing sent through the relay: the notification could not be sealed");
     }
   }
 
@@ -518,52 +539,33 @@ export async function sendPushNotification(
     };
   }
   const projectEntries = directEntries.filter(
-    (entry) => !entry.firebaseProjectId || entry.firebaseProjectId === projectId,
+    (entry) => entry.token && (!entry.firebaseProjectId || entry.firebaseProjectId === projectId),
   );
-  const tokens = projectEntries.map((entry) => entry.token).filter(Boolean);
-  if (tokens.length === 0) {
+  if (projectEntries.length === 0) {
     return relayResult ?? { sent: 0, attempted: 0 };
   }
 
-  const groups = new Map<string, StoredPushToken[]>();
-  for (const entry of projectEntries) {
-    const key = entry.appServerId || "";
-    groups.set(key, [...(groups.get(key) || []), entry]);
-  }
-
+  const targets = projectEntries.flatMap((entry) => {
+    const data = directPushData(entry, payload, sealed, plaintextAllowed);
+    return data ? [{ entry, data }] : [];
+  });
   let sent = 0;
   const invalid = new Set<string>();
-  for (const [appServerId, group] of groups) {
-    const groupTokens = group.map((entry) => entry.token).filter(Boolean);
-    if (groupTokens.length === 0) continue;
-    const data: Record<string, string> = {
-      title: payload.title,
-      body: payload.body || "",
-      sessionId: payload.sessionId || "",
-      serverId: appServerId,
-      status: payload.status || "manual",
-      kind: payload.kind || "",
-    };
-    for (const [key, value] of Object.entries(payload.data || {})) {
-      data[key] = value == null ? "" : String(value);
-    }
-
-    for (const token of groupTokens) {
-      try {
-        await sendFcmHttpV1(auth, projectId, token, data, payload);
-        sent++;
-      } catch (err: unknown) {
-        const code = fcmErrorCode(err);
-        if (isInvalidFcmTokenError(err)) {
-          invalid.add(token);
-        }
-        console.warn(`[Push] FCM send failed: ${code || errorMessage(err)}`);
+  for (const { entry, data } of targets) {
+    try {
+      await sendFcmHttpV1(auth, projectId, entry.token, data, entry.v2 ? null : payload);
+      sent++;
+    } catch (err: unknown) {
+      const code = fcmErrorCode(err);
+      if (isInvalidFcmTokenError(err)) {
+        invalid.add(entry.token);
       }
+      console.warn(`[Push] FCM send failed: ${code || errorMessage(err)}`);
     }
   }
   removeTokens(invalid);
   return {
     sent: sent + (relayResult?.sent ?? 0),
-    attempted: tokens.length + (relayResult?.attempted ?? 0),
+    attempted: targets.length + (relayResult?.attempted ?? 0),
   };
 }

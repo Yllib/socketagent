@@ -1,17 +1,24 @@
-const {z} = require("zod");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
-const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const nacl = require("tweetnacl");
+// Keeps the push token store in a throwaway folder, away from this machine's own.
+require("./test-data-dir");
 
+const { generateKeyPair } = require("#server/noise-ikpsk1");
 const {
   getPushDeliveryCapabilities,
   isPushConfigured,
   sendPushNotification,
+  setPushTransport,
   shouldSendForwardedPush,
 } = require("#server/push-notifications");
+const { RelayClient } = require("#server/relay-client");
+const { derivePushKey, secretTag } = require("#server/transport-v2");
+const { isRecord, parseJsonObject } = require("#server/value-guards");
 
 const pushEnvironmentKeys = [
   "FIREBASE_SERVICE_ACCOUNT_JSON",
@@ -121,55 +128,92 @@ test("reports unreadable Firebase credential files and relay availability", asyn
   });
 });
 
-test("routes authoritative FCM payloads through the configured relay", async () => {
-  /** @type {unknown} */
-  let rawReceived;
-  const server = http.createServer((request, response) => {
-    /** @type {Buffer[]} */
-    const chunks = [];
-    request.on("data", (/** @type {Buffer} */ chunk) => chunks.push(chunk));
-    request.on("end", () => {
-      rawReceived = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ ok: true, sent: 1, attempted: 1 }));
-    });
+/** A relay client on a fake open socket. Frames it sends to the relay are captured. */
+function relayClient() {
+  /** @type {Record<string, unknown>[]} */
+  const sent = [];
+  const client = new RelayClient({
+    relayUrl: "wss://relay.invalid",
+    pairingToken: "ab".repeat(32),
+    keyPair: generateKeyPair(),
+    onStatusChange: () => {},
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const oldRelay = process.env.RELAY_URL;
-  const oldPairing = process.env.PAIRING_TOKEN;
-  process.env.RELAY_URL = `ws://127.0.0.1:${address.port}`;
-  process.env.PAIRING_TOKEN = "pairing-secret";
+  client.ws = { readyState: 1, send: (/** @type {string} */ data) => sent.push(parseJsonObject(data)), close: () => {} };
+  /** @param {Record<string, unknown>} message */
+  const fromRelay = (message) => client.handleRelayMessage(message);
+  return { client, sent, fromRelay };
+}
 
+test("relay_push goes over the owned room socket and waits for its result", async (t) => {
+  const { client, sent, fromRelay } = relayClient();
+  await assert.rejects(client.relayPush({ sealed: "sealed-text" }), /relay socket is down/, "not before the relay accepts the owner key");
+  assert.equal(sent.length, 0);
+
+  fromRelay({ type: "relay_capabilities", multiDevice: true, owner: true });
+  const push = client.relayPush({ sealed: "sealed-text", serverId: "phone-id" });
+  assert.deepEqual(sent, [{ type: "relay_push", id: sent[0].id, sealed: "sealed-text", serverId: "phone-id" }]);
+  assert.equal(typeof sent[0].id, "string");
+  fromRelay({ type: "relay_push_result", id: "someone-else", sent: 9, attempted: 9 });
+  fromRelay({ type: "relay_push_result", id: sent[0].id, sent: 2, attempted: 3 });
+  assert.deepEqual(await push, { sent: 2, attempted: 3 });
+
+  const refused = client.relayPush({ sealed: "sealed-text" });
+  fromRelay({ type: "relay_push_result", id: sent[1].id, error: "invalid_push" });
+  await assert.rejects(refused, /invalid_push/);
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const unanswered = client.relayPush({ sealed: "sealed-text" });
+  t.mock.timers.tick(9_999);
+  const late = client.relayPush({ sealed: "sealed-text" });
+  t.mock.timers.tick(1);
+  await assert.rejects(unanswered, /did not answer in 10 s/);
+  t.mock.timers.reset();
+
+  client.close();
+  await assert.rejects(late, /relay socket closed/);
+  await assert.rejects(client.relayPush({ sealed: "sealed-text" }), /relay socket is down/);
+});
+
+test("a notification reaches the relay sealed, with plaintext only while a device is on the old path", async () => {
+  const secret = crypto.randomBytes(32);
+  /** @type {import("#server/push-sealing").RelayPushRequest[]} */
+  const pushes = [];
+  let plaintextAllowed = false;
+  let relayUp = true;
+  setPushTransport({
+    sealingSecrets: () => [secret],
+    plaintextAllowed: () => plaintextAllowed,
+    relayPush: (push) => {
+      if (!relayUp) return Promise.reject(new Error("the relay socket is down"));
+      pushes.push(push);
+      return Promise.resolve({ sent: 1, attempted: 1 });
+    },
+  });
   try {
-    assert.equal(isPushConfigured(), true);
-    const result = await sendPushNotification({
-      title: "Finished",
-      body: "Final response text",
-      sessionId: "session-1",
-      status: "completed",
-      kind: "session_finished",
-      showNotification: false,
-      data: {
-        finishedAt: "2026-07-18T13:00:00.000Z",
-        navigationTarget: "scheduled_tasks",
-        scheduledTaskId: "task-1",
-      },
+    await withCleanPushEnvironment(async () => {
+      process.env.RELAY_URL = "wss://relay.example.test";
+      process.env.PAIRING_TOKEN = "ab".repeat(32);
+      const notification = { title: "Finished", body: "Final response text", sessionId: "session-1", kind: "session_finished" };
+
+      assert.deepEqual(await sendPushNotification(notification), { sent: 1, attempted: 1 });
+      assert.deepEqual(Object.keys(pushes[0]), ["sealed"], "no legacy part and nothing readable");
+      const [tag, boxed] = pushes[0].sealed.split(".");
+      assert.equal(tag, secretTag(secret));
+      const bytes = Buffer.from(boxed, "base64");
+      const opened = nacl.secretbox.open(bytes.subarray(24), bytes.subarray(0, 24), derivePushKey(secret));
+      assert.ok(opened);
+      assert.equal(parseJsonObject(Buffer.from(opened).toString("utf8")).body, "Final response text");
+
+      plaintextAllowed = true;
+      await sendPushNotification(notification);
+      assert.equal(isRecord(pushes[1].legacy) && pushes[1].legacy.title, "Finished");
+
+      // With the relay socket down the push is not sent, and nothing throws.
+      relayUp = false;
+      assert.deepEqual(await sendPushNotification(notification), { sent: 0, attempted: 0 });
+      assert.equal(pushes.length, 2);
     });
-    assert.deepEqual(result, { sent: 1, attempted: 1 });
-    const received = z.object({pairingToken:z.string(),kind:z.string(),showNotification:z.boolean(),data:z.record(z.string(),z.string())}).parse(rawReceived);
-    assert.equal(received.pairingToken, "pairing-secret");
-    assert.equal(received.kind, "session_finished");
-    assert.equal(received.showNotification, false);
-    assert.equal(received.data.finishedAt, "2026-07-18T13:00:00.000Z");
-    assert.equal(received.data.navigationTarget, "scheduled_tasks");
-    assert.equal(received.data.scheduledTaskId, "task-1");
   } finally {
-    if (oldRelay === undefined) delete process.env.RELAY_URL;
-    else process.env.RELAY_URL = oldRelay;
-    if (oldPairing === undefined) delete process.env.PAIRING_TOKEN;
-    else process.env.PAIRING_TOKEN = oldPairing;
-    await new Promise((resolve) => server.close(resolve));
+    setPushTransport(null);
   }
 });

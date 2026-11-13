@@ -116,7 +116,8 @@ import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store
 import type { AiConnectorStatusServerMessage } from "./protocol";
 import { isAuthFailureMessage } from "./backend-auth";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
-import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
+import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, setPushTransport, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
+import { pushSealingSecrets } from "./push-sealing";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
 import { applyUserEdit, deleteMemoryFile, memoryVersionOf, readMemoryFile, restoreMemoryFile, writeMemoryFile } from "./claude-memory";
@@ -5334,6 +5335,7 @@ function createConnectionHandler(
             appServerId,
             deliveryRoute,
             firebaseProjectId || undefined,
+            channelKindForMessage(msg) === "v2",
           );
           sendJson({
             type: "push_token_registered",
@@ -5367,7 +5369,7 @@ function createConnectionHandler(
         sendJson({
           type: "push_registration_status",
           appServerId,
-          registered: isPushTokenRegistered(token, appServerId, deliveryRoute),
+          registered: isPushTokenRegistered(token, appServerId, deliveryRoute, channelKindForMessage(msg) === "v2"),
         });
         break;
       }
@@ -11727,6 +11729,13 @@ httpServer.on("upgrade", (req, socket, head) => {
 
 // Relay client (initialized after server starts if RELAY_URL is set)
 let relayClient: RelayClient | null = null;
+// A push is sealed for the secrets recorded phones hold and goes to the relay
+// over the control-room socket. Plaintext leaves only for a phone on the old path.
+setPushTransport({
+  sealingSecrets: () => pushSealingSecrets(deviceRegistry),
+  plaintextAllowed: () => LEGACY_TRANSPORT && deviceRegistry.list().some((entry) => entry.kind === "device" && entry.transport === 1),
+  relayPush: (push) => relayClient ? relayClient.relayPush(push) : Promise.reject(new Error("the relay socket is down")),
+});
 let relayConnectionHandler: ReturnType<typeof createConnectionHandler> | null = null;
 const relayControlMessageScheduler = new ControlMessageScheduler();
 let relayBulkClient: RelayClient | null = null;

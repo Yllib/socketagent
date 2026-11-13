@@ -17,8 +17,13 @@
 
 param(
     [switch]$ResetPairing,
-    [int]$Port = 8085
+    [int]$Port = 8085,
+    # Setup passes this to its own elevated copy when the caller set
+    # SOCKETAGENT_UNATTENDED=1, because elevation does not carry that over.
+    [switch]$Unattended
 )
+
+if ($Unattended) { $env:SOCKETAGENT_UNATTENDED = '1' }
 
 $ErrorActionPreference = "Stop"
 
@@ -213,21 +218,33 @@ function Test-SocketAgentAdminAccount {
 
 # Relaunches setup through UAC. Elevating a standard account hands UAC a
 # different user, so callers only use this for administrator accounts.
+# A person gets a window that stays open at the end, for the pairing code.
+# A caller that set SOCKETAGENT_UNATTENDED=1, such as the desktop installer,
+# reads this process's exit code as setup's result, so for it the elevated
+# copy runs to the end and its exit code is passed on.
 function Start-SocketAgentElevatedSetup {
     Write-Host "  Re-launching with administrator rights (SocketAgent runs elevated)..."
+    $waits = $env:SOCKETAGENT_UNATTENDED -eq '1'
     # ArgumentList entries are joined with spaces and not quoted, so the script
     # path has to carry its own quotes or any profile with a space breaks this.
     $arguments = @(
-        "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", "`"$PSCommandPath`"",
         "-Port", $Port
     )
     if ($ResetPairing) { $arguments += "-ResetPairing" }
+    if ($waits) { $arguments += "-Unattended" } else { $arguments = @("-NoExit") + $arguments }
     try {
-        Start-Process -FilePath (Get-CurrentPowerShellExecutable) -Verb RunAs -ArgumentList $arguments
+        $elevated = Start-Process -FilePath (Get-CurrentPowerShellExecutable) -Verb RunAs -ArgumentList $arguments -PassThru -Wait:$waits
     } catch {
         Write-Fail "Elevation was declined."
         throw "Approve the administrator prompt, or rerun setup and type LIMITED to install without administrator rights"
+    }
+    if ($waits) {
+        if ($elevated.ExitCode -ne 0) {
+            throw "Setup did not finish in the administrator window (exit code $($elevated.ExitCode))"
+        }
+        exit 0
     }
     Write-Host "  Setup continues in the new administrator window; this one is done."
     exit 0

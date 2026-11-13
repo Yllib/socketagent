@@ -356,6 +356,27 @@ function linkedComputer(env, extra = {}) {
   return { keys, publicKey, linkSecret, source };
 }
 
+test("an hs1 that meets a link past its time writes nothing, and the timer's prune saves the change", () => {
+  const env = setup();
+  const expired = linkedComputer(env, { expiresAt: Date.now() - 1 });
+  let changes = 0;
+  env.registry.onChange(() => { changes++; });
+  const before = stateOnDisk(env);
+  assert.ok(before.includes(expired.publicKey));
+
+  // Anyone can send these. Each makes the responder read the registry.
+  assert.equal(answer(env, expired.source(), "link").status, "silent");
+  assert.equal(answer(env, env.device()).status, "open");
+  assert.equal(env.registry.get(expired.publicKey), undefined, "a read no longer sees the link");
+  assert.equal(stateOnDisk(env), before, "and no read wrote the file");
+  assert.equal(changes, 0, "or told a listener");
+
+  assert.equal(env.registry.pruneExpired(), true);
+  assert.equal(stateOnDisk(env).includes(expired.publicKey), false);
+  assert.equal(changes, 1);
+  assert.equal(env.registry.pruneExpired(), false, "nothing more to save");
+});
+
 test("the link lane opens for a recorded computer that proves its link secret, and moves it at transport_ready", () => {
   const env = setup();
   const computer = linkedComputer(env);

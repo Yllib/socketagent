@@ -539,6 +539,9 @@ if (!LEGACY_TRANSPORT) console.log("[Devices] The old transport is off (SOCKETAG
 /** Whether this install has SocketAgentService, so it serves every Windows account. */
 let machineServiceRegistered = process.platform === "win32" && (serviceState.service || taskExists(SERVICE_TASK));
 console.log(`[Devices] Registry mode: ${deviceRegistry.mode} (${deviceRegistry.list().length} enrolled)`);
+// A time-limited link that ran out is dropped from the file here, not by
+// whichever read notices it first: a read can come from an unproved handshake.
+setInterval(() => deviceRegistry.pruneExpired(), 60_000).unref();
 
 // The room ID: the relay room, and part of every device handshake with or
 // without a relay. The name is historical. Read from .env or made here.

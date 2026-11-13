@@ -236,6 +236,9 @@ export class DeviceRegistry {
     return this.unreadable;
   }
 
+  /** A link ran out and was dropped from memory, and the file still names it. */
+  private expiredUnsaved = false;
+
   private loaded(): TransportStateFile {
     if (!this.state) throw new Error(`${this.unreadable ?? "The device state is unreadable"}. ${STATE_RESET_HINT}`);
     return this.state;
@@ -244,6 +247,7 @@ export class DeviceRegistry {
   private write(): void {
     const state = this.loaded();
     this.pruneSecrets(state);
+    this.expiredUnsaved = false;
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     const temporary = `${this.filePath}.${process.pid}.tmp`;
     fs.writeFileSync(temporary, JSON.stringify(state, null, 2), { encoding: "utf8", mode: 0o600 });
@@ -297,14 +301,32 @@ export class DeviceRegistry {
     this.write();
   }
 
-  /** Computer links past their expiresAt are forgotten, not removed, so the user can link again. */
+  /**
+   * Computer links past their expiresAt are forgotten, not removed, so the
+   * user can link again. This drops them from memory only. Reads call it, and
+   * a read can come from a handshake nobody has proved yet, which must not
+   * write the state file or broadcast. `pruneExpired` saves the change.
+   */
   private dropExpired(): void {
     const state = this.loaded();
     const now = Date.now();
     const kept = state.devices.filter((entry) => entry.expiresAt === undefined || entry.expiresAt > now);
     if (kept.length === state.devices.length) return;
     state.devices = kept;
+    this.expiredUnsaved = true;
+  }
+
+  /**
+   * Saves the state file once a time-limited link has run out, which also
+   * tells every listener. index.ts calls it on a timer. Returns whether
+   * anything was saved.
+   */
+  pruneExpired(): boolean {
+    if (!this.state) return false;
+    this.dropExpired();
+    if (!this.expiredUnsaved) return false;
     this.write();
+    return true;
   }
 
   /**

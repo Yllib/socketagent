@@ -283,7 +283,8 @@ test("a token the relay reports dead leaves this computer's store, so the next l
   }
 });
 
-test("the relay gets the room's push list when it accepts the owner key and after every change", () => {
+test("the relay gets the room's push list when it accepts the owner key and after every change, two seconds apart", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2026-11-13T10:00:00Z") });
   /** @type {import("#server/push-notifications").RelayPushToken[]} */
   let held = [{ token: "fcm-old-app", platform: "android", serverId: "phone-a-id" }];
   const { client, sent, fromRelay } = relayClient(() => held);
@@ -296,14 +297,39 @@ test("the relay gets the room's push list when it accepts the owner key and afte
   assert.deepEqual(sent, [{ type: "relay_push_tokens", id: sent[0].id, tokens: held }]);
   assert.equal(typeof sent[0].id, "string");
 
+  // Changes inside two seconds of the last frame go out as one frame when the two seconds are up, with the newest list.
   held = [...held, { token: "fcm-new-app", platform: "ios", serverId: "phone-b-id", v: 2 }];
   client.sendPushTokens();
-  assert.deepEqual(sent[1].tokens, held);
-  fromRelay({ type: "relay_push_tokens_result", id: sent[1].id, count: 2 });
-
-  client.close();
+  held = [...held, { token: "fcm-third", platform: "android" }];
   client.sendPushTokens();
-  assert.equal(sent.length, 2, "nothing once the socket is gone");
+  t.mock.timers.tick(1_999);
+  assert.equal(sent.length, 1);
+  t.mock.timers.tick(1);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1].tokens, held);
+  fromRelay({ type: "relay_push_tokens_result", id: sent[1].id, count: 3 });
+
+  // Two seconds after the last frame the next change goes at once.
+  t.mock.timers.tick(2_000);
+  client.sendPushTokens();
+  assert.equal(sent.length, 3);
+
+  // A removal or a reset does not wait, and takes the place of a frame that was waiting.
+  client.sendPushTokens();
+  held = [];
+  client.sendPushTokens(true);
+  assert.equal(sent.length, 4);
+  assert.deepEqual(sent[3].tokens, []);
+  t.mock.timers.tick(2_000);
+  assert.equal(sent.length, 4);
+
+  // A frame still waiting when the socket closes is not sent, and the next socket starts with no wait.
+  client.sendPushTokens(true);
+  client.sendPushTokens();
+  client.close();
+  t.mock.timers.tick(2_000);
+  client.sendPushTokens();
+  assert.equal(sent.length, 5, "nothing once the socket is gone");
 
   // A room that keeps no push list, like the bulk room, sends none.
   const bulk = relayClient();
@@ -344,11 +370,13 @@ test("every registration an app gives this computer is on the list for the relay
 
 test("a removed device's registrations leave the list for the relay, and a reset leaves none", () => {
   let changes = 0;
+  /** @type {boolean[]} */
+  const atOnce = [];
   setPushTransport({
     sealingSecrets: () => [],
     plaintextAllowed: () => false,
     relayPush: () => Promise.reject(new Error("unused")),
-    relayTokensChanged: () => { changes += 1; },
+    relayTokensChanged: (now) => { changes += 1; atOnce.push(now); },
   });
   const listed = () => relayPushTokens().map((entry) => entry.token);
   try {
@@ -362,12 +390,14 @@ test("a removed device's registrations leave the list for the relay, and a reset
     registerPushToken("fcm-no-key-2", "android", "phone-d-id", "relay", undefined, true, "key-kept");
     registerPushToken("fcm-lost-phone", "android", "phone-a-id", "relay", undefined, true);
     assert.deepEqual(listed(), ["fcm-kept-phone", "fcm-no-key", "fcm-no-key-2", "fcm-lost-phone"]);
+    assert.equal(atOnce.includes(true), false, "a registration waits its turn");
 
     // Forget: the forgotten key's registrations only.
     changes = 0;
     dropDeviceRegistrations("key-lost", false);
     assert.deepEqual(listed(), ["fcm-kept-phone", "fcm-no-key", "fcm-no-key-2"]);
     assert.equal(changes, 1, "the relay is sent the new list");
+    assert.equal(atOnce.at(-1), true, "and without waiting");
     dropDeviceRegistrations("key-lost", false);
     assert.equal(changes, 1, "nothing to drop, nothing to send");
 
@@ -381,6 +411,7 @@ test("a removed device's registrations leave the list for the relay, and a reset
     clearPushRegistrations();
     assert.deepEqual(listed(), []);
     assert.equal(changes, 1);
+    assert.equal(atOnce.at(-1), true);
   } finally {
     clearPushRegistrations();
     setPushTransport(null);

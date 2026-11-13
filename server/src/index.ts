@@ -11559,7 +11559,7 @@ setPushTransport({
   sealingSecrets: () => pushSealingSecrets(deviceRegistry),
   plaintextAllowed: () => LEGACY_TRANSPORT && deviceRegistry.list().some((entry) => entry.kind === "device" && entry.transport === 1),
   relayPush: (push) => relayClient ? relayClient.relayPush(push) : Promise.reject(new Error("the relay socket is down")),
-  relayTokensChanged: () => relayClient?.sendPushTokens(),
+  relayTokensChanged: (atOnce) => relayClient?.sendPushTokens(atOnce),
 });
 let relayConnectionHandler: ReturnType<typeof createConnectionHandler> | null = null;
 const relayControlMessageScheduler = new ControlMessageScheduler();

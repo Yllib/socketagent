@@ -40,8 +40,12 @@ export interface PushTransport {
    * socket is down. [dead] names the tokens the relay found dead.
    */
   relayPush(push: RelayPushRequest): Promise<{ sent: number; attempted: number; dead: string[] }>;
-  /** Called after every change to the stored registrations, so the relay gets the list again. */
-  relayTokensChanged(): void;
+  /**
+   * Called after every change to the stored registrations, so the relay gets
+   * the list again. [atOnce] is true when a device was removed or the pairing
+   * reset, and the list must not wait its turn.
+   */
+  relayTokensChanged(atOnce: boolean): void;
 }
 
 /** One registration in a `relay_push_tokens` frame (wire spec 11.2a). */
@@ -156,10 +160,10 @@ function readStore(): StoredPushToken[] {
   }
 }
 
-function writeStore(entries: StoredPushToken[]): void {
+function writeStore(entries: StoredPushToken[], atOnce = false): void {
   fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
   fs.writeFileSync(STORE_PATH, JSON.stringify(entries, null, 2), { mode: 0o600 });
-  pushTransport?.relayTokensChanged();
+  pushTransport?.relayTokensChanged(atOnce);
 }
 
 /** Whether the relay delivers for [entry]. Only a phone that registered as direct is left to this computer's own Firebase path. */
@@ -230,12 +234,12 @@ export function registerPushToken(
 export function dropDeviceRegistrations(deviceKey: string, alsoUnkeyed: boolean): void {
   const stored = readStore();
   const kept = stored.filter((entry) => (entry.deviceKey ? entry.deviceKey !== deviceKey : !alsoUnkeyed));
-  if (kept.length !== stored.length) writeStore(kept);
+  if (kept.length !== stored.length) writeStore(kept, true);
 }
 
 /** Drops every registration. Pairing was started over, so every phone has to pair and register again. */
 export function clearPushRegistrations(): void {
-  if (readStore().length > 0) writeStore([]);
+  if (readStore().length > 0) writeStore([], true);
 }
 
 export function unregisterPushToken(

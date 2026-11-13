@@ -53,6 +53,13 @@ const RELAY_AUTH_LABEL = "socketagent-relay-auth-v1";
 /** How long `relayPush` waits for the relay's `relay_push_result`. */
 const RELAY_PUSH_WAIT_MS = 10_000;
 
+/**
+ * The least time between two `relay_push_tokens` frames on one socket, apart
+ * from those sent at once. The relay takes 60 a minute from a socket. This
+ * keeps a computer at 30, however often a phone registers.
+ */
+const PUSH_TOKENS_MIN_GAP_MS = 2_000;
+
 /** The relay's answer to a `relay_push`. [dead] names the tokens Firebase told it no longer exist. */
 export interface RelayPushResult { sent: number; attempted: number; dead: string[] }
 
@@ -369,6 +376,10 @@ export class RelayClient {
   private refusedAsOwner = false;
   private pendingPushes = new Map<string, PendingRelayPush>();
   private nextPushId = 1;
+  /** When the last `relay_push_tokens` went out on this socket. */
+  private pushTokensSentAt = 0;
+  /** Set while a `relay_push_tokens` waits for the gap since the last one to pass. */
+  private pushTokensTimer: ReturnType<typeof setTimeout> | null = null;
   private status: RelayStatus = "disconnected";
   private reconnectDelay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -685,12 +696,31 @@ export class RelayClient {
    * Gives the relay this room's whole push list, which replaces the one it
    * holds. Does nothing while the socket is down or the relay has not
    * accepted this computer as the room's owner: the list goes out when it does.
+   * A send within two seconds of the last one waits until they are up. The
+   * list is read when the frame goes, so the relay ends with the newest.
+   * [atOnce] skips the wait, for a removed device or a reset, whose
+   * registrations must not stay listed while a timer runs.
    */
-  sendPushTokens(): void {
+  sendPushTokens(atOnce = false): void {
     const ws = this.ws;
     const { pushTokens } = this.opts;
     if (!pushTokens || !ws || ws.readyState !== WebSocket.OPEN || !this.ownsRoom) return;
+    const wait = atOnce ? 0 : this.pushTokensSentAt + PUSH_TOKENS_MIN_GAP_MS - Date.now();
+    if (wait > 0) {
+      this.pushTokensTimer ??= setTimeout(() => {
+        this.pushTokensTimer = null;
+        this.sendPushTokens();
+      }, wait);
+      return;
+    }
+    this.clearPushTokensTimer();
+    this.pushTokensSentAt = Date.now();
     ws.send(JSON.stringify({ type: "relay_push_tokens", id: `tokens-${this.nextPushId++}`, tokens: pushTokens() }));
+  }
+
+  private clearPushTokensTimer(): void {
+    if (this.pushTokensTimer) clearTimeout(this.pushTokensTimer);
+    this.pushTokensTimer = null;
   }
 
   /** Settles the push a `relay_push_result` answers. A result for no waiting push is dropped. */
@@ -711,8 +741,11 @@ export class RelayClient {
     pending.resolve({ sent: count(result.sent), attempted: count(result.attempted), dead });
   }
 
+  /** The socket is gone: waiting pushes fail, and the next socket sends its push list with no wait. */
   private failPendingPushes(): void {
     this.ownsRoom = false;
+    this.clearPushTokensTimer();
+    this.pushTokensSentAt = 0;
     for (const pending of this.pendingPushes.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error("the relay socket closed"));

@@ -1,0 +1,128 @@
+{
+  "note": "Published test vectors for Noise_IKpsk1_25519_ChaChaPoly_SHA256. Each vector is copied unchanged from the source named beside it, and only the entries for this protocol name are kept. Read by test/noise-ikpsk1.test.js. Retrieved 2026-11-12.",
+  "cacophony": {
+    "source": "https://github.com/haskell-cryptography/cacophony file vectors/cacophony.txt, last changed in commit 18b7348c54fd61fcd0c220298883de0d09c8364d. The same file ships in snow as tests/vectors/cacophony.txt (https://github.com/mcginty/snow, commit 2fcd3e2dbe3f4a455df5614538aa589c5854062b).",
+    "sha256": "3bde7c09a6f349ee11c825c50fcc02649f8f02a47c857a459206b357f9386cae",
+    "license": "Unlicense (public domain)",
+    "format": "The Noise wiki test vector format, https://github.com/noiseprotocol/noise_wiki/wiki/Test-vectors. All values are hex. init_static, init_ephemeral, resp_static and resp_ephemeral are private keys. messages[0] and messages[1] are the handshake messages. The rest are transport messages with an empty associated data, sent in turn starting with the initiator.",
+    "vectors": [
+      {
+        "protocol_name": "Noise_IKpsk1_25519_ChaChaPoly_SHA256",
+        "init_prologue": "4a6f686e2047616c74",
+        "init_psks": [
+          "54686973206973206d7920417573747269616e20706572737065637469766521"
+        ],
+        "init_static": "e61ef9919cde45dd5f82166404bd08e38bceb5dfdfded0a34c8df7ed542214d1",
+        "init_ephemeral": "893e28b9dc6ca8d611ab664754b8ceb7bac5117349a4439a6b0569da977c464a",
+        "init_remote_static": "31e0303fd6418d2f8c0e78b91f22e8caed0fbe48656dcf4767e4834f701b8f62",
+        "resp_prologue": "4a6f686e2047616c74",
+        "resp_psks": [
+          "54686973206973206d7920417573747269616e20706572737065637469766521"
+        ],
+        "resp_static": "4a3acbfdb163dec651dfa3194dece676d437029c62a408b4c5ea9114246e4893",
+        "resp_ephemeral": "bbdb4cdbd309f1a1f2e1456967fe288cadd6f712d65dc7b7793d5e63da6b375b",
+        "handshake_hash": "3ad252ed6f724c52da3450383b7d8b806c183e1ef157bbe0465ad24997ec4717",
+        "messages": [
+          {
+            "payload": "4c756477696720766f6e204d69736573",
+            "ciphertext": "ca35def5ae56cec33dc2036731ab14896bc4c75dbb07a61f879f8e3afa4c7944ac58a6c31948ce200911c5b27b67f1c4d1bed490532dd94ed17164fcc5784d3730fc302b70cc0f19beedaeb56bd974c0e57d747d11534c746eb2a32ac3fde3e4cdf6c3a4705762a6c6ca664b3bc89490"
+          },
+          {
+            "payload": "4d757272617920526f746862617264",
+            "ciphertext": "95ebc60d2b1fa672c1f46a8aa265ef51bfe38e7ccb39ec5be34069f144808843846a944a0652fb390d213d0700d5ae8fef7aad0ecc79a9216d15de5d7f3ee4"
+          },
+          {
+            "payload": "462e20412e20486179656b",
+            "ciphertext": "5d872673f64813a47a00369b15c8da92691605ad71ba019de8e718"
+          },
+          {
+            "payload": "4361726c204d656e676572",
+            "ciphertext": "2045266a750b6af2547f7eb1391058196b742d0aac4b3a1bcc1913"
+          },
+          {
+            "payload": "4a65616e2d426170746973746520536179",
+            "ciphertext": "9ec47ed0e7628c7d7a4eed631b963740ac2fd754eadaa9232e99054af4f7b29174"
+          },
+          {
+            "payload": "457567656e2042f6686d20766f6e2042617765726b",
+            "ciphertext": "310e359407350594cfb96eb4596e35677d4a71ceb42aa8cbba097bb9e7150b0d1bd749c4aa"
+          }
+        ]
+      }
+    ]
+  },
+  "flynn": {
+    "source": "https://github.com/flynn/noise file vectors.txt, last changed in commit fc3a9f3b3c4fba0af38ac409e8867672499d26e4.",
+    "sha256": "0b8a1305176c95952802b114baa4aa2a3d6e7c33fdf2035b60b8c92058a50d9c",
+    "license": "BSD-3-Clause, see noise-flynn-LICENSE in this folder",
+    "format": "Upstream is blocks of key=value lines. Each block is one object here with the same keys and values. All values are hex. init_static, resp_static, gen_init_ephemeral and gen_resp_ephemeral are private keys. A missing prologue is empty. msg_0 and msg_1 are the handshake messages. msg_2 (from the initiator) and msg_3 (from the responder) are transport messages with an empty associated data.",
+    "vectors": [
+      {
+        "handshake": "Noise_IKpsk1_25519_ChaChaPoly_SHA256",
+        "init_static": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "resp_static": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        "gen_init_ephemeral": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+        "gen_resp_ephemeral": "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60",
+        "preshared_key": "2176657279736563726574766572797365637265747665727973656372657421",
+        "msg_0_payload": "",
+        "msg_0_ciphertext": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254b4a9c4176c417784b1ee28a0f323750682da959b44f9d8e06a07f757567492fa9c485c377303672a2809b5a5bb0f90133dfe4b427300d7bb2519877180db9826",
+        "msg_1_payload": "",
+        "msg_1_ciphertext": "64b101b1d0be5a8704bd078f9895001fc03e8e9f9522f188dd128d9846d48466bd7e6a1364b08460dccf8961a117a93a",
+        "msg_2_payload": "79656c6c6f777375626d6172696e65",
+        "msg_2_ciphertext": "4492510a2b642757ad4089fda1333476635f5e8d984d8de917325a480380c8",
+        "msg_3_payload": "7375626d6172696e6579656c6c6f77",
+        "msg_3_ciphertext": "1e263d17ead44ed55677c2a12b11a3c9b625d3aa9f128b279cd5e281d5a8d9"
+      },
+      {
+        "handshake": "Noise_IKpsk1_25519_ChaChaPoly_SHA256",
+        "init_static": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "resp_static": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        "gen_init_ephemeral": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+        "gen_resp_ephemeral": "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60",
+        "preshared_key": "2176657279736563726574766572797365637265747665727973656372657421",
+        "msg_0_payload": "746573745f6d73675f30",
+        "msg_0_ciphertext": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254b4a9c4176c417784b1ee28a0f323750682da959b44f9d8e06a07f757567492fa9c485c377303672a2809b5a5bb0f9013363eebbdb99964a60f81048f750a3e578d215067a83d2699d584",
+        "msg_1_payload": "746573745f6d73675f31",
+        "msg_1_ciphertext": "64b101b1d0be5a8704bd078f9895001fc03e8e9f9522f188dd128d9846d48466e07ee913ea981e364239c3d829a9b1851d249f6fcd440f660431",
+        "msg_2_payload": "79656c6c6f777375626d6172696e65",
+        "msg_2_ciphertext": "4492510a2b642757ad4089fda1333476635f5e8d984d8de917325a480380c8",
+        "msg_3_payload": "7375626d6172696e6579656c6c6f77",
+        "msg_3_ciphertext": "1e263d17ead44ed55677c2a12b11a3c9b625d3aa9f128b279cd5e281d5a8d9"
+      },
+      {
+        "handshake": "Noise_IKpsk1_25519_ChaChaPoly_SHA256",
+        "init_static": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "resp_static": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        "gen_init_ephemeral": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+        "gen_resp_ephemeral": "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60",
+        "prologue": "6e6f74736563726574",
+        "preshared_key": "2176657279736563726574766572797365637265747665727973656372657421",
+        "msg_0_payload": "",
+        "msg_0_ciphertext": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254b4a9c4176c417784b1ee28a0f323750682da959b44f9d8e06a07f757567492fa875cb562717ab59a6cc44f6b90abbc692e57a72d368bbac4c15f2b26390fca38",
+        "msg_1_payload": "",
+        "msg_1_ciphertext": "64b101b1d0be5a8704bd078f9895001fc03e8e9f9522f188dd128d9846d484660a90cdf82790ca5709564a1a8ec6bd28",
+        "msg_2_payload": "79656c6c6f777375626d6172696e65",
+        "msg_2_ciphertext": "4492510a2b642757ad4089fda1333476635f5e8d984d8de917325a480380c8",
+        "msg_3_payload": "7375626d6172696e6579656c6c6f77",
+        "msg_3_ciphertext": "1e263d17ead44ed55677c2a12b11a3c9b625d3aa9f128b279cd5e281d5a8d9"
+      },
+      {
+        "handshake": "Noise_IKpsk1_25519_ChaChaPoly_SHA256",
+        "init_static": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "resp_static": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        "gen_init_ephemeral": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+        "gen_resp_ephemeral": "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60",
+        "prologue": "6e6f74736563726574",
+        "preshared_key": "2176657279736563726574766572797365637265747665727973656372657421",
+        "msg_0_payload": "746573745f6d73675f30",
+        "msg_0_ciphertext": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254b4a9c4176c417784b1ee28a0f323750682da959b44f9d8e06a07f757567492fa875cb562717ab59a6cc44f6b90abbc69363eebbdb99964a60f81d1bdca6741998d3df66cc4c3f7a20991",
+        "msg_1_payload": "746573745f6d73675f31",
+        "msg_1_ciphertext": "64b101b1d0be5a8704bd078f9895001fc03e8e9f9522f188dd128d9846d48466e07ee913ea981e364239b86129146a0dcf47f65877606625369d",
+        "msg_2_payload": "79656c6c6f777375626d6172696e65",
+        "msg_2_ciphertext": "4492510a2b642757ad4089fda1333476635f5e8d984d8de917325a480380c8",
+        "msg_3_payload": "7375626d6172696e6579656c6c6f77",
+        "msg_3_ciphertext": "1e263d17ead44ed55677c2a12b11a3c9b625d3aa9f128b279cd5e281d5a8d9"
+      }
+    ]
+  }
+}

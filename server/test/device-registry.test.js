@@ -30,7 +30,8 @@ test("the first start carries devices.json over and never reads it again", () =>
   const { state, legacy } = paths();
   const [phone, computer, removed] = [newKey(), newKey(), newKey()];
   fs.writeFileSync(legacy, JSON.stringify({
-    version: 1, mode: "enforced", revoked: [removed],
+    // The old file may hold a removed key without its padding.
+    version: 1, mode: "enforced", revoked: [removed.replace(/=+$/, "")],
     devices: [
       { publicKey: phone, kind: "device", name: "Pixel", platform: "android", addedAt: "2026-10-01", lastSeenAt: "2026-10-02", via: "token" },
       { publicKey: computer, kind: "computer", name: "Dev VM", platform: "computer", addedAt: "2026-10-01", lastSeenAt: "2026-10-01", via: "link",

@@ -310,7 +310,7 @@ export class TransportChannel implements FrameChannel {
   private readonly sendDirection: number;
   private readonly receiveDirection: number;
   private sent = 0;
-  private received = 0;
+  private received = 0n;
   private failed = false;
 
   constructor(keys: TransportChannelKeys) {
@@ -345,11 +345,10 @@ export class TransportChannel implements FrameChannel {
     if (nonce[0] !== this.receiveDirection) this.fail("Frame sealed for the other direction");
     for (let index = 1; index < 16; index++) if (nonce[index] !== 0) this.fail("Record nonce padding is not zero");
     const counter = new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength).getBigUint64(16);
-    if (counter <= BigInt(this.received)) this.fail("Replayed or reordered frame");
+    if (counter <= this.received) this.fail("Replayed or reordered frame");
     const plaintext = nacl.secretbox.open(box, nonce, this.receiveKey);
     if (!plaintext) this.fail("The record did not open");
-    // Counters stay below 2^53, far past any connection's frame count.
-    this.received = Number(counter);
+    this.received = counter;
     return plaintext;
   }
 

@@ -21,6 +21,8 @@ export function generateKeyPair(): KeyPair {
 // nacl.box redoes the X25519 key exchange on every call. The shared key per
 // key pair is cached instead, so each message costs only the symmetric cipher.
 const sharedKeys = new WeakMap<Uint8Array, Map<string, Uint8Array>>();
+// A frame may name any key, so the cache drops its oldest entry past this.
+const MAX_SHARED_KEYS = 1024;
 
 function sharedKey(theirPublicKey: Uint8Array, mySecretKey: Uint8Array): Uint8Array {
   let byPeer = sharedKeys.get(mySecretKey);
@@ -32,6 +34,9 @@ function sharedKey(theirPublicKey: Uint8Array, mySecretKey: Uint8Array): Uint8Ar
   let key = byPeer.get(peer);
   if (!key) {
     key = boxKey(theirPublicKey, mySecretKey);
+    if (byPeer.size >= MAX_SHARED_KEYS) {
+      for (const oldest of byPeer.keys()) { byPeer.delete(oldest); break; }
+    }
     byPeer.set(peer, key);
   }
   return key;

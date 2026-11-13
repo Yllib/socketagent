@@ -215,7 +215,8 @@ export class DeviceRegistry {
       relayKey: randomSecret(),
       secrets: [{ id: 1, secret: randomSecret(), createdAt: new Date().toISOString() }],
       devices: (legacy?.devices ?? []).map((entry) => ({ ...entry, transport: 1 })),
-      removed: legacy?.revoked ?? [],
+      // The old file may hold a key without padding. Every lookup uses the canonical form.
+      removed: (legacy?.revoked ?? []).map((key) => (isValidPublicKey(key) ? normalizePublicKey(key) : key)),
     };
     this.write();
     if (legacy) console.log(`[Devices] Carried ${legacy.devices.length} paired key(s) over from ${legacyFilePath}`);

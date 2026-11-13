@@ -79,6 +79,7 @@ import { parseSocketAgentPlugin } from "./plugin-contract";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
 import { RelayClient, RelayStatus, channelKindForMessage, noteDirectMessageOrigin, relayPeerForMessage, relayPeerKeyForMessage } from "./relay-client";
 import { TransportResponder } from "./transport-responder";
+import { relayClientOptions, type RelayLaneOptions } from "./relay-lanes";
 import { DirectV2Sockets, DirectV2Transport } from "./direct-v2-transport";
 import { BIN_MARKER_UPLOAD_CHUNK, DirectClientTransport } from "./direct-client-transport";
 import { broadcastDirectCapabilities, removeRegisteredKey } from "./device-removal";
@@ -12600,16 +12601,8 @@ function startRelayClient(): void {
   console.log(`[Relay] Room: ${redactSecretForLog(PAIRING_TOKEN)}`);
   console.log("[Relay] Run `socketagent pair` on this computer to show the pairing code.");
 
-  relayClient = new RelayClient({
-    relayUrl: RELAY_URL,
+  const controlLane: RelayLaneOptions = {
     pairingToken: PAIRING_TOKEN,
-    keyPair,
-    ownerKey,
-    responder: transportResponder,
-    legacyTransport: LEGACY_TRANSPORT,
-    lane: "control",
-    peerAuth: deviceAuthGate,
-    sessionKeyedPeers,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
     onPeerClosed: (peerId) => {
@@ -12684,20 +12677,10 @@ function startRelayClient(): void {
         relayControlMessageScheduler.reset();
       }
     },
-  });
+  };
 
-  relayClient.connect();
-
-  relayBulkClient = new RelayClient({
-    relayUrl: RELAY_URL,
+  const bulkLane: RelayLaneOptions = {
     pairingToken: `${PAIRING_TOKEN}${BULK_RELAY_PAIRING_SUFFIX}`,
-    keyPair,
-    ownerKey,
-    responder: transportResponder,
-    legacyTransport: LEGACY_TRANSPORT,
-    lane: "bulk",
-    peerAuth: deviceAuthGate,
-    sessionKeyedPeers,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
     serverCapabilities: (binaryEnvelope, lane, publicKey, transport) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey), transport),
@@ -12750,33 +12733,37 @@ function startRelayClient(): void {
         relayBulkMessageQueue = Promise.resolve();
       }
     },
-  });
-  relayBulkClient.connect();
+  };
 
-  if (LINK_ROOM_TOKEN) {
-    relayLinkClient = new RelayClient({
-      relayUrl: RELAY_URL,
-      pairingToken: LINK_ROOM_TOKEN,
-      keyPair,
-      ownerKey,
-      legacyTransport: LEGACY_TRANSPORT,
-      lane: "link",
-      peerAuth: deviceAuthGate,
-      sessionKeyedPeers,
-      onPeerJson: (message, peerId, publicKey, channel) => {
-        void computerLinkPeerApi.handle(message, publicKey, channel).then((response) => {
-          if (response) relayLinkClient?.sendReply(peerId, response);
-        }).catch((err: unknown) => {
-          console.error(`[Relay:link] Peer request failed: ${errorMessage(err)}`);
-        });
-      },
-      onPeerOpened: (_peerId, publicKey) => {
-        console.log(`[Relay:link] Linked computer connected: ${deviceRegistry.get(publicKey)?.name || publicKey.slice(0, 8)}`);
-      },
-      onStatusChange: (status: RelayStatus) => {
-        console.log(`[Relay:link] Status: ${status}`);
-      },
-    });
+  const linkLane: RelayLaneOptions | null = LINK_ROOM_TOKEN ? {
+    pairingToken: LINK_ROOM_TOKEN,
+    onPeerJson: (message, peerId, publicKey, channel) => {
+      void computerLinkPeerApi.handle(message, publicKey, channel).then((response) => {
+        if (response) relayLinkClient?.sendReply(peerId, response);
+      }).catch((err: unknown) => {
+        console.error(`[Relay:link] Peer request failed: ${errorMessage(err)}`);
+      });
+    },
+    onPeerOpened: (_peerId, publicKey) => {
+      console.log(`[Relay:link] Linked computer connected: ${deviceRegistry.get(publicKey)?.name || publicKey.slice(0, 8)}`);
+    },
+    onStatusChange: (status: RelayStatus) => {
+      console.log(`[Relay:link] Status: ${status}`);
+    },
+  } : null;
+
+  // All three are built in one place, so each lane gets the responder, the
+  // gate and the rest of what the rooms share.
+  const options = relayClientOptions(
+    { relayUrl: RELAY_URL, keyPair, ownerKey, responder: transportResponder, legacyTransport: LEGACY_TRANSPORT, peerAuth: deviceAuthGate, sessionKeyedPeers },
+    { control: controlLane, bulk: bulkLane, link: linkLane },
+  );
+  relayClient = new RelayClient(options.control);
+  relayClient.connect();
+  relayBulkClient = new RelayClient(options.bulk);
+  relayBulkClient.connect();
+  if (options.link) {
+    relayLinkClient = new RelayClient(options.link);
     relayLinkClient.connect();
   }
 }

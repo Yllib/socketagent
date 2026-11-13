@@ -5,7 +5,7 @@ const test = require("node:test");
 const dataDir = require("./test-data-dir");
 
 const { DeviceRegistry } = require("#server/device-registry");
-const { DeviceAuthGate } = require("#server/device-auth");
+const { DeviceAuthGate, recordApprovedDevice } = require("#server/device-auth");
 const { channelKindForMessage, RelayClient } = require("#server/relay-client");
 const { rotateAuthTokenInEnv } = require("#server/env-file");
 const { SessionKeyedPeerStore, SessionOffer, decrypt, encrypt, generateKeyPair, toBase64 } = require("#server/relay-crypto");
@@ -574,4 +574,39 @@ test("9.3: a device's first v2 transport_ready closes its old-path channels and 
   const back = sessionExchange(h, phone, "old-again");
   assert.equal(back.ack.device, "pending");
   assert.deepEqual(back.received(), [{ type: "device_auth_result", ok: false, reason: "not_approved" }]);
+});
+
+test("a key approved before anyone has seen it is recorded for v2 only and must prove the pairing secret", () => {
+  const registry = migratedRegistry({ mode: "enforced" });
+  const gate = new DeviceAuthGate(registry, () => AUTH_TOKEN);
+  const responderKeys = generateKeyPair();
+  const responder = new TransportResponder({ registry, keyPair: () => responderKeys, roomId: () => ROOM_ID, serverVersion: "1.1.530" });
+  /** One v2 handshake by [keys] under [secret], as far as the computer's answer. */
+  const handshake = (/** @type {import("#server/relay-crypto").KeyPair} */ keys, /** @type {string} */ secret) => {
+    const device = dial({ serverKey: responderKeys.publicKey, secret, roomId: ROOM_ID, keys });
+    const outcome = responder.handleHs1(device.hs1, { path: "relay", lane: "control" });
+    return outcome.result === "silent" ? "silent" : String(device.finish(outcome.hs2).answer.status);
+  };
+
+  // An account invite names a key that has never connected.
+  const invited = generateKeyPair();
+  const key = toBase64(invited.publicKey);
+  assert.equal(recordApprovedDevice(registry, { publicKey: key, name: "New phone" }).transport, 2);
+
+  // The old path would let a recorded key in with no token. It refuses this one.
+  assert.deepEqual(gate.authorize(key, "control"), { admission: "refused", reason: "not_approved" });
+  assert.deepEqual(gate.directAuth(key, { name: "New phone", platform: "android" }, false, "192.168.1.9"), { ok: false, reason: "not_approved", close: true });
+  // On v2 the key alone is not enough either. It takes the current pairing secret.
+  assert.equal(handshake(invited, Buffer.alloc(32, 9).toString("base64")), "silent");
+  assert.equal(handshake(invited, registry.currentSecret().secret), "open");
+
+  // A key that is waiting for an answer, with its code shown, is recorded as before.
+  const waiting = toBase64(generateKeyPair().publicKey);
+  assert.equal(recordApprovedDevice(registry, { publicKey: waiting, name: "", waiting: { name: "Old phone", platform: "android" } }).transport, 1);
+  assert.deepEqual(gate.authorize(waiting, "control"), { admission: "approved" });
+  assert.equal(registry.get(waiting)?.name, "Old phone");
+
+  // Approving a device again does not move it to another transport.
+  assert.equal(recordApprovedDevice(registry, { publicKey: waiting, name: "Renamed" }).transport, 1);
+  assert.equal(recordApprovedDevice(registry, { publicKey: key, name: "", waiting: { name: "x", platform: "ios" } }).transport, 2);
 });

@@ -1,4 +1,4 @@
-import { DeviceRegistry, DevicePlatform, deviceFingerprint } from "./device-registry";
+import { DeviceEntry, DeviceRegistry, DevicePlatform, deviceFingerprint } from "./device-registry";
 import { constantTimeEqual } from "./secret-compare";
 import { isLoopbackAddress } from "./loopback-request";
 
@@ -188,4 +188,27 @@ export class DeviceAuthGate {
     }
     return spent;
   }
+}
+
+/**
+ * Records the device key a `device_approve` names. [waiting] is set when the
+ * key is held for an answer: its owner was shown a code for it, and the
+ * record is made as it always was. A key nobody has seen, as an account
+ * invite names, is recorded on transport 2 only. It gets in once it proves
+ * the current pairing secret in a handshake, and the old path, which admits
+ * a recorded key with no token, refuses it. A key already on record keeps
+ * its transport.
+ */
+export function recordApprovedDevice(
+  registry: DeviceRegistry,
+  approval: { publicKey: string; name: string; waiting?: { name: string; platform: DevicePlatform } },
+): DeviceEntry {
+  const { publicKey, waiting } = approval;
+  const existing = registry.get(publicKey);
+  return registry.enroll({
+    publicKey, kind: "device", via: "approval",
+    name: approval.name || waiting?.name || existing?.name || "",
+    platform: waiting?.platform || existing?.platform || "android",
+    ...(waiting || existing ? {} : { transport: 2 }),
+  });
 }

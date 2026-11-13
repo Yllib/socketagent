@@ -192,6 +192,37 @@ export function encodeBinaryHs2(message: Uint8Array): Buffer {
   return Buffer.concat([Uint8Array.of(BINARY_HANDSHAKE_MARKER, 2), message]);
 }
 
+/** Whether a binary frame on the session-transfer socket is a handshake frame and not a record. */
+export function isBinaryHandshakeFrame(frame: Uint8Array): boolean {
+  return frame.length > 0 && frame[0] === BINARY_HANDSHAKE_MARKER;
+}
+
+/** Reads a binary `hs1`. Null for a frame that is not one or is outside the size limits. The caller stays silent. */
+export function parseBinaryHs1(frame: Uint8Array): { tag: string; message: Buffer } | null {
+  if (frame.length < 6 + 96 || frame.length > MAX_BINARY_HS1_BYTES) return null;
+  if (frame[0] !== BINARY_HANDSHAKE_MARKER || frame[1] !== 1) return null;
+  const bytes = Buffer.from(frame);
+  return { tag: bytes.subarray(2, 6).toString("hex"), message: bytes.subarray(6) };
+}
+
+/** Reads a binary `hs2` and returns its Noise message 2, or null when it is not one this side speaks. */
+export function parseBinaryHs2(frame: Uint8Array): Buffer | null {
+  if (frame.length < 2 + 48 || frame.length > MAX_BINARY_HS2_BYTES) return null;
+  if (frame[0] !== BINARY_HANDSHAKE_MARKER || frame[1] !== 2) return null;
+  return Buffer.from(frame).subarray(2);
+}
+
+/**
+ * The plaintext of a record on the session-transfer socket: a 4-byte
+ * big-endian header length, the JSON header, then the bytes it describes.
+ */
+export function encodeTransferRecord(header: string, bytes: Uint8Array = new Uint8Array(0)): Buffer {
+  const json = Buffer.from(header, "utf8");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(json.length);
+  return Buffer.concat([length, json, bytes]);
+}
+
 // ── Handshake payloads, spec section 3.4 ──
 
 /** A handshake payload as bytes. Throws when it would pass the size limit a receiver enforces. */

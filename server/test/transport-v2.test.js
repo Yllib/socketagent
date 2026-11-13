@@ -10,9 +10,12 @@ const {
   derivePushKey,
   encodeHs1Frame,
   encodeHs2Frame,
+  encodeTransferRecord,
   LOCAL_PSK,
   MAX_HANDSHAKE_FRAME_BYTES,
   MAX_NOISE_MESSAGE_1_BYTES,
+  parseBinaryHs1,
+  parseBinaryHs2,
   parseHandshakePayload,
   parseHs1Frame,
   parseHs2Frame,
@@ -109,7 +112,28 @@ test("each fixture case runs again from its inputs alone", () => {
       payload: Buffer.from(text(entry.payload1, "payload1"), "utf8"),
       fixedEphemeralKeyPair: keyPairFromSecretKey(Buffer.from(text(entry.initiatorEphemeralSecret, "initiatorEphemeralSecret"), "hex")),
     });
-    if (entry.frameEncoding !== "text") continue;
+    if (entry.frameEncoding !== "text") {
+      // The session-transfer socket: binary handshake frames and binary records, all in hex.
+      const hs1 = parseBinaryHs1(Buffer.from(text(expected.hs1, "hs1"), "hex"));
+      assert.ok(hs1, `${entry.name}: hs1 parses`);
+      assert.deepEqual(hs1.message, Buffer.from(initiator.message1));
+      assert.equal(hs1.tag, expected.tag);
+      assert.ok(readMessage1({ prologue, staticKeyPair: responderStatic, message: hs1.message }).tryPsk(psk), `${entry.name}: message 1 verifies`);
+      const hs2 = parseBinaryHs2(Buffer.from(text(expected.hs2, "hs2"), "hex"));
+      assert.ok(hs2, `${entry.name}: hs2 parses`);
+      const keys = initiator.readMessage2(hs2);
+      const destination = new TransportChannel({ role: "responder", sendKey: keys.receiveKey, receiveKey: keys.sendKey });
+      assert.deepEqual(
+        Buffer.from(destination.openBinary(Buffer.from(text(expected.firstRecord, "firstRecord"), "hex"))),
+        encodeTransferRecord(TRANSPORT_READY_MESSAGE),
+      );
+      // Neither parser takes the other frame, a record, or a frame past its size limit.
+      assert.equal(parseBinaryHs1(Buffer.from(text(expected.hs2, "hs2"), "hex")), null);
+      assert.equal(parseBinaryHs2(Buffer.from(text(expected.hs1, "hs1"), "hex")), null);
+      assert.equal(parseBinaryHs1(Buffer.from(text(expected.firstRecord, "firstRecord"), "hex")), null);
+      assert.equal(parseBinaryHs1(Buffer.concat([Buffer.from(text(expected.hs1, "hs1"), "hex"), Buffer.alloc(2100)])), null);
+      continue;
+    }
 
     // The responder reads the frame as it is in the file, and both records open.
     const hs1 = parseHs1Frame(text(expected.hs1, "hs1"));

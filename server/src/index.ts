@@ -955,7 +955,7 @@ const transferJobs = new SessionTransferJobs(socketAgentDataPath("transfer-jobs"
     deleteSession(id);
     broadcastSessionList();
   },
-});
+}, { serverVersion: SERVER_RELEASE_VERSION, legacyTransport: LEGACY_TRANSPORT });
 const restartRecovery = new RestartRecoveryStore(socketAgentDataPath("recovery", "runs.json"));
 const recoveryOwners = new WeakMap<Session, { sessionId: string; id: string }>();
 const abandonedRecoveryInstances = new WeakSet<Session>();
@@ -1826,7 +1826,7 @@ function serverCapabilitiesPayload(
     terminal: true,
     secretManagement: { version: 1 },
     htmlPlans: { version: 2 },
-    sessionTransfer: { version: 3 },
+    sessionTransfer: { version: 4 },
     codexGoals: { version: 1 },
     sessionMemory: { version: 1 },
     taskDismissals: { version: 1 },
@@ -7794,8 +7794,6 @@ function createConnectionHandler(
           let job: ReturnType<typeof transferJobs.status>;
           if (msg.action === "start") {
             if (!msg.config) throw new Error("Missing transfer configuration");
-            // A transfer between computers still runs on the old path's static box.
-            if (msg.config.role !== "local" && !LEGACY_TRANSPORT) throw new Error("Transfers between computers are off while the old transport is off");
             if (msg.config.role !== "local") {
               const allowed = new URL(RELAY_URL || "wss://relay.jarofdirt.info");
               const requested = new URL(msg.config.relayUrl || "");

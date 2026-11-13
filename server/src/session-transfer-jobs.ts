@@ -7,6 +7,8 @@ import WebSocket from "ws";
 import { decryptBinary, encryptBinary, type KeyPair } from "./relay-crypto";
 import type { TransferJobConfig } from "./protocol";
 import type { SessionTransferExportResult, SessionTransferImportResult } from "./session-transfer";
+import { TransferLink } from "./session-transfer-link";
+import { encodeTransferRecord } from "./transport-v2";
 
 const CHUNK = 512 * 1024;
 const WINDOW = 4;
@@ -39,8 +41,16 @@ interface Hooks {
   archive(sessionId: string, revision: string): Promise<string | undefined>;
   changed?(): void;
 }
+export interface TransferJobsOptions {
+  /** This server's release version, sent in the v2 handshake of a job that has a transfer secret. */
+  serverVersion?: string;
+  /** False when the old path is off: a job between computers then needs a transfer secret. Default true. */
+  legacyTransport?: boolean;
+}
 interface Runtime {
   ws?: WebSocket; timer?: NodeJS.Timeout; chain: Promise<void>; preparing: boolean; attempt: number;
+  /** The v2 channel of the current socket, for a job that has a transfer secret. */
+  link?: TransferLink;
   /** History entries written so far by a running import. In memory only, since a restarted import begins again. */
   restore?: { restored: number; total: number };
 }
@@ -59,12 +69,26 @@ function durableJson(file: string, value: unknown): void {
 }
 function hash(data: Buffer): string { return createHash("sha256").update(data).digest("hex"); }
 
-/** Owns durable transfers independently of connected phones. Only authenticated ciphertext crosses the relay. */
+const OLD_TRANSPORT_OFF = "This transfer uses the old transport, which is off on this computer. Start it again from the app.";
+
+/**
+ * Owns durable transfers independently of connected phones. Only authenticated ciphertext crosses the relay.
+ *
+ * A job between two computers whose config has a `transferSecret` runs a
+ * transport v2 handshake on its socket (session-transfer-link.ts) and never
+ * opens a static-box frame. A job without one uses the static box between
+ * the two computers' keys, which only happens while the old path is on.
+ */
 export class SessionTransferJobs {
   private readonly jobs = new Map<string, Job>();
   private readonly runtime = new Map<string, Runtime>();
   private closed = false;
-  constructor(private readonly directory: string, private readonly keys: KeyPair, private readonly hooks: Hooks) {
+  constructor(
+    private readonly directory: string,
+    private readonly keys: KeyPair,
+    private readonly hooks: Hooks,
+    private readonly options: TransferJobsOptions = {},
+  ) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     for (const entry of fs.readdirSync(directory)) {
       if (!UUID.test(entry)) continue;
@@ -114,13 +138,19 @@ export class SessionTransferJobs {
       const url = new URL(c.relayUrl || "");
       if (!["ws:", "wss:"].includes(url.protocol) || url.username || url.password
         || typeof c.ticket !== "string" || c.ticket.length > 2048 || !c.ticket
-        || typeof c.peerPublicKey !== "string" || Buffer.from(c.peerPublicKey, "base64").length !== 32) {
+        || typeof c.peerPublicKey !== "string" || Buffer.from(c.peerPublicKey, "base64").length !== 32
+        || (c.transferSecret !== undefined && (typeof c.transferSecret !== "string" || Buffer.from(c.transferSecret, "base64").length !== 32))) {
         throw new Error("Invalid transfer connection");
       }
     }
   }
+  /** Whether this job may not run: it would need the static box and the old path is off. */
+  private needsOldTransport(c: TransferJobConfig): boolean {
+    return c.role !== "local" && !c.transferSecret && this.options.legacyTransport === false;
+  }
   start(config: TransferJobConfig) {
     this.validate(config);
+    if (this.needsOldTransport(config)) throw new Error("Update both computers and the app to transfer between computers");
     const existing = this.jobs.get(config.jobId);
     if (existing) {
       // Renew credentials, but never allow a retry to change the authorized operation or identity.
@@ -165,6 +195,8 @@ export class SessionTransferJobs {
     clearTimeout(rt.timer);
     rt.preparing = true;
     void (async () => {
+      // A job accepted before the old path was turned off.
+      if (this.needsOldTransport(job.config)) throw new Error(OLD_TRANSPORT_OFF);
       if (job.config.role !== "destination" && !job.manifest) {
         const revision = this.hooks.revision(job.config.sessionId);
         const exported = await this.hooks.export(job.config);
@@ -193,6 +225,20 @@ export class SessionTransferJobs {
     const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${job.config.ticket}` },
       handshakeTimeout: 15_000, maxPayload: CHUNK + 16_384 });
     rt.ws = ws;
+    const secret = job.config.transferSecret;
+    const link = secret === undefined ? undefined : new TransferLink({
+      role: job.config.role === "source" ? "source" : "destination",
+      jobId: job.config.jobId,
+      keyPair: this.keys,
+      peerPublicKey: Buffer.from(job.config.peerPublicKey!, "base64"),
+      transferSecret: Buffer.from(secret, "base64"),
+      serverVersion: this.options.serverVersion ?? "",
+      sendFrame: (frame) => { if (ws.readyState === WebSocket.OPEN) ws.send(frame); },
+      onOpen: () => { if (rt.ws === ws && !this.closed && job.phase !== "failed") this.hello(job); },
+      // A new socket gets a new handshake. The close handler dials again.
+      onBroken: (why) => { console.warn(`[Transfer] ${job.config.jobId}: ${why}`); ws.close(); },
+    });
+    rt.link = link;
     let lastMessage = Date.now();
     const watchdog = setInterval(() => { if (Date.now() - lastMessage > 45_000) ws.terminate(); }, 15_000);
     watchdog.unref();
@@ -207,11 +253,15 @@ export class SessionTransferJobs {
           const signal = parseJsonObject(data.toString());
           if (signal.type === "peer_ready") {
             rt.attempt = 0;
-            this.hello(job);
+            // With a transfer secret the job's first message waits for the handshake.
+            if (link) link.peerReady();
+            else this.hello(job);
           }
           return;
         }
-        const plain = Buffer.from(decryptBinary(data, Buffer.from(job.config.peerPublicKey!, "base64"), this.keys.secretKey));
+        // A job with a transfer secret never opens a static-box frame.
+        const plain = link ? link.receive(data) : Buffer.from(decryptBinary(data, Buffer.from(job.config.peerPublicKey!, "base64"), this.keys.secretKey));
+        if (!plain) return;
         if (plain.length < 4) throw new Error("Invalid transfer frame");
         const length = plain.readUInt32BE(0);
         if (length > 8192 || length > plain.length - 4) throw new Error("Invalid transfer header");
@@ -228,8 +278,10 @@ export class SessionTransferJobs {
     });
     ws.on("close", () => {
       clearInterval(watchdog);
+      link?.close();
       if (rt.ws !== ws) return;
       rt.ws = undefined;
+      rt.link = undefined;
       if (!this.closed && job.config.role === "source" && job.phase === "completed") {
         job.settled = true; this.save(job);
       }
@@ -244,11 +296,16 @@ export class SessionTransferJobs {
     });
   }
   private send(job: Job, header: Omit<Header, "jobId">, bytes = Buffer.alloc(0)): void {
-    const ws = this.getRuntime(job).ws;
+    const { ws, link } = this.getRuntime(job);
     if (ws?.readyState !== WebSocket.OPEN) return;
-    const json = Buffer.from(JSON.stringify({ ...header, jobId: job.config.jobId }));
-    const prefix = Buffer.alloc(4); prefix.writeUInt32BE(json.length);
-    ws.send(encryptBinary(Buffer.concat([prefix, json, bytes]), Buffer.from(job.config.peerPublicKey!, "base64"), this.keys.secretKey));
+    const record = encodeTransferRecord(JSON.stringify({ ...header, jobId: job.config.jobId }), bytes);
+    if (job.config.transferSecret === undefined) {
+      ws.send(encryptBinary(record, Buffer.from(job.config.peerPublicKey!, "base64"), this.keys.secretKey));
+      return;
+    }
+    // Nothing leaves before the handshake is done. The peer asks again after the next one.
+    const sealed = link?.seal(record);
+    if (sealed) ws.send(sealed);
   }
   private hello(job: Job): void {
     if (job.config.role === "source") {

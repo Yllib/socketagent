@@ -888,6 +888,9 @@
         },
         "peerPublicKey": {
           "type": "string"
+        },
+        "transferSecret": {
+          "type": "string"
         }
       },
       "required": [

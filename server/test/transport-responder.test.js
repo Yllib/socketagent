@@ -329,7 +329,7 @@ test("limits: eight held peers and thirty pending answers in ten minutes", () =>
   assert.equal(answer(env, env.device()).status, "pending");
 });
 
-test("failed hs1 frames: twenty a minute shut out one direct address, and only a flood shuts a lane", () => {
+test("failed hs1 frames: twenty a minute shut out one direct address, and a lane is skipped only at the cap that bounds the work", () => {
   const env = setup();
   const tag = secretTag(Buffer.from(env.registry.currentSecret().secret, "base64"));
   /** An hs1 anyone can make: the public tag of the current secret over a handshake under another secret. */
@@ -365,9 +365,19 @@ test("failed hs1 frames: twenty a minute shut out one direct address, and only a
   env.advance(60 * 1000);
   for (let attempt = 0; attempt < MAX_FAILED_HS1_PER_ADDRESS; attempt++) env.responder.handleHs1(bad("relay"), { path: "relay", lane: "control" });
   assert.equal(answer(env, env.device()).status, "open");
-  // Only a flood shuts the lane, and then for the rest of that minute.
-  for (let attempt = MAX_FAILED_HS1_PER_ADDRESS; attempt < MAX_FAILED_HS1_PER_LANE; attempt++) env.responder.handleHs1(bad("relay"), { path: "relay", lane: "control" });
-  assert.equal(answer(env, env.device()).status, "silent");
+  // Nor do ten a second for a whole minute, which was once enough: a recorded device still gets in.
+  const recorded = env.device();
+  const first = answer(env, recorded);
+  assert.ok(first.outcome.result === "answered");
+  assert.deepEqual(env.responder.ready(first.outcome.handshake), { result: "open" });
+  assert.equal(env.registry.get(recorded.publicKey)?.kind, "device");
+  const oneFrame = bad("relay");
+  for (let attempt = MAX_FAILED_HS1_PER_ADDRESS; attempt < 600; attempt++) env.responder.handleHs1(oneFrame, { path: "relay", lane: "control" });
+  assert.equal(answer(env, env.device({ keys: recorded.keys })).status, "open");
+  // The work in a minute is still bounded. At the cap the lane is skipped until the minute ends.
+  assert.ok(MAX_FAILED_HS1_PER_LANE >= 10_000);
+  for (let attempt = 600; attempt < MAX_FAILED_HS1_PER_LANE; attempt++) env.responder.handleHs1(oneFrame, { path: "relay", lane: "control" });
+  assert.equal(answer(env, env.device({ keys: recorded.keys })).status, "silent");
   assert.equal(direct("192.168.1.20"), "open", "another path is not held back");
   env.advance(60 * 1000);
   assert.equal(answer(env, env.device()).status, "open");

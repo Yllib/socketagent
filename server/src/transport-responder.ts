@@ -159,10 +159,15 @@ export const MAX_FAILED_HS1_PER_ADDRESS = 20;
 /**
  * Failed `hs1` frames on one lane in a minute, from everyone together. The
  * tag in an `hs1` is public, so anyone in the room or on the network can
- * send frames that fail. This cap is high enough to bind only under a flood:
- * below it, nobody's failures make the computer skip a good handshake.
+ * send frames that fail, and below this cap nobody's failures make the
+ * computer skip a good handshake. The key an `hs1` claims shows only after
+ * the X25519 work is done, so known devices cannot be let past the cap for
+ * free. The cap is set by cost instead: a failed `hs1` takes about a quarter
+ * of a millisecond, so 20,000 a minute is at most 5 seconds of processor
+ * time, and it takes over 330 frames a second, each on a new connection, to
+ * reach it.
  */
-export const MAX_FAILED_HS1_PER_LANE = 600;
+export const MAX_FAILED_HS1_PER_LANE = 20_000;
 export const MAX_PENDING_ANSWERS = 30;
 const PENDING_ANSWER_WINDOW_MS = 10 * 60 * 1000;
 const FAILED_HS1_WINDOW_MS = 60 * 1000;

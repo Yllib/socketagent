@@ -35,8 +35,11 @@ export interface PushTransport {
   sealingSecrets(): Uint8Array[];
   /** True while the old path is on and a recorded device is still on it. Only then may a push leave in plaintext. */
   plaintextAllowed(): boolean;
-  /** Sends a `relay_push` over the control-room socket. Rejects when that socket is down. */
-  relayPush(push: RelayPushRequest): Promise<{ sent: number; attempted: number }>;
+  /**
+   * Sends a `relay_push` over the control-room socket. Rejects when that
+   * socket is down. [dead] names the tokens the relay found dead.
+   */
+  relayPush(push: RelayPushRequest): Promise<{ sent: number; attempted: number; dead: string[] }>;
   /** Called after every change to the stored registrations, so the relay gets the list again. */
   relayTokensChanged(): void;
 }
@@ -567,7 +570,13 @@ export async function sendPushNotification(
   ) {
     if (sealed) {
       try {
-        relayResult = await pushTransport.relayPush(buildRelayPush(payload, sealed, relayEntries, plaintextAllowed));
+        const { sent, attempted, dead } = await pushTransport.relayPush(buildRelayPush(payload, sealed, relayEntries, plaintextAllowed));
+        relayResult = { sent, attempted };
+        // The relay has dropped these already. Dropping them here keeps the
+        // next list this computer sends from putting them back. Only a token
+        // the relay delivers for is its to name.
+        const listed = new Set(relayEntries.map((entry) => entry.token));
+        removeTokens(new Set(dead.filter((token) => listed.has(token))));
       } catch (error: unknown) {
         console.warn(`[Push] Relay delivery failed, checking direct Firebase fallback: ${errorMessage(error)}`);
       }

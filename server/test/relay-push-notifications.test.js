@@ -14,6 +14,7 @@ const {
   dropDeviceRegistrations,
   getPushDeliveryCapabilities,
   isPushConfigured,
+  isPushTokenRegistered,
   registerPushToken,
   relayPushTokens,
   sendPushNotification,
@@ -164,10 +165,15 @@ test("relay_push goes over the owned room socket and waits for its result", asyn
   assert.equal(typeof sent[0].id, "string");
   fromRelay({ type: "relay_push_result", id: "someone-else", sent: 9, attempted: 9 });
   fromRelay({ type: "relay_push_result", id: sent[0].id, sent: 2, attempted: 3 });
-  assert.deepEqual(await push, { sent: 2, attempted: 3 });
+  assert.deepEqual(await push, { sent: 2, attempted: 3, dead: [] });
+
+  // The tokens the relay names as dead come back with the counts. Anything that is not a string is left out.
+  const withDead = client.relayPush({ sealed: "sealed-text" });
+  fromRelay({ type: "relay_push_result", id: sent[1].id, sent: 1, attempted: 2, dead: ["fcm-dead", 7, null] });
+  assert.deepEqual(await withDead, { sent: 1, attempted: 2, dead: ["fcm-dead"] });
 
   const refused = client.relayPush({ sealed: "sealed-text" });
-  fromRelay({ type: "relay_push_result", id: sent[1].id, error: "invalid_push" });
+  fromRelay({ type: "relay_push_result", id: sent[2].id, error: "invalid_push" });
   await assert.rejects(refused, /invalid_push/);
 
   t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -195,7 +201,7 @@ test("a notification reaches the relay sealed, with plaintext only for a phone t
     relayPush: (push) => {
       if (!relayUp) return Promise.reject(new Error("the relay socket is down"));
       pushes.push(push);
-      return Promise.resolve({ sent: 1, attempted: 1 });
+      return Promise.resolve({ sent: 1, attempted: 1, dead: [] });
     },
     relayTokensChanged: () => {},
   });
@@ -236,6 +242,43 @@ test("a notification reaches the relay sealed, with plaintext only for a phone t
       assert.equal(pushes.length, 5);
     });
   } finally {
+    setPushTransport(null);
+  }
+});
+
+test("a token the relay reports dead leaves this computer's store, so the next list does not put it back", async () => {
+  /** @type {string[]} */
+  let dead = [];
+  let changes = 0;
+  setPushTransport({
+    sealingSecrets: () => [crypto.randomBytes(32)],
+    plaintextAllowed: () => false,
+    relayPush: () => Promise.resolve({ sent: 1, attempted: 2, dead }),
+    relayTokensChanged: () => { changes += 1; },
+  });
+  try {
+    await withCleanPushEnvironment(async () => {
+      process.env.RELAY_URL = "wss://relay.example.test";
+      process.env.PAIRING_TOKEN = "ab".repeat(32);
+      registerPushToken("fcm-live", "android", "phone-a-id", "relay", undefined, true);
+      registerPushToken("fcm-dead", "android", "phone-b-id", "relay", undefined, true);
+      registerPushToken("fcm-direct", "android", "phone-c-id", "direct", "some-project");
+      const stored = () => ["fcm-live", "fcm-dead", "fcm-direct"].filter((token) => isPushTokenRegistered(token));
+
+      changes = 0;
+      assert.deepEqual(await sendPushNotification({ title: "Finished" }), { sent: 1, attempted: 3 });
+      assert.deepEqual(stored(), ["fcm-live", "fcm-dead", "fcm-direct"]);
+      assert.equal(changes, 0, "nothing dead, nothing rewritten");
+
+      // The relay may name only a token it delivers for. One this computer's own Firebase serves stays.
+      dead = ["fcm-dead", "fcm-direct", "fcm-never-registered"];
+      assert.deepEqual(await sendPushNotification({ title: "Finished" }), { sent: 1, attempted: 3 });
+      assert.deepEqual(stored(), ["fcm-live", "fcm-direct"]);
+      assert.deepEqual(relayPushTokens().map((entry) => entry.token), ["fcm-live"]);
+      assert.equal(changes, 1, "the relay is sent the list without it");
+    });
+  } finally {
+    clearPushRegistrations();
     setPushTransport(null);
   }
 });

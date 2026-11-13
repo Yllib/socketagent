@@ -10,7 +10,7 @@ import {
   type SessionKeyedPeers,
 } from "./relay-crypto";
 import { parseClientMessage } from "./client-message";
-import { errorMessage, isRecord, parseJsonObject } from "./value-guards";
+import { errorMessage, isRecord, parseJsonObject, unknownArray } from "./value-guards";
 import {
   ClientMessage,
   TransportLane,
@@ -53,8 +53,11 @@ const RELAY_AUTH_LABEL = "socketagent-relay-auth-v1";
 /** How long `relayPush` waits for the relay's `relay_push_result`. */
 const RELAY_PUSH_WAIT_MS = 10_000;
 
+/** The relay's answer to a `relay_push`. [dead] names the tokens Firebase told it no longer exist. */
+export interface RelayPushResult { sent: number; attempted: number; dead: string[] }
+
 interface PendingRelayPush {
-  resolve: (result: { sent: number; attempted: number }) => void;
+  resolve: (result: RelayPushResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -662,7 +665,7 @@ export class RelayClient {
    * when the socket is down, when the relay reports an error, and after 10 s
    * with no answer.
    */
-  relayPush(push: RelayPushRequest): Promise<{ sent: number; attempted: number }> {
+  relayPush(push: RelayPushRequest): Promise<RelayPushResult> {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN || !this.ownsRoom) {
       return Promise.reject(new Error("the relay socket is down"));
@@ -704,7 +707,8 @@ export class RelayClient {
       return;
     }
     const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
-    pending.resolve({ sent: count(result.sent), attempted: count(result.attempted) });
+    const dead = unknownArray(result.dead).filter((token): token is string => typeof token === "string");
+    pending.resolve({ sent: count(result.sent), attempted: count(result.attempted), dead });
   }
 
   private failPendingPushes(): void {

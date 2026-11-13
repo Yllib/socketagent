@@ -137,7 +137,7 @@ if $DEPLOY && [[ ! "$SIGN_RELEASES" =~ ^(0|false|off)$ ]]; then
   [[ -f "$SIGNING_KEY" ]] || { echo "Signing key not found: $SIGNING_KEY"; exit 1; }
 fi
 
-if [[ ! -d "$APP_DIR/.git" || ! -f "$PUBSPEC" ]]; then
+if [[ ! -e "$APP_DIR/.git" || ! -f "$PUBSPEC" ]]; then
   echo "SocketAgent app repo not found: $APP_DIR" >&2
   echo "Set SOCKETAGENT_APP_DIR to its absolute path if it is not beside the server repo." >&2
   exit 1

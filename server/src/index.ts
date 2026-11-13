@@ -69,17 +69,19 @@ import {
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
 } from "./protocol";
-import { encodeBinaryBrowserFrame, supportsBinaryBrowserFrames } from "./browser-frame-wire";
-import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, fileTransferVersion, resolveFileResumeOffset, supportsBinaryFileDownload } from "./file-transfer-wire";
+import { encodeBinaryBrowserFrame } from "./browser-frame-wire";
+import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, fileTransferVersion, resolveFileResumeOffset } from "./file-transfer-wire";
 import { onInlineImagesSaved } from "./session-store";
 import { inlineImageStore } from "./inline-image-store";
 import { isSendFileDeliveryPath, startSendFilePruning } from "./send-file-store";
 import { SocketAgentPlugin, PluginContext, SessionContext } from "./plugin-api";
 import { parseSocketAgentPlugin } from "./plugin-contract";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
-import { RelayClient, RelayStatus, channelKindForMessage, noteDirectMessageOrigin, relayPeerForMessage, relayPeerKeyForMessage, type MessageChannelKind } from "./relay-client";
+import { RelayClient, RelayStatus, channelKindForMessage, noteDirectMessageOrigin, relayPeerForMessage, relayPeerKeyForMessage } from "./relay-client";
 import { TransportResponder } from "./transport-responder";
 import { DirectV2Sockets, DirectV2Transport } from "./direct-v2-transport";
+import { BIN_MARKER_UPLOAD_CHUNK, DirectClientTransport } from "./direct-client-transport";
+import { broadcastDirectCapabilities, removeRegisteredKey } from "./device-removal";
 import { hasOriginHeader, isLoopbackRequest } from "./loopback-request";
 import { ViewHub, parseViewSet } from "./view-hub";
 import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
@@ -98,11 +100,8 @@ import { parseClientMessage } from "./client-message";
 import { listBackendConfigFiles, readBackendConfigFile, writeBackendConfigFile } from "./backend-config-files";
 import {
   KeyPair,
-  PeerChannel,
   SESSION_KEY_VERSION,
   SessionKeyedPeerStore,
-  acceptKeyExchange,
-  isSessionKeyDowngrade,
   loadOrCreateKeyPair,
   toBase64,
 } from "./relay-crypto";
@@ -576,230 +575,6 @@ if (fs.existsSync(pluginsDir)) {
       }
     } catch (e: unknown) {
       console.error(`Failed to load plugin ${file}: ${errorMessage(e)}`);
-    }
-  }
-}
-
-// Binary envelope plaintext markers — first byte of the decrypted payload.
-const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
-const BIN_MARKER_UPLOAD_CHUNK = 0x42;  // 'B' — upload chunk: [1 idLen][idBytes][4 chunkIdx BE][bytes]
-
-class DirectClientTransport implements ClientTransport {
-  private peerPublicKey: Uint8Array | null = null;
-  private channel: PeerChannel | null = null;
-  private binaryEnabled = false;
-  private authenticated: boolean;
-  private binaryFileDownloadEnabled = false;
-  private binaryBrowserFramesEnabled = false;
-  private authTimer: ReturnType<typeof setTimeout> | null = null;
-  supportsRawSdkEvents = false;
-  supportsSessionEventAck = false;
-  supportsMonitorOutputAck = false;
-
-  constructor(
-    private readonly ws: WebSocket,
-    private readonly keyPair: KeyPair,
-    opts: { authenticated: boolean; requireEncryptedAuth: boolean },
-  ) {
-    this.authenticated = opts.authenticated && !opts.requireEncryptedAuth;
-    this.holdsAuthToken = this.authenticated;
-    if (opts.requireEncryptedAuth) {
-      this.authTimer = setTimeout(() => {
-        if (this.authenticated || this.ws.readyState !== WebSocket.OPEN) return;
-        console.warn("[Direct E2E] Closing unauthenticated encrypted direct socket after timeout");
-        this.ws.close(1008, "Authentication timeout");
-      }, 15_000);
-    }
-  }
-
-  get readyState(): number {
-    return this.ws.readyState;
-  }
-
-  get bufferedAmount(): number {
-    return this.ws.bufferedAmount;
-  }
-
-  get isAuthenticated(): boolean {
-    return this.authenticated;
-  }
-
-  get usesBinaryEnvelope(): boolean {
-    return this.binaryEnabled;
-  }
-
-  get hasPeerKey(): boolean {
-    return this.channel !== null;
-  }
-
-  get peerKey(): string | undefined {
-    return this.peerPublicKey ? toBase64(this.peerPublicKey) : undefined;
-  }
-
-  /** True when this client proved AUTH_TOKEN, so capabilities may repeat it. */
-  holdsAuthToken = false;
-
-  /** The socket comes from this computer itself: loopback with no proxy in front. */
-  fromThisComputer = false;
-
-  /** How this socket's frames are keyed, for rules that need session keys. */
-  get channelKind(): MessageChannelKind {
-    if (!this.channel) return "plain";
-    return this.channel.sessionKeyed ? "session" : "static";
-  }
-
-  /** Set while the key waits for another device to approve it. */
-  heldForApproval = false;
-
-  /** Keeps the socket open past the auth timeout while approval is pending. */
-  holdForApproval(): void {
-    this.heldForApproval = true;
-    if (this.authTimer) clearTimeout(this.authTimer);
-    this.authTimer = setTimeout(() => {
-      if (this.authenticated || this.ws.readyState !== WebSocket.OPEN) return;
-      this.ws.close(1008, "Approval timed out");
-    }, 10 * 60 * 1000);
-  }
-
-  send(data: string): void {
-    if (this.ws.readyState !== WebSocket.OPEN) return;
-    if (!this.channel) {
-      this.ws.send(data);
-      return;
-    }
-
-    if (this.binaryEnabled) {
-      const jsonBytes = new TextEncoder().encode(data);
-      const plaintext = new Uint8Array(jsonBytes.length + 1);
-      plaintext[0] = BIN_MARKER_JSON;
-      plaintext.set(jsonBytes, 1);
-      this.ws.send(this.channel.sealBinary(plaintext), { binary: true });
-      return;
-    }
-
-    this.ws.send(JSON.stringify(this.channel.sealText(data)));
-  }
-
-  sendPlain(msg: Record<string, unknown>): void {
-    if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
-    }
-  }
-
-  /** Throws on a bad exchange, or a static-box one from a key that used session keys. */
-  handleKeyExchange(message: Record<string, unknown>): void {
-    const exchange = acceptKeyExchange(message, this.keyPair, sessionKeyedPeers);
-    if (this.peerPublicKey && toBase64(this.peerPublicKey) !== exchange.peerPublicKeyBase64) {
-      console.warn("[Direct E2E] Phone public key changed; replacing peer crypto state");
-    }
-    this.peerPublicKey = exchange.peerPublicKey;
-    this.channel = exchange.channel;
-    this.sendPlain({ type: "key_exchange_ack", ...exchange.ack });
-    console.log(`[Direct E2E] Key exchange complete (${exchange.channel.sessionKeyed ? "session key" : "static key"}) — waiting for encrypted auth`);
-  }
-
-  /**
-   * Whether the client speaks session keys although this socket's handshake
-   * had none, which means someone stripped them. Holds its key to them.
-   */
-  isSessionKeyDowngrade(message: unknown): boolean {
-    if (!this.channel || !isSessionKeyDowngrade(message, this.channel)) return false;
-    if (this.peerPublicKey) sessionKeyedPeers.add(toBase64(this.peerPublicKey));
-    return true;
-  }
-
-  authenticate(binaryEnvelope: boolean): void {
-    this.authenticated = true;
-    this.heldForApproval = false;
-    this.binaryEnabled = binaryEnvelope;
-    if (this.authTimer) {
-      clearTimeout(this.authTimer);
-      this.authTimer = null;
-    }
-  }
-
-  setClientCapabilities(message: unknown): void {
-    this.binaryFileDownloadEnabled = supportsBinaryFileDownload(message);
-    this.binaryBrowserFramesEnabled = supportsBinaryBrowserFrames(message);
-  }
-
-  sendBinaryBrowserFrame(encoded: Buffer): boolean {
-    if (!this.binaryBrowserFramesEnabled) return false;
-    if (this.ws.readyState !== WebSocket.OPEN) return true;
-    this.ws.send(
-      this.channel ? this.channel.sealBinary(encoded) : encoded,
-      { binary: true },
-    );
-    return true;
-  }
-
-  supportsBinaryFileDownload(): boolean {
-    return this.binaryFileDownloadEnabled;
-  }
-
-  sendFileDownloadChunk(
-    metadata: BinaryFileDownloadChunkMetadata,
-    bytes: Buffer,
-  ): boolean {
-    if (!this.binaryFileDownloadEnabled || this.ws.readyState !== WebSocket.OPEN) return false;
-    const plaintext = encodeBinaryFileDownloadChunk(metadata, bytes);
-    if (this.channel) {
-      this.ws.send(this.channel.sealBinary(plaintext), { binary: true });
-    } else {
-      this.ws.send(plaintext, { binary: true });
-    }
-    return true;
-  }
-
-  decryptTextEnvelope(parsed: unknown): ClientMessage {
-    if (!this.channel) {
-      throw new Error("Encrypted direct message before key exchange");
-    }
-    if (!isRecord(parsed) || typeof parsed.n !== "string" || typeof parsed.c !== "string") {
-      throw new Error("Invalid encrypted envelope");
-    }
-    const plaintext = this.channel.openText({ n: parsed.n, c: parsed.c });
-    return parseClientMessage(JSON.parse(plaintext));
-  }
-
-  decryptBinaryFrame(buf: Buffer): ClientMessage {
-    if (!this.channel) {
-      throw new Error("Encrypted direct binary frame before key exchange");
-    }
-    const plaintext = this.channel.openBinary(buf);
-    if (plaintext.length === 0) {
-      throw new Error("Empty direct binary frame");
-    }
-    const marker = plaintext[0];
-
-    if (marker === BIN_MARKER_JSON) {
-      const json = new TextDecoder().decode(plaintext.subarray(1));
-      return parseClientMessage(JSON.parse(json));
-    }
-
-    if (marker === BIN_MARKER_UPLOAD_CHUNK) {
-      if (plaintext.length < 6) throw new Error("Binary upload frame too short");
-      const idLen = plaintext[1];
-      const headerEnd = 2 + idLen + 4;
-      if (plaintext.length < headerEnd) throw new Error("Binary upload frame header too short");
-      const uploadId = new TextDecoder().decode(plaintext.subarray(2, 2 + idLen));
-      const off = 2 + idLen;
-      const chunkIndex =
-        ((plaintext[off] << 24) >>> 0) |
-        (plaintext[off + 1] << 16) |
-        (plaintext[off + 2] << 8) |
-        plaintext[off + 3];
-      const data = Buffer.from(plaintext.subarray(headerEnd));
-      return { type: "upload_chunk_bin", uploadId, chunkIndex, data };
-    }
-
-    throw new Error(`Unknown direct binary marker: 0x${marker.toString(16)}`);
-  }
-
-  close(): void {
-    if (this.authTimer) {
-      clearTimeout(this.authTimer);
-      this.authTimer = null;
     }
   }
 }
@@ -1729,6 +1504,10 @@ function directRouteInfo(holdsToken: boolean): { hosts: string[]; port: number; 
  * Devices enrolled by the token, or before devices were tracked, hold it, on
  * the relay and on a direct socket that signed in with the device key.
  */
+function isRecordedDevice(publicKey: string): boolean {
+  return deviceRegistry.get(publicKey)?.kind === "device";
+}
+
 function keyHoldsToken(publicKey: string | null): boolean {
   const via = publicKey ? deviceRegistry.get(publicKey)?.via : undefined;
   return via === "token" || via === "migration";
@@ -1885,11 +1664,7 @@ function broadcastServerCapabilities(): void {
   const withToken = serverCapabilitiesPayload(true, "control", true);
   const withoutToken = serverCapabilitiesPayload(true, "control", false);
   const v2 = serverCapabilitiesPayload(true, "control", false, 2);
-  for (const client of connectedClients) {
-    if (client.readyState !== WebSocket.OPEN) continue;
-    if (client instanceof DirectV2Transport) client.send(JSON.stringify(v2));
-    else client.send(JSON.stringify(client instanceof DirectClientTransport && client.holdsAuthToken ? withToken : withoutToken));
-  }
+  broadcastDirectCapabilities(connectedClients, { withToken, withoutToken, v2 }, isRecordedDevice);
   if (!relayClient) return;
   for (const key of new Set(relayClient.openPeerKeys())) {
     const payload = relayClient.transportOfKey(key) === 2 ? v2 : keyHoldsToken(key) ? withToken : withoutToken;
@@ -5254,7 +5029,7 @@ function createConnectionHandler(
       transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(msg);
       transport.setClientCapabilities?.(msg);
       sendJson({
-        ...serverCapabilitiesPayload(true, transportLane, transport instanceof DirectClientTransport && transport.holdsAuthToken),
+        ...serverCapabilitiesPayload(true, transportLane, transport instanceof DirectClientTransport && transport.mayLearnAuthToken(isRecordedDevice)),
         codexCollaborationMode: "default",
       });
       return;
@@ -10491,24 +10266,21 @@ function createConnectionHandler(
           sendJson({ type: "device_remove_result", requestId, ok: false, publicKey, error: "The last device can't be removed." });
           break;
         }
-        // Rotate first: the registry change below broadcasts capabilities,
-        // and that one broadcast must already carry the new direct token.
-        if (entry.kind === "device" && msg.keepToken !== true) rotateAuthToken();
-        deviceRegistry.revoke(publicKey);
-        clearDevicePending(publicKey);
-        if (entry.kind === "device") {
-          relayClient?.dropPeersWithKey(publicKey, "removed");
-          relayBulkClient?.dropPeersWithKey(publicKey, "removed");
-          dropDirectPeersWithKey(publicKey, "Removed");
-          directV2Sockets.dropKey(publicKey, "Removed");
-          // Its channels are closed, so the new secret goes only to the devices that stay.
-          if (msg.keepToken !== true) renewPairingSecret();
-        } else if (entry.kind === "connector") {
+        removeRegisteredKey(entry, msg.keepToken === true, {
+          dropDeviceChannels: (key) => {
+            relayClient?.dropPeersWithKey(key, "removed");
+            relayBulkClient?.dropPeersWithKey(key, "removed");
+            dropDirectPeersWithKey(key, "Removed");
+            directV2Sockets.dropKey(key, "Removed");
+          },
+          rotateAuthToken,
+          revoke: (key) => { deviceRegistry.revoke(key); },
+          clearPending: clearDevicePending,
+          renewPairingSecret,
           // Its tokens stop working at once; the next MCP call gets a 401.
-          aiConnectorOAuth.revokeKey(publicKey);
-        } else {
-          relayLinkClient?.dropPeersWithKey(publicKey, "removed");
-        }
+          revokeConnector: (key) => aiConnectorOAuth.revokeKey(key),
+          dropLinkPeers: (key) => relayLinkClient?.dropPeersWithKey(key, "removed"),
+        });
         sendJson({ type: "device_remove_result", requestId, ok: true, publicKey });
         break;
       }
@@ -12614,7 +12386,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
     return;
   }
   const { wantsEncryptedDirectAuth, transportLane } = auth;
-  const transport = new DirectClientTransport(ws, loadServerKeyPair(), {
+  const transport = new DirectClientTransport(ws, loadServerKeyPair(), sessionKeyedPeers, {
     authenticated: auth.authenticated,
     requireEncryptedAuth: wantsEncryptedDirectAuth,
   });

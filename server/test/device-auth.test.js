@@ -238,7 +238,7 @@ test("Allow does not open an old-path relay peer that has only named the key", (
   // The device that holds the key opens the peer with its first sealed frame, and gets the queue then.
   sendEncrypted(h, phone, { type: "device_auth", name: "Pixel", platform: "android" }, "peer-claim");
   const frames = framesFor(h, phone);
-  assert.deepEqual(frames.slice(1).map((frame) => frame.type).sort(), ["device_auth_result", "session_list"]);
+  assert.deepEqual(frames.slice(1).map((frame) => String(frame.type)).sort(), ["device_auth_result", "session_list"]);
 });
 
 test("9.2.5: over the relay a locked computer refuses an unknown key, token or not", () => {

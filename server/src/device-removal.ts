@@ -62,7 +62,7 @@ export interface CapabilityPayloads {
  * that may learn the token gets `withToken`, and no v2 client does.
  */
 export function broadcastDirectCapabilities(
-  clients: Iterable<ClientTransport>,
+  clients: ReadonlySet<ClientTransport>,
   payloads: CapabilityPayloads,
   isRecordedDevice: (publicKey: string) => boolean,
 ): void {

@@ -656,9 +656,10 @@ EOF
 
   ok "Created $SERVICE_FILE"
 
-  # Enable linger so service runs without active login
-  if command -v loginctl &>/dev/null; then
-    loginctl enable-linger "$(whoami)" 2>/dev/null || true
+  # Lingering starts the service at boot and keeps it running after logout.
+  if ! "$SERVER_DIR/scripts/enable-linger.sh"; then
+    warn "SocketAgent will stop when $(whoami) logs out and will not start at boot."
+    warn "To fix that, run: sudo loginctl enable-linger $(whoami)"
   fi
 
   systemctl --user daemon-reload

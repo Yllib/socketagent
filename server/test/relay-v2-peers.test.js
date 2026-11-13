@@ -386,3 +386,71 @@ test("the relay client joins new-style, proves it owns the room, and never falls
   await once(relay, "connection");
   assert.equal(joins[1].headers["x-socketagent-room"], "the-new-room");
 });
+
+test("a join the relay closes with 4005 keeps backing off, each retry is spread out, and an accepted join starts over", { timeout: 10_000 }, async (t) => {
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  t.after(() => { for (const socket of relay.clients) socket.terminate(); relay.close(); });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert.ok(address && typeof address !== "string");
+  // Too many joins are waiting, until the relay has a place and accepts one.
+  let accept = false;
+  relay.on("connection", (socket) => {
+    if (!accept) {
+      socket.close(4005);
+      return;
+    }
+    socket.send(JSON.stringify({ type: "relay_capabilities", multiDevice: true, owner: true }));
+    // The push list is the first frame of an accepted computer. Drop the socket once it shows the join was taken.
+    socket.once("message", () => socket.terminate());
+  });
+
+  let status = "";
+  let onDisconnected = () => {};
+  /** @returns {Promise<void>} */
+  const disconnected = () => new Promise((resolve) => { onDisconnected = () => resolve(undefined); });
+  // The timer set by a disconnect is what dials again. 0.5 from Math.random is no spread at all.
+  let random = 0.5;
+  t.mock.method(Math, "random", () => random);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const client = new RelayClient({
+    relayUrl: `ws://127.0.0.1:${address.port}`, pairingToken: ROOM_ID, keyPair: generateKeyPair(), ownerKey: nacl.sign.keyPair(),
+    serverCapabilities: () => ({ type: "server_capabilities" }),
+    pushTokens: () => [],
+    onStatusChange(next) {
+      status = next;
+      if (next === "disconnected") onDisconnected();
+    },
+  });
+  t.after(() => client.close());
+
+  /**
+   * Waits for the join in progress to end, then checks the next one starts
+   * after [delay] ms and not before. [acceptNext] is whether the relay takes that next join.
+   */
+  const retriesAfter = async (/** @type {number} */ delay, acceptNext = false) => {
+    await closed;
+    accept = acceptNext;
+    assert.equal(status, "disconnected");
+    t.mock.timers.tick(delay - 1);
+    assert.equal(status, "disconnected", `no retry before ${delay} ms`);
+    closed = disconnected();
+    t.mock.timers.tick(1);
+    assert.equal(status, "connecting", `a retry at ${delay} ms`);
+  };
+
+  let closed = disconnected();
+  client.connect();
+  await retriesAfter(1000);
+  await retriesAfter(2000);
+  // The spread is half to one and a half times the backoff, here 4 s and then 8 s.
+  random = 0;
+  await retriesAfter(2000);
+  random = 0.999;
+  await retriesAfter(11_992);
+  // The relay takes this join, so the retry after its socket drops is back to one second.
+  random = 0.5;
+  await retriesAfter(16_000, true);
+  await retriesAfter(1000);
+  await retriesAfter(2000);
+});

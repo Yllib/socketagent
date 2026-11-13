@@ -436,7 +436,6 @@ export class RelayClient {
 
     this.ws.on("open", () => {
       console.log(`[Relay] Connected, waiting for phone...`);
-      this.reconnectDelay = 1000; // reset backoff
       this.setStatus("waiting_for_peer");
       this.virtualWs._setOpen(true);
 
@@ -946,6 +945,11 @@ export class RelayClient {
       this.relaySupportsMultiDevice = !!parsed.multiDevice;
       this.ownsRoom = parsed.owner === true;
       if (this.ownsRoom) this.refusedAsOwner = false;
+      // The relay took the join, so the next reconnect starts from one second
+      // again. A socket that only opened has not got that far: the relay can
+      // still close it, with 4005 when too many joins wait, and those retries
+      // must keep backing off.
+      this.reconnectDelay = 1000;
       if (this.relaySupportsMultiDevice) {
         console.log(`[Relay] Relay supports multi-device routing`);
       }
@@ -1473,14 +1477,20 @@ export class RelayClient {
     this.keepalive = null;
   }
 
+  /**
+   * Dials again after the current backoff, spread between half and one and a
+   * half times it, so computers the relay turned away together do not come
+   * back together. The backoff doubles up to 30 s and goes back to 1 s when
+   * the relay accepts a join.
+   */
   private scheduleReconnect(): void {
     if (this.closed) return;
     this.setStatus("disconnected");
-    console.log(`[Relay] Reconnecting in ${this.reconnectDelay / 1000}s...`);
+    const delay = Math.round(this.reconnectDelay * (0.5 + Math.random()));
+    console.log(`[Relay] Reconnecting in ${delay / 1000}s...`);
     this.reconnectTimer = setTimeout(() => {
       this.connect();
-    }, this.reconnectDelay);
-    // Exponential backoff: 1s → 2s → 4s → ... → 30s max
+    }, delay);
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
   }
 }

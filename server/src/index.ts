@@ -84,7 +84,7 @@ import { DirectV2Sockets, DirectV2Transport, MAX_DIRECT_FRAME_BYTES } from "./di
 import { MAX_HANDSHAKE_FRAME_BYTES } from "./transport-v2";
 import { BIN_MARKER_UPLOAD_CHUNK, DirectClientTransport } from "./direct-client-transport";
 import { broadcastDirectCapabilities, removeRegisteredKey } from "./device-removal";
-import { hasOriginHeader, isLoopbackRequest } from "./loopback-request";
+import { hasOriginHeader, hasReadableTarget, isLoopbackRequest } from "./loopback-request";
 import { ViewHub, parseViewSet } from "./view-hub";
 import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
 import { DeviceAuthGate } from "./device-auth";
@@ -10940,6 +10940,11 @@ const httpServer = http.createServer((req, res) => {
     res.end("Forbidden");
     return;
   }
+  if (!hasReadableTarget(req)) {
+    res.writeHead(400);
+    res.end("Bad request");
+    return;
+  }
   // Lets setup under any Windows account see that the machine-wide server is
   // up. It needs no token, since only the owner can read .env, and returns
   // nothing secret. `machine` is true for both of an install's tasks once it
@@ -11469,13 +11474,17 @@ httpServer.on("connection", (socket) => {
 
 // Handle WebSocket upgrade with auth
 httpServer.on("upgrade", (req, socket, head) => {
-  const refuse = (status: "401 Unauthorized" | "403 Forbidden", why: string): void => {
+  const refuse = (status: "400 Bad Request" | "401 Unauthorized" | "403 Forbidden", why: string): void => {
     console.log(`Rejected connection: ${why}`);
     socket.write(`HTTP/1.1 ${status}\r\n\r\n`);
     socket.destroy();
   };
   if (hasOriginHeader(req)) {
     refuse("403 Forbidden", "the request names an Origin");
+    return;
+  }
+  if (!hasReadableTarget(req)) {
+    refuse("400 Bad Request", "the request target is not a URL");
     return;
   }
   const url = new URL(req.url || "/", `ws://localhost:${PORT}`);

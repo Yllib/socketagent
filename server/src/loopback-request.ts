@@ -25,6 +25,14 @@ export function isLoopbackRequest(req: http.IncomingMessage): boolean {
 }
 
 /**
+ * Whether the request target can be read as a URL. `//` cannot, and
+ * `new URL` throws on it, so both listeners refuse such a request first.
+ */
+export function hasReadableTarget(req: http.IncomingMessage): boolean {
+  return URL.canParse(req.url || "/", "http://localhost");
+}
+
+/**
  * Whether a request names an `Origin`, which only a web page's script does.
  * The app, the scripts and the CLI never send one, so the listener refuses
  * every upgrade and HTTP request that has it.

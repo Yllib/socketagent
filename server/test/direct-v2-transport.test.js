@@ -9,7 +9,7 @@ const dataDir = require("./test-data-dir");
 
 const { DeviceRegistry } = require("#server/device-registry");
 const { DirectV2Sockets, DirectV2Transport } = require("#server/direct-v2-transport");
-const { hasOriginHeader, isLoopbackRequest } = require("#server/loopback-request");
+const { hasOriginHeader, hasReadableTarget, isLoopbackRequest } = require("#server/loopback-request");
 const { generateKeyPair } = require("#server/noise-ikpsk1");
 const { channelKindForMessage, relayPeerKeyForMessage } = require("#server/relay-client");
 const { MAX_FAILED_HS1_PER_ADDRESS, TransportResponder } = require("#server/transport-responder");
@@ -398,4 +398,9 @@ test("loopback means a loopback address with no proxy in front", () => {
   assert.equal(hasOriginHeader(request("127.0.0.1", { origin: "https://example.com" })), true);
   assert.equal(hasOriginHeader(request("127.0.0.1", { origin: "null" })), true);
   assert.equal(hasOriginHeader(request("127.0.0.1")), false);
+
+  // `new URL` throws on a target of `//`, so the listeners ask this before they parse.
+  const target = (/** @type {string} */ url) => Object.assign(request("127.0.0.1"), { url });
+  for (const url of ["/", "/?e2e=2", "/download-file?path=%2Ftmp"]) assert.equal(hasReadableTarget(target(url)), true, url);
+  assert.equal(hasReadableTarget(target("//")), false);
 });

@@ -284,6 +284,13 @@ test("the bulk lane opens a recorded device and refuses a key control would add"
   const channel = h.handshake(h.device({ keys }), "phone-2");
   h.fromPeer(channel.ready(), "phone-2");
   assert.deepEqual(h.received(channel, "phone-2"), [{ type: "server_capabilities", transport: { version: 2 }, seenAs: 2 }]);
+
+  // A removed device's bulk channel stops in the same call, as on control.
+  h.fromPeer(channel.seal({ type: "list_sessions" }), "phone-2");
+  assert.equal(h.delivered.length, 1);
+  assert.equal(h.client.dropPeersWithKey(Buffer.from(keys.publicKey).toString("base64"), "removed"), 1);
+  h.fromPeer(channel.seal({ type: "list_sessions" }), "phone-2");
+  assert.equal(h.delivered.length, 1);
 });
 
 test("the relay client joins new-style, proves it owns the room, and never falls back to an old-style join", { timeout: 10_000 }, async (t) => {

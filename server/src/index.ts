@@ -4047,7 +4047,7 @@ function approveDirectPeersWithKey(publicKey: string): void {
   }
 }
 
-/** Closes the direct sockets of a key that was denied or removed. */
+/** Closes the old-path direct sockets of a key that was denied, removed or moved. No later frame from them is read. */
 function dropDirectPeersWithKey(publicKey: string, reason: string): void {
   for (const peer of [...keyedDirectPeers]) if (peer.publicKey === publicKey) peer.close(reason);
 }
@@ -4916,6 +4916,15 @@ function createConnectionHandler(
   }
 
   async function handleMessage(msg: ClientMessage): Promise<void> {
+    // A second check behind the transports. A message that arrived under a
+    // device key is acted on only while that key is a recorded device, so a
+    // removed device's message does nothing whichever path let it through,
+    // and neither does one that was still queued when the device was removed.
+    const senderKey = relayPeerKeyForMessage(msg);
+    if (senderKey && deviceRegistry.readable && !isRecordedDevice(senderKey)) {
+      console.warn(`[Devices] Ignored ${msg.type} from a key that is not paired`);
+      return;
+    }
     let targetSessionId = String(("sessionId" in msg ? msg.sessionId : undefined)
       || (msg.type === "prompt" && msg.clientConversationId ? "" : activeSessionId) || "");
     if ((restartPreparing || shuttingDown || continuationStarting.has(targetSessionId))
@@ -12429,6 +12438,9 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
   const runMessage = directMessageRunner(transport, transportLane, handler);
 
   ws.on("message", (data, isBinary) => {
+    // A socket this side dropped still hands over what the peer sends until
+    // the close completes. None of it is read.
+    if (transport.dropped) return;
     let msg: ClientMessage;
 
     const buf = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
@@ -12546,7 +12558,7 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       const outcome = deviceAuthGate.directAuth(publicKey, { token: msg.token, name: msg.name, platform: msg.platform }, transport.fromThisComputer, req.socket.remoteAddress);
       const peer: { publicKey: string; close: (reason: string) => void; open?: () => void } = {
         publicKey,
-        close: (reason) => ws.close(1008, reason),
+        close: (reason) => transport.drop(reason),
       };
       if (outcome.ok) {
         keyedDirectPeers.add(peer);

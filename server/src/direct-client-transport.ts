@@ -6,6 +6,7 @@ import { BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, support
 import type { ClientMessage } from "./protocol";
 import type { MessageChannelKind } from "./relay-client";
 import { KeyPair, PeerChannel, SessionKeyedPeerStore, acceptKeyExchange, isSessionKeyDowngrade, toBase64 } from "./relay-crypto";
+import { closeThenDestroy } from "./socket-teardown";
 import { isRecord } from "./value-guards";
 
 // Binary envelope plaintext markers — first byte of the decrypted payload.
@@ -98,6 +99,23 @@ export class DirectClientTransport implements ClientTransport {
 
   /** Set while the key waits for another device to approve it. */
   heldForApproval = false;
+
+  /** Set by [drop]. index.ts reads no frame from the socket once it is. */
+  dropped = false;
+
+  /**
+   * Closes the socket of a device that was removed, denied or moved to the
+   * new transport. It takes effect in this tick: the socket is no longer
+   * signed in or held, and index.ts ignores every frame that arrives after.
+   * A peer that does not answer the close frame is cut off two seconds later.
+   */
+  drop(reason: string): void {
+    this.dropped = true;
+    this.authenticated = false;
+    this.heldForApproval = false;
+    this.close();
+    if (this.ws.readyState === WebSocket.OPEN) closeThenDestroy(this.ws, 1008, reason);
+  }
 
   /** Keeps the socket open past the auth timeout while approval is pending. */
   holdForApproval(): void {

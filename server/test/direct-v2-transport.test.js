@@ -199,6 +199,48 @@ test("a direct v2 socket closes on any frame it does not expect", async (t) => {
   assert.equal(env.registry.list().length, 2);
 });
 
+test("a dropped direct v2 socket delivers nothing more, before the peer has answered the close", async (t) => {
+  const env = await listener(t);
+  const device = env.device();
+  env.registry.enroll({ publicKey: device.publicKey, kind: "device", name: "Pixel", platform: "android", via: "token" });
+  const socket = await env.handshake(device);
+  socket.ws.send(socket.channel.ready());
+  await socket.frames(2);
+  socket.ws.send(socket.channel.seal({ type: "list_sessions" }));
+  await socket.settled();
+  assert.deepEqual(env.delivered.map((message) => message.type), ["list_sessions"]);
+
+  // The computer removes the device, in the order device-removal.ts uses.
+  env.sockets.dropKey(device.publicKey, "Removed");
+  env.registry.revoke(device.publicKey);
+  // The channel is gone in the same tick, while the socket is still closing.
+  assert.deepEqual(env.sockets.openKeys(), []);
+
+  // The device has not read the close frame yet and sends one more message.
+  socket.ws.send(socket.channel.seal({ type: "list_sessions" }));
+  assert.equal(await socket.closed(), 1008);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(env.delivered.map((message) => message.type), ["list_sessions"], "nothing sent after the drop was delivered");
+});
+
+test("a denied held peer on a direct v2 socket is not read again", async (t) => {
+  const env = await listener(t);
+  env.registry.lock();
+  const socket = await env.handshake(env.device());
+  socket.ws.send(socket.channel.ready());
+  await socket.settled();
+  assert.equal(env.prompts.length, 1);
+
+  env.sockets.denyKey(env.prompts[0].publicKey);
+  assert.equal(env.sockets.isKeyHeld(env.prompts[0].publicKey), false);
+  assert.deepEqual(env.cleared, [env.prompts[0].publicKey]);
+  socket.ws.send(socket.channel.seal({ type: "list_sessions" }));
+  assert.equal(await socket.closed(), 1008);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(env.delivered, []);
+  assert.deepEqual(env.cleared, [env.prompts[0].publicKey], "the prompt is cleared once");
+});
+
 test("failed handshakes are counted against the direct socket's address", async (t) => {
   const env = await listener(t, "192.168.1.66");
   // The public tag of the current secret over a handshake made under another secret.

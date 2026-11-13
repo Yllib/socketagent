@@ -115,7 +115,7 @@ async function listener(t) {
 
   /** @type {import("#server/device-removal").DeviceRemovalSteps} */
   const steps = {
-    dropDeviceChannels: (key) => { for (const [transport, ws] of sockets) if (transport.peerKey === key) ws.close(1008, "Removed"); },
+    dropDeviceChannels: (key) => { for (const transport of sockets.keys()) if (transport.peerKey === key) transport.drop("Removed"); },
     rotateAuthToken: () => { token = "token-after"; },
     revoke: (key) => { registry.revoke(key); },
     clearPending: () => {},
@@ -123,7 +123,9 @@ async function listener(t) {
     revokeConnector: () => assert.fail("not a connector"),
     dropLinkPeers: () => assert.fail("not a linked computer"),
   };
-  return { registry, twoDevices, steps };
+  /** The server's end of a device's socket. */
+  const transportOf = (/** @type {string} */ key) => [...sockets.keys()].find((transport) => transport.peerKey === key);
+  return { registry, twoDevices, steps, transportOf };
 }
 
 /** Every token a device was sent in capabilities, in order. */
@@ -144,6 +146,22 @@ test("a removed device's open direct socket closes before the new AUTH_TOKEN is 
   assert.equal(removed.closeCode, 1008);
   assert.deepEqual(tokensSent(removed), ["token-before"], "nothing reached the removed device after its removal began");
   assert.equal(registry.get(removed.publicKey), undefined);
+});
+
+test("a dropped old-path socket is signed out in the same tick, before the peer answers the close", async (t) => {
+  const { twoDevices, transportOf } = await listener(t);
+  const [removed] = await twoDevices("Removed phone", "Kept phone");
+  const transport = transportOf(removed.publicKey);
+  assert.ok(transport?.isAuthenticated);
+
+  transport.drop("Removed");
+
+  // index.ts reads no frame from a dropped socket, and it is signed out anyway.
+  assert.equal(transport.dropped, true);
+  assert.equal(transport.isAuthenticated, false);
+  assert.equal(transport.heldForApproval, false);
+  await removed.closed();
+  assert.equal(removed.closeCode, 1008);
 });
 
 test("a socket whose key is no longer recorded is not sent the token, even while it is open", async (t) => {

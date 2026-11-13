@@ -21,6 +21,7 @@ import {
   type PendingNotice,
   type TransportResponder,
 } from "./transport-responder";
+import { closeThenDestroy } from "./socket-teardown";
 import { MAX_HANDSHAKE_FRAME_BYTES, parseHs1Frame, TRANSPORT_VERSION } from "./transport-v2";
 import { errorMessage, isRecord } from "./value-guards";
 
@@ -72,6 +73,11 @@ export interface DirectV2Hooks {
  * once its key is a recorded device, at once or after Allow, it is sent
  * `pairing_grant` and the socket closes. No record it sends is read past
  * `transport_ready`.
+ *
+ * When the computer closes the socket, for a removed or denied device or a
+ * bad frame, the channel ends in that same tick: no frame that arrives later
+ * is read, and a peer that does not answer the close frame is cut off two
+ * seconds later.
  */
 export class DirectV2Transport implements ClientTransport {
   private state: "waiting" | "answered" | "held" | "open" | "closed" = "waiting";
@@ -90,6 +96,8 @@ export class DirectV2Transport implements ClientTransport {
     this.fromThisComputer = hooks.fromThisComputer;
     this.setTimer(HANDSHAKE_WAIT_MS, () => this.closeSocket("No handshake in time"));
     ws.on("message", (data, isBinary) => {
+      // A socket this side has closed still hands over what the peer sends until the close completes.
+      if (this.state === "closed") return;
       const frame = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
       try {
         // Until transport_ready the only frames are hs1 and that one record,
@@ -106,16 +114,24 @@ export class DirectV2Transport implements ClientTransport {
         this.closeSocket("Invalid frame");
       }
     });
-    ws.on("close", () => {
-      const wasHeld = this.state === "held";
-      this.state = "closed";
-      this.clearTimer();
-      if (this.handshake) {
-        hooks.responder.release(this.handshake);
-        if (wasHeld) hooks.onPendingDropped(this.handshake.publicKey);
-      }
-      hooks.onClose(this);
-    });
+    ws.on("close", () => this.end());
+  }
+
+  /**
+   * Ends the channel, once: from here no frame is read and nothing is sent,
+   * the handshake's place is freed and the hooks are told. Runs when this
+   * side closes the socket and when the socket closes by itself.
+   */
+  private end(): void {
+    if (this.state === "closed") return;
+    const wasHeld = this.state === "held";
+    this.state = "closed";
+    this.clearTimer();
+    if (this.handshake) {
+      this.hooks.responder.release(this.handshake);
+      if (wasHeld) this.hooks.onPendingDropped(this.handshake.publicKey);
+    }
+    this.hooks.onClose(this);
   }
 
   get readyState(): number {
@@ -155,8 +171,10 @@ export class DirectV2Transport implements ClientTransport {
     this.timer = null;
   }
 
-  private closeSocket(reason: string): void {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.close(CLOSE_POLICY_VIOLATION, reason);
+  /** Ends the channel in this tick, then closes the socket without waiting on the peer for long. */
+  private closeSocket(reason: string, code = CLOSE_POLICY_VIOLATION): void {
+    this.end();
+    if (this.ws.readyState === WebSocket.OPEN) closeThenDestroy(this.ws, code, reason);
   }
 
   private handleText(raw: string): void {
@@ -288,7 +306,7 @@ export class DirectV2Transport implements ClientTransport {
   /** The whole of a `local-request` channel once its key is a recorded device: one record, then the close. */
   private grantAndClose(): void {
     this.sendSealed(JSON.stringify(this.hooks.pairingGrant()));
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.close(CLOSE_NORMAL, "Pairing granted");
+    this.closeSocket("Pairing granted", CLOSE_NORMAL);
   }
 
   /** The first records of an open channel: `pairing_update` when one is due, then `server_capabilities`. */
@@ -328,7 +346,7 @@ export class DirectV2Transport implements ClientTransport {
     this.closeSocket("Not approved");
   }
 
-  /** Closes the socket of a removed device. */
+  /** Closes the socket of a removed device. Nothing it sends after this call is read. */
   drop(reason: string): void {
     this.closeSocket(reason);
   }

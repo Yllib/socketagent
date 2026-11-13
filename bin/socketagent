@@ -28,6 +28,7 @@ SocketAgent command line
 
 Usage:
   socketagent pair [--raw]        Show the pairing QR (relay and same network)
+  socketagent pair --reset        Start pairing over; every device scans the new code
   socketagent direct [--json]     Show the pairing QR with direct connection values
   socketagent token               Show direct/manual auth token only
   socketagent install [args...]   Re-run the SocketAgent installer

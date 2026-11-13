@@ -23,6 +23,7 @@ function Show-Usage {
     Write-Host ""
     Write-Host "Usage:"
     Write-Host "  socketagent pair [--raw]        Show the pairing QR (relay and same network)"
+    Write-Host "  socketagent pair --reset        Start pairing over; every device scans the new code"
     Write-Host "  socketagent direct [--json]     Show the pairing QR with direct connection values"
     Write-Host "  socketagent token               Show direct/manual auth token only"
     Write-Host "  socketagent install [args...]   Re-run the SocketAgent installer"

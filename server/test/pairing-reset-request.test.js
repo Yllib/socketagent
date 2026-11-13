@@ -50,7 +50,7 @@ async function impostor(/** @type {import("node:test").TestContext} */ t) {
   const port = await listen(t, (req, res) => {
     /** @type {Buffer[]} */
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("data", (/** @type {Buffer} */ chunk) => chunks.push(chunk));
     req.on("end", () => {
       seen.push(`${req.method} ${req.url} ${JSON.stringify(req.headers)} ${Buffer.concat(chunks).toString("utf8")}`);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -70,7 +70,7 @@ test("the script and the server prove the token to each other, and the reset run
   /** @type {string[]} */
   const bodies = [];
   const port = await listen(t, (req, res) => {
-    req.on("data", (chunk) => bodies.push(String(chunk)));
+    req.on("data", (/** @type {Buffer} */ chunk) => bodies.push(chunk.toString("utf8")));
     if (!answerPairingResetRequest(req, res, gate, startOver)) { res.writeHead(404); res.end(); }
   });
 

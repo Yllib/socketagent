@@ -1547,8 +1547,9 @@ const pairingResetGate = new PairingResetGate(() => AUTH_TOKEN);
  * `socketagent pair --reset`: a full start over. A new room ID, pairing
  * secret and AUTH_TOKEN, previous secrets cleared, the lock off, and the
  * device records still on the old path deleted, and every push registration
- * dropped. Every device has to scan the new code, or on the old path be
- * given the new token. It is also the way
+ * dropped. A phone or another computer has to scan the new code, or on the
+ * old path be given the new token. An app on this computer gets the new
+ * pairing from this server with no scan. It is also the way
  * out of an unreadable state file and of a relay room another key has
  * claimed.
  *

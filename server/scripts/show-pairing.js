@@ -7,9 +7,10 @@
 //
 // --reset is a full start over. It makes a new room ID, a new pairing secret
 // and a new AUTH_TOKEN, clears the previous secrets and takes the lock off.
-// Devices on the new transport stay on the list, but every one has to scan
-// the new code. Devices still on the old path are taken off the list and
-// have to be given the new token. No phone stays registered for
+// Devices on the new transport stay on the list. A phone or another computer
+// has to scan the new code. An app on this computer gets the new pairing from
+// the server here with no scan. Devices still on the old path are taken off
+// the list and have to be given the new token. No phone stays registered for
 // notifications. It is the fix for a damaged transport.json and for a relay
 // room another computer has claimed. A running server does the reset itself,
 // so one process owns the files; without one this script writes them.
@@ -89,7 +90,8 @@ async function main() {
     // nothing changed and no reset reported.
     const before = readEnv(envFile);
     if ((await requestPairingReset(Number(before.PORT || "8085"), before.AUTH_TOKEN || "")) === "no-server") resetInFiles();
-    console.error("Pairing started over. Every device has to scan the new code.");
+    console.error("Pairing started over. Phones and other computers have to scan the new code.");
+    console.error("SocketAgent on this computer needs no code. Restart it if it stays offline.");
   }
 
   const env = readEnv(envFile);

@@ -218,15 +218,21 @@ export class DeviceAuthGate {
 /**
  * Records the device key a `device_approve` names. [waiting] is set when the
  * key is held for an answer: its owner was shown a code for it, and the
- * record is made as it always was. A key nobody has seen, as an account
- * invite names, is recorded on transport 2 only. It gets in once it proves
- * the current pairing secret in a handshake, and the old path, which admits
- * a recorded key with no token, refuses it. A key already on record keeps
- * its transport.
+ * record is made as it always was. A key already on record keeps its
+ * transport.
+ *
+ * A key nobody has seen, as an account invite names, is recorded by how its
+ * approver is connected. [approverOnV2] says the approval came in on a
+ * transport v2 channel. That approver's app writes the pairing secret into
+ * the account vault, so the record is made on transport 2 only: the invited
+ * device gets in once it proves the secret in a handshake, and the old path
+ * refuses it. An approver on the old path writes a vault with AUTH_TOKEN and
+ * no pairing secret, so the invited device has only the old path to come in
+ * by, and the record is made there for it to carry over from.
  */
 export function recordApprovedDevice(
   registry: DeviceRegistry,
-  approval: { publicKey: string; name: string; waiting?: { name: string; platform: DevicePlatform } },
+  approval: { publicKey: string; name: string; approverOnV2: boolean; waiting?: { name: string; platform: DevicePlatform } },
 ): DeviceEntry {
   const { publicKey, waiting } = approval;
   const existing = registry.get(publicKey);
@@ -234,6 +240,6 @@ export function recordApprovedDevice(
     publicKey, kind: "device", via: "approval",
     name: approval.name || waiting?.name || existing?.name || "",
     platform: waiting?.platform || existing?.platform || "android",
-    ...(waiting || existing ? {} : { transport: 2 }),
+    ...(approval.approverOnV2 && !waiting && !existing ? { transport: 2 } : {}),
   });
 }

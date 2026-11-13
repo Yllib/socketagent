@@ -10234,7 +10234,8 @@ function createConnectionHandler(
         }
         // The key may be waiting on the relay, revoked, or never seen: an
         // account invite approves the new device before it ever connects.
-        // One that is not waiting is recorded for transport v2 only.
+        // One that is not waiting is recorded for transport v2 only when
+        // this approval itself came in on a v2 channel.
         const notice = pendingDeviceNotices.get(publicKey);
         if (deviceRegistry.get(publicKey)?.kind === "computer") {
           sendJson({ type: "device_approve_result", requestId, ok: false, publicKey, error: "That key belongs to a linked computer" });
@@ -10243,6 +10244,7 @@ function createConnectionHandler(
         recordApprovedDevice(deviceRegistry, {
           publicKey,
           name: (msg.name || "").trim(),
+          approverOnV2: channelKindForMessage(msg) === "v2",
           waiting: notice && notice.expiresAt > Date.now() ? notice : undefined,
         });
         relayClient?.approvePeersWithKey(publicKey);

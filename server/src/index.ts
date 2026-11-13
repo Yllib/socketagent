@@ -504,8 +504,8 @@ if (!AUTH_TOKEN) {
     : "";
   fs.writeFileSync(envPath, existing.trimEnd() + `\nAUTH_TOKEN=${AUTH_TOKEN}\n`, { mode: 0o600 });
   secureSecretFileMode(envPath);
-  console.log(`Generated new auth token. Add this to your app settings:`);
-  console.log(`  Token: ${AUTH_TOKEN}`);
+  // The token itself stays out of the log, which a service keeps on disk.
+  console.log(`Generated a new auth token and saved it in ${envPath}`);
 } else {
   console.log(`Auth token loaded from .env`);
 }

@@ -11543,7 +11543,8 @@ httpServer.on("upgrade", (req, socket, head) => {
 // Relay client (initialized after server starts if RELAY_URL is set)
 let relayClient: RelayClient | null = null;
 // A push is sealed for the secrets recorded phones hold and goes to the relay
-// over the control-room socket. Plaintext leaves only for a phone on the old path.
+// over the control-room socket. Plaintext leaves only while a device is on the
+// old path, and then only for a registration that did not arrive on a v2 channel.
 setPushTransport({
   sealingSecrets: () => pushSealingSecrets(deviceRegistry),
   plaintextAllowed: () => LEGACY_TRANSPORT && deviceRegistry.list().some((entry) => entry.kind === "device" && entry.transport === 1),

@@ -32,7 +32,7 @@ export interface RelayPushRequest {
   sealed: string;
   /** Fills in for phones that registered with the relay without a server ID. */
   serverId?: string;
-  /** Plaintext for phones still on the old path. Left out when none is recorded. */
+  /** Plaintext for phones that registered on the old path. Left out when the computer holds no such registration. */
   legacy?: Record<string, unknown>;
 }
 

@@ -181,7 +181,7 @@ test("relay_push goes over the owned room socket and waits for its result", asyn
   await assert.rejects(client.relayPush({ sealed: "sealed-text" }), /relay socket is down/);
 });
 
-test("a notification reaches the relay sealed, with plaintext only while a device is on the old path", async () => {
+test("a notification reaches the relay sealed, with plaintext only for a phone that registered on the old path", async () => {
   const secret = crypto.randomBytes(32);
   /** @type {import("#server/push-sealing").RelayPushRequest[]} */
   const pushes = [];
@@ -212,14 +212,26 @@ test("a notification reaches the relay sealed, with plaintext only while a devic
       assert.ok(opened);
       assert.equal(parseJsonObject(Buffer.from(opened).toString("utf8")).body, "Final response text");
 
+      // A device on the old path alone does not put plaintext in the push.
       plaintextAllowed = true;
       await sendPushNotification(notification);
-      assert.equal(isRecord(pushes[1].legacy) && pushes[1].legacy.title, "Finished");
+      registerPushToken("fcm-new-app", "ios", "phone-b-id", "relay", undefined, true);
+      await sendPushNotification(notification);
+      assert.deepEqual([Object.keys(pushes[1]), Object.keys(pushes[2])], [["sealed"], ["sealed", "serverId"]]);
+
+      // It takes a phone that registered on the old path, and it ends when that registration goes.
+      registerPushToken("fcm-old-app", "android", "phone-a-id", "relay");
+      await sendPushNotification(notification);
+      assert.equal(isRecord(pushes[3].legacy) && pushes[3].legacy.title, "Finished");
+      unregisterPushToken("fcm-old-app");
+      await sendPushNotification(notification);
+      assert.equal("legacy" in pushes[4], false);
+      unregisterPushToken("fcm-new-app");
 
       // With the relay socket down the push is not sent, and nothing throws.
       relayUp = false;
       assert.deepEqual(await sendPushNotification(notification), { sent: 0, attempted: 0 });
-      assert.equal(pushes.length, 2);
+      assert.equal(pushes.length, 5);
     });
   } finally {
     setPushTransport(null);

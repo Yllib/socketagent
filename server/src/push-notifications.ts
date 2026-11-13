@@ -338,11 +338,13 @@ function relayPushConfigured(): boolean {
 }
 
 /**
- * The `relay_push` for a notification (wire spec 11.2). `legacy` rides along
- * only when [plaintextAllowed]. [entries] are this computer's registrations
- * that the relay delivers for. Registrations are appended, so the last one
- * with a server ID is the newest, and it fills in for phones the relay holds
- * without an ID.
+ * The `relay_push` for a notification (wire spec 11.2). [entries] are this
+ * computer's registrations that the relay delivers for, which is the whole
+ * push list of its room. The plaintext `legacy` part rides along only when
+ * [plaintextAllowed] and one of them did not arrive on a v2 channel, so the
+ * relay sees no notification text once every phone gets sealed pushes.
+ * Registrations are appended, so the last one with a server ID is the
+ * newest, and it fills in for phones the relay holds without an ID.
  */
 export function buildRelayPush(
   payload: PushNotificationPayload,
@@ -351,10 +353,11 @@ export function buildRelayPush(
   plaintextAllowed: boolean,
 ): RelayPushRequest {
   const serverId = [...entries].reverse().find((entry) => entry.appServerId)?.appServerId;
+  const legacyNeeded = plaintextAllowed && entries.some((entry) => !entry.v2);
   return {
     sealed,
     ...(serverId ? { serverId } : {}),
-    ...(plaintextAllowed ? { legacy: legacyPushFields(payload) } : {}),
+    ...(legacyNeeded ? { legacy: legacyPushFields(payload) } : {}),
   };
 }
 

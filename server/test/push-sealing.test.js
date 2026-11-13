@@ -95,20 +95,26 @@ test("a push is sealed for the current secret and up to two older ones a recorde
   assert.deepEqual(ids(source([5], false)), [], "an unreadable state file seals nothing");
 });
 
-test("legacy rides in relay_push only while plaintext is allowed", () => {
+test("legacy rides in relay_push only while plaintext is allowed and a registration needs it", () => {
   const entries = [
     { token: "a", platform: "android", appServerId: "old-id", updatedAt: "" },
     { token: "b", platform: "android", appServerId: "new-id", updatedAt: "" },
     { token: "c", platform: "android", updatedAt: "" },
   ];
   assert.deepEqual(buildRelayPush(payload, "sealed-text", entries, false), { sealed: "sealed-text", serverId: "new-id" });
-  assert.deepEqual(buildRelayPush(payload, "sealed-text", [], true), {
+
+  const oldPhone = { token: "old", platform: "android", updatedAt: "" };
+  const v2Phone = { token: "new", platform: "android", v2: true, updatedAt: "" };
+  assert.deepEqual(buildRelayPush(payload, "sealed-text", [v2Phone, oldPhone], true), {
     sealed: "sealed-text",
     legacy: {
       title: "Finished", body: "The build passed", sessionId: "session-1", status: "completed",
       kind: "session_finished", showNotification: false, data: { scheduledTaskId: "task-1", attempt: 2 },
     },
   });
+  // A device record left on the old path is not enough. Some phone has to be registered for plaintext.
+  assert.deepEqual(buildRelayPush(payload, "sealed-text", [v2Phone], true), { sealed: "sealed-text" });
+  assert.deepEqual(buildRelayPush(payload, "sealed-text", [], true), { sealed: "sealed-text" });
 });
 
 test("the computer's own Firebase path sends the sealed shape to a phone that registered on v2", () => {

@@ -18,6 +18,7 @@ const { parseJsonObject } = require("#server/value-guards");
 const { dial } = require("./v2-initiator");
 
 const ROOM_ID = "ab".repeat(32);
+const LINK_ROOM_ID = "cd".repeat(32);
 let counter = 0;
 
 /** A computer with an empty record, its responder, and what a device needs to dial it. */
@@ -29,7 +30,7 @@ function setup() {
   /** @type {string[]} */
   const moved = [];
   const responder = new TransportResponder({
-    registry, keyPair: () => keyPair, roomId: () => ROOM_ID, serverVersion: "1.1.530",
+    registry, keyPair: () => keyPair, roomId: () => ROOM_ID, linkRoomId: () => LINK_ROOM_ID, serverVersion: "1.1.530",
     onDeviceMoved: (publicKey) => moved.push(publicKey), now: () => now,
   });
   /** @param {Partial<Parameters<typeof dial>[0]>} options */
@@ -46,8 +47,8 @@ function stateOnDisk(env) {
  * Runs one device's handshake up to `hs2` and reads the answer as the device.
  * @param {ReturnType<typeof setup>} env
  * @param {ReturnType<typeof dial>} device
- * @param {"control" | "bulk"} lane
- * @param {"relay" | "direct"} path
+ * @param {"control" | "bulk" | "link"} lane
+ * @param {"relay" | "direct" | "local-request"} path
  */
 function answer(env, device, lane = "control", path = "relay") {
   const outcome = env.responder.handleHs1(device.hs1, { path, lane });
@@ -339,4 +340,126 @@ test("limits: eight held peers, thirty pending answers in ten minutes, twenty fa
   assert.equal(answer(failing, failing.device({ path: "direct" }), "control", "direct").status, "open", "another path is not held back");
   failing.advance(60 * 1000);
   assert.equal(answer(failing, failing.device()).status, "open");
+});
+
+/** A linked computer's record, as `device_authorize` writes it. @param {ReturnType<typeof setup>} env */
+function linkedComputer(env, extra = {}) {
+  const keys = generateKeyPair();
+  const publicKey = Buffer.from(keys.publicKey).toString("base64");
+  const linkSecret = Buffer.alloc(32, ++counter).toString("base64");
+  env.registry.enroll({
+    publicKey, kind: "computer", name: "Dev VM", platform: "computer", via: "link",
+    access: { read: true, agents: false, commands: false }, confirm: "never", linkSecret, ...extra,
+  });
+  /** @param {Partial<Parameters<typeof dial>[0]>} options */
+  const source = (options = {}) => env.device({ keys, secret: linkSecret, roomId: LINK_ROOM_ID, lane: "link", payload: { app: "1.1.530" }, ...options });
+  return { keys, publicKey, linkSecret, source };
+}
+
+test("the link lane opens for a recorded computer that proves its link secret, and moves it at transport_ready", () => {
+  const env = setup();
+  const computer = linkedComputer(env);
+  const before = stateOnDisk(env);
+  const first = answer(env, computer.source(), "link");
+  assert.equal(first.status, "open");
+  // A replayed hs1 gets the same answer and changes nothing.
+  assert.equal(stateOnDisk(env), before);
+  assert.equal(env.registry.get(computer.publicKey)?.transport, 1);
+  assert.equal(first.outcome.result, "answered");
+  if (first.outcome.result !== "answered") return;
+
+  assert.deepEqual(env.responder.ready(first.outcome.handshake), { result: "open" });
+  assert.equal(env.registry.get(computer.publicKey)?.transport, 2);
+  assert.deepEqual(env.moved, [computer.publicKey]);
+
+  // A secret that was replaced between hs2 and transport_ready closes the handshake.
+  const stale = answer(env, computer.source(), "link");
+  env.registry.enroll({ publicKey: computer.publicKey, kind: "computer", name: "Dev VM", platform: "computer", via: "link", linkSecret: Buffer.alloc(32, 250).toString("base64") });
+  assert.equal(stale.outcome.result, "answered");
+  if (stale.outcome.result === "answered") assert.deepEqual(env.responder.ready(stale.outcome.handshake), { result: "closed" });
+});
+
+test("the link lane stays silent for everything but that computer and that secret", () => {
+  const env = setup();
+  const computer = linkedComputer(env);
+  const pairingSecret = env.registry.currentSecret().secret;
+
+  // The pairing secret, another computer's link secret, and the right secret under an unknown key.
+  assert.equal(answer(env, computer.source({ secret: pairingSecret }), "link").status, "silent");
+  const other = linkedComputer(env);
+  assert.equal(answer(env, computer.source({ secret: other.linkSecret }), "link").status, "silent");
+  assert.equal(answer(env, computer.source({ keys: generateKeyPair() }), "link").status, "silent");
+  // The link secret is no way onto a device lane, and a link frame counts only in the link room.
+  assert.equal(answer(env, computer.source({ roomId: ROOM_ID, lane: "control" }), "control").status, "silent");
+  assert.equal(answer(env, computer.source(), "control").status, "silent");
+  assert.equal(env.responder.handleHs1(computer.source().hs1, { path: "direct", lane: "link" }).result, "silent");
+
+  // A computer with no link secret, an expired link, a device key and a removed computer.
+  const plain = generateKeyPair();
+  const plainKey = Buffer.from(plain.publicKey).toString("base64");
+  env.registry.enroll({ publicKey: plainKey, kind: "computer", name: "Old link", platform: "computer", via: "link" });
+  assert.equal(answer(env, computer.source({ keys: plain }), "link").status, "silent");
+  const expired = linkedComputer(env, { expiresAt: Date.now() - 1 });
+  assert.equal(answer(env, expired.source(), "link").status, "silent");
+  const device = generateKeyPair();
+  record(env.registry, Buffer.from(device.publicKey).toString("base64"));
+  assert.equal(answer(env, computer.source({ keys: device }), "link").status, "silent");
+  env.registry.revoke(other.publicKey);
+  assert.equal(answer(env, other.source(), "link").status, "silent");
+
+  assert.equal(answer(env, computer.source(), "link").status, "open");
+});
+
+test("local-request hands a recorded device the secret and makes every other key wait for Allow", () => {
+  const env = setup();
+  /** @param {Partial<Parameters<typeof dial>[0]>} options */
+  const local = (options = {}) => env.device({ path: "local-request", ...options });
+
+  // A recorded device: open, and the grant counts as handing it the current secret.
+  const known = local();
+  record(env.registry, known.publicKey);
+  env.registry.rotateSecret();
+  const opened = answer(env, known, "control", "local-request");
+  assert.equal(opened.status, "open");
+  assert.equal(opened.outcome.result, "answered");
+  if (opened.outcome.result !== "answered") return;
+  assert.equal(env.registry.get(known.publicKey)?.secretId, undefined);
+  assert.deepEqual(env.responder.ready(opened.outcome.handshake), { result: "open" });
+  const entry = env.registry.get(known.publicKey);
+  assert.equal(entry?.secretId, env.registry.currentSecret().id);
+  assert.equal(entry?.transport, 1, "the record moves when the device comes back with a direct handshake");
+
+  // An unknown key waits even though the computer is not locked, and nothing is stored for it.
+  assert.equal(env.registry.locked, false);
+  const stranger = local({ payload: { app: "1.2.0", name: "Second account", platform: "windows", caps: {} } });
+  const held = answer(env, stranger, "control", "local-request");
+  assert.equal(held.status, "pending");
+  assert.equal(held.outcome.result, "answered");
+  if (held.outcome.result !== "answered" || !held.finished) return;
+  assert.deepEqual(env.responder.ready(held.outcome.handshake), {
+    result: "held", notice: { publicKey: stranger.publicKey, name: "Second account", platform: "windows", code: held.finished.code },
+  });
+  assert.equal(env.registry.get(stranger.publicKey), undefined);
+  // Allow: the index records the key, then the responder marks the secret as handed.
+  env.registry.enroll({ publicKey: stranger.publicKey, kind: "device", name: "Second account", platform: "windows", via: "approval" });
+  assert.deepEqual(env.responder.approve(held.outcome.handshake), {});
+  assert.equal(env.registry.get(stranger.publicKey)?.secretId, env.registry.currentSecret().id);
+  assert.equal(env.registry.get(stranger.publicKey)?.transport, 1);
+
+  // A removed key asks again. A linked computer's key is not a device and gets nothing.
+  env.registry.revoke(known.publicKey);
+  assert.equal(answer(env, local({ keys: known.keys }), "control", "local-request").status, "pending");
+  const computer = linkedComputer(env);
+  assert.equal(answer(env, local({ keys: computer.keys }), "control", "local-request").status, "silent");
+  // The path is its own: the same frame is not a direct or relay handshake, and bulk does not exist on it.
+  assert.equal(env.responder.handleHs1(local().hs1, { path: "direct", lane: "control" }).result, "silent");
+  assert.equal(env.responder.handleHs1(local().hs1, { path: "local-request", lane: "bulk" }).result, "silent");
+});
+
+test("local-request answers nobody while the state file is unreadable", () => {
+  const env = setup();
+  fs.writeFileSync(env.file, "{ damaged");
+  const registry = new DeviceRegistry(env.file);
+  const responder = new TransportResponder({ registry, keyPair: () => env.keyPair, roomId: () => ROOM_ID, serverVersion: "1.1.530" });
+  assert.equal(responder.handleHs1(env.device({ path: "local-request", secret: Buffer.alloc(32).toString("base64") }).hs1, { path: "local-request", lane: "control" }).result, "silent");
 });

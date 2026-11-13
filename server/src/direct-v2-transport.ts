@@ -17,6 +17,7 @@ import {
   isTransportReady,
   type AcceptedHandshake,
   type PairingUpdate,
+  type Hs1Arrival,
   type PendingNotice,
   type TransportResponder,
 } from "./transport-responder";
@@ -27,12 +28,15 @@ import { errorMessage, isRecord } from "./value-guards";
 const BIN_MARKER_JSON = 0x4A;
 const BIN_MARKER_UPLOAD_CHUNK = 0x42;
 const CLOSE_POLICY_VIOLATION = 1008;
+const CLOSE_NORMAL = 1000;
 
 export interface DirectV2Hooks {
   responder: TransportResponder;
   /** The socket comes from this computer itself: loopback with no proxy in front. */
   fromThisComputer: boolean;
   serverCapabilities: (binaryEnvelope: boolean, lane: TransportLane) => Record<string, unknown>;
+  /** The `pairing_grant` message for a `local-request` peer that is a recorded device. */
+  pairingGrant: () => Record<string, unknown>;
   /** The channel is admitted. Called once, after the first records have gone out. */
   onOpen: (transport: DirectV2Transport) => void;
   /** A sealed message from an open channel. */
@@ -52,6 +56,12 @@ export interface DirectV2Hooks {
  * Nothing is stored or sent beyond `hs2` until the peer's first record,
  * `transport_ready`, proves it holds the handshake's keys. The lane comes
  * from `hs1`, so `lane` and `peerKey` are only set once the channel is up.
+ *
+ * The same socket carries the `local-request` path (5.3) for the app in
+ * another account on this computer. That peer never gets an open channel:
+ * once its key is a recorded device, at once or after Allow, it is sent
+ * `pairing_grant` and the socket closes. No record it sends is read past
+ * `transport_ready`.
  */
 export class DirectV2Transport implements ClientTransport {
   private state: "waiting" | "answered" | "held" | "open" | "closed" = "waiting";
@@ -101,7 +111,7 @@ export class DirectV2Transport implements ClientTransport {
 
   /** The lane the handshake named. Control until a handshake is answered. */
   get lane(): TransportLane {
-    return this.handshake?.lane ?? "control";
+    return this.handshake?.lane === "bulk" ? "bulk" : "control";
   }
 
   /** The device's key, once its `transport_ready` has proved it. */
@@ -148,9 +158,9 @@ export class DirectV2Transport implements ClientTransport {
       // Another version, or a second hs1, is ignored. The 10 s timer closes the socket.
       if (parsed.v !== TRANSPORT_VERSION || this.handshakeUsed) return;
       this.handshakeUsed = true;
-      const lane = parseHs1Frame(raw)?.lane;
-      if (lane !== "control" && lane !== "bulk") return;
-      const outcome = this.hooks.responder.handleHs1(raw, { path: "direct", lane });
+      const arrival = this.arrivalOf(raw);
+      if (!arrival) return;
+      const outcome = this.hooks.responder.handleHs1(raw, arrival);
       if (outcome.result === "silent") return;
       this.ws.send(outcome.hs2);
       if (outcome.result === "refused") {
@@ -178,6 +188,19 @@ export class DirectV2Transport implements ClientTransport {
     // A held peer's records are ignored until a paired device answers.
     if (this.state !== "open") return;
     this.deliverJson(plaintext);
+  }
+
+  /**
+   * Which handshake this socket may run for an `hs1`. The frame picks
+   * between the device lanes and `local-request`, and `local-request` only
+   * counts on a socket from this computer. Null means stay silent.
+   */
+  private arrivalOf(raw: string): Hs1Arrival | null {
+    const frame = parseHs1Frame(raw);
+    if (!frame) return null;
+    if (frame.path === "local-request") return this.fromThisComputer ? { path: "local-request", lane: "control" } : null;
+    if (frame.path !== "direct" || (frame.lane !== "control" && frame.lane !== "bulk")) return null;
+    return { path: "direct", lane: frame.lane };
   }
 
   private handleBinary(frame: Buffer): void {
@@ -241,12 +264,19 @@ export class DirectV2Transport implements ClientTransport {
       return;
     }
     if (outcome.result === "open") {
-      this.open(handshake, outcome.pairingUpdate);
+      if (handshake.path === "local-request") this.grantAndClose();
+      else this.open(handshake, outcome.pairingUpdate);
       return;
     }
     this.state = "held";
     this.setTimer(HELD_PEER_WAIT_MS, () => this.deny());
     this.hooks.onDevicePending(outcome.notice);
+  }
+
+  /** The whole of a `local-request` channel once its key is a recorded device: one record, then the close. */
+  private grantAndClose(): void {
+    this.sendSealed(JSON.stringify(this.hooks.pairingGrant()));
+    if (this.ws.readyState === WebSocket.OPEN) this.ws.close(CLOSE_NORMAL, "Pairing granted");
   }
 
   /** The first records of an open channel: `pairing_update` when one is due, then `server_capabilities`. */
@@ -259,7 +289,7 @@ export class DirectV2Transport implements ClientTransport {
     this.supportsSessionEventAck = supportsSessionEventAcknowledgement(caps);
     this.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(caps);
     if (pairingUpdate) this.send(JSON.stringify(pairingUpdate));
-    this.send(JSON.stringify(this.hooks.serverCapabilities(this.binaryEnabled, handshake.lane)));
+    this.send(JSON.stringify(this.hooks.serverCapabilities(this.binaryEnabled, this.lane)));
     this.hooks.onOpen(this);
   }
 
@@ -270,6 +300,10 @@ export class DirectV2Transport implements ClientTransport {
     const approved = this.hooks.responder.approve(this.handshake);
     if (!approved) {
       this.closeSocket("Not approved");
+      return;
+    }
+    if (this.handshake.path === "local-request") {
+      this.grantAndClose();
       return;
     }
     this.sendSealed(JSON.stringify({ type: "device_auth_result", ok: true }));

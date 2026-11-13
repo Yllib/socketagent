@@ -56,6 +56,10 @@ const RELAY_AUTH_LABEL = "socketagent-relay-auth-v1";
  */
 export type MessageChannelKind = "v2" | "session" | "static" | "plain";
 
+function channelKindOf(channel: PeerChannel | TransportChannel | null): "v2" | "session" | "static" {
+  return channel instanceof PeerChannel ? (channel.sessionKeyed ? "session" : "static") : "v2";
+}
+
 /** The bytes a computer signs to prove it owns a relay room (wire spec 12.2). */
 export function relayAuthMessage(roomId: string, nonce: Uint8Array): Buffer {
   const zero = Uint8Array.of(0);
@@ -286,7 +290,7 @@ export interface RelayClientOptions {
    * needs it. Tests that never connect leave it out.
    */
   ownerKey?: { publicKey: Uint8Array; secretKey: Uint8Array };
-  /** Answers `hs1` from devices. Without one, v2 peers get silence. */
+  /** Answers `hs1` from devices, and from linked computers in the link room. Without one, v2 peers get silence. */
   responder?: TransportResponder;
   /** False refuses `key_exchange`, which turns the old path off in this room. Default true. */
   legacyTransport?: boolean;
@@ -312,9 +316,9 @@ export interface RelayClientOptions {
   /**
    * Link lane only: decrypted JSON from an approved computer peer, delivered
    * without client-message parsing so peer wire shapes stay out of the phone
-   * protocol.
+   * protocol. `channel` says how the peer's channel was keyed.
    */
-  onPeerJson?: (msg: Record<string, unknown>, peerId: string, publicKey: string) => void;
+  onPeerJson?: (msg: Record<string, unknown>, peerId: string, publicKey: string, channel: "v2" | "session" | "static") => void;
   /**
    * Build the authoritative capability payload for this server. Keeping this
    * in index.ts ensures direct and relay handshakes cannot advertise different
@@ -1128,7 +1132,7 @@ export class RelayClient {
     if (this.opts.onPeerJson) {
       if (peer.auth !== "approved" || !peer.publicKeyBase64) return;
       if (!isRecord(parsed)) throw new Error("Invalid peer message");
-      this.opts.onPeerJson(parsed, peerId, peer.publicKeyBase64);
+      this.opts.onPeerJson(parsed, peerId, peer.publicKeyBase64, channelKindOf(peer.channel));
       return;
     }
     const msg = parseClientMessage(parsed);
@@ -1262,7 +1266,7 @@ export class RelayClient {
     messagePeers.set(msg, peerId);
     const peer = this.getPeer(peerId);
     if (peer.publicKeyBase64) messagePeerKeys.set(msg, peer.publicKeyBase64);
-    messageChannels.set(msg, peer.channel instanceof PeerChannel ? (peer.channel.sessionKeyed ? "session" : "static") : "v2");
+    messageChannels.set(msg, channelKindOf(peer.channel));
     this.opts.onMessage?.(msg);
   }
 

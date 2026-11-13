@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const nacl = require("tweetnacl");
 const dataDir = require("./test-data-dir");
 
 const { DeviceRegistry } = require("#server/device-registry");
@@ -276,4 +277,55 @@ test("an agent start from a linked computer that predates lifetime arrives witho
   assert.equal(named?.ok, true);
   assert.deepEqual(starts.map((args) => args.lifetime), [undefined, "fleeting"]);
   assert.deepEqual(starts.map((args) => args.action), ["start", "start"]);
+});
+
+test("link_upgrade is taken only from a linked computer on a session-keyed old channel, until the link is on v2", async () => {
+  const env = setup({ confirm: "never" });
+  const first = Buffer.alloc(32, 1).toString("base64");
+  const second = Buffer.alloc(32, 2).toString("base64");
+  /** @param {string} linkSecret @param {import("#server/computer-link-peer").PeerRequestChannel} [channel] */
+  const upgrade = (linkSecret, channel) => env.api.handle({ type: "peer_request", id: "u1", action: "link_upgrade", args: { linkSecret } }, env.sourceKey, channel);
+
+  // A static-box channel can be replayed, and the connector calls in with no channel at all.
+  for (const channel of /** @type {const} */ (["static", "v2", "local", undefined])) {
+    const refused = await upgrade(first, channel);
+    assert.equal(refused?.ok, false, String(channel));
+    assert.equal(refused?.code, "invalid");
+  }
+  assert.equal((await upgrade("not a secret", "session"))?.ok, false);
+  assert.equal(env.registry.get(env.sourceKey)?.linkSecret, undefined);
+
+  // It needs no access, like hello, and a repeat overwrites the secret.
+  env.registry.enroll({ publicKey: env.sourceKey, kind: "computer", name: "Dev VM", platform: "computer", via: "link",
+    access: { read: false, agents: false, commands: false }, confirm: "never" });
+  assert.deepEqual(await upgrade(first, "session"), { type: "peer_response", id: "u1", ok: true, result: { upgraded: true } });
+  assert.equal(env.registry.get(env.sourceKey)?.linkSecret, first);
+  assert.equal((await upgrade(second, "session"))?.ok, true);
+  assert.equal(env.registry.get(env.sourceKey)?.linkSecret, second);
+  assert.equal(env.registry.get(env.sourceKey)?.transport, 1, "the record moves at the first v2 handshake, not here");
+
+  // Once the link runs on v2 the secret no longer changes this way.
+  env.registry.touch(env.sourceKey, { transport: 2 });
+  assert.equal((await upgrade(first, "session"))?.ok, false);
+  assert.equal(env.registry.get(env.sourceKey)?.linkSecret, second);
+
+  // An AI client's key is not a link.
+  const connector = setup({ kind: "connector" });
+  assert.equal((await connector.api.handle({ type: "peer_request", id: "u2", action: "link_upgrade", args: { linkSecret: first } }, connector.sourceKey, "session"))?.ok, false);
+});
+
+test("an approval token from a key whose shared secret is all zeros is refused", async () => {
+  const env = setup({ kind: "connector" });
+  const pending = await challenge(env);
+  // The all-zero point gives the same box key to everyone, whatever their secret key.
+  const zeroKey = new Uint8Array(32);
+  env.registry.enroll({ publicKey: toBase64(zeroKey), kind: "device", name: "Zero", platform: "android", via: "token" });
+  const nonce = nacl.randomBytes(nacl.box.nonceLength);
+  const box = nacl.box.after(Buffer.from(JSON.stringify(claims(env, pending))), nonce, nacl.box.before(zeroKey, generateKeyPair().secretKey));
+  const approval = { from: toBase64(zeroKey), n: Buffer.from(nonce).toString("base64"), c: Buffer.from(box).toString("base64") };
+  const response = await env.api.handle({ ...request, approval }, env.sourceKey);
+  assert.equal(response?.ok, false);
+  assert.equal(response?.code, "approval_invalid");
+  assert.match(response?.error ?? "", /could not be opened/);
+  assert.deepEqual(env.ran, []);
 });

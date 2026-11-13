@@ -1,7 +1,7 @@
 import * as crypto from "crypto";
 import { z } from "zod";
 import type { Backend, ComputerApprovalToken } from "./protocol";
-import type { DeviceEntry, DeviceRegistry, ComputerAccess, ComputerConfirm } from "./device-registry";
+import { isValidPublicKey, type DeviceEntry, type DeviceRegistry, type ComputerAccess, type ComputerConfirm } from "./device-registry";
 import { decrypt, fromBase64, type KeyPair } from "./relay-crypto";
 import type { AgentSessionToolArgs, AgentSessionToolResponse, DelegatedAgentTail } from "./delegated-agent-types";
 import { clampPeerCommandTimeout, peerShellName, resolvePeerCommandCwd, type PeerCommandRequest, type PeerCommandResult } from "./peer-command";
@@ -11,9 +11,17 @@ import { errorMessage, isRecord } from "./value-guards";
 export const PEER_ACTIONS = [
   "hello", "sessions_list", "transcript_read", "transcript_search", "run_command",
   "agent_start", "agent_message", "agent_status", "agent_tail", "agent_stop", "agent_list",
-  "agent_report_ack",
+  "agent_report_ack", "link_upgrade",
 ] as const;
 export type PeerAction = typeof PEER_ACTIONS[number];
+
+/**
+ * What carried a peer request. `link_upgrade` hands over a secret, so it is
+ * only taken from an old-path channel with session keys, which cannot be
+ * replayed. `v2` is a link that has already moved, and `local` is the AI
+ * connector calling in from this process.
+ */
+export type PeerRequestChannel = "v2" | "session" | "static" | "local";
 
 export const CHALLENGE_TTL_MS = 10 * 60 * 1000;
 export const CHAT_GRANT_TTL_MS = 12 * 60 * 60 * 1000;
@@ -100,6 +108,7 @@ const agentArgs = z.object({
   limit: z.number().int().min(1).max(50).optional(),
 });
 const reportAckArgs = z.object({ delegationId: z.string(), runId: z.string() });
+const linkUpgradeArgs = z.object({ linkSecret: z.string().refine(isValidPublicKey, "must be base64 of 32 bytes") });
 
 export interface PeerSessionSummary {
   id: string;
@@ -169,6 +178,7 @@ export function accessFor(action: PeerAction): keyof ComputerAccess | null {
   switch (action) {
     case "hello":
     case "agent_report_ack":
+    case "link_upgrade":
       return null;
     case "sessions_list":
     case "transcript_read":
@@ -182,7 +192,7 @@ export function accessFor(action: PeerAction): keyof ComputerAccess | null {
 }
 
 function needsConfirm(action: PeerAction): boolean {
-  return action !== "hello" && action !== "agent_report_ack";
+  return action !== "hello" && action !== "agent_report_ack" && action !== "link_upgrade";
 }
 
 export function approvalSummary(action: PeerAction, args: Record<string, unknown>): string {
@@ -246,8 +256,11 @@ export class ComputerLinkPeerApi {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** Parses one decrypted link-lane message and produces the response, if any. */
-  async handle(raw: Record<string, unknown>, publicKey: string): Promise<PeerResponse | undefined> {
+  /**
+   * Parses one decrypted link-lane message and produces the response, if
+   * any. `channel` says what carried it, which only `link_upgrade` asks about.
+   */
+  async handle(raw: Record<string, unknown>, publicKey: string, channel: PeerRequestChannel = "local"): Promise<PeerResponse | undefined> {
     const parsed = peerRequestSchema.safeParse(raw);
     if (!parsed.success) {
       const id = typeof raw.id === "string" ? raw.id : "";
@@ -262,7 +275,7 @@ export class ComputerLinkPeerApi {
       return this.fail(request, "access_denied", "This computer is not linked here");
     }
     try {
-      return await this.dispatch(request, entry, publicKey);
+      return await this.dispatch(request, entry, publicKey, channel);
     } catch (err: unknown) {
       return this.fail(request, undefined, errorMessage(err) || "Peer request failed");
     }
@@ -293,7 +306,7 @@ export class ComputerLinkPeerApi {
     return this.oneTimeGrants.delete(`${publicKey}\n${oneTimeDigest(request.action, request.args)}`);
   }
 
-  private async dispatch(request: PeerRequest, entry: DeviceEntry, publicKey: string): Promise<PeerResponse> {
+  private async dispatch(request: PeerRequest, entry: DeviceEntry, publicKey: string, channel: PeerRequestChannel): Promise<PeerResponse> {
     const access: ComputerAccess = entry.access ?? { read: false, agents: false, commands: false };
     // A linked computer never asks: the link itself is the user's approval,
     // permanent or until midnight. Only AI connectors keep per-action cards.
@@ -346,6 +359,17 @@ export class ComputerLinkPeerApi {
         const args = reportAckArgs.parse(request.args);
         this.host.ackAgentReport(args.delegationId, args.runId);
         return this.ok(request, { acknowledged: true });
+      }
+      case "link_upgrade": {
+        // Moves an existing link to transport v2 (wire spec 10.2). It needs no
+        // access, like hello. Until the link's first v2 handshake a repeat
+        // overwrites the secret. After it, the old path this arrives on is
+        // refused for the key, so nothing can change the secret from here.
+        const args = linkUpgradeArgs.parse(request.args);
+        if (channel !== "session" || entry.kind !== "computer" || !this.registry.setLinkSecret(publicKey, args.linkSecret)) {
+          return this.fail(request, "invalid", "This connection can't move the link to the new transport");
+        }
+        return this.ok(request, { upgraded: true });
       }
       default: {
         const args = agentArgs.parse(request.args);
@@ -413,6 +437,8 @@ export class ComputerLinkPeerApi {
     try {
       const fromKey = fromBase64(token.from);
       if (fromKey.length !== 32) throw new Error("bad key");
+      // decrypt refuses a key whose shared secret with ours is all zeros,
+      // which would let anyone make the box (wire spec 10.4).
       claims = approvalClaimsSchema.parse(JSON.parse(decrypt({ n: token.n, c: token.c }, fromKey, this.keyPair.secretKey)));
     } catch {
       return { ok: false, error: "The approval could not be opened" };

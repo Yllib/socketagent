@@ -310,7 +310,8 @@ export class DeviceRegistry {
   /**
    * Adds or refreshes an entry and takes its key off the removed list. A
    * computer entry without expiresAt lasts until removed. `transport` is
-   * kept from the existing entry and starts at 1.
+   * kept from the existing entry and starts at 1. A computer's `linkSecret`
+   * is kept too when the new entry names none.
    */
   enroll(entry: Omit<DeviceEntry, "addedAt" | "lastSeenAt" | "transport"> & { addedAt?: string; transport?: DeviceTransport }): DeviceEntry {
     const state = this.loaded();
@@ -327,10 +328,10 @@ export class DeviceRegistry {
     if (entry.kind === "device") {
       delete next.access;
       delete next.confirm;
-      delete next.linkSecret;
     } else {
       delete next.secretId;
     }
+    if (entry.kind !== "computer") delete next.linkSecret;
     if (entry.expiresAt === undefined) delete next.expiresAt;
     if (existing) {
       state.devices[state.devices.indexOf(existing)] = next;
@@ -362,6 +363,20 @@ export class DeviceRegistry {
     existing.lastSeenAt = new Date().toISOString();
     this.write();
     return { ...existing };
+  }
+
+  /**
+   * Stores the link secret a linked computer offered with `link_upgrade`.
+   * False when the key is not a recorded computer, or its link already runs
+   * on v2: from then only `device_authorize` from a device changes the secret.
+   */
+  setLinkSecret(publicKey: string, linkSecret: string): boolean {
+    this.dropExpired();
+    const existing = this.loaded().devices.find((candidate) => candidate.publicKey === publicKey);
+    if (existing?.kind !== "computer" || existing.transport !== 1 || !isValidPublicKey(linkSecret)) return false;
+    existing.linkSecret = normalizePublicKey(linkSecret);
+    this.write();
+    return true;
   }
 
   /** Moves the key to the removed list. Returns the removed entry. */

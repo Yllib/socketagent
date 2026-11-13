@@ -3099,6 +3099,9 @@
                 "digest"
               ]
             },
+            "linkSecret": {
+              "type": "string"
+            },
             "commandId": {
               "type": "string"
             }
@@ -3166,6 +3169,9 @@
             },
             "expiresAt": {
               "type": "number"
+            },
+            "linkSecret": {
+              "type": "string"
             },
             "commandId": {
               "type": "string"
@@ -5248,6 +5254,9 @@
           "type": "string"
         },
         "peerPublicKey": {
+          "type": "string"
+        },
+        "transferSecret": {
           "type": "string"
         }
       },

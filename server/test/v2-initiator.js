@@ -5,6 +5,8 @@ const {
   derivePsk,
   encodeHandshakePayload,
   encodeHs1Frame,
+  LOCAL_PSK,
+  LOCAL_REQUEST_TAG,
   parseHandshakePayload,
   parseHs2Frame,
   secretTag,
@@ -15,13 +17,14 @@ const {
 /**
  * The device's half of a v2 handshake, for tests of the computer's half.
  * `dial` writes `hs1`. `finish(hs2)` reads the answer and returns the
- * device's end of the channel.
+ * device's end of the channel. On `local-request` the secret is not used:
+ * that path runs on the public constant and has no room.
  *
  * @param {{
  *   serverKey: Uint8Array,
  *   secret: string,
  *   roomId: string,
- *   path?: "relay" | "direct",
+ *   path?: "relay" | "direct" | "local-request",
  *   lane?: "control" | "bulk" | "link",
  *   keys?: import("#server/noise-ikpsk1").NoiseKeyPair,
  *   payload?: Record<string, unknown>,
@@ -29,19 +32,20 @@ const {
  */
 function dial(options) {
   const { serverKey, roomId, path = "relay", lane = "control", keys = generateKeyPair() } = options;
+  const local = path === "local-request";
   const secret = Buffer.from(options.secret, "base64");
   const payload = options.payload ?? { app: "1.2.0", name: "Pixel 9", platform: "android", caps: {} };
   const handshake = initiateHandshake({
-    prologue: buildPrologue(path, lane, roomId),
+    prologue: buildPrologue(path, lane, local ? "" : roomId),
     staticKeyPair: keys,
     responderStaticKey: serverKey,
-    psk: derivePsk(secret),
+    psk: local ? LOCAL_PSK : derivePsk(secret),
     payload: encodeHandshakePayload(payload),
   });
   return {
     keys,
     publicKey: Buffer.from(keys.publicKey).toString("base64"),
-    hs1: encodeHs1Frame({ path, lane, tag: secretTag(secret), message: Buffer.from(handshake.message1) }),
+    hs1: encodeHs1Frame({ path, lane, tag: local ? LOCAL_REQUEST_TAG : secretTag(secret), message: Buffer.from(handshake.message1) }),
     /** @param {string} hs2 */
     finish(hs2) {
       const message2 = parseHs2Frame(hs2);

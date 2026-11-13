@@ -16,8 +16,9 @@ const { TransportResponder } = require("#server/transport-responder");
 const { parseJsonObject } = require("#server/value-guards");
 const { dial } = require("./v2-initiator");
 
-// The direct `?e2e=2` socket of wire spec 5.2, over a real loopback
-// WebSocket, and the one loopback check every local-only rule uses.
+// The direct `?e2e=2` socket of wire spec 5.2 and the `local-request` path
+// of 5.3, over a real loopback WebSocket, and the one loopback check every
+// local-only rule uses.
 
 const ROOM_ID = "ab".repeat(32);
 let counter = 0;
@@ -41,11 +42,12 @@ async function listener(t) {
   let opened = 0;
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   t.after(() => { for (const socket of server.clients) socket.terminate(); server.close(); });
-  server.on("connection", (ws) => {
+  server.on("connection", (ws, req) => {
     sockets.add(new DirectV2Transport(ws, {
       responder,
-      fromThisComputer: true,
+      fromThisComputer: isLoopbackRequest(req),
       serverCapabilities: (_binary, lane) => ({ type: "server_capabilities", lane, transport: { version: 2 } }),
+      pairingGrant: () => ({ type: "pairing_grant", secret: registry.currentSecret().secret, roomId: ROOM_ID, port: 8085, hosts: ["192.168.1.20"] }),
       onOpen: () => { opened++; },
       onMessage: (_transport, message) => delivered.push(message),
       onDevicePending: (notice) => prompts.push(notice),
@@ -57,9 +59,12 @@ async function listener(t) {
   const address = server.address();
   assert.ok(address && typeof address !== "string");
 
-  /** Connects and collects what the computer sends and how the socket closes. */
-  const connect = async () => {
-    const ws = new WebSocket(`ws://127.0.0.1:${address.port}/?e2e=2`);
+  /**
+   * Connects and collects what the computer sends and how the socket closes.
+   * @param {Record<string, string>} headers
+   */
+  const connect = async (headers = {}) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${address.port}/?e2e=2`, { headers });
     /** @type {string[]} */
     const received = [];
     /** @type {(() => void)[]} */
@@ -90,9 +95,13 @@ async function listener(t) {
   };
   /** @param {Partial<Parameters<typeof dial>[0]>} options */
   const device = (options = {}) => dial({ serverKey: serverKeys.publicKey, secret: registry.currentSecret().secret, roomId: ROOM_ID, path: "direct", ...options });
-  /** Runs a device's handshake on a new socket up to `hs2`. */
-  const handshake = async (/** @type {ReturnType<typeof dial>} */ dialled) => {
-    const socket = await connect();
+  /**
+   * Runs a device's handshake on a new socket up to `hs2`.
+   * @param {ReturnType<typeof dial>} dialled
+   * @param {Record<string, string>} headers
+   */
+  const handshake = async (dialled, headers = {}) => {
+    const socket = await connect(headers);
     socket.ws.send(dialled.hs1);
     const channel = dialled.finish((await socket.frames(1))[0]);
     /** Opens the sealed frame at `index`, counting `hs2` as the first. */
@@ -233,6 +242,112 @@ test("a locked computer holds a new key on a direct v2 socket until it is allowe
   while (env.cleared.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(env.cleared, [denied.publicKey]);
   assert.equal(env.registry.get(denied.publicKey), undefined);
+});
+
+test("local-request sends a recorded device pairing_grant and closes, and reads nothing else", async (t) => {
+  const env = await listener(t);
+  const device = env.device({ path: "local-request", keys: generateKeyPair() });
+  env.registry.enroll({ publicKey: device.publicKey, kind: "device", name: "Desktop app", platform: "windows", via: "approval" });
+  const socket = await env.handshake(device);
+  assert.equal(socket.channel.answer.status, "open");
+  await socket.settled();
+  assert.equal(socket.received.length, 1, "nothing follows hs2 before transport_ready");
+
+  socket.ws.send(socket.channel.ready());
+  // A message an open channel would act on. This path never opens one.
+  socket.ws.send(socket.channel.seal({ type: "list_sessions" }));
+  assert.equal(await socket.closed(), 1000);
+  assert.equal(socket.received.length, 2);
+  assert.deepEqual(socket.open(1), {
+    type: "pairing_grant", secret: env.registry.currentSecret().secret, roomId: ROOM_ID, port: 8085, hosts: ["192.168.1.20"],
+  });
+  assert.equal(env.opened(), 0);
+  assert.deepEqual(env.delivered, []);
+  assert.deepEqual(env.sockets.openKeys(), []);
+});
+
+test("local-request holds an unknown key and grants only after Allow", async (t) => {
+  const env = await listener(t);
+  // Not locked. This path asks all the same.
+  const allowed = env.device({ path: "local-request", payload: { app: "1.2.0", name: "Second account", platform: "windows", caps: {} } });
+  const socket = await env.handshake(allowed);
+  assert.equal(socket.channel.answer.status, "pending");
+  await socket.settled();
+  assert.deepEqual(env.prompts, [], "no prompt before transport_ready");
+
+  socket.ws.send(socket.channel.ready());
+  socket.ws.send(socket.channel.seal({ type: "pairing_upgrade", requestId: "r1" }));
+  socket.ws.send(socket.channel.seal({ type: "list_sessions" }));
+  await socket.settled();
+  assert.deepEqual(env.prompts, [{ publicKey: allowed.publicKey, name: "Second account", platform: "windows", code: socket.channel.code }]);
+  assert.equal(socket.received.length, 1, "no grant and no answer while it waits");
+  assert.deepEqual(env.delivered, []);
+  assert.equal(env.registry.get(allowed.publicKey), undefined);
+
+  // device_approve: the index records the key, then tells the socket.
+  env.registry.enroll({ publicKey: allowed.publicKey, kind: "device", name: "Second account", platform: "windows", via: "approval" });
+  env.sockets.approveKey(allowed.publicKey);
+  assert.equal(await socket.closed(), 1000);
+  assert.equal(socket.received.length, 2);
+  const grant = socket.open(1);
+  assert.equal(grant.type, "pairing_grant");
+  assert.equal(grant.secret, env.registry.currentSecret().secret);
+  assert.equal(env.opened(), 0);
+
+  // device_deny: the verdict, then the close. No grant.
+  const denied = env.device({ path: "local-request" });
+  const other = await env.handshake(denied);
+  other.ws.send(other.channel.ready());
+  await other.settled();
+  env.sockets.denyKey(denied.publicKey);
+  assert.equal(await other.closed(), 1008);
+  assert.equal(other.received.length, 2);
+  assert.deepEqual(other.open(1), { type: "device_auth_result", ok: false, reason: "not_approved" });
+  assert.equal(env.registry.get(denied.publicKey), undefined);
+});
+
+test("local-request gets no answer from a socket with a proxy header, or one that is not this computer", async (t) => {
+  const env = await listener(t);
+  const device = env.device({ path: "local-request", keys: generateKeyPair() });
+  env.registry.enroll({ publicKey: device.publicKey, kind: "device", name: "Desktop app", platform: "windows", via: "approval" });
+
+  // A tunnel on this computer connects from loopback for someone who is not here.
+  for (const header of ["X-Forwarded-For", "Forwarded", "X-Real-IP"]) {
+    const proxied = await env.connect({ [header]: "203.0.113.9" });
+    proxied.ws.send(env.device({ path: "local-request", keys: device.keys }).hs1);
+    await proxied.settled();
+    assert.deepEqual(proxied.received, [], header);
+  }
+
+  // The same transport on a socket the index did not mark as from this computer.
+  const outside = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  t.after(() => { for (const socket of outside.clients) socket.terminate(); outside.close(); });
+  const responder = new TransportResponder({ registry: env.registry, keyPair: generateKeyPair, roomId: () => ROOM_ID, serverVersion: "1.1.530" });
+  let granted = 0;
+  outside.on("connection", (ws) => {
+    new DirectV2Transport(ws, {
+      responder, fromThisComputer: false,
+      serverCapabilities: () => ({}), pairingGrant: () => { granted++; return {}; },
+      onOpen: () => {}, onMessage: () => {}, onDevicePending: () => {}, onPendingDropped: () => {}, onClose: () => {},
+    });
+  });
+  await once(outside, "listening");
+  const address = outside.address();
+  assert.ok(address && typeof address !== "string");
+  const ws = new WebSocket(`ws://127.0.0.1:${address.port}/?e2e=2`);
+  /** @type {string[]} */
+  const received = [];
+  ws.on("message", (data) => received.push(String(data)));
+  await once(ws, "open");
+  ws.send(device.hs1);
+  ws.ping();
+  await once(ws, "pong");
+  assert.deepEqual(received, []);
+  assert.equal(granted, 0);
+  ws.terminate();
+
+  // From this computer with no proxy header the same key is answered.
+  assert.equal((await env.handshake(env.device({ path: "local-request", keys: device.keys }))).channel.answer.status, "open");
 });
 
 test("loopback means a loopback address with no proxy in front", () => {

@@ -325,6 +325,9 @@
           "$ref": "#/definitions/PairingUpdateServerMessage"
         },
         {
+          "$ref": "#/definitions/PairingGrantServerMessage"
+        },
+        {
           "$ref": "#/definitions/PairingUpgradeResultServerMessage"
         },
         {
@@ -6684,6 +6687,37 @@
         "type",
         "secret",
         "roomId"
+      ]
+    },
+    "PairingGrantServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pairing_grant"
+        },
+        "secret": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "port": {
+          "type": "number"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "secret",
+        "roomId",
+        "port",
+        "hosts"
       ]
     },
     "PairingUpgradeResultServerMessage": {

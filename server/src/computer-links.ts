@@ -1,3 +1,4 @@
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import WebSocket from "ws";
@@ -12,7 +13,20 @@ import {
   type SessionKeyedPeers,
 } from "./relay-crypto";
 import { peerEventSchema, peerResponseSchema, type PeerAction, type PeerEvent, type PeerResponse } from "./computer-link-peer";
+import { initiateHandshake, NoiseError, type NoiseInitiatorHandshake } from "./noise-ikpsk1";
 import type { ComputerApprovalToken, ComputerLinkSummary } from "./protocol";
+import {
+  buildPrologue,
+  derivePsk,
+  encodeHandshakePayload,
+  encodeHs1Frame,
+  parseHandshakePayload,
+  parseHs2Frame,
+  secretTag,
+  TransportChannel,
+  TRANSPORT_READY_MESSAGE,
+  type FrameChannel,
+} from "./transport-v2";
 import { errorMessage, isRecord } from "./value-guards";
 
 const linkRecordSchema = z.object({
@@ -28,6 +42,11 @@ const linkRecordSchema = z.object({
   shell: z.string().optional(),
   /** Unix ms when the link ends. Absent means it lasts until removed. */
   expiresAt: z.number().optional(),
+  /**
+   * base64 of 32 bytes, shared with the target. A link that has one connects
+   * with transport v2 and never falls back to the old key exchange.
+   */
+  linkSecret: z.string().refine(isValidPublicKey, "must be base64 of 32 bytes").optional(),
 });
 export type ComputerLinkRecord = z.infer<typeof linkRecordSchema>;
 
@@ -36,7 +55,7 @@ const linksFileSchema = z.object({ version: z.literal(1), links: z.array(linkRec
 /**
  * Outgoing links this computer holds. access, confirm, expiresAt, platform
  * and shell are a copy from the target's hello; the target enforces access,
- * confirm and expiry.
+ * confirm and expiry. The file holds link secrets, so it is written 0600.
  */
 export class ComputerLinkStore {
   private links: ComputerLinkRecord[] = [];
@@ -94,21 +113,43 @@ interface PendingResponse {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+/** How long the source waits for `hs2`, and for the answer to `link_upgrade`. */
+const HANDSHAKE_WAIT_MS = 10_000;
+/** After a handshake the target did not answer or answered badly, the next dial waits this long. */
+const FAILED_HANDSHAKE_RETRY_MS = 60_000;
 
-/**
- * One outgoing connection to a target's link room. This computer joins as a
- * phone with a link ticket, then speaks the same NaCl box envelope the phone
- * lanes use, pinned to the target's server key, with a session key per
- * connection once the target answers with one.
- */
-interface LinkHooks {
+export interface LinkHooks {
   onEvent: (event: PeerEvent, record: ComputerLinkRecord) => void;
   onOnline: (record: ComputerLinkRecord) => void;
   onStatusChange?: () => void;
   /** Targets that answered with session keys and may not fall back. Defaults to memory. */
   sessionKeyedPeers?: SessionKeyedPeers;
+  /** This server's release version, sent in the v2 handshake. */
+  serverVersion: string;
+  /**
+   * False when the old path is off on this computer. A link with no link
+   * secret then does not connect at all. Default true.
+   */
+  legacyTransport?: boolean;
+  /** Stores a record whose link secret the target has just accepted. Set by the manager. */
+  saveRecord?: (record: ComputerLinkRecord) => void;
 }
 
+/**
+ * One outgoing connection to a target's link room. This computer joins as a
+ * phone with a link ticket, pinned to the target's server key.
+ *
+ * A link whose record has a link secret runs transport v2 (wire spec 5.4):
+ * on `peer_connected` it sends `hs1` on the `link` lane, and after `hs2` every
+ * frame is a sealed record. It never sends the old key exchange.
+ *
+ * A link with no secret speaks the old NaCl box envelope, with a session key
+ * per connection once the target answers with one. On such a session-keyed
+ * channel it makes a link secret and offers it with `link_upgrade` (10.2).
+ * When the target accepts, the secret is stored and the link reconnects on
+ * v2. An older target refuses the action and the link stays as it is until
+ * the next connect.
+ */
 export class LinkConnection {
   private ws: WebSocket | null = null;
   private closed = false;
@@ -120,7 +161,12 @@ export class LinkConnection {
   private approved = false;
   private requestCounter = 0;
   private offer: SessionOffer | null = null;
-  private channel: PeerChannel | null = null;
+  private channel: FrameChannel | null = null;
+  /** The v2 handshake in flight, from `hs1` until `hs2` arrives or the wait ends. */
+  private handshake: NoiseInitiatorHandshake | null = null;
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The shortest wait before the next dial. Set after a handshake that failed. */
+  private retryFloorMs = 0;
   private readonly sessionKeyedPeers: SessionKeyedPeers;
   offlineReason: string | undefined = "Connecting";
   /** Set once the relay refuses the ticket; only a new ticket clears it. */
@@ -149,10 +195,21 @@ export class LinkConnection {
       this.offlineReason = "The link ticket expired. Open the app to renew it.";
       return;
     }
-    const url = `${this.record.relayUrl}?token=${encodeURIComponent(this.record.linkRoom)}&role=phone&link_ticket=${encodeURIComponent(this.record.ticket)}`;
+    if (!this.record.linkSecret && this.hooks.legacyTransport === false) {
+      this.offlineReason = "This link uses the old transport, which is off on this computer. Make the link again in the app.";
+      return;
+    }
     let ws: WebSocket;
     try {
-      ws = new WebSocket(url);
+      // A new-style join: the room and the ticket ride in headers, not the URL.
+      ws = new WebSocket(this.record.relayUrl, {
+        headers: {
+          "X-SocketAgent-Protocol": "2",
+          "X-SocketAgent-Role": "phone",
+          "X-SocketAgent-Room": encodeURIComponent(this.record.linkRoom),
+          "X-SocketAgent-Link-Ticket": this.record.ticket,
+        },
+      });
     } catch (err: unknown) {
       this.offlineReason = errorMessage(err);
       this.scheduleReconnect();
@@ -160,8 +217,7 @@ export class LinkConnection {
     }
     this.ws = ws;
     // A session belongs to one socket. Frames from an older one never open here.
-    this.channel = null;
-    this.offer = null;
+    this.dropChannel();
     this.offlineReason = "Connecting";
     // update() replaces the socket; events from the one it closed are ignored.
     const current = () => this.ws === ws;
@@ -176,7 +232,7 @@ export class LinkConnection {
       if (!current()) return;
       try {
         const raw = (Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data)).toString();
-        this.handleFrame(JSON.parse(raw));
+        this.handleFrame(JSON.parse(raw), raw);
       } catch (err: unknown) {
         console.warn(`[ComputerLinks] ${this.record.name}: bad frame: ${errorMessage(err)}`);
       }
@@ -187,6 +243,7 @@ export class LinkConnection {
       this.ws = null;
       this.peerPresent = false;
       this.approved = false;
+      this.dropChannel();
       this.failPending(new Error(`${this.record.name} disconnected`));
       if (code === 1008 || code === 4401) {
         this.ticketRejected = true;
@@ -218,25 +275,42 @@ export class LinkConnection {
     });
   }
 
-  /** Replaces the stored record (new ticket or settings) and reconnects if needed. */
+  /** Replaces the stored record (new ticket, link secret or settings) and reconnects if needed. */
   update(record: ComputerLinkRecord): void {
     const ticketChanged = record.ticket !== this.record.ticket || record.linkRoom !== this.record.linkRoom
       || record.relayUrl !== this.record.relayUrl;
+    const secretChanged = record.linkSecret !== this.record.linkSecret;
     this.record = record;
-    if (ticketChanged) {
-      this.ticketRejected = false;
-      this.stopPing();
-      this.ws?.close();
-      this.ws = null;
-      this.peerPresent = false;
-      this.approved = false;
-      this.failPending(new Error(`${this.record.name} reconnected with a new ticket`));
-      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-      this.connect();
+    if (ticketChanged || secretChanged) {
+      if (ticketChanged) this.ticketRejected = false;
+      this.retryFloorMs = 0;
+      this.redial(new Error(`${this.record.name} reconnected with a new ${ticketChanged ? "ticket" : "link secret"}`));
     } else if (!this.ws && !this.closed) {
       this.connect();
     }
+  }
+
+  /** Drops the socket and dials again at once. */
+  private redial(why: Error): void {
+    this.stopPing();
+    this.ws?.close();
+    this.ws = null;
+    this.peerPresent = false;
+    this.approved = false;
+    this.dropChannel();
+    this.failPending(why);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.connect();
+  }
+
+  /** Forgets the channel and any handshake in flight. Both belong to one socket and one `peer_connected`. */
+  private dropChannel(): void {
+    this.channel = null;
+    this.offer = null;
+    this.handshake = null;
+    if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = null;
   }
 
   close(): void {
@@ -246,15 +320,20 @@ export class LinkConnection {
     this.reconnectTimer = null;
     this.ws?.close();
     this.ws = null;
+    this.dropChannel();
     this.failPending(new Error(`${this.record.name} link removed`));
   }
 
-  private handleFrame(parsed: unknown): void {
+  private handleFrame(parsed: unknown, raw: string): void {
     if (!isRecord(parsed)) return;
     if (parsed.type === "peer_connected") {
       this.peerPresent = true;
       this.approved = false;
-      this.channel = null;
+      this.dropChannel();
+      if (this.record.linkSecret) {
+        this.startHandshake(this.record.linkSecret);
+        return;
+      }
       this.offer = new SessionOffer(this.keyPair, fromBase64(this.record.targetPubkey));
       this.sendPlain(this.offer.message());
       return;
@@ -262,7 +341,7 @@ export class LinkConnection {
     if (parsed.type === "peer_disconnected") {
       this.peerPresent = false;
       this.approved = false;
-      this.channel = null;
+      this.dropChannel();
       this.offlineReason = `${this.record.name} is offline`;
       this.failPending(new Error(`${this.record.name} went offline`));
       this.hooks.onStatusChange?.();
@@ -273,7 +352,12 @@ export class LinkConnection {
       this.offlineReason = "The relay refused the link ticket. Open the app to renew it.";
       return;
     }
+    if (parsed.type === "hs2") {
+      this.handleHs2(raw);
+      return;
+    }
     if (parsed.type === "key_exchange_ack") {
+      // A link with a secret never set an offer, so it never takes this path.
       if (!this.offer) return;
       try {
         this.channel = this.offer.accept(parsed, this.sessionKeyedPeers);
@@ -304,17 +388,107 @@ export class LinkConnection {
         plaintext = this.channel.openText({ n: parsed.n, c: parsed.c });
       } catch (err: unknown) {
         console.warn(`[ComputerLinks] ${this.record.name}: frame refused: ${errorMessage(err)}`);
+        // A v2 channel is closed for good by a record that does not open.
+        if (this.channel instanceof TransportChannel) this.ws?.close();
         return;
       }
       this.handleEncrypted(JSON.parse(plaintext));
     }
   }
 
+  /** Sends `hs1` on the link lane and waits 10 s for the target's `hs2`. */
+  private startHandshake(linkSecret: string): void {
+    const secret = Buffer.from(linkSecret, "base64");
+    this.handshake = initiateHandshake({
+      prologue: buildPrologue("relay", "link", this.record.linkRoom),
+      staticKeyPair: this.keyPair,
+      responderStaticKey: fromBase64(this.record.targetPubkey),
+      psk: derivePsk(secret),
+      payload: encodeHandshakePayload({ app: this.hooks.serverVersion }),
+    });
+    this.sendFrame(encodeHs1Frame({ path: "relay", lane: "link", tag: secretTag(secret), message: Buffer.from(this.handshake.message1) }));
+    // The target stays silent for a key or secret it does not have on record.
+    this.handshakeTimer = setTimeout(() => this.failHandshake(`${this.record.name} has not authorized this computer`), HANDSHAKE_WAIT_MS);
+    this.handshakeTimer.unref?.();
+  }
+
+  /** The first `hs2` decides the handshake (spec 3.7). A bad one closes the socket. */
+  private handleHs2(raw: string): void {
+    const handshake = this.handshake;
+    if (!handshake) return;
+    this.handshake = null;
+    if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = null;
+    const message2 = parseHs2Frame(raw);
+    if (!message2) {
+      this.failHandshake(`${this.record.name} answered with an unusable handshake`);
+      return;
+    }
+    let keys: ReturnType<NoiseInitiatorHandshake["readMessage2"]>;
+    try {
+      keys = handshake.readMessage2(message2);
+    } catch (err: unknown) {
+      if (!(err instanceof NoiseError)) throw err;
+      this.failHandshake(`${this.record.name} answered with an unusable handshake`);
+      return;
+    }
+    // A link is only ever answered `open`.
+    if (parseHandshakePayload(keys.payload)?.status !== "open") {
+      this.failHandshake(`${this.record.name} refused the connection`);
+      return;
+    }
+    this.channel = new TransportChannel({ role: "initiator", sendKey: keys.sendKey, receiveKey: keys.receiveKey });
+    this.sendFrame(JSON.stringify(this.channel.sealText(TRANSPORT_READY_MESSAGE)));
+    this.retryFloorMs = 0;
+    this.markOnline();
+  }
+
+  /** Closes the socket after a handshake that got no usable answer. The next dial waits a minute. */
+  private failHandshake(reason: string): void {
+    this.dropChannel();
+    this.approved = false;
+    this.offlineReason = reason;
+    this.retryFloorMs = FAILED_HANDSHAKE_RETRY_MS;
+    this.failPending(new Error(reason));
+    this.hooks.onStatusChange?.();
+    this.ws?.close();
+  }
+
   private markOnline(): void {
     this.approved = true;
     this.offlineReason = undefined;
     this.hooks.onStatusChange?.();
+    if (this.channel instanceof PeerChannel && this.channel.sessionKeyed) {
+      void this.offerLinkSecret();
+      return;
+    }
     this.hooks.onOnline(this.record);
+  }
+
+  /**
+   * Moves an existing link to v2 (spec 10.2). The secret is made here, sent
+   * over this session-keyed channel, and stored only after the target says
+   * it has it. Then the link reconnects with a v2 handshake. A target that
+   * does not know the action leaves the link on the old path for now.
+   */
+  private async offerLinkSecret(): Promise<void> {
+    const ws = this.ws;
+    const linkSecret = crypto.randomBytes(32).toString("base64");
+    let accepted = false;
+    try {
+      accepted = (await this.request("link_upgrade", { linkSecret }, "", undefined, HANDSHAKE_WAIT_MS)).ok;
+    } catch {
+      // No answer, or the socket went away. The next connect asks again.
+    }
+    if (this.ws !== ws || this.closed) return;
+    if (!accepted || !this.hooks.saveRecord) {
+      this.hooks.onOnline(this.record);
+      return;
+    }
+    this.record = { ...this.record, linkSecret };
+    this.hooks.saveRecord(this.record);
+    console.log(`[ComputerLinks] ${this.record.name}: link moved to the new transport`);
+    this.redial(new Error(`${this.record.name} reconnected on the new transport`));
   }
 
   private handleEncrypted(parsed: unknown): void {
@@ -354,8 +528,11 @@ export class LinkConnection {
   }
 
   private sendPlain(message: Record<string, unknown>): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify(message));
+    this.sendFrame(JSON.stringify(message));
+  }
+
+  private sendFrame(frame: string): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(frame);
   }
 
   private sendEncrypted(message: Record<string, unknown>): void {
@@ -418,7 +595,7 @@ export class LinkConnection {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, this.reconnectDelay);
+    }, Math.max(this.reconnectDelay, this.retryFloorMs));
     this.reconnectTimer.unref?.();
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000);
   }
@@ -456,15 +633,26 @@ export class ComputerLinkManager {
       existing.update(record);
       return existing;
     }
-    const connection = new LinkConnection(record, this.keyPair, this.hooks);
+    const connection = new LinkConnection(record, this.keyPair, {
+      ...this.hooks,
+      // A link_upgrade the target accepted. The connection already uses the new record.
+      saveRecord: (upgraded) => { this.store.set(upgraded); },
+    });
     this.connections.set(record.targetPubkey, connection);
     connection.connect();
     return connection;
   }
 
+  /**
+   * Stores a link and connects it. A record with no link secret keeps the
+   * one the stored link has: a link that has moved to v2 never goes back.
+   */
   set(record: ComputerLinkRecord): ComputerLinkRecord {
     if (!isValidPublicKey(record.targetPubkey)) throw new Error("targetPubkey must be a base64 X25519 key");
-    const saved = this.store.set({ ...record, targetPubkey: normalizePublicKey(record.targetPubkey) });
+    if (record.linkSecret !== undefined && !isValidPublicKey(record.linkSecret)) throw new Error("linkSecret must be base64 of 32 bytes");
+    const targetPubkey = normalizePublicKey(record.targetPubkey);
+    const linkSecret = record.linkSecret ?? this.store.get(targetPubkey)?.linkSecret;
+    const saved = this.store.set({ ...record, targetPubkey, ...(linkSecret ? { linkSecret } : {}) });
     this.open(saved);
     return saved;
   }

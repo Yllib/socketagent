@@ -885,21 +885,31 @@ function loadServerKeyPair(): KeyPair {
 // transport refuses them the replayable static box from then on.
 const sessionKeyedPeers = new SessionKeyedPeerStore(socketAgentDataPath("session-keyed-peers.json"));
 
-// Transport v2: one responder answers device handshakes from the relay rooms
-// and from direct `?e2e=2` sockets.
+// Transport v2: one responder answers handshakes from the relay rooms, the
+// link room included, and from direct `?e2e=2` sockets.
 const directV2Sockets = new DirectV2Sockets();
 const transportResponder = new TransportResponder({
   registry: deviceRegistry,
   keyPair: loadServerKeyPair,
   roomId: () => PAIRING_TOKEN,
+  linkRoomId: () => LINK_ROOM_TOKEN,
   serverVersion: SERVER_RELEASE_VERSION,
-  // A device that has moved to v2 does not come back to the old path.
+  // A device or linked computer that has moved to v2 does not come back to the old path.
   onDeviceMoved: (publicKey) => {
     relayClient?.dropPeersWithKey(publicKey, "not_approved", "legacy");
     relayBulkClient?.dropPeersWithKey(publicKey, "not_approved", "legacy");
+    relayLinkClient?.dropPeersWithKey(publicKey, "not_approved", "legacy");
     dropDirectPeersWithKey(publicKey, "Moved to the new transport");
   },
 });
+
+/** What `pairing_grant` and `pairing_upgrade_result` hand a device so it can connect with v2. */
+function pairingHandover(): { secret: string; roomId: string; port: number; hosts: string[] } {
+  return {
+    secret: deviceRegistry.currentSecret().secret, roomId: PAIRING_TOKEN,
+    port: PORT, hosts: ACCEPTS_LAN_CONNECTIONS ? localIpv4Addresses() : [],
+  };
+}
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
@@ -1840,7 +1850,7 @@ function serverCapabilitiesPayload(
     backendConfig: { version: 1 },
     transport: { version: 2 },
     deviceAuth: { version: 1, mode: deviceRegistry.mode },
-    computerLinks: { version: 1 },
+    computerLinks: { version: 2 },
     directE2e: oldPath ? { serverPubkey: toBase64(loadServerKeyPair().publicKey) } : undefined,
     relayPairing: oldPath && holdsToken ? relayPairingInfo() : undefined,
     pairingReset: !oldPath || (holdsToken && RELAY_URL) ? { version: 1 } : undefined,
@@ -3554,6 +3564,8 @@ const computerLinks = new ComputerLinkManager(
   loadServerKeyPair(),
   {
     sessionKeyedPeers,
+    serverVersion: SERVER_RELEASE_VERSION,
+    legacyTransport: LEGACY_TRANSPORT,
     onEvent: (event, link) => handleRemoteAgentReport(event, link),
     // hello also lets the target flush reports that finished while this computer was away.
     onOnline: (link) => {
@@ -10380,11 +10392,7 @@ function createConnectionHandler(
           break;
         }
         deviceRegistry.markSecretHanded([publicKey]);
-        sendJson({
-          type: "pairing_upgrade_result", requestId: msg.requestId, ok: true,
-          secret: deviceRegistry.currentSecret().secret, roomId: PAIRING_TOKEN,
-          port: PORT, hosts: ACCEPTS_LAN_CONNECTIONS ? localIpv4Addresses() : [],
-        });
+        sendJson({ type: "pairing_upgrade_result", requestId: msg.requestId, ok: true, ...pairingHandover() });
         break;
       }
 
@@ -10511,6 +10519,13 @@ function createConnectionHandler(
           break;
         }
         const name = msg.name.trim() || "Linked computer";
+        if (msg.linkSecret !== undefined && !isValidPublicKey(msg.linkSecret)) {
+          sendJson({ type: "device_approve_result", requestId, ok: false, publicKey, error: "Invalid link secret" });
+          break;
+        }
+        // With a link secret the link runs on transport v2. Without one the
+        // record keeps the secret it has, or stays on the old path.
+        const linkSecret = msg.linkSecret === undefined ? {} : { linkSecret: normalizePublicKey(msg.linkSecret) };
         if (msg.oneTime) {
           // One request only. An existing link keeps its settings; without
           // one, a link with no access lasts as long as the grant.
@@ -10523,6 +10538,7 @@ function createConnectionHandler(
             deviceRegistry.enroll({
               publicKey, kind: "computer", via: "link", name, platform: "computer",
               access: { read: false, agents: false, commands: false }, confirm: "ask", expiresAt: grantExpiresAt,
+              ...linkSecret,
             });
           }
         } else {
@@ -10530,6 +10546,7 @@ function createConnectionHandler(
             publicKey, kind: "computer", via: "link", name, platform: "computer",
             access: msg.access, confirm: msg.confirm,
             ...(msg.expiresAt !== undefined ? { expiresAt: msg.expiresAt } : {}),
+            ...linkSecret,
           });
         }
         sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });
@@ -10562,6 +10579,7 @@ function createConnectionHandler(
             access: msg.access,
             confirm: msg.confirm,
             ...(msg.expiresAt !== undefined ? { expiresAt: msg.expiresAt } : {}),
+            ...(msg.linkSecret !== undefined ? { linkSecret: msg.linkSecret } : {}),
           });
           sendJson({ type: "computer_link_result", requestId, ok: true, targetPubkey: saved.targetPubkey });
           sendJson({ type: "computer_link_list_result", links: computerLinks.list() });
@@ -12543,6 +12561,7 @@ function acceptDirectV2Socket(ws: WebSocket, fromThisComputer: boolean): void {
     responder: transportResponder,
     fromThisComputer,
     serverCapabilities: (binaryEnvelope, lane) => serverCapabilitiesPayload(binaryEnvelope, lane, false, 2),
+    pairingGrant: () => ({ type: "pairing_grant", ...pairingHandover() }),
     onOpen: (transport) => {
       console.log(`Client connected (direct v2) lane=${transport.lane}`);
       handler = createConnectionHandler(transport, transport.lane);
@@ -12955,8 +12974,8 @@ function startRelayClient(): void {
       lane: "link",
       peerAuth: deviceAuthGate,
       sessionKeyedPeers,
-      onPeerJson: (message, peerId, publicKey) => {
-        void computerLinkPeerApi.handle(message, publicKey).then((response) => {
+      onPeerJson: (message, peerId, publicKey, channel) => {
+        void computerLinkPeerApi.handle(message, publicKey, channel).then((response) => {
           if (response) relayLinkClient?.sendReply(peerId, response);
         }).catch((err: unknown) => {
           console.error(`[Relay:link] Peer request failed: ${errorMessage(err)}`);

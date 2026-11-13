@@ -1,5 +1,5 @@
 import type { DeviceRegistry, DevicePlatform, PairingSecret } from "./device-registry";
-import { NoiseError, readMessage1, type NoiseKeyPair } from "./noise-ikpsk1";
+import { NoiseError, readMessage1, type NoiseAcceptedMessage1, type NoiseKeyPair } from "./noise-ikpsk1";
 import { isRecord } from "./value-guards";
 import {
   approvalCode,
@@ -8,18 +8,20 @@ import {
   encodeHandshakePayload,
   encodeHs2Frame,
   handshakeAnswer,
+  LOCAL_PSK,
   parseHandshakePayload,
   parseHs1Frame,
   secretTag,
   TransportChannel,
   type HandshakeRefusal,
+  type Hs1Frame,
 } from "./transport-v2";
 
 /**
- * The computer's side of a device handshake on transport v2: which pairing
- * secret to try (wire spec 3.5a), who gets in (7.3), and the limits (3.8).
- * The relay client and the direct `?e2e=2` socket both feed it the `hs1`
- * frames they receive and carry out what it answers.
+ * The computer's side of a handshake on transport v2: which secret to try
+ * (wire spec 3.5a), who gets in (7.3), and the limits (3.8). The relay
+ * client and the direct `?e2e=2` socket both feed it the `hs1` frames they
+ * receive and carry out what it answers.
  *
  * How a transport uses it:
  *
@@ -35,12 +37,21 @@ import {
  *      `approve(handshake)` after the index has recorded its key.
  *   4. `release(handshake)` whenever the peer goes away or times out.
  *
- * Link, transfer and `local-request` handshakes are not answered here yet.
+ * Three kinds of peer come through here. A device on `control` or `bulk`
+ * proves a pairing secret. A linked computer in the link room proves its
+ * link secret and only ever gets `open` or silence. A `local-request` peer
+ * is the app in another Windows account on this computer: it proves a key
+ * and no secret, never gets a channel, and is handed the pairing secret
+ * once it is a recorded device (5.3). Session transfer answers its own
+ * handshakes in session-transfer.ts.
  */
 
-/** Where an `hs1` arrived. Taken from the socket or room, never from the frame. */
+/**
+ * Where an `hs1` arrived. Taken from the socket or room, never from the
+ * frame. A direct socket takes `local-request` only from this computer.
+ */
 export interface Hs1Arrival {
-  path: "relay" | "direct";
+  path: "relay" | "direct" | "local-request";
   lane: "control" | "bulk" | "link";
 }
 
@@ -88,7 +99,7 @@ export interface AcceptedHandshake {
   /** The initiator's static key, base64. Proved by the handshake. */
   readonly publicKey: string;
   readonly path: Hs1Arrival["path"];
-  readonly lane: DeviceLane;
+  readonly lane: Hs1Arrival["lane"];
   readonly status: "open" | "pending";
   /** Seals and opens this channel's records. */
   readonly channel: TransportChannel;
@@ -98,7 +109,7 @@ export interface AcceptedHandshake {
   readonly platform: DevicePlatform;
   /** Handled as if a `client_capabilities` message had arrived on this lane. */
   readonly caps: Record<string, unknown>;
-  /** The id of the pairing secret the handshake proved. */
+  /** The id of the pairing secret the handshake proved. 0 on the link lane and on `local-request`. */
   readonly secretId: number;
 }
 
@@ -118,8 +129,10 @@ export interface TransportResponderOptions {
   keyPair: () => NoiseKeyPair;
   /** The control room ID, which is the prologue context for control and bulk. */
   roomId: () => string;
+  /** This computer's link room ID, the prologue context for the link lane. Without one, link handshakes get silence. */
+  linkRoomId?: () => string;
   serverVersion: string;
-  /** A recorded device finished its first v2 handshake. Its old-path channels close now. */
+  /** A recorded device or linked computer finished its first v2 handshake. Its old-path channels close now. */
   onDeviceMoved?: (publicKey: string) => void;
   now?: () => number;
 }
@@ -137,9 +150,38 @@ export const HELD_PEER_WAIT_MS = 10 * 60 * 1000;
 
 const DEVICE_PLATFORMS: readonly DevicePlatform[] = ["android", "windows", "linux", "macos", "ios"];
 
+/** A secret the responder may try against one `hs1`. A null tag fits any `k`. */
+interface SecretCandidate {
+  id: number;
+  tag: string | null;
+  psk: () => Uint8Array;
+}
+
+/** A key the handshake has proved, with the secret that fitted. */
+interface ProvedKey {
+  publicKey: string;
+  candidate: SecretCandidate;
+  accepted: NoiseAcceptedMessage1;
+  payload: Record<string, unknown>;
+}
+
+function pairingCandidate(secret: PairingSecret): SecretCandidate {
+  const bytes = Buffer.from(secret.secret, "base64");
+  return { id: secret.id, tag: secretTag(bytes), psk: () => derivePsk(bytes) };
+}
+
+function linkCandidate(linkSecret: string): SecretCandidate {
+  const bytes = Buffer.from(linkSecret, "base64");
+  return { id: 0, tag: secretTag(bytes), psk: () => derivePsk(bytes) };
+}
+
+const LOCAL_CANDIDATE: SecretCandidate = { id: 0, tag: null, psk: () => LOCAL_PSK };
+
 export class TransportResponder {
   private readonly held = new Set<AcceptedHandshake>();
   private readonly finished = new WeakSet<AcceptedHandshake>();
+  /** The link secret each link handshake proved, checked again at `ready`. */
+  private readonly provedLinkSecrets = new WeakMap<AcceptedHandshake, string>();
   private readonly failedHs1 = new Map<string, { startedAt: number; count: number }>();
   private pendingAnswers: number[] = [];
 
@@ -168,11 +210,10 @@ export class TransportResponder {
     return window.count >= MAX_FAILED_HS1_PER_MINUTE;
   }
 
-  private noteFailedHs1(lane: string): Hs1Outcome {
+  private noteFailedHs1(lane: string): void {
     const window = this.failedHs1.get(lane);
     if (window) window.count++;
     else this.failedHs1.set(lane, { startedAt: this.now(), count: 1 });
-    return { result: "silent" };
   }
 
   /** Counts one `pending` answer. False once the computer has given 30 in ten minutes. */
@@ -190,6 +231,78 @@ export class TransportResponder {
   }
 
   /**
+   * Steps 2 to 6 of spec 3.5a for one `hs1`. Null means stay silent. The
+   * claimed key only picks the candidates. `laneTags` are the tags of every
+   * secret the lane could use, and null skips that step.
+   */
+  private proveKey(input: {
+    frame: Hs1Frame;
+    limitKey: string;
+    prologue: Uint8Array;
+    laneTags: readonly string[] | null;
+    candidatesFor: (claimedKey: string) => readonly SecretCandidate[];
+  }): ProvedKey | null {
+    const { frame, limitKey } = input;
+    if (this.skipping(limitKey)) return null;
+    if (input.laneTags && !input.laneTags.includes(frame.tag)) return null;
+
+    let message1: ReturnType<typeof readMessage1>;
+    try {
+      message1 = readMessage1({ prologue: input.prologue, staticKeyPair: this.options.keyPair(), message: frame.message });
+    } catch (err: unknown) {
+      if (!(err instanceof NoiseError)) throw err;
+      this.noteFailedHs1(limitKey);
+      return null;
+    }
+
+    // The key is only a claim here. It chooses which secrets to try.
+    const publicKey = Buffer.from(message1.initiatorStaticKey).toString("base64");
+    const candidates = input.candidatesFor(publicKey).filter((candidate) => candidate.tag === null || candidate.tag === frame.tag);
+    for (const candidate of candidates.slice(0, MAX_PSK_TRIES)) {
+      const accepted = message1.tryPsk(candidate.psk());
+      if (!accepted) continue;
+      // From here the key is proved.
+      const payload = parseHandshakePayload(accepted.payload);
+      return payload ? { publicKey, candidate, accepted, payload } : null;
+    }
+    this.noteFailedHs1(limitKey);
+    return null;
+  }
+
+  /** Writes message 2 and builds the handshake a transport keeps. */
+  private answer(
+    proved: ProvedKey,
+    arrival: Hs1Arrival,
+    status: "open" | "pending" | "refused",
+    reason?: HandshakeRefusal,
+  ): Hs1Outcome {
+    if (status === "pending" && (this.held.size >= MAX_HELD_PEERS || !this.takePendingAnswer())) {
+      status = "refused";
+      reason = "too_many_pending";
+    }
+    const answer = proved.accepted.writeMessage2(encodeHandshakePayload(handshakeAnswer(status, this.options.serverVersion, reason)));
+    const hs2 = encodeHs2Frame(answer.message2);
+    if (status === "refused") return { result: "refused", hs2 };
+
+    const { payload } = proved;
+    const handshake: AcceptedHandshake = {
+      publicKey: proved.publicKey,
+      path: arrival.path,
+      lane: arrival.lane,
+      status,
+      channel: new TransportChannel({ role: "responder", sendKey: answer.sendKey, receiveKey: answer.receiveKey }),
+      code: approvalCode(answer.handshakeHash),
+      name: typeof payload.name === "string" ? payload.name.trim().slice(0, 80) : "",
+      platform: DEVICE_PLATFORMS.find((candidate) => candidate === payload.platform) ?? "android",
+      caps: isRecord(payload.caps) ? payload.caps : {},
+      secretId: proved.candidate.id,
+    };
+    // Held peers count from hs2, so a replay can fill the table for 10 s at most.
+    if (status === "pending") this.held.add(handshake);
+    return { result: "answered", hs2, handshake };
+  }
+
+  /**
    * Reads an `hs1` text frame and decides the answer. Reads the state file's
    * contents and counts against the in-memory limits. Changes nothing else.
    */
@@ -199,80 +312,86 @@ export class TransportResponder {
     // The prologue comes from where the frame arrived. A frame that claims
     // another path or lane could only fail, so it is not tried.
     if (!frame || frame.path !== arrival.path || frame.lane !== arrival.lane) return silent;
-    if (arrival.lane === "link") return silent;
-    const lane: DeviceLane = arrival.lane;
     const { registry } = this.options;
     if (!registry.readable) return silent;
-    const limitKey = `${arrival.path}:${lane}`;
-    if (this.skipping(limitKey)) return silent;
+    if (arrival.lane === "link") return arrival.path === "relay" ? this.handleLinkHs1(frame) : silent;
+    if (arrival.path === "local-request") return arrival.lane === "control" ? this.handleLocalRequestHs1(frame) : silent;
+    const lane: DeviceLane = arrival.lane;
 
     const current = registry.currentSecret();
-    const secrets = [current, ...registry.previousSecrets()].map((secret) => {
-      const bytes = Buffer.from(secret.secret, "base64");
-      return { id: secret.id, bytes, tag: secretTag(bytes) };
+    const secrets = [current, ...registry.previousSecrets()].map(pairingCandidate);
+    const proved = this.proveKey({
+      frame,
+      limitKey: `${arrival.path}:${lane}`,
+      prologue: buildPrologue(arrival.path, lane, this.options.roomId()),
+      laneTags: secrets.flatMap((secret) => secret.tag ?? []),
+      candidatesFor: (claimedKey) => {
+        const claimed = this.standing(claimedKey);
+        return claimed === "device" ? secrets : claimed === "other-kind" ? [] : secrets.slice(0, 1);
+      },
     });
-    if (!secrets.some((secret) => secret.tag === frame.tag)) return silent;
+    if (!proved) return silent;
 
-    let message1: ReturnType<typeof readMessage1>;
-    try {
-      message1 = readMessage1({
-        prologue: buildPrologue(arrival.path, lane, this.options.roomId()),
-        staticKeyPair: this.options.keyPair(),
-        message: frame.message,
-      });
-    } catch (err: unknown) {
-      if (err instanceof NoiseError) return this.noteFailedHs1(limitKey);
-      throw err;
-    }
-
-    // The key is only a claim here. It chooses which secrets to try.
-    const publicKey = Buffer.from(message1.initiatorStaticKey).toString("base64");
-    const claimed = this.standing(publicKey);
-    const candidates = claimed === "device" ? secrets : claimed === "other-kind" ? [] : secrets.slice(0, 1);
-    let fitted: { id: number; accepted: NonNullable<ReturnType<typeof message1.tryPsk>> } | undefined;
-    for (const candidate of candidates.filter((secret) => secret.tag === frame.tag).slice(0, MAX_PSK_TRIES)) {
-      const accepted = message1.tryPsk(derivePsk(candidate.bytes));
-      if (accepted) {
-        fitted = { id: candidate.id, accepted };
-        break;
-      }
-    }
-    if (!fitted) return this.noteFailedHs1(limitKey);
-
-    // From here the key is proved.
-    const payload = parseHandshakePayload(fitted.accepted.payload);
-    if (!payload) return silent;
+    const claimed = this.standing(proved.publicKey);
     const admission = admissionFor({
-      lane, standing: claimed, fitted: fitted.id === current.id ? "current" : "previous", locked: registry.locked,
+      lane, standing: claimed, fitted: proved.candidate.id === current.id ? "current" : "previous", locked: registry.locked,
     });
     if (admission === "silent") return silent;
+    if (admission === "refuse") return this.answer(proved, arrival, "refused", "not_approved");
+    return this.answer(proved, arrival, admission === "hold" ? "pending" : "open");
+  }
 
-    let status: "open" | "pending" | "refused" = admission === "hold" ? "pending" : admission === "refuse" ? "refused" : "open";
-    let reason: HandshakeRefusal | undefined = admission === "refuse" ? "not_approved" : undefined;
-    if (status === "pending" && (this.held.size >= MAX_HELD_PEERS || !this.takePendingAnswer())) {
-      status = "refused";
-      reason = "too_many_pending";
-    }
-    const answer = fitted.accepted.writeMessage2(encodeHandshakePayload(handshakeAnswer(status, this.options.serverVersion, reason)));
-    const hs2 = encodeHs2Frame(answer.message2);
-    if (status === "refused") return { result: "refused", hs2 };
-
-    const platform = DEVICE_PLATFORMS.find((candidate) => candidate === payload.platform) ?? "android";
-    const handshake: AcceptedHandshake = {
-      publicKey,
-      path: arrival.path,
-      lane,
-      status,
-      channel: new TransportChannel({ role: "responder", sendKey: answer.sendKey, receiveKey: answer.receiveKey }),
-      code: approvalCode(answer.handshakeHash),
-      name: typeof payload.name === "string" ? payload.name.trim().slice(0, 80) : "",
-      platform,
-      caps: isRecord(payload.caps) ? payload.caps : {},
-      secretId: fitted.id,
+  /**
+   * A linked computer's `hs1` in this computer's link room (spec 5.4). The
+   * claimed key must be a recorded computer that has a link secret and has
+   * not expired. The answer is `open` or nothing.
+   */
+  private handleLinkHs1(frame: Hs1Frame): Hs1Outcome {
+    const silent: Hs1Outcome = { result: "silent" };
+    const linkRoomId = this.options.linkRoomId?.();
+    if (!linkRoomId) return silent;
+    const { registry } = this.options;
+    const linkSecretOf = (publicKey: string): string | undefined => {
+      const entry = registry.get(publicKey);
+      return entry?.kind === "computer" ? entry.linkSecret : undefined;
     };
-    // Held peers count from hs2, so a replay can fill the table for 10 s at most.
-    if (status === "pending") this.held.add(handshake);
-    return { result: "answered", hs2, handshake };
+    const proved = this.proveKey({
+      frame,
+      limitKey: "relay:link",
+      prologue: buildPrologue("relay", "link", linkRoomId),
+      laneTags: registry.list().flatMap((entry) => (entry.kind === "computer" && entry.linkSecret ? [secretTag(Buffer.from(entry.linkSecret, "base64"))] : [])),
+      candidatesFor: (claimedKey) => {
+        const candidate = linkSecretOf(claimedKey);
+        return candidate ? [linkCandidate(candidate)] : [];
+      },
+    });
+    const linkSecret = proved ? linkSecretOf(proved.publicKey) : undefined;
+    if (!proved || !linkSecret) return silent;
+    const outcome = this.answer(proved, { path: "relay", lane: "link" }, "open");
+    if (outcome.result === "answered") this.provedLinkSecrets.set(outcome.handshake, linkSecret);
+    return outcome;
+  }
+
+  /**
+   * An `hs1` on the `local-request` path (spec 5.3), which the caller only
+   * passes on from a loopback socket. It proves a key and no secret, so the
+   * tag is ignored. A recorded device gets `open` and anything else waits
+   * for Allow, locked or not. A linked computer's or AI client's key is not
+   * a device and gets silence, as on the device lanes.
+   */
+  private handleLocalRequestHs1(frame: Hs1Frame): Hs1Outcome {
+    const arrival: Hs1Arrival = { path: "local-request", lane: "control" };
+    const proved = this.proveKey({
+      frame,
+      limitKey: "local-request:control",
+      prologue: buildPrologue("local-request", "control", ""),
+      laneTags: null,
+      candidatesFor: () => [LOCAL_CANDIDATE],
+    });
+    if (!proved) return { result: "silent" };
+    const standing = this.standing(proved.publicKey);
+    if (standing === "other-kind") return { result: "silent" };
+    return this.answer(proved, arrival, standing === "device" ? "open" : "pending");
   }
 
   /** Which stored secret the handshake proved, as the state stands now. */
@@ -294,7 +413,10 @@ export class TransportResponder {
     if (this.finished.has(handshake)) return closed;
     this.finished.add(handshake);
     const { registry } = this.options;
-    const now = registry.readable ? this.fittedNow(handshake) : null;
+    if (!registry.readable) return this.close(handshake);
+    if (handshake.lane === "link") return this.linkReady(handshake);
+    if (handshake.path === "local-request") return this.localRequestReady(handshake);
+    const now = this.fittedNow(handshake);
     if (!now) return this.close(handshake);
     const { publicKey, name, platform } = handshake;
     const admission = admissionFor({ lane: handshake.lane, standing: this.standing(publicKey), fitted: now.fitted, locked: registry.locked });
@@ -318,6 +440,38 @@ export class TransportResponder {
     return admission === "open-update" ? { result: "open", pairingUpdate: this.pairingUpdate() } : { result: "open" };
   }
 
+  /**
+   * A linked computer's first v2 `transport_ready`. From here its record is
+   * on v2 and the old key exchange is refused for its key (spec 10.2).
+   */
+  private linkReady(handshake: AcceptedHandshake): ReadyOutcome {
+    const { registry } = this.options;
+    const entry = registry.get(handshake.publicKey);
+    const proved = this.provedLinkSecrets.get(handshake);
+    if (entry?.kind !== "computer" || !proved || entry.linkSecret !== proved) return this.close(handshake);
+    registry.touch(handshake.publicKey, { transport: 2 });
+    if (entry.transport === 1) this.options.onDeviceMoved?.(handshake.publicKey);
+    return { result: "open" };
+  }
+
+  /**
+   * `transport_ready` on `local-request`. `open` here means the transport
+   * sends `pairing_grant` and closes: the key is a recorded device and has
+   * now been handed the current secret. Any other key is held for Allow.
+   */
+  private localRequestReady(handshake: AcceptedHandshake): ReadyOutcome {
+    const { registry } = this.options;
+    const { publicKey, name, platform } = handshake;
+    const standing = this.standing(publicKey);
+    if (standing === "device" && handshake.status === "open") {
+      registry.touch(publicKey, { name: name || undefined, platform });
+      registry.markSecretHanded([publicKey]);
+      return { result: "open" };
+    }
+    if (standing === "device" || standing === "other-kind" || handshake.status !== "pending") return this.close(handshake);
+    return { result: "held", notice: { publicKey, name: name || "Unknown device", platform, code: handshake.code } };
+  }
+
   private close(handshake: AcceptedHandshake): ReadyOutcome {
     this.held.delete(handshake);
     return { result: "closed" };
@@ -325,13 +479,20 @@ export class TransportResponder {
 
   /**
    * A paired device allowed this held peer, and the index has recorded its
-   * key. Marks the record as v2. Null when the key is not a recorded device
-   * after all, and the transport then drops the peer.
+   * key. Marks the record as v2, except on `local-request`, where the
+   * transport sends `pairing_grant` next and closes. Null when the key is
+   * not a recorded device after all, and the transport then drops the peer.
    */
   approve(handshake: AcceptedHandshake): { pairingUpdate?: PairingUpdate } | null {
     this.held.delete(handshake);
     const { registry } = this.options;
     if (!registry.readable || this.standing(handshake.publicKey) !== "device") return null;
+    if (handshake.path === "local-request") {
+      // The grant hands over the current secret. The record moves to v2 when
+      // the device comes back with an ordinary direct handshake.
+      registry.markSecretHanded([handshake.publicKey]);
+      return {};
+    }
     const current = registry.currentSecret();
     const moved = registry.get(handshake.publicKey)?.transport === 1;
     registry.touch(handshake.publicKey, { transport: 2, secretId: current.id });

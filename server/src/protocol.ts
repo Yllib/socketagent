@@ -843,6 +843,12 @@ export interface TransferJobConfig {
   relayUrl?: string;
   ticket?: string;
   peerPublicKey?: string;
+  /**
+   * base64 of 32 bytes, the same value in both computers' start messages.
+   * With it the two computers run a transport v2 handshake for the job and
+   * refuse static-box frames. Without it the job uses the static box.
+   */
+  transferSecret?: string;
 }
 
 export interface SessionTransferJobMessage {
@@ -1458,6 +1464,12 @@ export interface DeviceAuthorizeMessage {
   /** Unix ms when the link ends. Absent means it lasts until removed. */
   expiresAt?: number;
   oneTime?: { digest: string };
+  /**
+   * base64 of 32 bytes, the same value the source gets in `computer_link_set`.
+   * The target stores it on the source's record and the link runs on
+   * transport v2. Absent keeps whatever the record has.
+   */
+  linkSecret?: string;
 }
 
 export interface LinkRoomInfoMessage {
@@ -1505,6 +1517,12 @@ export interface ComputerLinkSetMessage {
   confirm: ComputerConfirm;
   /** Unix ms when the link ends. Absent means it lasts until removed. */
   expiresAt?: number;
+  /**
+   * base64 of 32 bytes, the same value the target got in `device_authorize`.
+   * A link with one connects with transport v2 and never falls back. Absent
+   * keeps whatever the stored link has.
+   */
+  linkSecret?: string;
 }
 
 export interface ComputerLinkRemoveMessage {
@@ -3193,6 +3211,20 @@ export interface PairingUpdateServerMessage {
   roomId: string;
 }
 
+/**
+ * What the app in another account on this computer needs to pair, sent on a
+ * `local-request` channel once its key is a recorded device. It is the only
+ * record that channel ever carries, and the socket closes after it.
+ */
+export interface PairingGrantServerMessage {
+  type: "pairing_grant";
+  /** base64 of 32 bytes. */
+  secret: string;
+  roomId: string;
+  port: number;
+  hosts: string[];
+}
+
 /** Answer to `pairing_upgrade`. On success it carries what the device needs to connect with v2. */
 export interface PairingUpgradeResultServerMessage {
   type: "pairing_upgrade_result";
@@ -4136,6 +4168,7 @@ export type ServerMessage =
   | DeviceRemoveResultServerMessage
   | PairingResetResultServerMessage
   | PairingUpdateServerMessage
+  | PairingGrantServerMessage
   | PairingUpgradeResultServerMessage
   | LinkRoomInfoResultServerMessage
   | ComputerLinkListResultServerMessage

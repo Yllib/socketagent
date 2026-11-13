@@ -31,6 +31,18 @@ export interface PushTransport {
   plaintextAllowed(): boolean;
   /** Sends a `relay_push` over the control-room socket. Rejects when that socket is down. */
   relayPush(push: RelayPushRequest): Promise<{ sent: number; attempted: number }>;
+  /** Called after every change to the stored registrations, so the relay gets the list again. */
+  relayTokensChanged(): void;
+}
+
+/** One registration in a `relay_push_tokens` frame (wire spec 11.2a). */
+export interface RelayPushToken {
+  token: string;
+  platform: string;
+  /** The ID that phone knows this computer by. */
+  serverId?: string;
+  /** 2 when the phone registered on a transport v2 channel and gets sealed pushes. */
+  v?: 2;
 }
 
 let pushTransport: PushTransport | null = null;
@@ -137,6 +149,26 @@ function readStore(): StoredPushToken[] {
 function writeStore(entries: StoredPushToken[]): void {
   fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
   fs.writeFileSync(STORE_PATH, JSON.stringify(entries, null, 2), { mode: 0o600 });
+  pushTransport?.relayTokensChanged();
+}
+
+/** Whether the relay delivers for [entry]. Only a phone that registered as direct is left to this computer's own Firebase path. */
+function relayDelivers(entry: StoredPushToken): boolean {
+  return entry.deliveryRoute !== "direct";
+}
+
+/**
+ * The whole push list the relay should hold for this computer's room, oldest
+ * first. The relay takes an owned room's list only from its computer, so
+ * every registration an app gives this computer is passed on from here.
+ */
+export function relayPushTokens(): RelayPushToken[] {
+  return readStore().filter(relayDelivers).map((entry) => ({
+    token: entry.token,
+    platform: entry.platform,
+    ...(entry.appServerId ? { serverId: entry.appServerId } : {}),
+    ...(entry.v2 ? { v: 2 as const } : {}),
+  }));
 }
 
 export function registerPushToken(
@@ -494,9 +526,7 @@ export async function sendPushNotification(
   const entries = readStore();
   const sealed = pushTransport ? sealPush(payload, pushTransport.sealingSecrets()) : null;
   const plaintextAllowed = pushTransport?.plaintextAllowed() ?? false;
-  const relayEntries = entries.filter(
-    (entry) => entry.deliveryRoute !== "direct",
-  );
+  const relayEntries = entries.filter(relayDelivers);
   let relayResult: { sent: number; attempted: number } | null = null;
   if (
     pushTransport &&

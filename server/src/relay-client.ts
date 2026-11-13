@@ -23,6 +23,7 @@ import type { DeviceAuthOutcome, PeerAdmission, RelayLane } from "./device-auth"
 import { STATE_RESET_HINT, type DevicePlatform } from "./device-registry";
 import { MAX_HANDSHAKE_FRAME_BYTES, TRANSPORT_VERSION, type TransportChannel } from "./transport-v2";
 import type { RelayPushRequest } from "./push-sealing";
+import type { RelayPushToken } from "./push-notifications";
 import {
   HANDSHAKE_WAIT_MS,
   HELD_PEER_WAIT_MS,
@@ -316,6 +317,12 @@ export interface RelayClientOptions {
    * proven on one transport is held to it on all. Defaults to memory only.
    */
   sessionKeyedPeers?: SessionKeyedPeers;
+  /**
+   * The push registrations the relay should hold for this room (wire spec
+   * 11.2a). Set for the control room only. The client sends the list when the
+   * relay accepts it as the room's owner and on every `sendPushTokens`.
+   */
+  pushTokens?: () => RelayPushToken[];
   /** A pending key needs approval from an enrolled device. */
   onDevicePending?: (notice: { publicKey: string; name: string; platform: DevicePlatform; code: string }) => void;
   /** A held peer expired or was dropped before approval. */
@@ -671,6 +678,18 @@ export class RelayClient {
     });
   }
 
+  /**
+   * Gives the relay this room's whole push list, which replaces the one it
+   * holds. Does nothing while the socket is down or the relay has not
+   * accepted this computer as the room's owner: the list goes out when it does.
+   */
+  sendPushTokens(): void {
+    const ws = this.ws;
+    const { pushTokens } = this.opts;
+    if (!pushTokens || !ws || ws.readyState !== WebSocket.OPEN || !this.ownsRoom) return;
+    ws.send(JSON.stringify({ type: "relay_push_tokens", id: `tokens-${this.nextPushId++}`, tokens: pushTokens() }));
+  }
+
   /** Settles the push a `relay_push_result` answers. A result for no waiting push is dropped. */
   private handlePushResult(result: Record<string, unknown>): void {
     const { id, error } = result;
@@ -893,6 +912,12 @@ export class RelayClient {
       if (this.relaySupportsMultiDevice) {
         console.log(`[Relay] Relay supports multi-device routing`);
       }
+      this.sendPushTokens();
+      return;
+    }
+
+    if (parsed.type === "relay_push_tokens_result") {
+      if (parsed.error !== undefined) console.warn("[Relay] The relay did not take the push registrations");
       return;
     }
 

@@ -119,7 +119,7 @@ import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store
 import type { AiConnectorStatusServerMessage } from "./protocol";
 import { isAuthFailureMessage } from "./backend-auth";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
-import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, sendPushNotification, setPushTransport, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
+import { getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, relayPushTokens, sendPushNotification, setPushTransport, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { pushSealingSecrets } from "./push-sealing";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
 import { assertFileManagerPathAllowed, getFileManagerRoots, listFileManagerDirectory, readDirectoryEntries, resolveFileManagerPath, statFileManagerPath, writeFileManagerText } from "./file-manager";
@@ -11548,6 +11548,7 @@ setPushTransport({
   sealingSecrets: () => pushSealingSecrets(deviceRegistry),
   plaintextAllowed: () => LEGACY_TRANSPORT && deviceRegistry.list().some((entry) => entry.kind === "device" && entry.transport === 1),
   relayPush: (push) => relayClient ? relayClient.relayPush(push) : Promise.reject(new Error("the relay socket is down")),
+  relayTokensChanged: () => relayClient?.sendPushTokens(),
 });
 let relayConnectionHandler: ReturnType<typeof createConnectionHandler> | null = null;
 const relayControlMessageScheduler = new ControlMessageScheduler();
@@ -12645,6 +12646,7 @@ function startRelayClient(): void {
 
   const controlLane: RelayLaneOptions = {
     pairingToken: PAIRING_TOKEN,
+    pushTokens: relayPushTokens,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
     onPeerClosed: (peerId) => {

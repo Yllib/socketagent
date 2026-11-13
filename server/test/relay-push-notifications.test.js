@@ -12,9 +12,12 @@ const { generateKeyPair } = require("#server/noise-ikpsk1");
 const {
   getPushDeliveryCapabilities,
   isPushConfigured,
+  registerPushToken,
+  relayPushTokens,
   sendPushNotification,
   setPushTransport,
   shouldSendForwardedPush,
+  unregisterPushToken,
 } = require("#server/push-notifications");
 const { RelayClient } = require("#server/relay-client");
 const { derivePushKey, secretTag } = require("#server/transport-v2");
@@ -128,8 +131,11 @@ test("reports unreadable Firebase credential files and relay availability", asyn
   });
 });
 
-/** A relay client on a fake open socket. Frames it sends to the relay are captured. */
-function relayClient() {
+/**
+ * A relay client on a fake open socket. Frames it sends to the relay are captured.
+ * @param {(() => import("#server/push-notifications").RelayPushToken[])} [pushTokens]
+ */
+function relayClient(pushTokens) {
   /** @type {Record<string, unknown>[]} */
   const sent = [];
   const client = new RelayClient({
@@ -137,6 +143,7 @@ function relayClient() {
     pairingToken: "ab".repeat(32),
     keyPair: generateKeyPair(),
     onStatusChange: () => {},
+    ...(pushTokens ? { pushTokens } : {}),
   });
   client.ws = { readyState: 1, send: (/** @type {string} */ data) => sent.push(parseJsonObject(data)), close: () => {} };
   /** @param {Record<string, unknown>} message */
@@ -188,6 +195,7 @@ test("a notification reaches the relay sealed, with plaintext only while a devic
       pushes.push(push);
       return Promise.resolve({ sent: 1, attempted: 1 });
     },
+    relayTokensChanged: () => {},
   });
   try {
     await withCleanPushEnvironment(async () => {
@@ -214,6 +222,65 @@ test("a notification reaches the relay sealed, with plaintext only while a devic
       assert.equal(pushes.length, 2);
     });
   } finally {
+    setPushTransport(null);
+  }
+});
+
+test("the relay gets the room's push list when it accepts the owner key and after every change", () => {
+  /** @type {import("#server/push-notifications").RelayPushToken[]} */
+  let held = [{ token: "fcm-old-app", platform: "android", serverId: "phone-a-id" }];
+  const { client, sent, fromRelay } = relayClient(() => held);
+
+  client.sendPushTokens();
+  fromRelay({ type: "relay_capabilities", multiDevice: true });
+  assert.equal(sent.length, 0, "not to a relay that has not accepted this computer as the room's owner");
+
+  fromRelay({ type: "relay_capabilities", multiDevice: true, owner: true });
+  assert.deepEqual(sent, [{ type: "relay_push_tokens", id: sent[0].id, tokens: held }]);
+  assert.equal(typeof sent[0].id, "string");
+
+  held = [...held, { token: "fcm-new-app", platform: "ios", serverId: "phone-b-id", v: 2 }];
+  client.sendPushTokens();
+  assert.deepEqual(sent[1].tokens, held);
+  fromRelay({ type: "relay_push_tokens_result", id: sent[1].id, count: 2 });
+
+  client.close();
+  client.sendPushTokens();
+  assert.equal(sent.length, 2, "nothing once the socket is gone");
+
+  // A room that keeps no push list, like the bulk room, sends none.
+  const bulk = relayClient();
+  bulk.fromRelay({ type: "relay_capabilities", multiDevice: true, owner: true });
+  bulk.client.sendPushTokens();
+  assert.equal(bulk.sent.length, 0);
+});
+
+test("every registration an app gives this computer is on the list for the relay, and each change is announced", () => {
+  let changes = 0;
+  setPushTransport({
+    sealingSecrets: () => [],
+    plaintextAllowed: () => false,
+    relayPush: () => Promise.reject(new Error("unused")),
+    relayTokensChanged: () => { changes += 1; },
+  });
+  try {
+    // A released app on the old path, the new app on a v2 channel, and a phone this computer's own Firebase serves.
+    registerPushToken("fcm-old-app", "android", "phone-a-id", "relay");
+    registerPushToken("fcm-new-app", "ios", "phone-b-id", "relay", undefined, true);
+    registerPushToken("fcm-direct", "android", "phone-c-id", "direct", "some-project");
+    registerPushToken("fcm-no-route", "android");
+    assert.equal(changes, 4);
+    assert.deepEqual(relayPushTokens(), [
+      { token: "fcm-old-app", platform: "android", serverId: "phone-a-id" },
+      { token: "fcm-new-app", platform: "ios", serverId: "phone-b-id", v: 2 },
+      { token: "fcm-no-route", platform: "android" },
+    ]);
+
+    unregisterPushToken("fcm-old-app", "phone-a-id");
+    assert.equal(changes, 5);
+    assert.deepEqual(relayPushTokens().map((entry) => entry.token), ["fcm-new-app", "fcm-no-route"]);
+  } finally {
+    for (const token of ["fcm-new-app", "fcm-direct", "fcm-no-route"]) unregisterPushToken(token);
     setPushTransport(null);
   }
 });

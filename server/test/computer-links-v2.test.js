@@ -32,9 +32,10 @@ function newSecret() {
 
 /**
  * @param {import("node:test").TestContext} t
- * @param {{ knowsLinkUpgrade?: boolean, legacyTransport?: boolean }} options
+ * @param {{ knowsLinkUpgrade?: boolean, answersLinkUpgrade?: boolean, legacyTransport?: boolean }} options
  *   `knowsLinkUpgrade` false makes the target answer `link_upgrade` as a
- *   server from before this release does.
+ *   server from before this release does. `answersLinkUpgrade` false makes
+ *   it take the request and say nothing.
  */
 async function computers(t, options = {}) {
   const id = ++counter;
@@ -63,6 +64,7 @@ async function computers(t, options = {}) {
     }),
     peerAuth: new DeviceAuthGate(registry, () => "token"),
     onPeerJson: (message, peerId, publicKey, channel) => {
+      if (options.answersLinkUpgrade === false && message.action === "link_upgrade") return;
       if (options.knowsLinkUpgrade === false && message.action === "link_upgrade") {
         target.sendReply(peerId, { type: "peer_response", id: String(message.id), ok: false, code: "invalid", error: "Invalid peer request" });
         return;
@@ -134,7 +136,9 @@ async function computers(t, options = {}) {
     }
   };
   const stored = () => parseJsonObject(fs.readFileSync(storePath, "utf8"));
-  return { registry, sourceKey, targetKey: toBase64(targetKeys.publicKey), joins, online, source, record, authorize, until, stored };
+  /** The relay tells every source socket that the target left its room. */
+  const targetLeaves = () => { for (const socket of sockets.values()) socket.send(JSON.stringify({ type: "peer_disconnected" })); };
+  return { registry, sourceKey, targetKey: toBase64(targetKeys.publicKey), joins, online, source, record, authorize, until, stored, targetLeaves };
 }
 
 /** @param {{frames: Record<string, unknown>[]}} join */
@@ -236,6 +240,8 @@ test("link_upgrade moves an existing link to v2, and the old key exchange is the
   assert.ok(connection);
   // Old key exchange, link_upgrade over its session keys, then a second join with hs1.
   await env.until(() => env.joins.length === 2 && connection.online, "the link to come back on v2");
+  // The source is online once it reads hs2. The target moves the record when it reads transport_ready, a moment later.
+  await env.until(() => env.registry.get(env.sourceKey)?.transport === 2, "the target to record the link as v2");
 
   assert.deepEqual(frameTypes(env.joins[0]), ["key_exchange", "sealed"]);
   assert.equal(env.joins[1].frames[0].type, "hs1");
@@ -258,6 +264,22 @@ test("link_upgrade moves an existing link to v2, and the old key exchange is the
   assert.equal(env.joins[2].frames[0].type, "key_exchange");
   assert.equal(env.registry.get(env.sourceKey)?.linkSecret, moved?.linkSecret, "the refused peer changed nothing");
   assert.equal(connection.online, true);
+});
+
+test("a link whose target leaves while link_upgrade waits is not announced as online", async (t) => {
+  const env = await computers(t, { answersLinkUpgrade: false });
+  env.authorize();
+  const manager = env.source();
+  manager.set(env.record());
+  const connection = manager.get(env.targetKey);
+  assert.ok(connection);
+  await env.until(() => env.joins[0]?.frames.length === 2, "the source to offer a link secret");
+  assert.equal(connection.online, true);
+  env.targetLeaves();
+  await env.until(() => !connection.online, "the source to see the target leave");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(env.online, [], "the unanswered offer ended without an online announcement");
+  assert.equal(JSON.stringify(env.stored()).includes("linkSecret"), false);
 });
 
 test("a source with a link secret never falls back to the old key exchange", async (t) => {

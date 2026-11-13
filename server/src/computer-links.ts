@@ -480,7 +480,8 @@ export class LinkConnection {
     } catch {
       // No answer, or the socket went away. The next connect asks again.
     }
-    if (this.ws !== ws || this.closed) return;
+    // The target may have left while this waited. Then there is nothing to announce or to move.
+    if (this.ws !== ws || this.closed || !this.online) return;
     if (!accepted || !this.hooks.saveRecord) {
       this.hooks.onOnline(this.record);
       return;

@@ -116,7 +116,16 @@ export class DeviceAuthGate {
    * already proved `publicKey`. A recorded device needs no token. An unknown
    * key gets in with the right token, locked or not: released apps that only
    * ever connected this way were never recorded, and they must keep working
-   * until the old path is shut down. A socket from this computer, which is
+   * until the old path is shut down.
+   *
+   * That is more than being let in once. The key is recorded as a device, so
+   * from then on it gets in over the relay with no token, and `pairing_upgrade`
+   * hands it the pairing secret, which carries it over to transport v2 for
+   * good. On a locked computer, AUTH_TOKEN and reach of the port therefore
+   * make a lasting device with no Allow. This ends when the old path is
+   * switched off (SOCKETAGENT_LEGACY_TRANSPORT).
+   *
+   * A socket from this computer, which is
    * loopback with no proxy in front, may also send no token and raise an
    * approval prompt, for the old desktop app under another Windows account.
    */
@@ -146,6 +155,7 @@ export class DeviceAuthGate {
       // The lock holds on the relay, where every device that exists is
       // already on record. A direct token holder was never recorded by the
       // old build, so refusing it here would lock out a device paired today.
+      // The record made below lasts and can carry over to v2: see directAuth.
       if (this.registry.locked && path === "relay") return NOT_APPROVED;
       this.registry.enroll({ publicKey, kind: "device", name, platform: platform || "android", via: "token" });
       this.wrongTokens.delete(publicKey);

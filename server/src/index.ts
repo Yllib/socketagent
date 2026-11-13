@@ -80,7 +80,8 @@ import { createPluginAnswerAcknowledgement } from "./plugin-answer";
 import { RelayClient, RelayStatus, channelKindForMessage, noteDirectMessageOrigin, relayPeerForMessage, relayPeerKeyForMessage } from "./relay-client";
 import { TransportResponder } from "./transport-responder";
 import { relayClientOptions, type RelayLaneOptions } from "./relay-lanes";
-import { DirectV2Sockets, DirectV2Transport } from "./direct-v2-transport";
+import { DirectV2Sockets, DirectV2Transport, MAX_DIRECT_FRAME_BYTES } from "./direct-v2-transport";
+import { MAX_HANDSHAKE_FRAME_BYTES } from "./transport-v2";
 import { BIN_MARKER_UPLOAD_CHUNK, DirectClientTransport } from "./direct-client-transport";
 import { broadcastDirectCapabilities, removeRegisteredKey } from "./device-removal";
 import { hasOriginHeader, isLoopbackRequest } from "./loopback-request";
@@ -11410,7 +11411,8 @@ const httpServer = http.createServer((req, res) => {
   res.end("Not found");
 });
 
-const wss = new WebSocketServer({ noServer: true });
+// No frame over the cap is ever buffered, whoever sends it. The library's own default is 100 MiB.
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_DIRECT_FRAME_BYTES });
 
 const BULK_LANE_CLIENT_MESSAGE_TYPES = new Set<string>([
   "client_capabilities",
@@ -12416,6 +12418,12 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
 
     const buf = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
     console.log(`[WS Recv] isBinary=${isBinary} bytes=${buf.length}`);
+    // Before sign-in the only frames are key_exchange and direct_auth, both
+    // well under this. A larger one is closed on before it is parsed.
+    if (!transport.isAuthenticated && !transport.heldForApproval && buf.length > MAX_HANDSHAKE_FRAME_BYTES) {
+      ws.close(1009, "Frame too large");
+      return;
+    }
     if (isBinary && transport.hasPeerKey) {
       try {
         msg = transport.decryptBinaryFrame(buf);

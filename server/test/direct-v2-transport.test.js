@@ -170,6 +170,14 @@ test("a direct v2 socket closes on any frame it does not expect", async (t) => {
   early.ws.send(early.channel.seal({ type: "list_sessions" }));
   assert.equal(await early.closed(), 1008);
 
+  // Nothing over 4,096 bytes is read before transport_ready, text or binary.
+  for (const large of ["x".repeat(4097), Buffer.alloc(4097)]) {
+    const waiting = await env.handshake(env.device());
+    waiting.ws.send(large);
+    assert.equal(await waiting.closed(), 1008);
+    assert.equal(waiting.received.length, 1, "only hs2 was ever sent");
+  }
+
   // An unsealed frame after the handshake.
   const unsealed = await env.handshake(env.device());
   unsealed.ws.send(unsealed.channel.ready());

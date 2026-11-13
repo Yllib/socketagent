@@ -30,6 +30,14 @@ const BIN_MARKER_UPLOAD_CHUNK = 0x42;
 const CLOSE_POLICY_VIOLATION = 1008;
 const CLOSE_NORMAL = 1000;
 
+/**
+ * The largest frame the direct listener takes, on `e2e=2`, `e2e=1` and the
+ * loopback token socket alike. It is the relay's own cap, so whatever an app
+ * can send through the relay it can send directly. The largest real frames
+ * are upload chunks of 1 MiB.
+ */
+export const MAX_DIRECT_FRAME_BYTES = 16 * 1024 * 1024;
+
 export interface DirectV2Hooks {
   responder: TransportResponder;
   /** The socket comes from this computer itself: loopback with no proxy in front. */
@@ -84,6 +92,13 @@ export class DirectV2Transport implements ClientTransport {
     ws.on("message", (data, isBinary) => {
       const frame = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
       try {
+        // Until transport_ready the only frames are hs1 and that one record,
+        // both small. A larger one is closed on before it is made a string
+        // or parsed, since anyone who reaches the port can send it.
+        if ((this.state === "waiting" || this.state === "answered") && frame.length > MAX_HANDSHAKE_FRAME_BYTES) {
+          this.closeSocket("Frame too large");
+          return;
+        }
         if (isBinary) this.handleBinary(frame);
         else this.handleText(frame.toString("utf8"));
       } catch (err: unknown) {
@@ -147,11 +162,6 @@ export class DirectV2Transport implements ClientTransport {
   private handleText(raw: string): void {
     if (this.state === "closed") return;
     if (!this.handshake) {
-      // Before the channel exists the only frame is hs1, which is small.
-      if (Buffer.byteLength(raw, "utf8") > MAX_HANDSHAKE_FRAME_BYTES) {
-        this.closeSocket("Frame too large");
-        return;
-      }
       const parsed: unknown = JSON.parse(raw);
       if (!isRecord(parsed) || parsed.type !== "hs1") {
         this.closeSocket("Handshake required");

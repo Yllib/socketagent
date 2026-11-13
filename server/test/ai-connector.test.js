@@ -394,7 +394,7 @@ test("a client ID metadata document identifies a client without registration", a
 });
 
 test("the peer API treats a connector key like a linked computer", async () => {
-  const registry = new DeviceRegistry(path.join(dataDir, `connector-registry-${++counter}.json`), true);
+  const registry = new DeviceRegistry(path.join(dataDir, `connector-registry-${++counter}.json`));
   const key = crypto.randomBytes(32).toString("base64");
   registry.enroll({ publicKey: key, kind: "connector", name: "Claude", platform: "connector", via: "connector", access: { read: true, agents: true, commands: false }, confirm: "never" });
   /** @type {string[]} */

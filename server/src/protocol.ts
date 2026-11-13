@@ -1375,9 +1375,10 @@ export interface ComputerAccess {
 }
 
 /**
- * Sent inside the encrypted box by a peer the relay handshake held as
- * pending. A correct token enrolls the key; otherwise an enrolled device has
- * to approve it. Enrolled devices send it without a token to update their name.
+ * Old path only. Sent inside the encrypted box by a peer the key exchange
+ * left pending. A correct token records the key while the computer is not
+ * locked; anything else is told `not_approved`. Recorded devices send it
+ * without a token to update their name. A v2 device never sends it.
  */
 export interface DeviceAuthMessage {
   type: "device_auth";
@@ -1404,9 +1405,10 @@ export interface DeviceDenyMessage {
   publicKey: string;
 }
 
-/** Revokes the key on every lane. For device keys this also rotates AUTH_TOKEN,
- *  unless `keepToken` is set: the app forgets a device whose install is gone,
- *  so nothing that knows the token is left to shut out. */
+/** Moves the key to the removed list and closes its channels on every path.
+ *  For device keys this also makes a new pairing secret and rotates
+ *  AUTH_TOKEN, unless `keepToken` is set: the app forgets a device whose
+ *  install is gone, so nothing that knows them is left to shut out. */
 export interface DeviceRemoveMessage {
   type: "device_remove";
   requestId?: string;
@@ -1415,16 +1417,26 @@ export interface DeviceRemoveMessage {
 }
 
 /**
- * Replaces the relay pairing token, so the old QR stops working. Connected
- * phones that hold the token get the new one in the capabilities broadcast
- * that follows; other paired phones scan the new QR.
+ * Makes a new pairing secret and a new AUTH_TOKEN, so old codes and
+ * screenshots stop working. The relay room stays. Devices on an open v2
+ * control channel get the new secret in `pairing_update`.
  */
 export interface PairingResetMessage {
   type: "pairing_reset";
   requestId?: string;
 }
 
-/** Learning mode becomes enforced. Replies with device_list_result. */
+/**
+ * A recorded device on an old-path channel with session keys asks for the
+ * pairing secret, so it can move to transport v2. Refused on a static-box
+ * channel. Answered with `pairing_upgrade_result`.
+ */
+export interface PairingUpgradeMessage {
+  type: "pairing_upgrade";
+  requestId: string;
+}
+
+/** Locks the computer: a new device with the code then waits for Allow. Replies with device_list_result. */
 export interface DeviceLockMessage {
   type: "device_lock";
   requestId?: string;
@@ -1659,6 +1671,7 @@ export type ClientMessage = { commandId?: string } & (
   | AiConnectorSetMessage
   | AiConnectorClientSetMessage
   | PairingResetMessage
+  | PairingUpgradeMessage
   | DeviceAuthorizeMessage
   | LinkRoomInfoMessage
   | ComputerLinkSetMessage
@@ -2498,7 +2511,11 @@ export interface ServerCapabilitiesMessage {
   backendConfig?: {
     version: number;
   };
-  /** Relay peers authenticate with device keys. mode is the registry mode. */
+  /** The computer speaks transport v2. Sent on every path. */
+  transport?: {
+    version: number;
+  };
+  /** Device keys are recorded. mode is "enforced" when the computer is locked. */
   deviceAuth?: {
     version: number;
     mode: DeviceRegistryMode;
@@ -2507,19 +2524,25 @@ export interface ServerCapabilitiesMessage {
   computerLinks?: {
     version: number;
   };
+  /** Old-path channels only. */
   directE2e?: {
     serverPubkey: string;
   };
+  /** Old-path channels only, and only to a key that holds the token. */
   relayPairing?: {
     relayUrl: string;
     pairingToken: string;
     serverPubkey: string;
   };
-  /** How to reach this server directly on its LAN, likeliest address first. */
+  /**
+   * How to reach this server directly on its LAN, likeliest address first.
+   * `token` goes only to an old-path key that already holds it. A v2 channel
+   * never carries it.
+   */
   directRoute?: {
     hosts: string[];
     port: number;
-    token: string;
+    token?: string;
   };
   pushNotifications?: {
     version?: number;
@@ -3154,6 +3177,32 @@ export interface PairingResetResultServerMessage {
   type: "pairing_reset_result";
   requestId?: string;
   ok: boolean;
+  error?: string;
+}
+
+/**
+ * The current pairing secret, sent on an open v2 control channel right after
+ * the secret changes, and first of all to a device that opened under a
+ * previous one. The device stores it for its next handshake. No answer.
+ */
+export interface PairingUpdateServerMessage {
+  type: "pairing_update";
+  /** base64 of 32 bytes. */
+  secret: string;
+  /** The relay room. In this release always the one the device already has. */
+  roomId: string;
+}
+
+/** Answer to `pairing_upgrade`. On success it carries what the device needs to connect with v2. */
+export interface PairingUpgradeResultServerMessage {
+  type: "pairing_upgrade_result";
+  requestId: string;
+  ok: boolean;
+  /** base64 of 32 bytes. */
+  secret?: string;
+  roomId?: string;
+  port?: number;
+  hosts?: string[];
   error?: string;
 }
 
@@ -4086,6 +4135,8 @@ export type ServerMessage =
   | DeviceDenyResultServerMessage
   | DeviceRemoveResultServerMessage
   | PairingResetResultServerMessage
+  | PairingUpdateServerMessage
+  | PairingUpgradeResultServerMessage
   | LinkRoomInfoResultServerMessage
   | ComputerLinkListResultServerMessage
   | ComputerLinkOperationResultServerMessage

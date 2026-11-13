@@ -345,8 +345,3 @@ export class TransportChannel implements FrameChannel {
     return this.open(Uint8Array.from(envelope.subarray(NONCE_LENGTH)), Uint8Array.from(envelope.subarray(0, NONCE_LENGTH)));
   }
 }
-
-/** The sealed text frame as it goes onto the socket. */
-export function sealedTextFrame(channel: FrameChannel, message: string): string {
-  return JSON.stringify(channel.sealText(message));
-}

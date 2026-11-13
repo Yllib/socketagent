@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import * as nacl from "tweetnacl";
 import {
   KeyPair,
   PeerChannel,
@@ -19,7 +20,16 @@ import {
 import { BinaryFileDownloadChunkMetadata, encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { supportsBinaryBrowserFrames } from "./browser-frame-wire";
 import type { DeviceAuthOutcome, PeerAdmission, RelayLane } from "./device-auth";
-import type { DevicePlatform } from "./device-registry";
+import { STATE_RESET_HINT, type DevicePlatform } from "./device-registry";
+import { MAX_HANDSHAKE_FRAME_BYTES, TRANSPORT_VERSION, type TransportChannel } from "./transport-v2";
+import {
+  HANDSHAKE_WAIT_MS,
+  HELD_PEER_WAIT_MS,
+  isTransportReady,
+  type AcceptedHandshake,
+  type PairingUpdate,
+  type TransportResponder,
+} from "./transport-responder";
 
 // Binary envelope plaintext markers — first byte of the decrypted payload.
 const BIN_MARKER_JSON = 0x4A;          // 'J' — UTF-8 JSON message follows
@@ -29,6 +39,28 @@ const MAX_PENDING_PEERS = 8;
 const PENDING_PEER_TTL_MS = 10 * 60 * 1000;
 const messagePeers = new WeakMap<ClientMessage, string>();
 const messagePeerKeys = new WeakMap<ClientMessage, string>();
+const messageChannels = new WeakMap<ClientMessage, MessageChannelKind>();
+// A new-style join the relay refuses with 4004 belongs to another owner key.
+const RELAY_CLOSE_OWNER_MISMATCH = 4004;
+const OWNER_MISMATCH_RETRY_MS = 10 * 60 * 1000;
+// The relay takes a limited number of new room claims per hour from one
+// address and closes with 1013 past it. That one means "try again later".
+const RELAY_CLOSE_CLAIM_LIMIT = 1013;
+const CLAIM_LIMIT_RETRY_MS = 5 * 60 * 1000;
+const RELAY_AUTH_LABEL = "socketagent-relay-auth-v1";
+
+/**
+ * How the channel a message arrived on was keyed. `v2` is a transport v2
+ * handshake. `session` and `static` are the old path, with and without
+ * session keys. `plain` is the loopback token socket.
+ */
+export type MessageChannelKind = "v2" | "session" | "static" | "plain";
+
+/** The bytes a computer signs to prove it owns a relay room (wire spec 12.2). */
+export function relayAuthMessage(roomId: string, nonce: Uint8Array): Buffer {
+  const zero = Uint8Array.of(0);
+  return Buffer.concat([Buffer.from(RELAY_AUTH_LABEL, "ascii"), zero, Buffer.from(roomId, "utf8"), zero, nonce]);
+}
 
 // A ping tick this much later than scheduled means the event loop stalled.
 const PING_STALL_SLACK_MS = 5_000;
@@ -87,9 +119,23 @@ export function relayPeerForMessage(message: ClientMessage): string | undefined 
   return messagePeers.get(message);
 }
 
-/** The enrolled device key a relay message arrived under. Absent on direct sockets. */
+/**
+ * The recorded device key a message arrived under: every relay message, and
+ * a direct socket's once its handshake has proved the key.
+ */
 export function relayPeerKeyForMessage(message: ClientMessage): string | undefined {
   return messagePeerKeys.get(message);
+}
+
+/** How the channel this message arrived on was keyed. Unset means the loopback token socket. */
+export function channelKindForMessage(message: ClientMessage): MessageChannelKind {
+  return messageChannels.get(message) ?? "plain";
+}
+
+/** A direct socket records where its message came from, as the relay client does for its own. */
+export function noteDirectMessageOrigin(message: ClientMessage, origin: { publicKey?: string; channel: MessageChannelKind }): void {
+  if (origin.publicKey) messagePeerKeys.set(message, origin.publicKey);
+  messageChannels.set(message, origin.channel);
 }
 
 /**
@@ -99,14 +145,27 @@ export function relayPeerKeyForMessage(message: ClientMessage): string | undefin
  * an enrolled key (or replays a recorded one) cannot drain the outbox or pass
  * for the phone. pending: held until device_auth or an approval; it receives
  * nothing but device_auth replies. dropped: ignored until it leaves.
+ *
+ * A v2 peer uses the same four: admitted from `hs2` until its
+ * `transport_ready`, pending while it waits for Allow, then approved.
  */
 type RelayPeerAuth = "approved" | "admitted" | "pending" | "dropped";
 
 interface RelayPeer {
+  /**
+   * Set for good by the peer's first frame: `hs1` makes it a v2 peer,
+   * `key_exchange` an old-path one.
+   */
+  mode: "unknown" | "legacy" | "v2";
+  /** A v2 peer's one handshake, once answered. Null when it was refused or silent. */
+  handshake: AcceptedHandshake | null;
+  /** A v2 peer has spent its one handshake. */
+  handshakeUsed: boolean;
   publicKey: Uint8Array | null;
+  /** A v2 peer's key is set at `transport_ready`, not before. */
   publicKeyBase64: string | null;
-  /** Set by the key exchange; session-keyed unless the phone predates it. */
-  channel: PeerChannel | null;
+  /** Set by the key exchange or the v2 handshake. */
+  channel: PeerChannel | TransportChannel | null;
   auth: RelayPeerAuth;
   pendingTimer: ReturnType<typeof setTimeout> | null;
   binaryEnabled: boolean;
@@ -219,8 +278,18 @@ export interface RelayPeerAuthorizer {
 
 export interface RelayClientOptions {
   relayUrl: string;
+  /** The room ID. The name is historical. */
   pairingToken: string;
   keyPair: KeyPair;
+  /**
+   * The Ed25519 key that proves this computer owns its rooms. `connect`
+   * needs it. Tests that never connect leave it out.
+   */
+  ownerKey?: { publicKey: Uint8Array; secretKey: Uint8Array };
+  /** Answers `hs1` from devices. Without one, v2 peers get silence. */
+  responder?: TransportResponder;
+  /** False refuses `key_exchange`, which turns the old path off in this room. Default true. */
+  legacyTransport?: boolean;
   lane?: RelayLane;
   /**
    * Without an authorizer every key is approved, which is only right for
@@ -255,6 +324,8 @@ export interface RelayClientOptions {
     binaryEnvelope: boolean,
     lane: TransportLane,
     publicKey: string | null,
+    /** 2 for a v2 channel, 1 for the old path. */
+    transport: 1 | 2,
   ) => Record<string, unknown>;
   onMessage?: (msg: ClientMessage) => void;
   onStatusChange: (status: RelayStatus) => void;
@@ -296,11 +367,23 @@ export class RelayClient {
     if (this.closed) return;
     this.setStatus("connecting");
 
-    const url = `${this.opts.relayUrl}?token=${encodeURIComponent(this.opts.pairingToken)}&role=server&multi_device=1`;
+    const ownerKey = this.opts.ownerKey;
+    if (!ownerKey) throw new Error("A relay client needs the relay owner key to join its room");
     console.log(`[Relay] Connecting to ${this.opts.relayUrl}...`);
 
     try {
-      this.ws = new WebSocket(url);
+      // A new-style join (wire spec 12.1): the room ID rides in a header, so
+      // it stays out of URLs and the relay's access logs. There is no
+      // fallback to the old `?token=` join: once this computer owns its room
+      // the relay refuses that join for it.
+      this.ws = new WebSocket(this.opts.relayUrl, {
+        headers: {
+          "X-SocketAgent-Protocol": "2",
+          "X-SocketAgent-Role": "server",
+          "X-SocketAgent-Room": encodeURIComponent(this.opts.pairingToken),
+          "X-SocketAgent-Owner-Key": Buffer.from(ownerKey.publicKey).toString("base64"),
+        },
+      });
     } catch (err) {
       console.error(`[Relay] Connection error: ${errorMessage(err)}`);
       this.scheduleReconnect();
@@ -339,8 +422,15 @@ export class RelayClient {
       }
     });
 
-    this.ws.on("close", () => {
+    this.ws.on("close", (code) => {
       console.log(`[Relay] Disconnected`);
+      if (code === RELAY_CLOSE_OWNER_MISMATCH) {
+        this.reconnectDelay = OWNER_MISMATCH_RETRY_MS;
+        console.error(`[Relay${this.laneTag()}] Another key owns this relay room, so this computer cannot use it. Trying again in 10 minutes. ${STATE_RESET_HINT}`);
+      } else if (code === RELAY_CLOSE_CLAIM_LIMIT) {
+        this.reconnectDelay = CLAIM_LIMIT_RETRY_MS;
+        console.warn(`[Relay${this.laneTag()}] The relay is taking no new room claims from this address right now. Trying again in 5 minutes.`);
+      }
       this.stopPingPong();
       this.ws = null;
       for (const id of Array.from(this.peers.keys())) this.removePeer(id);
@@ -418,8 +508,18 @@ export class RelayClient {
     let opened = 0;
     for (const [peerId, peer] of this.peers) {
       if (peer.auth !== "pending" || peer.publicKeyBase64 !== publicKey) continue;
-      this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
-      this.openPeer(peerId, peer);
+      if (peer.handshake) {
+        const approved = this.opts.responder?.approve(peer.handshake);
+        if (!approved) {
+          this.dropPeer(peerId, peer, false);
+          continue;
+        }
+        this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
+        this.openV2Peer(peerId, peer, peer.handshake, approved.pairingUpdate);
+      } else {
+        this.sendToPeer(peerId, { type: "device_auth_result", ok: true }, peer, true);
+        this.openPeer(peerId, peer);
+      }
       opened++;
     }
     return opened;
@@ -428,16 +528,41 @@ export class RelayClient {
   /**
    * Stops talking to every peer under this key. The relay has no server-side
    * kick, so the peer is told once and then ignored until it disconnects.
+   * An open v2 peer is told nothing: on v2 `device_auth_result` is only the
+   * verdict for a held peer.
    */
-  dropPeersWithKey(publicKey: string, reason: "removed" | "not_approved"): number {
+  dropPeersWithKey(publicKey: string, reason: "removed" | "not_approved", only?: "legacy"): number {
     let dropped = 0;
     for (const [peerId, peer] of this.peers) {
       if (peer.auth === "dropped" || peer.publicKeyBase64 !== publicKey) continue;
-      this.sendToPeer(peerId, { type: "device_auth_result", ok: false, reason }, peer, true);
-      this.dropPeer(peerId, peer, reason === "removed");
+      if (only === "legacy" && peer.mode !== "legacy") continue;
+      const wasOpen = peer.auth === "approved";
+      if (peer.mode !== "v2" || peer.auth === "pending") {
+        this.sendToPeer(peerId, { type: "device_auth_result", ok: false, reason: peer.mode === "v2" ? "not_approved" : reason }, peer, true);
+      }
+      this.dropPeer(peerId, peer, wasOpen);
       dropped++;
     }
     return dropped;
+  }
+
+  /** Sends to every open v2 peer and returns their keys. Used for `pairing_update`. */
+  sendToV2Peers(message: Record<string, unknown>): string[] {
+    const keys: string[] = [];
+    for (const [peerId, peer] of this.peers) {
+      if (peer.mode !== "v2" || peer.auth !== "approved" || !peer.publicKeyBase64) continue;
+      this.sendToPeer(peerId, message, peer);
+      keys.push(peer.publicKeyBase64);
+    }
+    return keys;
+  }
+
+  /** How the open peers under this key are connected. */
+  transportOfKey(publicKey: string): 1 | 2 | undefined {
+    for (const peer of this.peers.values()) {
+      if (peer.auth === "approved" && peer.publicKeyBase64 === publicKey) return peer.mode === "v2" ? 2 : 1;
+    }
+    return undefined;
   }
 
   /** Whether the relay is connected and paired with a phone */
@@ -483,6 +608,9 @@ export class RelayClient {
     let peer = this.peers.get(peerId);
     if (!peer) {
       peer = {
+        mode: "unknown",
+        handshake: null,
+        handshakeUsed: false,
         publicKey: null,
         publicKeyBase64: null,
         channel: null,
@@ -519,6 +647,7 @@ export class RelayClient {
     if (!peer) return;
     this.clearPendingTimer(peer);
     this.peers.delete(peerId);
+    if (peer.handshake) this.opts.responder?.release(peer.handshake);
     if (peer.auth === "approved" && peer.publicKeyBase64) {
       this.opts.onPeerClosed?.(peerId, peer.publicKeyBase64);
     } else if (peer.auth === "pending" && peer.publicKeyBase64) {
@@ -529,8 +658,11 @@ export class RelayClient {
   private dropPeer(peerId: string, peer: RelayPeer, wasOpen: boolean): void {
     const key = peer.publicKeyBase64;
     const wasApproved = peer.auth === "approved";
+    const wasHeld = peer.auth === "pending" && peer.mode === "v2";
     this.clearPendingTimer(peer);
+    if (peer.handshake) this.opts.responder?.release(peer.handshake);
     peer.auth = "dropped";
+    if (wasHeld && key) this.opts.onPendingDropped?.(key);
     if (wasApproved && key) this.opts.onPeerClosed?.(peerId, key);
     if (wasApproved) this.recomputePeerCapabilities();
     if (wasOpen && !this.hasPairedPeer()) {
@@ -669,6 +801,21 @@ export class RelayClient {
       return;
     }
 
+    // The relay asks this computer to prove it owns the room (wire spec 12.2).
+    if (parsed.type === "relay_challenge") {
+      const nonce = typeof parsed.nonce === "string" ? Buffer.from(parsed.nonce, "base64") : null;
+      const ownerKey = this.opts.ownerKey;
+      if (!nonce || nonce.length !== 32 || !ownerKey) return;
+      const signature = nacl.sign.detached(relayAuthMessage(this.opts.pairingToken, nonce), ownerKey.secretKey);
+      this.ws?.send(JSON.stringify({ type: "relay_auth", sig: Buffer.from(signature).toString("base64") }));
+      return;
+    }
+
+    if (parsed.type === "relay_error") {
+      console.error(`[Relay${this.laneTag()}] The relay refused this computer: ${typeof parsed.error === "string" ? parsed.error : "unknown error"}`);
+      return;
+    }
+
     // Relay control messages (unencrypted)
     if (parsed.type === "peer_connected") {
       const peerId = typeof parsed.peerId === "string" ? parsed.peerId : LEGACY_PEER_ID;
@@ -706,7 +853,7 @@ export class RelayClient {
         return;
       }
       try {
-        this.handlePeerMessage(JSON.parse(String(parsed.data || "")), peerId);
+        this.handlePeerText(String(parsed.data || ""), peerId);
       } catch (err) {
         console.error(`[Relay] Failed to parse peer message: ${errorMessage(err)}`);
       }
@@ -716,12 +863,165 @@ export class RelayClient {
     this.handlePeerMessage(parsed, LEGACY_PEER_ID);
   }
 
+  /**
+   * A text frame from one peer, as the relay delivered it. The peer's first
+   * frame decides what it is for good: `hs1` makes it a v2 peer and
+   * `key_exchange` an old-path one.
+   */
+  private handlePeerText(raw: string, peerId: string): void {
+    const peer = this.getPeer(peerId);
+    if (peer.mode === "v2") {
+      this.handleV2Text(raw, peerId, peer);
+      return;
+    }
+    // A peer with no channel can only send one of the two openers, and both
+    // are small. Anything bigger is dropped before it is parsed.
+    if (!peer.channel && Buffer.byteLength(raw, "utf8") > MAX_HANDSHAKE_FRAME_BYTES) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (peer.mode === "unknown" && isRecord(parsed) && parsed.type === "hs1") {
+      // A version this side does not speak is ignored and spends nothing.
+      if (parsed.v !== TRANSPORT_VERSION) return;
+      peer.mode = "v2";
+      this.handleV2Text(raw, peerId, peer);
+      return;
+    }
+    this.handlePeerMessage(parsed, peerId);
+  }
+
+  /** Stops answering a v2 peer. The app notices on its own and dials again. */
+  private dropV2Peer(peerId: string, peer: RelayPeer, why: string): void {
+    console.warn(`[Relay${this.laneTag()}] Dropping peer ${peerId}: ${why}`);
+    this.dropPeer(peerId, peer, peer.auth === "approved");
+  }
+
+  /**
+   * A text frame from a v2 peer. Before the handshake the only frame that
+   * counts is its one `hs1`. After it, only sealed records do: any other
+   * frame, and any record that does not open, drops the peer (spec 4.3).
+   */
+  private handleV2Text(raw: string, peerId: string, peer: RelayPeer): void {
+    if (peer.auth === "dropped") return;
+    if (!peer.handshake) {
+      // A second hs1, or anything after an hs1 that got no channel, is ignored.
+      if (peer.handshakeUsed) return;
+      peer.handshakeUsed = true;
+      const lane = this.opts.lane || "control";
+      const outcome = this.opts.responder?.handleHs1(raw, { path: "relay", lane }) ?? { result: "silent" };
+      if (outcome.result === "silent") {
+        peer.auth = "dropped";
+        return;
+      }
+      this.sendRawFrameToPeer(peerId, outcome.hs2, false);
+      if (outcome.result === "refused") {
+        peer.auth = "dropped";
+        return;
+      }
+      const handshake = outcome.handshake;
+      peer.handshake = handshake;
+      peer.channel = handshake.channel;
+      // Nothing is sent or stored until the first record proves the peer
+      // holds this handshake's keys.
+      peer.auth = "admitted";
+      peer.pendingTimer = setTimeout(() => {
+        if (peer.auth === "admitted") this.dropV2Peer(peerId, peer, "no transport_ready within 10 s");
+      }, HANDSHAKE_WAIT_MS);
+      peer.pendingTimer.unref?.();
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      this.dropV2Peer(peerId, peer, "unsealed frame after the handshake");
+      return;
+    }
+    if (isRecord(parsed) && parsed.type === "hs1") return;
+    if (!isRecord(parsed) || typeof parsed.n !== "string" || typeof parsed.c !== "string") {
+      this.dropV2Peer(peerId, peer, "unsealed frame after the handshake");
+      return;
+    }
+    let plaintext: string;
+    try {
+      plaintext = peer.handshake.channel.openText({ n: parsed.n, c: parsed.c });
+    } catch (err) {
+      this.dropV2Peer(peerId, peer, errorMessage(err));
+      return;
+    }
+    if (peer.auth === "admitted") {
+      if (isTransportReady(plaintext)) this.handleTransportReady(peerId, peer, peer.handshake);
+      else this.dropV2Peer(peerId, peer, "first record was not transport_ready");
+      return;
+    }
+    // A held peer's records are ignored until a paired device answers.
+    if (peer.auth !== "approved") return;
+    this.routeDecryptedJson(JSON.parse(plaintext), peerId, peer);
+  }
+
+  /**
+   * The peer proved it holds the handshake's keys. Only now may anything be
+   * stored or sent (spec 3.7), and the responder does the storing.
+   */
+  private handleTransportReady(peerId: string, peer: RelayPeer, handshake: AcceptedHandshake): void {
+    this.clearPendingTimer(peer);
+    const outcome = this.opts.responder?.ready(handshake) ?? { result: "closed" };
+    if (outcome.result === "closed") {
+      this.dropV2Peer(peerId, peer, "the handshake no longer matches the stored state");
+      return;
+    }
+    peer.publicKey = new Uint8Array(Buffer.from(handshake.publicKey, "base64"));
+    peer.publicKeyBase64 = handshake.publicKey;
+    if (outcome.result === "open") {
+      this.openV2Peer(peerId, peer, handshake, outcome.pairingUpdate);
+      return;
+    }
+    peer.auth = "pending";
+    peer.pendingTimer = setTimeout(() => {
+      if (peer.auth !== "pending") return;
+      console.log(`[Relay${this.laneTag()}] Held peer ${peerId} was not answered in time`);
+      this.sendToPeer(peerId, { type: "device_auth_result", ok: false, reason: "not_approved" }, peer, true);
+      this.dropPeer(peerId, peer, false);
+    }, HELD_PEER_WAIT_MS);
+    peer.pendingTimer.unref?.();
+    console.log(`[Relay${this.laneTag()}] Peer ${peerId} held pending device approval`);
+    this.opts.onDevicePending?.(outcome.notice);
+  }
+
+  /**
+   * Opens a v2 peer. Its capabilities came in the handshake, so the first
+   * records are `pairing_update` when one is due, then `server_capabilities`,
+   * then whatever queued while no device was there.
+   */
+  private openV2Peer(peerId: string, peer: RelayPeer, handshake: AcceptedHandshake, pairingUpdate?: PairingUpdate): void {
+    const caps = handshake.caps;
+    peer.binaryEnabled = caps.binaryEnvelope === true;
+    peer.supportsSessionEventAck = supportsSessionEventAcknowledgement(caps);
+    peer.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(caps);
+    peer.supportsBinaryFileDownload = supportsBinaryFileDownload(caps);
+    peer.supportsBinaryBrowserFrames = supportsBinaryBrowserFrames(caps);
+    if (pairingUpdate) this.sendToPeer(peerId, { ...pairingUpdate }, peer, true);
+    const lane: TransportLane = this.opts.lane === "bulk" ? "bulk" : "control";
+    if (this.opts.serverCapabilities) {
+      this.sendToPeer(peerId, this.opts.serverCapabilities(peer.binaryEnabled, lane, handshake.publicKey, 2), peer, true);
+    }
+    this.openPeer(peerId, peer);
+    this.recomputePeerCapabilities();
+  }
+
   private handlePeerMessage(parsed: unknown, peerId: string): void {
     if (!isRecord(parsed)) throw new Error("Invalid relay peer message");
     const peer = this.getPeer(peerId);
 
     // Key exchange (plaintext from phone)
     if (parsed.type === "key_exchange") {
+      if (this.opts.legacyTransport === false) {
+        // The old path is off: no ack, and nothing else from this peer counts.
+        peer.mode = "legacy";
+        peer.channel = null;
+        peer.auth = "dropped";
+        return;
+      }
+      peer.mode = "legacy";
       console.log(`[Relay${this.laneTag()}] Received peer public key${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
       let exchange: ReturnType<typeof acceptKeyExchange>;
       try {
@@ -747,10 +1047,10 @@ export class RelayClient {
       peer.publicKeyBase64 = nextKeyBase64;
       peer.channel = exchange.channel;
       const lane = this.opts.lane || "control";
-      const admission = this.opts.peerAuth ? this.opts.peerAuth.authorize(nextKeyBase64, lane) : "approved";
+      const admission: PeerAdmission = this.opts.peerAuth ? this.opts.peerAuth.authorize(nextKeyBase64, lane) : { admission: "approved" };
       const sessionNote = exchange.channel.sessionKeyed ? "session key" : "static key";
 
-      if (admission === "approved") {
+      if (admission.admission === "approved") {
         // Send ack PLAINTEXT. The phone needs this to confirm the handshake
         // before encrypted mode begins. Its session key is public. The peer
         // opens on its first frame: a session offer can be replayed and a
@@ -765,11 +1065,12 @@ export class RelayClient {
       // Held or refused peers get the same plaintext ack so the app knows to
       // authenticate, then an encrypted reason when there is nothing to wait for.
       this.sendPlainToPeer(peerId, { type: "key_exchange_ack", device: "pending", ...exchange.ack });
-      if (admission === "refused") {
+      if (admission.admission === "refused") {
+        if (peer.auth === "approved") this.dropPeer(peerId, peer, true);
         peer.auth = "pending";
-        this.sendToPeer(peerId, { type: "device_auth_result", ok: false, reason: "wrong_lane" }, peer, true);
+        this.sendToPeer(peerId, { type: "device_auth_result", ok: false, reason: admission.reason }, peer, true);
         peer.auth = "dropped";
-        console.warn(`[Relay${this.laneTag()}] Refused peer ${peerId}: key is not allowed on this lane`);
+        console.warn(`[Relay${this.laneTag()}] Refused peer ${peerId}: ${admission.reason}`);
         return;
       }
       if (this.pendingPeerCount() >= MAX_PENDING_PEERS) {
@@ -807,7 +1108,14 @@ export class RelayClient {
       return;
     }
 
-    console.warn(`[Relay] Unknown message type: ${parsed.type || "no type"}`);
+    // After a key exchange only sealed frames count. The released app sends
+    // nothing else unsealed but a repeated key_exchange, handled above.
+    if (peer.channel && peer.auth !== "dropped") {
+      console.warn(`[Relay${this.laneTag()}] Dropping peer ${peerId}: unsealed frame after the key exchange`);
+      this.dropPeer(peerId, peer, peer.auth === "approved");
+      return;
+    }
+    console.warn(`[Relay] Unknown message type: ${typeof parsed.type === "string" ? parsed.type : "no type"}`);
   }
 
   /**
@@ -824,6 +1132,13 @@ export class RelayClient {
       return;
     }
     const msg = parseClientMessage(parsed);
+    if (peer.mode === "v2") {
+      // The handshake carried what these did. On v2 they are never sent, and
+      // the token in device_auth must not reach the old gate from here.
+      if (msg.type === "device_auth" || msg.type === "direct_auth" || msg.type === "client_capabilities") return;
+      this.dispatchClientMessage(msg, peerId);
+      return;
+    }
     if (msg.type === "device_auth") {
       this.handleDeviceAuth(peerId, peer, msg);
       return;
@@ -842,19 +1157,27 @@ export class RelayClient {
    */
   private handleBinaryFrame(buf: Buffer, peerId = LEGACY_PEER_ID): void {
     const peer = this.getPeer(peerId);
+    if (peer.auth === "dropped") return;
     if (!peer.channel) {
-      console.error(`[Relay] Binary frame received before key exchange — dropping${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
+      if (peer.mode === "v2") this.dropV2Peer(peerId, peer, "binary frame before the handshake finished");
+      else console.error(`[Relay] Binary frame received before key exchange — dropping${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}`);
       return;
     }
-    if (peer.auth === "dropped") return;
     let plaintext: Uint8Array;
     try {
       plaintext = peer.channel.openBinary(buf);
     } catch (err) {
-      console.error(`[Relay] Binary decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${errorMessage(err)}`);
+      if (peer.mode === "v2") this.dropV2Peer(peerId, peer, errorMessage(err));
+      else console.error(`[Relay] Binary decryption failed${peerId !== LEGACY_PEER_ID ? ` (${peerId})` : ""}: ${errorMessage(err)}`);
       return;
     }
-    if (peer.auth === "admitted") this.openPeer(peerId, peer);
+    if (peer.mode === "v2") {
+      // The first record is transport_ready, which is text. A held peer's records are ignored.
+      if (peer.auth === "admitted") this.dropV2Peer(peerId, peer, "first record was not transport_ready");
+      if (peer.auth !== "approved") return;
+    } else if (peer.auth === "admitted") {
+      this.openPeer(peerId, peer);
+    }
     if (plaintext.length === 0) return;
     const marker = plaintext[0];
 
@@ -908,7 +1231,7 @@ export class RelayClient {
     if (msg.type === "client_capabilities") {
       const wantsBinary = msg.binaryEnvelope === true;
       const peer = this.getPeer(peerId);
-      if (peer.channel && isSessionKeyDowngrade(msg, peer.channel)) {
+      if (peer.channel instanceof PeerChannel && isSessionKeyDowngrade(msg, peer.channel)) {
         // Both sides speak session keys but the handshake carried none, so
         // something between them removed it. Hold the key to session keys
         // from now on and stop talking on this channel.
@@ -932,13 +1255,14 @@ export class RelayClient {
       // fully updated relay-connected servers appear too old to teleport.
       const lane: TransportLane = this.opts.lane === "bulk" ? "bulk" : "control";
       if (this.opts.serverCapabilities) {
-        this.sendToPeer(peerId, this.opts.serverCapabilities(peer.binaryEnabled, lane, peer.publicKeyBase64), peer);
+        this.sendToPeer(peerId, this.opts.serverCapabilities(peer.binaryEnabled, lane, peer.publicKeyBase64, 1), peer);
       }
       return;
     }
     messagePeers.set(msg, peerId);
-    const key = this.getPeer(peerId).publicKeyBase64;
-    if (key) messagePeerKeys.set(msg, key);
+    const peer = this.getPeer(peerId);
+    if (peer.publicKeyBase64) messagePeerKeys.set(msg, peer.publicKeyBase64);
+    messageChannels.set(msg, peer.channel instanceof PeerChannel ? (peer.channel.sessionKeyed ? "session" : "static") : "v2");
     this.opts.onMessage?.(msg);
   }
 

@@ -31,10 +31,36 @@ function sharedKey(theirPublicKey: Uint8Array, mySecretKey: Uint8Array): Uint8Ar
   const peer = Buffer.from(theirPublicKey).toString("base64");
   let key = byPeer.get(peer);
   if (!key) {
-    key = nacl.box.before(theirPublicKey, mySecretKey);
+    key = boxKey(theirPublicKey, mySecretKey);
     byPeer.set(peer, key);
   }
   return key;
+}
+
+/** A public key that is not 32 bytes, or whose X25519 result with our key is all zero. */
+export class WeakPublicKeyError extends Error {
+  constructor() {
+    super("Public key refused: wrong length or low order");
+  }
+}
+
+/**
+ * Refuses a public key that is not 32 bytes or that is low order. Every
+ * low-order key gives an X25519 result of 32 zero bytes with any secret key,
+ * so a box made with one can be opened by anyone. `nacl.box.before` does not
+ * check this, so the raw result is computed and checked here.
+ */
+export function refuseWeakPublicKey(theirPublicKey: Uint8Array, mySecretKey: Uint8Array): void {
+  if (theirPublicKey.length !== nacl.box.publicKeyLength) throw new WeakPublicKeyError();
+  let bits = 0;
+  for (const byte of nacl.scalarMult(mySecretKey, theirPublicKey)) bits |= byte;
+  if (bits === 0) throw new WeakPublicKeyError();
+}
+
+/** `nacl.box.before` behind the key check. Every box in this file is keyed through it. */
+function boxKey(theirPublicKey: Uint8Array, mySecretKey: Uint8Array): Uint8Array {
+  refuseWeakPublicKey(theirPublicKey, mySecretKey);
+  return nacl.box.before(theirPublicKey, mySecretKey);
 }
 
 /** Encrypt a message string using NaCl box */
@@ -351,8 +377,9 @@ export interface KeyExchangeResult {
 
 /**
  * The responder's half: reads a key_exchange and answers it. Throws on a
- * malformed exchange or a bad proof, and SessionKeyRequiredError when a key
- * that has used session keys before arrives without one.
+ * malformed exchange, a static or session key that is the wrong length or
+ * low order, or a bad proof, and SessionKeyRequiredError when a key that has
+ * used session keys before arrives without one.
  */
 export function acceptKeyExchange(
   message: Record<string, unknown>,
@@ -362,9 +389,11 @@ export function acceptKeyExchange(
   if (typeof message.pubkey !== "string" || !message.pubkey) throw new Error("Missing key exchange public key");
   const peerPublicKey = fromBase64(message.pubkey);
   if (peerPublicKey.length !== KEY_LENGTH) throw new Error("Invalid key exchange public key");
+  refuseWeakPublicKey(peerPublicKey, keyPair.secretKey);
   const peerPublicKeyBase64 = toBase64(peerPublicKey);
 
   const offer = sessionFields(message);
+  if (offer) refuseWeakPublicKey(fromBase64(offer.key), keyPair.secretKey);
   if (!offer) {
     if (sessionKeyedPeers.has(peerPublicKeyBase64)) throw new SessionKeyRequiredError();
     return { peerPublicKey, peerPublicKeyBase64, channel: PeerChannel.legacy(peerPublicKey, keyPair.secretKey), ack: {} };
@@ -380,7 +409,7 @@ export function acceptKeyExchange(
   return {
     peerPublicKey,
     peerPublicKeyBase64,
-    channel: PeerChannel.session(nacl.box.before(offerKey, ephemeral.secretKey), "responder"),
+    channel: PeerChannel.session(boxKey(offerKey, ephemeral.secretKey), "responder"),
     ack: { session: { v: SESSION_KEY_VERSION, key: toBase64(ephemeral.publicKey), proof: toBase64(proof) } },
   };
 }
@@ -420,7 +449,7 @@ export class SessionOffer {
       throw new Error("Session proof does not match this offer");
     }
     sessionKeyedPeers.add(this.theirKeyBase64);
-    return PeerChannel.session(nacl.box.before(answerKey, this.ephemeral.secretKey), "initiator");
+    return PeerChannel.session(boxKey(answerKey, this.ephemeral.secretKey), "initiator");
   }
 }
 

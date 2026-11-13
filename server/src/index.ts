@@ -1,5 +1,4 @@
 import { serviceState } from "./windows-service-env";
-import qrcode from "qrcode-terminal";
 import { z } from "zod";
 import { errorMessage, isRecord, parseJsonObject } from "./value-guards";
 import type { ClientTransport } from "./client-transport";
@@ -78,7 +77,10 @@ import { isSendFileDeliveryPath, startSendFilePruning } from "./send-file-store"
 import { SocketAgentPlugin, PluginContext, SessionContext } from "./plugin-api";
 import { parseSocketAgentPlugin } from "./plugin-contract";
 import { createPluginAnswerAcknowledgement } from "./plugin-answer";
-import { RelayClient, RelayStatus, relayPeerForMessage, relayPeerKeyForMessage } from "./relay-client";
+import { RelayClient, RelayStatus, channelKindForMessage, noteDirectMessageOrigin, relayPeerForMessage, relayPeerKeyForMessage, type MessageChannelKind } from "./relay-client";
+import { TransportResponder } from "./transport-responder";
+import { DirectV2Sockets, DirectV2Transport } from "./direct-v2-transport";
+import { hasOriginHeader, isLoopbackRequest } from "./loopback-request";
 import { ViewHub, parseViewSet } from "./view-hub";
 import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
 import { DeviceAuthGate } from "./device-auth";
@@ -519,28 +521,32 @@ function rotateAuthToken(): void {
   console.log("[Devices] Rotated AUTH_TOKEN after a device was removed");
 }
 
-// Every install starts in learning mode for now, fresh ones included: the
-// released app predates device_auth, so an enforced registry would hold a new
-// user's phone pending forever. Start fresh installs enforced (pass true when
-// relay-keys.json didn't exist at boot) once that app is out.
-const deviceRegistry = new DeviceRegistry(socketAgentDataPath("devices.json"), false);
+// The pairing secrets, the lock and the record of keys that paired. The first
+// start after the update makes transport.json from devices.json, which is not
+// read again. A new install starts unlocked.
+const deviceRegistry = new DeviceRegistry(socketAgentDataPath("transport.json"), socketAgentDataPath("devices.json"));
 const deviceAuthGate = new DeviceAuthGate(deviceRegistry, () => AUTH_TOKEN);
+
+/**
+ * The old path: key_exchange over the relay and on `e2e=1` direct sockets.
+ * On unless SOCKETAGENT_LEGACY_TRANSPORT in .env turns it off. The loopback
+ * token socket that this computer's own tools use is not part of it.
+ */
+const LEGACY_TRANSPORT = !/^(0|off|false|no)$/i.test((process.env.SOCKETAGENT_LEGACY_TRANSPORT ?? "").trim());
+if (!LEGACY_TRANSPORT) console.log("[Devices] The old transport is off (SOCKETAGENT_LEGACY_TRANSPORT)");
 
 /** Whether this install has SocketAgentService, so it serves every Windows account. */
 let machineServiceRegistered = process.platform === "win32" && (serviceState.service || taskExists(SERVICE_TASK));
 console.log(`[Devices] Registry mode: ${deviceRegistry.mode} (${deviceRegistry.list().length} enrolled)`);
 
-// Pairing token for relay — read from .env or generate and persist one
+// The room ID: the relay room, and part of every device handshake with or
+// without a relay. The name is historical. Read from .env or made here.
 let PAIRING_TOKEN = process.env.PAIRING_TOKEN || "";
-if (RELAY_URL && !PAIRING_TOKEN) {
-  PAIRING_TOKEN = crypto.randomUUID();
-  const envPath = ENV_PATH;
-  const existing = fs.existsSync(envPath)
-    ? fs.readFileSync(envPath, "utf-8")
-    : "";
-  fs.writeFileSync(envPath, existing.trimEnd() + `\nPAIRING_TOKEN=${PAIRING_TOKEN}\n`, { mode: 0o600 });
-  secureSecretFileMode(envPath);
-  console.log(`Generated new pairing token`);
+if (!PAIRING_TOKEN) {
+  PAIRING_TOKEN = crypto.randomBytes(32).toString("hex");
+  writeEnvValue(ENV_PATH, "PAIRING_TOKEN", PAIRING_TOKEN);
+  secureSecretFileMode(ENV_PATH);
+  console.log(`Generated new room ID`);
 }
 
 // Link room for other computers. A separate relay room keeps link peers out
@@ -631,6 +637,15 @@ class DirectClientTransport implements ClientTransport {
 
   /** True when this client proved AUTH_TOKEN, so capabilities may repeat it. */
   holdsAuthToken = false;
+
+  /** The socket comes from this computer itself: loopback with no proxy in front. */
+  fromThisComputer = false;
+
+  /** How this socket's frames are keyed, for rules that need session keys. */
+  get channelKind(): MessageChannelKind {
+    if (!this.channel) return "plain";
+    return this.channel.sessionKeyed ? "session" : "static";
+  }
 
   /** Set while the key waits for another device to approve it. */
   heldForApproval = false;
@@ -869,6 +884,22 @@ function loadServerKeyPair(): KeyPair {
 // Device and computer keys that have used per-connection session keys. Every
 // transport refuses them the replayable static box from then on.
 const sessionKeyedPeers = new SessionKeyedPeerStore(socketAgentDataPath("session-keyed-peers.json"));
+
+// Transport v2: one responder answers device handshakes from the relay rooms
+// and from direct `?e2e=2` sockets.
+const directV2Sockets = new DirectV2Sockets();
+const transportResponder = new TransportResponder({
+  registry: deviceRegistry,
+  keyPair: loadServerKeyPair,
+  roomId: () => PAIRING_TOKEN,
+  serverVersion: SERVER_RELEASE_VERSION,
+  // A device that has moved to v2 does not come back to the old path.
+  onDeviceMoved: (publicKey) => {
+    relayClient?.dropPeersWithKey(publicKey, "not_approved", "legacy");
+    relayBulkClient?.dropPeersWithKey(publicKey, "not_approved", "legacy");
+    dropDirectPeersWithKey(publicKey, "Moved to the new transport");
+  },
+});
 
 // Global session registry — sessions survive client disconnects
 const activeSessions: Map<string, Session> = new Map();
@@ -1693,21 +1724,46 @@ function keyHoldsToken(publicKey: string | null): boolean {
 }
 
 /**
- * Replaces the relay pairing token so the old QR has no room to join. The
- * capabilities broadcast hands the new token to connected phones that hold
- * the old one, then both phone lanes move to the new room.
+ * Makes a new pairing secret and hands it to every device on an open v2
+ * control channel. The room stays. A device that is not connected proves the
+ * previous secret next time and is sent the new one then.
  */
-function resetPairingToken(): void {
-  PAIRING_TOKEN = crypto.randomUUID();
+function renewPairingSecret(): void {
+  deviceRegistry.rotateSecret();
+  const update = transportResponder.pairingUpdate();
+  deviceRegistry.markSecretHanded([
+    ...(relayClient?.sendToV2Peers(update) ?? []),
+    ...directV2Sockets.sendToControl(update),
+  ]);
+  console.log("[Devices] New pairing secret");
+}
+
+/**
+ * `socketagent pair --reset`: a new room ID and pairing secret, previous
+ * secrets cleared, the lock off. Every device has to scan the new code, so
+ * every device channel is closed. It is also the way out of an unreadable
+ * state file and of a relay room another key has claimed.
+ */
+function startPairingOver(): void {
+  const hadState = deviceRegistry.readable;
+  deviceRegistry.resetPairing();
+  PAIRING_TOKEN = crypto.randomBytes(32).toString("hex");
   process.env.PAIRING_TOKEN = PAIRING_TOKEN;
   writeEnvValue(ENV_PATH, "PAIRING_TOKEN", PAIRING_TOKEN);
-  console.log("[Relay] Pairing token reset");
-  broadcastServerCapabilities();
-  // Leave the old room only after the broadcast has had time to arrive.
-  setTimeout(() => {
-    relayClient?.moveRoom(PAIRING_TOKEN);
+  console.log("[Devices] Pairing started over: new room ID and pairing secret");
+  for (const entry of deviceRegistry.list()) {
+    if (entry.kind !== "device") continue;
+    dropDirectPeersWithKey(entry.publicKey, "Pairing reset");
+    directV2Sockets.dropKey(entry.publicKey, "Pairing reset");
+  }
+  if (!RELAY_URL) return;
+  if (hadState && relayClient) {
+    relayClient.moveRoom(PAIRING_TOKEN);
     relayBulkClient?.moveRoom(`${PAIRING_TOKEN}${BULK_RELAY_PAIRING_SUFFIX}`);
-  }, 2000);
+  } else if (!relayClient) {
+    // The relay was never joined while the state file could not be read.
+    startRelayClient();
+  }
 }
 
 function publicRelayUrl(relayUrl: string): string {
@@ -1721,16 +1777,18 @@ function publicRelayUrl(relayUrl: string): string {
 }
 
 /**
- * `holdsToken` is true only for clients that already have AUTH_TOKEN. The
- * others get neither the token nor the relay pairing: while the device
- * registry is still learning, pairing through the relay enrolls a key as
- * migrated, and migrated keys are sent the token.
+ * `holdsToken` is true only for old-path clients that already have
+ * AUTH_TOKEN. The others get neither the token nor the relay pairing.
+ * `transport` 2 is a v2 channel, which never carries the token, the relay
+ * pairing or the computer's key: a v2 device has all it needs from its code.
  */
 function serverCapabilitiesPayload(
   binaryEnvelope = true,
   transportLane: TransportLane = "control",
   holdsToken = false,
+  transport: 1 | 2 = 1,
 ): Record<string, unknown> {
+  const oldPath = transport === 1;
   const settings = getAdvertisedServerSettings();
   const pushDelivery = getPushDeliveryCapabilities();
   return {
@@ -1780,14 +1838,13 @@ function serverCapabilitiesPayload(
     backendHealth: settings.backendHealth,
     issues: settings.issues,
     backendConfig: { version: 1 },
+    transport: { version: 2 },
     deviceAuth: { version: 1, mode: deviceRegistry.mode },
     computerLinks: { version: 1 },
-    directE2e: {
-      serverPubkey: toBase64(loadServerKeyPair().publicKey),
-    },
-    relayPairing: holdsToken ? relayPairingInfo() : undefined,
-    pairingReset: holdsToken && RELAY_URL ? { version: 1 } : undefined,
-    directRoute: directRouteInfo(holdsToken),
+    directE2e: oldPath ? { serverPubkey: toBase64(loadServerKeyPair().publicKey) } : undefined,
+    relayPairing: oldPath && holdsToken ? relayPairingInfo() : undefined,
+    pairingReset: !oldPath || (holdsToken && RELAY_URL) ? { version: 1 } : undefined,
+    directRoute: directRouteInfo(oldPath && holdsToken),
     pushNotifications: {
       version: 3,
       directFcm: true,
@@ -1803,17 +1860,20 @@ function serverCapabilitiesPayload(
   };
 }
 
-/** Sends each client its own capabilities, since only some may see the token. */
+/** Sends each client its own capabilities: only some old-path ones may see the token, and no v2 one does. */
 function broadcastServerCapabilities(): void {
   const withToken = serverCapabilitiesPayload(true, "control", true);
   const withoutToken = serverCapabilitiesPayload(true, "control", false);
+  const v2 = serverCapabilitiesPayload(true, "control", false, 2);
   for (const client of connectedClients) {
     if (client.readyState !== WebSocket.OPEN) continue;
-    client.send(JSON.stringify(client instanceof DirectClientTransport && client.holdsAuthToken ? withToken : withoutToken));
+    if (client instanceof DirectV2Transport) client.send(JSON.stringify(v2));
+    else client.send(JSON.stringify(client instanceof DirectClientTransport && client.holdsAuthToken ? withToken : withoutToken));
   }
   if (!relayClient) return;
   for (const key of new Set(relayClient.openPeerKeys())) {
-    relayClient.sendToPeersWithKey(key, keyHoldsToken(key) ? withToken : withoutToken);
+    const payload = relayClient.transportOfKey(key) === 2 ? v2 : keyHoldsToken(key) ? withToken : withoutToken;
+    relayClient.sendToPeersWithKey(key, payload);
   }
 }
 
@@ -4165,7 +4225,7 @@ function directPeerHeld(publicKey: string): boolean {
 /** A lane dropped a held peer; the notice goes once no lane holds that key. */
 function onPendingPeerDropped(publicKey: string): void {
   if (relayClient?.isKeyPending(publicKey) || relayBulkClient?.isKeyPending(publicKey)) return;
-  if (directPeerHeld(publicKey)) return;
+  if (directPeerHeld(publicKey) || directV2Sockets.isKeyHeld(publicKey)) return;
   clearDevicePending(publicKey);
 }
 
@@ -4189,6 +4249,7 @@ function onlineDeviceKeys(): Set<string> {
     ...(relayClient?.openPeerKeys() ?? []),
     ...(relayBulkClient?.openPeerKeys() ?? []),
     ...(relayLinkClient?.openPeerKeys() ?? []),
+    ...directV2Sockets.openKeys(),
   ]);
 }
 
@@ -4200,7 +4261,15 @@ function deviceListResult(requestId: string | undefined, self: string | undefine
     type: "device_list_result",
     requestId,
     mode: deviceRegistry.mode,
-    devices: deviceRegistry.list().map((entry) => ({ ...entry, online: online.has(entry.publicKey) })),
+    // Named field by field: a record also holds a link secret, which no device may see.
+    devices: deviceRegistry.list().map((entry) => ({
+      publicKey: entry.publicKey, kind: entry.kind, name: entry.name, platform: entry.platform,
+      addedAt: entry.addedAt, lastSeenAt: entry.lastSeenAt, via: entry.via,
+      online: online.has(entry.publicKey),
+      ...(entry.access ? { access: entry.access } : {}),
+      ...(entry.confirm ? { confirm: entry.confirm } : {}),
+      ...(entry.expiresAt !== undefined ? { expiresAt: entry.expiresAt } : {}),
+    })),
     ...(self ? { self } : {}),
     pending: Array.from(pendingDeviceNotices, ([publicKey, notice]) => ({
       publicKey, name: notice.name, platform: notice.platform, code: notice.code,
@@ -7713,6 +7782,8 @@ function createConnectionHandler(
           let job: ReturnType<typeof transferJobs.status>;
           if (msg.action === "start") {
             if (!msg.config) throw new Error("Missing transfer configuration");
+            // A transfer between computers still runs on the old path's static box.
+            if (msg.config.role !== "local" && !LEGACY_TRANSPORT) throw new Error("Transfers between computers are off while the old transport is off");
             if (msg.config.role !== "local") {
               const allowed = new URL(RELAY_URL || "wss://relay.jarofdirt.info");
               const requested = new URL(msg.config.relayUrl || "");
@@ -10278,18 +10349,42 @@ function createConnectionHandler(
       }
 
       case "pairing_reset": {
-        // The same clients that are sent the pairing token may replace it.
+        // Any device on a v2 channel may reset. On the old path it is the
+        // clients that are sent the pairing token, as before.
+        const v2 = channelKindForMessage(msg) === "v2";
         const holdsToken = transport instanceof DirectClientTransport
           ? transport.holdsAuthToken
           : keyHoldsToken(relayPeerKeyForMessage(msg) ?? null);
-        if (!RELAY_URL) {
+        if (!v2 && !RELAY_URL) {
           sendJson({ type: "pairing_reset_result", requestId: msg.requestId, ok: false, error: "Relay is off on this computer" });
-        } else if (!holdsToken) {
+        } else if (!v2 && !holdsToken) {
           sendJson({ type: "pairing_reset_result", requestId: msg.requestId, ok: false, error: "Only a device paired with this computer's code can reset it" });
         } else {
-          resetPairingToken();
+          // Rotate first: the new secret's broadcast must carry the new token.
+          rotateAuthToken();
+          renewPairingSecret();
           sendJson({ type: "pairing_reset_result", requestId: msg.requestId, ok: true });
         }
+        break;
+      }
+
+      case "pairing_upgrade": {
+        // Carry-over (wire spec 9.3): a recorded device on an old-path
+        // channel with session keys is handed the pairing secret, so its
+        // next connection can be a v2 handshake. A static-box channel can be
+        // replayed, so it is never given the secret.
+        const publicKey = relayPeerKeyForMessage(msg);
+        const entry = publicKey ? deviceRegistry.get(publicKey) : undefined;
+        if (!publicKey || channelKindForMessage(msg) !== "session" || entry?.kind !== "device") {
+          sendJson({ type: "pairing_upgrade_result", requestId: msg.requestId, ok: false, error: "This connection can't move to the new transport" });
+          break;
+        }
+        deviceRegistry.markSecretHanded([publicKey]);
+        sendJson({
+          type: "pairing_upgrade_result", requestId: msg.requestId, ok: true,
+          secret: deviceRegistry.currentSecret().secret, roomId: PAIRING_TOKEN,
+          port: PORT, hosts: ACCEPTS_LAN_CONNECTIONS ? localIpv4Addresses() : [],
+        });
         break;
       }
 
@@ -10328,6 +10423,7 @@ function createConnectionHandler(
         relayClient?.approvePeersWithKey(publicKey);
         relayBulkClient?.approvePeersWithKey(publicKey);
         approveDirectPeersWithKey(publicKey);
+        directV2Sockets.approveKey(publicKey);
         clearDevicePending(publicKey);
         sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });
         break;
@@ -10344,6 +10440,7 @@ function createConnectionHandler(
           relayClient?.dropPeersWithKey(publicKey, "not_approved");
           relayBulkClient?.dropPeersWithKey(publicKey, "not_approved");
           dropDirectPeersWithKey(publicKey, "Not approved");
+          directV2Sockets.denyKey(publicKey);
         }
         clearDevicePending(publicKey);
         sendJson({ type: "device_deny_result", requestId, ok: true, publicKey });
@@ -10368,10 +10465,11 @@ function createConnectionHandler(
           break;
         }
         // The last device is refused so its owner keeps a way in, which a
-        // client holding the token already has. Another Windows account's
-        // app is often the only device the owner can remove.
-        const callerHoldsToken = transport instanceof DirectClientTransport && transport.holdsAuthToken;
-        if (entry.kind === "device" && deviceRegistry.countDevices() <= 1 && !callerHoldsToken) {
+        // client on this computer itself already has. Another Windows
+        // account's app is often the only device the owner can remove.
+        const callerIsLocal = (transport instanceof DirectClientTransport || transport instanceof DirectV2Transport)
+          && transport.fromThisComputer;
+        if (entry.kind === "device" && deviceRegistry.countDevices() <= 1 && !callerIsLocal) {
           sendJson({ type: "device_remove_result", requestId, ok: false, publicKey, error: "The last device can't be removed." });
           break;
         }
@@ -10384,6 +10482,9 @@ function createConnectionHandler(
           relayClient?.dropPeersWithKey(publicKey, "removed");
           relayBulkClient?.dropPeersWithKey(publicKey, "removed");
           dropDirectPeersWithKey(publicKey, "Removed");
+          directV2Sockets.dropKey(publicKey, "Removed");
+          // Its channels are closed, so the new secret goes only to the devices that stay.
+          if (msg.keepToken !== true) renewPairingSecret();
         } else if (entry.kind === "connector") {
           // Its tokens stop working at once; the next MCP call gets a 401.
           aiConnectorOAuth.revokeKey(publicKey);
@@ -10431,7 +10532,6 @@ function createConnectionHandler(
             ...(msg.expiresAt !== undefined ? { expiresAt: msg.expiresAt } : {}),
           });
         }
-        deviceRegistry.lock();
         sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });
         break;
       }
@@ -11018,13 +11118,23 @@ function recoverInterruptedSessions(): void {
   restartRecoveryWorker.tick();
 }
 
+// The HTTP routes that take AUTH_TOKEN. They answer this computer only (wire spec 9.2.8).
+const TOKEN_HTTP_ROUTES = ["/continue", "/running-sessions", "/download-file", "/tts-model", "/skills"];
+
 const httpServer = http.createServer((req, res) => {
+  // Only a web page's script sends Origin. Nothing of ours does, so a page
+  // open in a browser on this network cannot reach any route here.
+  if (hasOriginHeader(req)) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return;
+  }
   // Lets setup under any Windows account see that the machine-wide server is
   // up. It needs no token, since only the owner can read .env, and returns
   // nothing secret. `machine` is true for both of an install's tasks once it
   // has SocketAgentService; `system` says the SYSTEM copy is the one serving.
   if (req.method === "GET" && req.url?.split("?")[0] === "/internal/machine/health") {
-    const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "");
+    const local = isLoopbackRequest(req);
     res.writeHead(local ? 200 : 404, { "Content-Type": "application/json" });
     res.end(local ? JSON.stringify({ service: "socketagent", ready: serverReady && !shuttingDown, machine: machineServiceRegistered, system: serviceState.service }) : "{}");
     return;
@@ -11032,8 +11142,7 @@ const httpServer = http.createServer((req, res) => {
   // The owner's wrapper calls this when the owner signs in while the SYSTEM
   // copy serves; see windows-machine-service.
   if (req.method === "POST" && req.url?.split("?")[0] === "/internal/machine/yield") {
-    const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "");
-    if (!local || getBearerToken(req) !== AUTH_TOKEN) { res.writeHead(401); res.end("Unauthorized"); return; }
+    if (!isLoopbackRequest(req) || getBearerToken(req) !== AUTH_TOKEN) { res.writeHead(401); res.end("Unauthorized"); return; }
     if (!serviceState.service) { res.writeHead(409); res.end("This server already runs as the owner"); return; }
     for (const [sid, session] of activeSessions) {
       if (sessionIsBusy(session)) appendRecoveryNotice(sessionInstanceId(session) || sid, "The owner signed in, so their own server takes over. Interrupted work will resume there.");
@@ -11042,10 +11151,23 @@ const httpServer = http.createServer((req, res) => {
     res.end("{}", () => void shutdownGracefully("The owner's server is taking over"));
     return;
   }
+  // `socketagent pair --reset` asks the running server to start pairing
+  // over, so one process owns the state file.
+  if (req.method === "POST" && req.url?.split("?")[0] === "/internal/pairing/reset") {
+    if (!isLoopbackRequest(req) || getBearerToken(req) !== AUTH_TOKEN) { res.writeHead(401); res.end("Unauthorized"); return; }
+    try {
+      startPairingOver();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+    } catch (error: unknown) {
+      console.error(`[Devices] Could not start pairing over: ${errorMessage(error)}`);
+      res.writeHead(500);
+      res.end("Could not reset pairing");
+    }
+    return;
+  }
   if (req.url?.startsWith("/internal/restart/")) {
-    const remote = req.socket.remoteAddress || "";
-    if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote)
-        || getBearerToken(req) !== AUTH_TOKEN) {
+    if (!isLoopbackRequest(req) || getBearerToken(req) !== AUTH_TOKEN) {
       res.writeHead(401); res.end("Unauthorized"); return;
     }
     try {
@@ -11116,13 +11238,9 @@ const httpServer = http.createServer((req, res) => {
   // A second process has its own transcript sequence allocator and can race a
   // live agent event for the same SQLite primary key.
   if (req.method === "POST" && req.url?.startsWith("/internal/session-history")) {
-    const remoteAddress = req.socket.remoteAddress || "";
-    const isLoopback = remoteAddress === "127.0.0.1"
-      || remoteAddress === "::1"
-      || remoteAddress === "::ffff:127.0.0.1";
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const token = getBearerToken(req) || url.searchParams.get("token");
-    if (!isLoopback || token !== AUTH_TOKEN) {
+    if (!isLoopbackRequest(req) || token !== AUTH_TOKEN) {
       res.writeHead(401);
       res.end("Unauthorized");
       return;
@@ -11172,6 +11290,14 @@ const httpServer = http.createServer((req, res) => {
         res.end(error instanceof Error ? errorMessage(error) : "Invalid request");
       }
     });
+    return;
+  }
+
+  // The token in a URL or header crosses the network in the clear, so the
+  // routes that take it are refused from anywhere but this computer.
+  if (TOKEN_HTTP_ROUTES.some((route) => req.url?.startsWith(route)) && !isLoopbackRequest(req)) {
+    res.writeHead(401);
+    res.end("Unauthorized");
     return;
   }
 
@@ -11518,6 +11644,8 @@ const directUpgradeAuth = new WeakMap<http.IncomingMessage, {
   authenticated: boolean;
   wantsEncryptedDirectAuth: boolean;
   transportLane: TransportLane;
+  /** 2 for a `?e2e=2` socket, which carries nothing but the v2 handshake and its records. */
+  transport: 1 | 2;
 }>();
 
 httpServer.on("connection", (socket) => {
@@ -11529,27 +11657,52 @@ httpServer.on("connection", (socket) => {
 
 // Handle WebSocket upgrade with auth
 httpServer.on("upgrade", (req, socket, head) => {
+  const refuse = (status: "401 Unauthorized" | "403 Forbidden", why: string): void => {
+    console.log(`Rejected connection: ${why}`);
+    socket.write(`HTTP/1.1 ${status}\r\n\r\n`);
+    socket.destroy();
+  };
+  if (hasOriginHeader(req)) {
+    refuse("403 Forbidden", "the request names an Origin");
+    return;
+  }
   const url = new URL(req.url || "/", `ws://localhost:${PORT}`);
+  const e2e = url.searchParams.get("e2e");
+  if (e2e === "2") {
+    // Transport v2: no token and no lane here. The handshake carries both.
+    directUpgradeAuth.set(req, { authenticated: false, wantsEncryptedDirectAuth: false, transportLane: "control", transport: 2 });
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req);
+    });
+    return;
+  }
   const token = getBearerToken(req) || url.searchParams.get("token");
-  const wantsEncryptedDirectAuth = url.searchParams.get("e2e") === "1";
+  const wantsEncryptedDirectAuth = e2e === "1";
   const transportLane: TransportLane =
     url.searchParams.get("lane") === "bulk" ? "bulk" : "control";
   if (token && token !== AUTH_TOKEN) {
-    console.log("Rejected connection: invalid token");
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-    socket.destroy();
+    refuse("401 Unauthorized", "invalid token");
     return;
   }
   if (!token && !wantsEncryptedDirectAuth) {
-    console.log("Rejected connection: missing token");
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-    socket.destroy();
+    refuse("401 Unauthorized", "missing token");
+    return;
+  }
+  if (wantsEncryptedDirectAuth && !LEGACY_TRANSPORT) {
+    refuse("401 Unauthorized", "the old transport is off");
+    return;
+  }
+  // Without `e2e` the socket carries the token and every message in the
+  // clear, which is only safe from this computer itself.
+  if (!wantsEncryptedDirectAuth && !isLoopbackRequest(req)) {
+    refuse("401 Unauthorized", "the plaintext token socket only answers this computer");
     return;
   }
   directUpgradeAuth.set(req, {
     authenticated: token === AUTH_TOKEN,
     wantsEncryptedDirectAuth,
     transportLane,
+    transport: 1,
   });
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req);
@@ -12291,179 +12444,19 @@ setInterval(checkScheduledTasks, SCHEDULER_INTERVAL);
 // Also run once on startup to catch overdue tasks
 setTimeout(checkScheduledTasks, 5000);
 
-// ── Direct WebSocket connections ──
-wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
-  const auth = directUpgradeAuth.get(req);
-  if (!auth) {
-    ws.close(1008, "Missing upgrade authentication");
-    return;
-  }
-  const { wantsEncryptedDirectAuth, transportLane } = auth;
-  const transport = new DirectClientTransport(ws, loadServerKeyPair(), {
-    authenticated: auth.authenticated,
-    requireEncryptedAuth: wantsEncryptedDirectAuth,
-  });
-  console.log(
-    `${wantsEncryptedDirectAuth ? "Client connected (direct E2E pending auth)" : "Client connected (authenticated)"} lane=${transportLane}`,
-  );
-
-  // Legacy direct clients are already authenticated by the upgrade request.
-  // Direct E2E clients get status only after encrypted direct_auth succeeds.
-  if (transport.isAuthenticated && transportLane === "control") {
-    connectedClients.add(transport);
-    sendStatusSyncTo(transport);
-    for (const card of computerAccessRequests.openCards()) transport.send(JSON.stringify(card));
-  }
-
-  const handler = createConnectionHandler(transport, transportLane);
+/**
+ * Runs the messages of one direct socket through its handler: aborts at
+ * once, control messages through their scheduler, bulk messages in order.
+ * Shared by the old direct socket and the v2 one.
+ */
+function directMessageRunner(
+  transport: ClientTransport,
+  transportLane: TransportLane,
+  handler: ReturnType<typeof createConnectionHandler>,
+): (msg: ClientMessage) => void {
   const controlMessageScheduler = new ControlMessageScheduler();
   let bulkMessageQueue = Promise.resolve();
-
-  ws.on("message", (data, isBinary) => {
-    let msg: ClientMessage;
-
-    const buf = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
-    console.log(`[WS Recv] isBinary=${isBinary} bytes=${buf.length}`);
-    if (isBinary && transport.hasPeerKey) {
-      try {
-        msg = transport.decryptBinaryFrame(buf);
-      } catch (err) {
-        console.warn(`[Direct E2E] Binary frame rejected: ${errorMessage(err)}`);
-        transport.send(JSON.stringify({ type: "error", message: "Invalid encrypted binary frame" }));
-        return;
-      }
-    } else if (isBinary) {
-      // Legacy direct binary frame — currently only used for upload chunks.
-      // Format: [1 marker(0x42)][1 idLen][idBytes][4 chunkIdx BE][bytes]
-      if (buf.length < 6 || buf[0] !== BIN_MARKER_UPLOAD_CHUNK) {
-        transport.send(JSON.stringify({ type: "error", message: "Unknown binary frame" }));
-        return;
-      }
-      const idLen = buf[1];
-      const headerEnd = 2 + idLen + 4;
-      if (buf.length < headerEnd) {
-        transport.send(JSON.stringify({ type: "error", message: "Binary frame too short" }));
-        return;
-      }
-      const uploadId = buf.subarray(2, 2 + idLen).toString("utf-8");
-      const off = 2 + idLen;
-      const chunkIndex = buf.readUInt32BE(off);
-      const chunkBytes = buf.subarray(headerEnd);
-      msg = { type: "upload_chunk_bin", uploadId, chunkIndex, data: chunkBytes };
-    } else {
-      try {
-        const parsed: unknown = JSON.parse(buf.toString());
-        if (isRecord(parsed) && parsed.type === "key_exchange") {
-          try {
-            transport.handleKeyExchange(parsed);
-          } catch (err) {
-            console.warn(`[Direct E2E] Key exchange rejected: ${errorMessage(err)}`);
-            ws.close(1008, "Invalid key exchange");
-          }
-          return;
-        }
-        if (isRecord(parsed) && parsed.n && parsed.c) {
-          msg = transport.decryptTextEnvelope(parsed);
-        } else if (transport.hasPeerKey) {
-          // After the key exchange only encrypted frames count. The exchange
-          // proves nothing by itself, so a plaintext direct_auth here would
-          // let anyone who knows an enrolled device's public key sign in as it.
-          console.warn("[Direct E2E] Plaintext message rejected after key exchange");
-          ws.close(1008, "Encryption required");
-          return;
-        } else {
-          msg = parseClientMessage(parsed);
-        }
-      } catch {
-        transport.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
-        return;
-      }
-    }
-
-    if (msg.type === "direct_auth") {
-      if (transport.isSessionKeyDowngrade(msg)) {
-        console.warn("[Direct E2E] Client supports session keys but its handshake had none; closing");
-        ws.close(1008, "Session key required");
-        return;
-      }
-      const authMessage = msg;
-      const open = (holdsToken: boolean) => {
-        transport.holdsAuthToken = holdsToken;
-        transport.authenticate(authMessage.binaryEnvelope === true);
-        transport.setClientCapabilities(authMessage);
-        transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(authMessage);
-        transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(authMessage);
-        console.log(
-          `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane}, ${authMessage.token === AUTH_TOKEN ? "token" : "device key"})`,
-        );
-        if (transportLane === "control") {
-          connectedClients.add(transport);
-          sendStatusSyncTo(transport);
-        }
-        transport.send(JSON.stringify(
-          serverCapabilitiesPayload(transport.usesBinaryEnvelope, transportLane, holdsToken),
-        ));
-      };
-      if (msg.token && msg.token === AUTH_TOKEN) {
-        open(true);
-        return;
-      }
-      // Otherwise the device proves its key, such as a phone approved over
-      // the relay or the desktop app under a Windows account that cannot read
-      // .env; see DeviceAuthGate.directAuth. An enrolled device's wrong token
-      // is one a device removal rotated, so its key still lets it in.
-      const publicKey = transport.peerKey;
-      if (!publicKey || (msg.token && deviceRegistry.get(publicKey)?.kind !== "device")) {
-        if (msg.token) console.log("Rejected direct E2E auth: invalid token");
-        transport.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
-        ws.close(1008, "Unauthorized");
-        return;
-      }
-      const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "");
-      const outcome = deviceAuthGate.directAuth(publicKey, { name: msg.name, platform: msg.platform }, local);
-      const peer: { publicKey: string; close: (reason: string) => void; open?: () => void } = {
-        publicKey,
-        close: (reason) => ws.close(1008, reason),
-      };
-      if (outcome.ok) {
-        keyedDirectPeers.add(peer);
-        ws.once("close", () => keyedDirectPeers.delete(peer));
-        transport.send(JSON.stringify({ type: "device_auth_result", ok: true }));
-        open(keyHoldsToken(publicKey));
-        return;
-      }
-      transport.send(JSON.stringify({ type: "device_auth_result", ok: false, reason: outcome.reason, ...(outcome.code ? { code: outcome.code } : {}) }));
-      if (outcome.close) {
-        ws.close(1008, "Not approved");
-        return;
-      }
-      transport.holdForApproval();
-      peer.open = () => {
-        transport.send(JSON.stringify({ type: "device_auth_result", ok: true }));
-        open(keyHoldsToken(publicKey));
-      };
-      keyedDirectPeers.add(peer);
-      ws.once("close", () => {
-        const wasHeld = peer.open !== undefined;
-        keyedDirectPeers.delete(peer);
-        if (wasHeld) onPendingPeerDropped(publicKey);
-      });
-      if (outcome.notify) noteDevicePending(outcome.notify);
-      return;
-    }
-
-    if (transport.heldForApproval) {
-      // As over the relay, a held peer hears only that it is still waiting.
-      transport.send(JSON.stringify({ type: "device_auth_result", ok: false, reason: "not_approved" }));
-      return;
-    }
-
-    if (!transport.isAuthenticated) {
-      transport.send(JSON.stringify({ type: "error", message: "Authentication required" }));
-      ws.close(1008, "Authentication required");
-      return;
-    }
-
+  return (msg) => {
     const receivedAt = Date.now();
     const msgType = msg?.type || "unknown";
     if (transportLane === "control" && isSafetyCriticalControlMessage(msg)) {
@@ -12522,21 +12515,252 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         );
       }
     });
+  };
+}
+
+/** What a closed direct socket leaves behind, old or v2. */
+function detachDirectClient(transport: ClientTransport, handler: ReturnType<typeof createConnectionHandler>): void {
+  handler.close();
+  connectedClients.delete(transport);
+  views.dropOwner(transport);
+  // Clean up session client mapping for this connection
+  if (handler.activeSessionId) {
+    const client = sessionClients.get(handler.activeSessionId);
+    if (client && client.ws === transport) {
+      sessionClients.delete(handler.activeSessionId);
+    }
+  }
+}
+
+/**
+ * A direct `?e2e=2` socket. Its lane is only known once the handshake is
+ * done, so the handler is made when the channel opens.
+ */
+function acceptDirectV2Socket(ws: WebSocket, fromThisComputer: boolean): void {
+  let handler: ReturnType<typeof createConnectionHandler> | null = null;
+  let runMessage: ((msg: ClientMessage) => void) | null = null;
+  const socket = new DirectV2Transport(ws, {
+    responder: transportResponder,
+    fromThisComputer,
+    serverCapabilities: (binaryEnvelope, lane) => serverCapabilitiesPayload(binaryEnvelope, lane, false, 2),
+    onOpen: (transport) => {
+      console.log(`Client connected (direct v2) lane=${transport.lane}`);
+      handler = createConnectionHandler(transport, transport.lane);
+      runMessage = directMessageRunner(transport, transport.lane, handler);
+      if (transport.lane !== "control") return;
+      connectedClients.add(transport);
+      sendStatusSyncTo(transport);
+      for (const card of computerAccessRequests.openCards()) transport.send(JSON.stringify(card));
+    },
+    onMessage: (_transport, msg) => runMessage?.(msg),
+    onDevicePending: noteDevicePending,
+    onPendingDropped: onPendingPeerDropped,
+    onClose: (transport) => {
+      directV2Sockets.delete(transport);
+      if (handler) detachDirectClient(transport, handler);
+    },
+  });
+  directV2Sockets.add(socket);
+  ws.on("error", (err) => {
+    console.error("WebSocket error:", err.message);
+  });
+}
+
+// ── Direct WebSocket connections ──
+wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
+  const auth = directUpgradeAuth.get(req);
+  if (!auth) {
+    ws.close(1008, "Missing upgrade authentication");
+    return;
+  }
+  if (auth.transport === 2) {
+    acceptDirectV2Socket(ws, isLoopbackRequest(req));
+    return;
+  }
+  const { wantsEncryptedDirectAuth, transportLane } = auth;
+  const transport = new DirectClientTransport(ws, loadServerKeyPair(), {
+    authenticated: auth.authenticated,
+    requireEncryptedAuth: wantsEncryptedDirectAuth,
+  });
+  transport.fromThisComputer = isLoopbackRequest(req);
+  console.log(
+    `${wantsEncryptedDirectAuth ? "Client connected (direct E2E pending auth)" : "Client connected (authenticated)"} lane=${transportLane}`,
+  );
+
+  // Legacy direct clients are already authenticated by the upgrade request.
+  // Direct E2E clients get status only after encrypted direct_auth succeeds.
+  if (transport.isAuthenticated && transportLane === "control") {
+    connectedClients.add(transport);
+    sendStatusSyncTo(transport);
+    for (const card of computerAccessRequests.openCards()) transport.send(JSON.stringify(card));
+  }
+
+  const handler = createConnectionHandler(transport, transportLane);
+  const runMessage = directMessageRunner(transport, transportLane, handler);
+
+  ws.on("message", (data, isBinary) => {
+    let msg: ClientMessage;
+
+    const buf = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+    console.log(`[WS Recv] isBinary=${isBinary} bytes=${buf.length}`);
+    if (isBinary && transport.hasPeerKey) {
+      try {
+        msg = transport.decryptBinaryFrame(buf);
+      } catch (err) {
+        console.warn(`[Direct E2E] Binary frame rejected: ${errorMessage(err)}`);
+        transport.send(JSON.stringify({ type: "error", message: "Invalid encrypted binary frame" }));
+        return;
+      }
+    } else if (isBinary) {
+      // Legacy direct binary frame — currently only used for upload chunks.
+      // Format: [1 marker(0x42)][1 idLen][idBytes][4 chunkIdx BE][bytes]
+      if (buf.length < 6 || buf[0] !== BIN_MARKER_UPLOAD_CHUNK) {
+        transport.send(JSON.stringify({ type: "error", message: "Unknown binary frame" }));
+        return;
+      }
+      const idLen = buf[1];
+      const headerEnd = 2 + idLen + 4;
+      if (buf.length < headerEnd) {
+        transport.send(JSON.stringify({ type: "error", message: "Binary frame too short" }));
+        return;
+      }
+      const uploadId = buf.subarray(2, 2 + idLen).toString("utf-8");
+      const off = 2 + idLen;
+      const chunkIndex = buf.readUInt32BE(off);
+      const chunkBytes = buf.subarray(headerEnd);
+      msg = { type: "upload_chunk_bin", uploadId, chunkIndex, data: chunkBytes };
+    } else {
+      try {
+        const parsed: unknown = JSON.parse(buf.toString());
+        if (isRecord(parsed) && parsed.type === "key_exchange") {
+          if (transport.hasPeerKey) {
+            // After a key exchange only sealed frames count, and the
+            // released app never sends a second one on a socket.
+            console.warn("[Direct E2E] Unsealed frame rejected after key exchange");
+            ws.close(1008, "Encryption required");
+            return;
+          }
+          try {
+            transport.handleKeyExchange(parsed);
+          } catch (err) {
+            console.warn(`[Direct E2E] Key exchange rejected: ${errorMessage(err)}`);
+            ws.close(1008, "Invalid key exchange");
+          }
+          return;
+        }
+        if (isRecord(parsed) && parsed.n && parsed.c) {
+          msg = transport.decryptTextEnvelope(parsed);
+        } else if (transport.hasPeerKey) {
+          // After the key exchange only encrypted frames count. The exchange
+          // proves nothing by itself, so a plaintext direct_auth here would
+          // let anyone who knows an enrolled device's public key sign in as it.
+          console.warn("[Direct E2E] Plaintext message rejected after key exchange");
+          ws.close(1008, "Encryption required");
+          return;
+        } else {
+          msg = parseClientMessage(parsed);
+        }
+      } catch {
+        transport.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
+        return;
+      }
+    }
+
+    if (msg.type === "direct_auth") {
+      if (transport.isSessionKeyDowngrade(msg)) {
+        console.warn("[Direct E2E] Client supports session keys but its handshake had none; closing");
+        ws.close(1008, "Session key required");
+        return;
+      }
+      const authMessage = msg;
+      const open = (holdsToken: boolean) => {
+        transport.holdsAuthToken = holdsToken;
+        transport.authenticate(authMessage.binaryEnvelope === true);
+        transport.setClientCapabilities(authMessage);
+        transport.supportsSessionEventAck = supportsSessionEventAcknowledgement(authMessage);
+        transport.supportsMonitorOutputAck = supportsMonitorOutputAcknowledgement(authMessage);
+        console.log(
+          `[Direct E2E] Encrypted auth complete (binary=${transport.usesBinaryEnvelope}, lane=${transportLane}, ${authMessage.token === AUTH_TOKEN ? "token" : "device key"})`,
+        );
+        if (transportLane === "control") {
+          connectedClients.add(transport);
+          sendStatusSyncTo(transport);
+        }
+        transport.send(JSON.stringify(
+          serverCapabilitiesPayload(transport.usesBinaryEnvelope, transportLane, holdsToken),
+        ));
+      };
+      const publicKey = transport.peerKey;
+      if (!publicKey) {
+        // The loopback token socket: the upgrade already checked the token.
+        if (transport.isAuthenticated && !wantsEncryptedDirectAuth) {
+          open(true);
+          return;
+        }
+        transport.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
+        ws.close(1008, "Unauthorized");
+        return;
+      }
+      // The key exchange proved the key. The gate decides: a recorded device
+      // gets in by its key, even with a token a device removal has rotated;
+      // an unknown key needs the right token and an unlocked computer; see
+      // DeviceAuthGate.directAuth for what a socket from this computer adds.
+      const holdsToken = msg.token === AUTH_TOKEN;
+      const outcome = deviceAuthGate.directAuth(publicKey, { token: msg.token, name: msg.name, platform: msg.platform }, transport.fromThisComputer);
+      const peer: { publicKey: string; close: (reason: string) => void; open?: () => void } = {
+        publicKey,
+        close: (reason) => ws.close(1008, reason),
+      };
+      if (outcome.ok) {
+        keyedDirectPeers.add(peer);
+        ws.once("close", () => keyedDirectPeers.delete(peer));
+        // A client that sent the right token is answered with capabilities
+        // alone, as the released app expects.
+        if (!holdsToken) transport.send(JSON.stringify({ type: "device_auth_result", ok: true }));
+        open(holdsToken || keyHoldsToken(publicKey));
+        return;
+      }
+      if (msg.token) console.log("Rejected direct E2E auth: not approved");
+      transport.send(JSON.stringify({ type: "device_auth_result", ok: false, reason: outcome.reason, ...(outcome.code ? { code: outcome.code } : {}) }));
+      if (outcome.close) {
+        ws.close(1008, "Not approved");
+        return;
+      }
+      transport.holdForApproval();
+      peer.open = () => {
+        transport.send(JSON.stringify({ type: "device_auth_result", ok: true }));
+        open(keyHoldsToken(publicKey));
+      };
+      keyedDirectPeers.add(peer);
+      ws.once("close", () => {
+        const wasHeld = peer.open !== undefined;
+        keyedDirectPeers.delete(peer);
+        if (wasHeld) onPendingPeerDropped(publicKey);
+      });
+      if (outcome.notify) noteDevicePending(outcome.notify);
+      return;
+    }
+
+    if (transport.heldForApproval) {
+      // As over the relay, a held peer hears only that it is still waiting.
+      transport.send(JSON.stringify({ type: "device_auth_result", ok: false, reason: "not_approved" }));
+      return;
+    }
+
+    if (!transport.isAuthenticated) {
+      transport.send(JSON.stringify({ type: "error", message: "Authentication required" }));
+      ws.close(1008, "Authentication required");
+      return;
+    }
+
+    noteDirectMessageOrigin(msg, { publicKey: transport.peerKey, channel: transport.channelKind });
+    runMessage(msg);
   });
 
   ws.on("close", () => {
     console.log(`Client disconnected lane=${transportLane}`);
-    handler.close();
     transport.close();
-    connectedClients.delete(transport);
-    views.dropOwner(transport);
-    // Clean up session client mapping for this connection
-    if (handler.activeSessionId) {
-      const client = sessionClients.get(handler.activeSessionId);
-      if (client && client.ws === transport) {
-        sessionClients.delete(handler.activeSessionId);
-      }
-    }
+    detachDirectClient(transport, handler);
     // DON'T abort — let the session keep running in the background
   });
 
@@ -12553,33 +12777,27 @@ function redactSecretForLog(secret: string): string {
 }
 
 function startRelayClient(): void {
+  if (!deviceRegistry.readable) {
+    // Nobody may be let in over the relay, and the key that owns the rooms
+    // is in the file that cannot be read. `socketagent pair --reset` starts it.
+    console.error("[Relay] Not connecting: the device state file is unreadable");
+    return;
+  }
   const keyPair = loadServerKeyPair();
-  const pubkeyBase64 = toBase64(keyPair.publicKey);
+  // One key proves this computer owns its control, bulk and link rooms.
+  const ownerKey = deviceRegistry.relayOwnerKey();
 
   console.log(`[Relay] Connecting to ${RELAY_URL}`);
-  console.log(`[Relay] Pairing token: ${redactSecretForLog(PAIRING_TOKEN)}`);
-
-  // Display QR code for pairing. The SC prefix is kept as the wire-format
-  // marker so existing SocketClaude app builds can still re-pair.
-  const qrPayload = `SC|${PAIRING_TOKEN}|${pubkeyBase64}`;
-
-  if (process.env.SOCKETAGENT_SHOW_PAIRING_QR_ON_STARTUP === "1") {
-    try {
-      console.log(`\n[Relay] Scan this QR code with SocketAgent app to pair:\n`);
-      qrcode.generate(qrPayload, { small: true }, (qr: string) => {
-        console.log(qr);
-      });
-    } catch {
-      console.log(`[Relay] QR payload (paste into app): ${qrPayload}`);
-    }
-  } else {
-    console.log("[Relay] Pairing QR suppressed in logs. Set SOCKETAGENT_SHOW_PAIRING_QR_ON_STARTUP=1 for an explicit pairing session.");
-  }
+  console.log(`[Relay] Room: ${redactSecretForLog(PAIRING_TOKEN)}`);
+  console.log("[Relay] Run `socketagent pair` on this computer to show the pairing code.");
 
   relayClient = new RelayClient({
     relayUrl: RELAY_URL,
     pairingToken: PAIRING_TOKEN,
     keyPair,
+    ownerKey,
+    responder: transportResponder,
+    legacyTransport: LEGACY_TRANSPORT,
     lane: "control",
     peerAuth: deviceAuthGate,
     sessionKeyedPeers,
@@ -12588,7 +12806,7 @@ function startRelayClient(): void {
     onPeerClosed: (peerId) => {
       if (relayClient) views.dropPeer(relayClient.getVirtualSocket(), peerId);
     },
-    serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey)),
+    serverCapabilities: (binaryEnvelope, lane, publicKey, transport) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey), transport),
     onMessage: (msg: ClientMessage) => {
       if (!relayConnectionHandler) {
         // Create handler on first message (phone just paired)
@@ -12665,12 +12883,15 @@ function startRelayClient(): void {
     relayUrl: RELAY_URL,
     pairingToken: `${PAIRING_TOKEN}${BULK_RELAY_PAIRING_SUFFIX}`,
     keyPair,
+    ownerKey,
+    responder: transportResponder,
+    legacyTransport: LEGACY_TRANSPORT,
     lane: "bulk",
     peerAuth: deviceAuthGate,
     sessionKeyedPeers,
     onDevicePending: noteDevicePending,
     onPendingDropped: onPendingPeerDropped,
-    serverCapabilities: (binaryEnvelope, lane, publicKey) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey)),
+    serverCapabilities: (binaryEnvelope, lane, publicKey, transport) => serverCapabilitiesPayload(binaryEnvelope, lane, keyHoldsToken(publicKey), transport),
     onMessage: (msg: ClientMessage) => {
       if (!relayBulkConnectionHandler) {
         relayBulkConnectionHandler = createConnectionHandler(
@@ -12728,6 +12949,8 @@ function startRelayClient(): void {
       relayUrl: RELAY_URL,
       pairingToken: LINK_ROOM_TOKEN,
       keyPair,
+      ownerKey,
+      legacyTransport: LEGACY_TRANSPORT,
       lane: "link",
       peerAuth: deviceAuthGate,
       sessionKeyedPeers,

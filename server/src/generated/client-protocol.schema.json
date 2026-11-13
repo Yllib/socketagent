@@ -3045,6 +3045,25 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "pairing_upgrade"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "requestId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "device_authorize"
             },
             "requestId": {

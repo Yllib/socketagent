@@ -15,7 +15,7 @@ let counter = 0;
 
 /** @param {{ kind?: "computer" | "connector", confirm?: "ask" | "never", commands?: boolean, agent?: import("#server/computer-link-peer").PeerApiHost["agent"] }} options */
 function setup(options = {}) {
-  const registry = new DeviceRegistry(path.join(dataDir, `peer-registry-${++counter}.json`), true);
+  const registry = new DeviceRegistry(path.join(dataDir, `peer-registry-${++counter}.json`));
   const target = generateKeyPair();
   const source = generateKeyPair();
   const device = generateKeyPair();
@@ -173,6 +173,7 @@ test("a once approval covers one request and a chat approval covers that chat", 
 });
 
 test("links stored with the old confirm values load as ask", () => {
+  // devices.json from before the update, carried over on the first start.
   const file = path.join(dataDir, `peer-registry-legacy-${++counter}.json`);
   fs.writeFileSync(file, JSON.stringify({
     version: 1, mode: "enforced", revoked: [],
@@ -182,7 +183,7 @@ test("links stored with the old confirm values load as ask", () => {
       access: { read: true, agents: true, commands: true }, confirm,
     })),
   }));
-  const registry = new DeviceRegistry(file, false);
+  const registry = new DeviceRegistry(path.join(dataDir, `peer-registry-${++counter}.json`), file);
   assert.deepEqual([registry.get("key-0")?.confirm, registry.get("key-1")?.confirm], ["ask", "ask"]);
 });
 

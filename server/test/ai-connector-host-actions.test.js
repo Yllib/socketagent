@@ -22,7 +22,7 @@ let counter = 0;
  * and the host-action runner with a short wait.
  */
 function setup({ waitMs = 150 } = {}) {
-  const registry = new DeviceRegistry(path.join(dataDir, `host-actions-${++counter}.json`), true);
+  const registry = new DeviceRegistry(path.join(dataDir, `host-actions-${++counter}.json`));
   const serverKeys = generateKeyPair();
   const phone = generateKeyPair();
   registry.enroll({ publicKey: toBase64(phone.publicKey), kind: "device", name: "Phone", platform: "android", via: "relay", access: { read: true, agents: true, commands: true }, confirm: "never" });

@@ -322,6 +322,12 @@
           "$ref": "#/definitions/PairingResetResultServerMessage"
         },
         {
+          "$ref": "#/definitions/PairingUpdateServerMessage"
+        },
+        {
+          "$ref": "#/definitions/PairingUpgradeResultServerMessage"
+        },
+        {
           "$ref": "#/definitions/LinkRoomInfoResultServerMessage"
         },
         {
@@ -4230,6 +4236,17 @@
             "version"
           ]
         },
+        "transport": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        },
         "deviceAuth": {
           "type": "object",
           "properties": {
@@ -4304,8 +4321,7 @@
           },
           "required": [
             "hosts",
-            "port",
-            "token"
+            "port"
           ]
         },
         "pushNotifications": {
@@ -6647,6 +6663,64 @@
       },
       "required": [
         "type",
+        "ok"
+      ]
+    },
+    "PairingUpdateServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pairing_update"
+        },
+        "secret": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "secret",
+        "roomId"
+      ]
+    },
+    "PairingUpgradeResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pairing_upgrade_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "secret": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "port": {
+          "type": "number"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
         "ok"
       ]
     },

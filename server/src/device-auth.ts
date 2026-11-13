@@ -3,7 +3,6 @@ import { DeviceRegistry, DevicePlatform, deviceFingerprint } from "./device-regi
 
 /** Relay lanes. Device keys use control and bulk; computer keys use link only. */
 export type RelayLane = "control" | "bulk" | "link";
-export type PeerAdmission = "approved" | "pending" | "refused";
 
 export interface DeviceAuthRequest {
   token?: string;
@@ -19,6 +18,16 @@ export type DeviceAuthReason =
   | "too_many_pending"
   | "removed";
 
+/**
+ * What a key gets right after an old-path key exchange. `pending` means it
+ * is unknown and may still send the token in `device_auth`. `refused` is
+ * told the reason once and then ignored.
+ */
+export type PeerAdmission =
+  | { admission: "approved" }
+  | { admission: "pending" }
+  | { admission: "refused"; reason: DeviceAuthReason };
+
 export type DeviceAuthOutcome =
   | { ok: true; enrolled: boolean }
   | {
@@ -28,12 +37,14 @@ export type DeviceAuthOutcome =
       code?: string;
       /** The peer should be dropped after this reply. */
       close?: boolean;
-      /** Enrolled devices should be told about this pending key. */
+      /** Paired devices should be told about this pending key. */
       notify?: { publicKey: string; name: string; platform: DevicePlatform; code: string };
     };
 
 const WRONG_TOKEN_LIMIT = 5;
 const WRONG_TOKEN_WINDOW_MS = 10 * 60 * 1000;
+
+const NOT_APPROVED: DeviceAuthOutcome = { ok: false, reason: "not_approved", close: true };
 
 function constantTimeEqual(left: string, right: string): boolean {
   const a = Buffer.from(left, "utf8");
@@ -47,8 +58,17 @@ function constantTimeEqual(left: string, right: string): boolean {
 }
 
 /**
- * Decides what a relay peer may do based on its X25519 key. The relay only
- * forwards ciphertext, so the token check and every enrollment happen here.
+ * The old path's admission rules, kept under the lid of wire spec section 9
+ * until that path is deleted. It decides for a key that arrived by
+ * `key_exchange` over the relay or on an `e2e=1` direct socket. A v2
+ * handshake never comes here; its rules are in transport-responder.ts.
+ *
+ * What still gets in: a recorded key on its own lane, and an unknown device
+ * key that sends the right AUTH_TOKEN inside the encrypted channel while the
+ * computer is not locked. What no longer does: a removed key, a key that has
+ * moved to v2, an unknown key without the token, and any unknown key on a
+ * locked computer. Nothing is enrolled on sight and no relay peer raises an
+ * approval prompt.
  */
 export class DeviceAuthGate {
   private wrongTokens = new Map<string, number[]>();
@@ -58,65 +78,81 @@ export class DeviceAuthGate {
     private readonly currentToken: () => string,
   ) {}
 
-  /** Admission for a key that just finished a key exchange on `lane`. */
-  authorize(publicKey: string, lane: RelayLane): PeerAdmission {
+  /** Why a key may not use the old path at all, whatever it sends next. */
+  private barred(publicKey: string, lane: RelayLane): DeviceAuthReason | null {
+    // An unreadable state file admits nobody over the relay or the LAN.
+    if (!this.registry.readable) return "not_approved";
+    if (this.registry.isRevoked(publicKey)) return "removed";
     const entry = this.registry.get(publicKey);
-    if (lane === "link") {
-      if (entry?.kind !== "computer") return "refused";
-      this.registry.touch(publicKey);
-      return "approved";
-    }
-    if (entry?.kind === "computer") return "refused";
-    if (entry) {
-      this.registry.touch(publicKey);
-      return "approved";
-    }
-    if (this.registry.mode === "learning" && !this.registry.isRevoked(publicKey)) {
-      this.registry.enroll({ publicKey, kind: "device", name: "", platform: "android", via: "migration" });
-      return "approved";
-    }
-    return "pending";
+    if (lane === "link") return entry?.kind === "computer" && entry.transport === 1 ? null : "wrong_lane";
+    if (entry && entry.kind !== "device") return "wrong_lane";
+    // A device that has moved to v2 does not come back.
+    if (entry?.transport === 2) return "not_approved";
+    return null;
   }
 
-  /** Handles an encrypted device_auth from a peer on `lane`. */
-  deviceAuth(publicKey: string, lane: RelayLane, request: DeviceAuthRequest): DeviceAuthOutcome {
-    if (lane === "link") return { ok: false, reason: "wrong_lane", close: true };
-    const entry = this.registry.get(publicKey);
-    if (entry?.kind === "computer") return { ok: false, reason: "wrong_lane", close: true };
-    const name = (request.name || "").trim().slice(0, 80);
-    const platform = request.platform;
-    if (entry) {
-      this.registry.touch(publicKey, { name: name || undefined, platform });
-      return { ok: true, enrolled: false };
-    }
-    const code = deviceFingerprint(publicKey);
-    const notify = { publicKey, name: name || "Unknown device", platform: platform || "android", code };
-    if (typeof request.token === "string" && request.token) {
-      if (!this.registry.isRevoked(publicKey) && constantTimeEqual(request.token, this.currentToken())) {
-        this.registry.enroll({ publicKey, kind: "device", name, platform: platform || "android", via: "token" });
-        this.wrongTokens.delete(publicKey);
-        return { ok: true, enrolled: true };
-      }
-      if (this.noteWrongToken(publicKey)) {
-        return { ok: false, reason: "too_many_attempts", close: true };
-      }
-    }
-    return { ok: false, reason: "approval_required", code, notify };
+  /** Admission for a key that just finished an old-path key exchange on `lane`. */
+  authorize(publicKey: string, lane: RelayLane): PeerAdmission {
+    const reason = this.barred(publicKey, lane);
+    if (reason) return { admission: "refused", reason };
+    if (!this.registry.get(publicKey)) return { admission: "pending" };
+    this.registry.touch(publicKey);
+    return { admission: "approved" };
   }
 
   /**
-   * Handles a token-less direct_auth on a direct socket, where the key
-   * exchange already proved `publicKey`. From this computer it works like
-   * device_auth over the relay, so another Windows account's app can ask for
-   * approval. From the network only an enrolled device gets in, which gives
-   * phones approved over the relay their LAN route without the token and
-   * lets nobody there raise approval prompts.
+   * Handles an encrypted `device_auth` from a relay peer on `lane`. A
+   * recorded device may send it to update its name. An unknown key gets in
+   * only with the right token on an unlocked computer, and is otherwise told
+   * `not_approved` and dropped.
+   */
+  deviceAuth(publicKey: string, lane: RelayLane, request: DeviceAuthRequest): DeviceAuthOutcome {
+    if (lane === "link") return { ok: false, reason: "wrong_lane", close: true };
+    return this.admit(publicKey, request, false);
+  }
+
+  /**
+   * Handles `direct_auth` on an `e2e=1` direct socket, where the key exchange
+   * already proved `publicKey`. The rules are the relay's, with two additions
+   * for a socket from this computer, which is loopback with no proxy in
+   * front: the right token gets in even on a locked computer, since whoever
+   * can read `.env` here already owns it, and a key with no token raises an
+   * approval prompt, for the old desktop app under another Windows account.
    */
   directAuth(publicKey: string, request: DeviceAuthRequest, fromThisComputer: boolean): DeviceAuthOutcome {
-    if (!fromThisComputer && this.registry.get(publicKey)?.kind !== "device") {
-      return { ok: false, reason: "not_approved", close: true };
+    return this.admit(publicKey, request, fromThisComputer);
+  }
+
+  private admit(publicKey: string, request: DeviceAuthRequest, fromThisComputer: boolean): DeviceAuthOutcome {
+    if (!this.registry.readable) {
+      // Nothing can be recorded or looked up. This computer's own tools still
+      // get in by the token, and nobody else does.
+      const local = fromThisComputer && typeof request.token === "string" && constantTimeEqual(request.token, this.currentToken());
+      return local ? { ok: true, enrolled: false } : NOT_APPROVED;
     }
-    return this.deviceAuth(publicKey, "control", { name: request.name, platform: request.platform });
+    const reason = this.barred(publicKey, "control");
+    if (reason) return { ok: false, reason, close: true };
+    const name = (request.name || "").trim().slice(0, 80);
+    const platform = request.platform;
+    if (this.registry.get(publicKey)) {
+      this.registry.touch(publicKey, { name: name || undefined, platform });
+      return { ok: true, enrolled: false };
+    }
+    if (typeof request.token === "string" && request.token) {
+      if (!constantTimeEqual(request.token, this.currentToken())) {
+        return this.noteWrongToken(publicKey) ? { ok: false, reason: "too_many_attempts", close: true } : NOT_APPROVED;
+      }
+      if (this.registry.locked && !fromThisComputer) return NOT_APPROVED;
+      this.registry.enroll({ publicKey, kind: "device", name, platform: platform || "android", via: "token" });
+      this.wrongTokens.delete(publicKey);
+      return { ok: true, enrolled: true };
+    }
+    if (!fromThisComputer) return NOT_APPROVED;
+    const code = deviceFingerprint(publicKey);
+    return {
+      ok: false, reason: "approval_required", code,
+      notify: { publicKey, name: name || "Unknown device", platform: platform || "android", code },
+    };
   }
 
   /** Returns true once the key has used up its wrong-token budget. */

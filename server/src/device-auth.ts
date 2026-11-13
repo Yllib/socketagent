@@ -148,8 +148,12 @@ export class DeviceAuthGate {
       return { ok: true, enrolled: false };
     }
     if (typeof request.token === "string" && request.token) {
+      const counters = [`key:${publicKey}`, ...(source ? [`from:${source}`] : [])];
+      // Past the limit no token is looked at, so a guess learns nothing.
+      if (counters.some((counter) => this.spent(counter))) return { ok: false, reason: "too_many_attempts", close: true };
       if (!constantTimeEqual(request.token, this.currentToken())) {
-        return this.noteWrongToken(publicKey, source) ? { ok: false, reason: "too_many_attempts", close: true } : NOT_APPROVED;
+        this.noteWrongToken(counters);
+        return NOT_APPROVED;
       }
       // The lock holds on the relay, where every device that exists is
       // already on record. A direct token holder was never recorded by the
@@ -169,24 +173,45 @@ export class DeviceAuthGate {
   }
 
   /**
-   * Counts one wrong token against the key and against where it came from.
-   * Returns true once either has used up its budget. That changes the answer
-   * to a wrong token and nothing else: a right token is never refused for
-   * earlier wrong ones, so nobody can lock a device out by guessing.
+   * Checks the token a direct upgrade request carries, where [right] says
+   * whether it is the current one. False for a wrong token, and for any
+   * token while [remoteAddress] has used up its wrong tries. The count is
+   * the one `direct_auth` from that address uses. Loopback is not counted.
    */
-  private noteWrongToken(publicKey: string, source: string | undefined): boolean {
+  upgradeToken(right: boolean, remoteAddress: string | undefined): boolean {
+    if (!remoteAddress || isLoopbackAddress(remoteAddress)) return right;
+    const counter = `from:direct:${remoteAddress}`;
+    if (this.spent(counter)) return false;
+    if (!right) this.noteWrongToken([counter]);
+    return right;
+  }
+
+  /** The wrong tokens counted against [counter] in the last ten minutes. */
+  private recentWrongTokens(counter: string): number[] {
+    const now = Date.now();
+    return (this.wrongTokens.get(counter) || []).filter((at) => now - at < WRONG_TOKEN_WINDOW_MS);
+  }
+
+  /**
+   * Whether [counter] has had five wrong tokens in the last ten minutes.
+   * While it has, every token it sends is refused unread, the right one
+   * too, until the oldest of the five is ten minutes old. A refusal is not
+   * counted, so the wait does not grow.
+   */
+  private spent(counter: string): boolean {
+    return this.recentWrongTokens(counter).length >= WRONG_TOKEN_LIMIT;
+  }
+
+  /** Counts one wrong token against each of [counters]: the key, and where it came from. */
+  private noteWrongToken(counters: readonly string[]): void {
     const now = Date.now();
     if (this.wrongTokens.size >= MAX_WRONG_TOKEN_COUNTERS) {
       for (const [counter, times] of this.wrongTokens) if (times.every((at) => now - at >= WRONG_TOKEN_WINDOW_MS)) this.wrongTokens.delete(counter);
     }
-    let spent = false;
-    for (const counter of [`key:${publicKey}`, ...(source ? [`from:${source}`] : [])]) {
-      const recent = (this.wrongTokens.get(counter) || []).filter((at) => now - at < WRONG_TOKEN_WINDOW_MS).slice(-WRONG_TOKEN_LIMIT);
-      recent.push(now);
+    for (const counter of counters) {
+      const recent = [...this.recentWrongTokens(counter), now];
       if (this.wrongTokens.has(counter) || this.wrongTokens.size < MAX_WRONG_TOKEN_COUNTERS) this.wrongTokens.set(counter, recent);
-      spent ||= recent.length > WRONG_TOKEN_LIMIT;
     }
-    return spent;
   }
 }
 

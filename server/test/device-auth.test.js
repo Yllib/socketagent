@@ -427,15 +427,47 @@ test("an unreadable state file lets in nobody but this computer's own tools with
   assert.deepEqual(gate.directAuth(key, { token: AUTH_TOKEN }, true), { ok: true, enrolled: false });
 });
 
-test("the wrong-token limit stays", () => {
+test("after five wrong tokens a key is refused whatever it sends, until the ten minutes are up", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-13T12:00:00Z") });
   const registry = migratedRegistry({ mode: "learning" });
   const gate = new DeviceAuthGate(registry, () => AUTH_TOKEN);
   const key = toBase64(generateKeyPair().publicKey);
+  const spent = { ok: false, reason: "too_many_attempts", close: true };
   for (let attempt = 0; attempt < 5; attempt++) {
     assert.deepEqual(gate.deviceAuth(key, "control", { token: `wrong-${attempt}` }), { ok: false, reason: "not_approved", close: true });
+    t.mock.timers.tick(1000);
   }
-  assert.deepEqual(gate.deviceAuth(key, "control", { token: "wrong-again" }), { ok: false, reason: "too_many_attempts", close: true });
+  assert.deepEqual(gate.deviceAuth(key, "control", { token: "wrong-again" }), spent);
+  // The right token is not looked at either, so a guess past the limit learns nothing.
+  assert.deepEqual(gate.deviceAuth(key, "control", { token: AUTH_TOKEN }), spent);
   assert.equal(registry.get(key), undefined);
+
+  // Refusals are not counted. The wait ends ten minutes after the first wrong token.
+  t.mock.timers.tick(10 * 60 * 1000 - 5001);
+  assert.deepEqual(gate.deviceAuth(key, "control", { token: AUTH_TOKEN }), spent);
+  t.mock.timers.tick(1);
+  assert.deepEqual(gate.deviceAuth(key, "control", { token: AUTH_TOKEN, name: "Phone", platform: "android" }), { ok: true, enrolled: true });
+});
+
+test("the upgrade's token check shares the address's wrong tries with direct_auth and refuses the same way", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-13T12:00:00Z") });
+  const gate = new DeviceAuthGate(migratedRegistry({ mode: "learning" }), () => AUTH_TOKEN);
+  const freshKey = () => toBase64(generateKeyPair().publicKey);
+
+  assert.equal(gate.upgradeToken(true, "192.0.2.7"), true);
+  for (let attempt = 0; attempt < 4; attempt++) assert.equal(gate.upgradeToken(false, "192.0.2.7"), false);
+  assert.equal(gate.upgradeToken(true, "192.0.2.7"), true, "four wrong tokens do not shut the address out");
+  // The fifth wrong token from the address arrives in direct_auth.
+  assert.equal(gate.directAuth(freshKey(), { token: "wrong" }, false, "192.0.2.7").ok, false);
+  assert.equal(gate.upgradeToken(true, "192.0.2.7"), false, "now the right token gets the same 401");
+  assert.equal(gate.upgradeToken(true, "192.0.2.8"), true, "another address has its own count");
+
+  t.mock.timers.tick(10 * 60 * 1000);
+  assert.equal(gate.upgradeToken(true, "192.0.2.7"), true);
+
+  // Every program on this computer shares the loopback address, so it is not counted.
+  for (let attempt = 0; attempt < 8; attempt++) assert.equal(gate.upgradeToken(false, "127.0.0.1"), false);
+  assert.equal(gate.upgradeToken(true, "127.0.0.1"), true);
 });
 
 test("wrong tokens are counted against where they came from, so a new key for every try does not reset the count", () => {
@@ -464,10 +496,13 @@ test("wrong tokens are counted against where they came from, so a new key for ev
     assert.deepEqual(gate.directAuth(freshKey(), { token: `wrong-${attempt}` }, true, "127.0.0.1"), refused);
   }
 
-  // The right token gets in from an address that has spent its wrong tries.
+  // An address that has spent its wrong tries is refused with the right token too, and a recorded device is not.
   const phone = freshKey();
-  assert.equal(gate.directAuth(phone, { token: AUTH_TOKEN, name: "Phone", platform: "android" }, false, "192.0.2.7").ok, true);
-  assert.equal(registry.get(phone)?.kind, "device");
+  assert.deepEqual(gate.directAuth(phone, { token: AUTH_TOKEN, name: "Phone", platform: "android" }, false, "192.0.2.7"), spent);
+  assert.equal(registry.get(phone), undefined);
+  const paired = freshKey();
+  registry.enroll({ publicKey: paired, kind: "device", name: "Paired phone", platform: "android", via: "token" });
+  assert.deepEqual(gate.directAuth(paired, {}, false, "192.0.2.7"), { ok: true, enrolled: false });
 });
 
 test("removing a device rotates the token and the old token no longer enrolls", () => {

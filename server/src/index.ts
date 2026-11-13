@@ -11511,7 +11511,9 @@ httpServer.on("upgrade", (req, socket, head) => {
   const wantsEncryptedDirectAuth = e2e === "1";
   const transportLane: TransportLane =
     url.searchParams.get("lane") === "bulk" ? "bulk" : "control";
-  if (token && !isAuthToken(token)) {
+  // A wrong token is counted against its address, and an address that has
+  // used up its wrong tries gets the same answer for any token.
+  if (token && !deviceAuthGate.upgradeToken(isAuthToken(token), req.socket.remoteAddress)) {
     refuse("401 Unauthorized", "invalid token");
     return;
   }

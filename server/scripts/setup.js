@@ -7,18 +7,24 @@ function isRecord(value) {
 /**
  * SocketAgent setup script — generates server configuration.
  *
- * Generates AUTH_TOKEN, PAIRING_TOKEN, NaCl key pair, .env, and relay-keys.json.
- * Preserves existing values on re-run (safe for upgrades).
- * Outputs QR payload JSON on the last line of stdout.
+ * Generates AUTH_TOKEN, the room ID (PAIRING_TOKEN), the NaCl key pair, .env,
+ * relay-keys.json and, beside it, transport.json with the pairing secret.
+ * Preserves existing values on re-run (safe for upgrades). When it has to
+ * make a new room ID for a computer that already has a transport.json, as
+ * after the installer's reset-pairing option, pairing starts over: a new
+ * secret and the lock off.
+ * Outputs the SA3 pairing code on the last line of stdout.
+ * Run it after the server is built: it loads the compiled device registry.
  *
- * Usage: node setup.js --env-file <path> --keys-file <path> --relay-url <url> [--default-cwd <path>] [--port <port>] [--bind-host <host>]
+ * Usage: node setup.js --envfile <path> --keysfile <path> --relay-url <url> [--default-cwd <path>] [--port <port>] [--bind-host <host>]
+ * (Not `--env-file`: node takes that flag for itself and fails when the file does not exist yet.)
  */
 
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const nacl = require("tweetnacl");
-const { localIpv4Addresses, pairingCode } = require("./pairing-code");
+const { localIpv4Addresses, openTransportState, pairingCode, relayUrlForCode } = require("./pairing-code");
 
 // Parse CLI arguments
 /** @type {Record<string, string>} */
@@ -57,7 +63,8 @@ if (fs.existsSync(envFile)) {
 // --- Generate values (only if not already present) ---
 const authToken =
   existingEnv.AUTH_TOKEN || crypto.randomBytes(32).toString("hex");
-const pairingToken = existingEnv.PAIRING_TOKEN || crypto.randomUUID();
+// A carried-over install keeps its room ID. A new one is 32 random bytes in hex.
+const pairingToken = existingEnv.PAIRING_TOKEN || crypto.randomBytes(32).toString("hex");
 const envPort = existingEnv.PORT || port;
 // The server listens on the local network unless BIND_HOST says otherwise.
 // 127.0.0.1 was the old written default, so it is dropped rather than kept.
@@ -136,15 +143,28 @@ if (fs.existsSync(keysFile)) {
   console.log(`Generated new key pair -> ${keysFile}`);
 }
 
-// --- Output QR payload on last line (parsed by installer) ---
-// Relay URL is hardcoded in the app. Plain delimited, no JSON, which avoids
-// PowerShell stripping quotes when passing it to qrcode-terminal.
+// --- Pairing secret ---
+const stateFile = path.join(path.dirname(keysFile), "transport.json");
+const hadState = fs.existsSync(stateFile);
+const state = openTransportState(keysFile);
+// A new room ID for a computer that was already set up means every device
+// scans again, so the old secrets and the lock go too.
+if (hadState && !existingEnv.PAIRING_TOKEN) state.resetPairing();
+if (!state.readable) {
+  console.error(`${state.problem}. Run \`socketagent pair --reset\` to start over with a new pairing code.`);
+  process.exit(1);
+}
+
+// --- Output the pairing code on last line (parsed by installer) ---
+// Plain delimited, no JSON, which avoids PowerShell stripping quotes when
+// passing it to qrcode-terminal.
 const qrPayload = pairingCode({
-  pairingToken,
+  roomId: pairingToken,
   publicKey: publicKeyB64,
+  secret: state.currentSecret().secret,
   port: envPort,
-  authToken,
   hosts: localIpv4Addresses(),
+  relayUrl: relayUrlForCode({ ...existingEnv, RELAY_URL: envRelay }),
 });
 
 console.log(qrPayload);

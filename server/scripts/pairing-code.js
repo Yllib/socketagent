@@ -1,10 +1,13 @@
-// The pairing code the app scans. One code covers both ways to connect: the
-// relay from anywhere, and directly when the phone shares this computer's
-// network. Format:
-//   SA|<pairing token>|<public key>|<port>|<auth token>|<address>,<address>
-// The app also accepts the older SA|<pairing token>|<public key> relay code.
+// The pairing code the app scans or pastes (wire spec section 6). One code
+// covers both ways to connect: the relay from anywhere, and directly when the
+// device shares this computer's network. Format:
+//   SA3|<room ID>|<computer key>|<pairing secret>|<port>|<address>,<address>[|<relay URL>]
+// The room ID is PAIRING_TOKEN in .env. The secret is the current pairing
+// secret in transport.json. AUTH_TOKEN is not in the code. Apps older than
+// transport v2 reject an SA3 code as invalid.
 
 const os = require("os");
+const path = require("path");
 
 // Container and VM bridge adapters a phone on the same Wi-Fi can't reach.
 // Hyper-V's external switches are named vEthernet too and carry the real LAN,
@@ -38,11 +41,46 @@ function localIpv4Addresses() {
   return [...new Set(results)].sort((a, b) => addressRank(a) - addressRank(b));
 }
 
+const DEFAULT_RELAY_URL = "wss://relay.jarofdirt.info";
+
 /**
- * @param {{ pairingToken: string, publicKey: string, port: string | number, authToken: string, hosts: string[] }} parts
+ * The relay address a device should use, or "" when it is the app's default.
+ * A computer that reaches its relay on localhost names the public address in
+ * PUBLIC_RELAY_URL, as the server does.
+ * @param {Record<string, string | undefined>} env
  */
-function pairingCode({ pairingToken, publicKey, port, authToken, hosts }) {
-  return `SA|${pairingToken}|${publicKey}|${port}|${authToken}|${hosts.join(",")}`;
+function relayUrlForCode(env) {
+  let relayUrl = env.RELAY_URL || "";
+  try {
+    const { hostname } = new URL(relayUrl);
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]") {
+      relayUrl = env.PUBLIC_RELAY_URL || DEFAULT_RELAY_URL;
+    }
+  } catch {
+    return "";
+  }
+  relayUrl = relayUrl.replace(/\/+$/, "");
+  return relayUrl.startsWith("wss://") && relayUrl !== DEFAULT_RELAY_URL ? relayUrl : "";
 }
 
-module.exports = { localIpv4Addresses, pairingCode };
+/**
+ * @param {{ roomId: string, publicKey: string, secret: string, port: string | number, hosts: string[], relayUrl?: string }} parts
+ */
+function pairingCode({ roomId, publicKey, secret, port, hosts, relayUrl }) {
+  const code = `SA3|${roomId}|${publicKey}|${secret}|${port}|${hosts.join(",")}`;
+  return relayUrl ? `${code}|${relayUrl}` : code;
+}
+
+/**
+ * Opens the computer's transport state, which sits beside its key file. The
+ * first call after the update makes transport.json from devices.json, the
+ * same way the server does. Needs the built server (`npx tsc`).
+ * @param {string} keysFile
+ */
+function openTransportState(keysFile) {
+  const { DeviceRegistry } = require("#server/device-registry");
+  const dataDir = path.dirname(keysFile);
+  return new DeviceRegistry(path.join(dataDir, "transport.json"), path.join(dataDir, "devices.json"));
+}
+
+module.exports = { localIpv4Addresses, openTransportState, pairingCode, relayUrlForCode };

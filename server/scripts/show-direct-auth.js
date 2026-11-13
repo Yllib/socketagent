@@ -8,7 +8,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
-const { localIpv4Addresses, pairingCode } = require("./pairing-code");
+const { localIpv4Addresses, openTransportState, pairingCode, relayUrlForCode } = require("./pairing-code");
 
 const serverDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(serverDir, "..");
@@ -64,7 +64,21 @@ if (!publicKey) {
 
 // The same code `socketagent pair` shows. Scanned on this network, the app
 // connects directly.
-const code = pairingCode({ pairingToken: env.PAIRING_TOKEN || "", publicKey, port, authToken: token, hosts });
+const state = openTransportState(keysFile);
+if (!env.PAIRING_TOKEN || !state.readable) {
+  console.error(state.problem
+    ? `${state.problem}. Run \`socketagent pair --reset\` to start over with a new pairing code.`
+    : `No PAIRING_TOKEN found in ${envFile}. Run the SocketAgent installer first.`);
+  process.exit(1);
+}
+const code = pairingCode({
+  roomId: env.PAIRING_TOKEN,
+  publicKey,
+  secret: state.currentSecret().secret,
+  port,
+  hosts,
+  relayUrl: relayUrlForCode(env),
+});
 
 if (process.argv.includes("--json")) {
   console.log(JSON.stringify({
@@ -93,8 +107,10 @@ if (hosts.length > 0) {
   console.log("No local network address found. Connect this computer to a network first.");
   console.log("");
 }
-console.log("Manual values:");
-console.log(`  Address:    ${hosts.join(", ") || "this computer's LAN IP address"}`);
+// Host, port and token typed by hand travel in the clear, so the server only
+// takes them from this computer itself.
+console.log("Manual values, for an app on this computer only:");
+console.log("  Address:    127.0.0.1");
 console.log(`  Port:       ${port}`);
 console.log(`  Auth token: ${token}`);
 console.log(`  Public key: ${publicKey}`);

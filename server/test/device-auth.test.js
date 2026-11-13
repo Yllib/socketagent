@@ -219,7 +219,7 @@ test("9.1 and 9.2.4: an unknown key gets in by the token inside the box and by n
   assert.deepEqual(h.prompts, []);
 });
 
-test("9.2.5: a locked computer refuses an unknown key on the old path, token or not", () => {
+test("9.2.5: over the relay a locked computer refuses an unknown key, token or not", () => {
   const registry = migratedRegistry({ mode: "enforced" });
   const h = harness(registry);
   const phone = generateKeyPair();
@@ -234,13 +234,26 @@ test("9.2.5: a locked computer refuses an unknown key on the old path, token or 
   assert.equal(registry.get(key), undefined);
   assert.deepEqual(h.prompts, []);
 
-  // The same on a direct socket from the network. From this computer itself
-  // the token still works, since whoever reads .env here already owns it.
+});
+
+test("a direct e2e=1 socket with the right token gets in on a locked computer, from any address", () => {
+  // The old build never recorded a device that only connected this way, so
+  // the lock must not shut out one that is paired today.
+  const registry = migratedRegistry({ mode: "enforced" });
   const gate = new DeviceAuthGate(registry, () => AUTH_TOKEN);
-  assert.deepEqual(gate.directAuth(key, { token: AUTH_TOKEN }, false), { ok: false, reason: "not_approved", close: true });
-  assert.equal(registry.get(key), undefined);
-  assert.deepEqual(gate.directAuth(key, { token: AUTH_TOKEN, name: "Desktop app", platform: "linux" }, true), { ok: true, enrolled: true });
-  assert.equal(registry.get(key)?.transport, 1);
+  const [lan, local, wrong, bare] = [0, 1, 2, 3].map(() => toBase64(generateKeyPair().publicKey));
+
+  assert.deepEqual(gate.directAuth(lan, { token: AUTH_TOKEN, name: "Pixel", platform: "android" }, false), { ok: true, enrolled: true });
+  assert.deepEqual([registry.get(lan)?.via, registry.get(lan)?.transport], ["token", 1]);
+  assert.deepEqual(gate.directAuth(local, { token: AUTH_TOKEN, name: "Desktop app", platform: "linux" }, true), { ok: true, enrolled: true });
+  // The token is still what gets it in.
+  assert.deepEqual(gate.directAuth(wrong, { token: "wrong" }, false), { ok: false, reason: "not_approved", close: true });
+  assert.deepEqual(gate.directAuth(bare, {}, false), { ok: false, reason: "not_approved", close: true });
+  assert.equal(registry.get(wrong), undefined);
+  assert.equal(registry.get(bare), undefined);
+  // Over the relay the same token on the same locked computer is refused.
+  const relayKey = toBase64(generateKeyPair().publicKey);
+  assert.deepEqual(gate.deviceAuth(relayKey, "control", { token: AUTH_TOKEN }), { ok: false, reason: "not_approved", close: true });
 });
 
 test("9.2.2 and 9.2.3: a removed key and a key that has moved to v2 are refused the old path", () => {

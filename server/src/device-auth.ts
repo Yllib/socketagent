@@ -64,11 +64,11 @@ function constantTimeEqual(left: string, right: string): boolean {
  * handshake never comes here; its rules are in transport-responder.ts.
  *
  * What still gets in: a recorded key on its own lane, and an unknown device
- * key that sends the right AUTH_TOKEN inside the encrypted channel while the
- * computer is not locked. What no longer does: a removed key, a key that has
- * moved to v2, an unknown key without the token, and any unknown key on a
- * locked computer. Nothing is enrolled on sight and no relay peer raises an
- * approval prompt.
+ * key that sends the right AUTH_TOKEN inside the encrypted channel. Over the
+ * relay the token only counts while the computer is not locked. On a direct
+ * socket it counts locked or not. What no longer gets in: a removed key, a
+ * key that has moved to v2, and an unknown key without the token. Nothing is
+ * enrolled on sight and no relay peer raises an approval prompt.
  */
 export class DeviceAuthGate {
   private wrongTokens = new Map<string, number[]>();
@@ -108,22 +108,23 @@ export class DeviceAuthGate {
    */
   deviceAuth(publicKey: string, lane: RelayLane, request: DeviceAuthRequest): DeviceAuthOutcome {
     if (lane === "link") return { ok: false, reason: "wrong_lane", close: true };
-    return this.admit(publicKey, request, false);
+    return this.admit(publicKey, request, "relay", false);
   }
 
   /**
    * Handles `direct_auth` on an `e2e=1` direct socket, where the key exchange
-   * already proved `publicKey`. The rules are the relay's, with two additions
-   * for a socket from this computer, which is loopback with no proxy in
-   * front: the right token gets in even on a locked computer, since whoever
-   * can read `.env` here already owns it, and a key with no token raises an
+   * already proved `publicKey`. A recorded device needs no token. An unknown
+   * key gets in with the right token, locked or not: released apps that only
+   * ever connected this way were never recorded, and they must keep working
+   * until the old path is shut down. A socket from this computer, which is
+   * loopback with no proxy in front, may also send no token and raise an
    * approval prompt, for the old desktop app under another Windows account.
    */
   directAuth(publicKey: string, request: DeviceAuthRequest, fromThisComputer: boolean): DeviceAuthOutcome {
-    return this.admit(publicKey, request, fromThisComputer);
+    return this.admit(publicKey, request, "direct", fromThisComputer);
   }
 
-  private admit(publicKey: string, request: DeviceAuthRequest, fromThisComputer: boolean): DeviceAuthOutcome {
+  private admit(publicKey: string, request: DeviceAuthRequest, path: "relay" | "direct", fromThisComputer: boolean): DeviceAuthOutcome {
     if (!this.registry.readable) {
       // Nothing can be recorded or looked up. This computer's own tools still
       // get in by the token, and nobody else does.
@@ -142,7 +143,10 @@ export class DeviceAuthGate {
       if (!constantTimeEqual(request.token, this.currentToken())) {
         return this.noteWrongToken(publicKey) ? { ok: false, reason: "too_many_attempts", close: true } : NOT_APPROVED;
       }
-      if (this.registry.locked && !fromThisComputer) return NOT_APPROVED;
+      // The lock holds on the relay, where every device that exists is
+      // already on record. A direct token holder was never recorded by the
+      // old build, so refusing it here would lock out a device paired today.
+      if (this.registry.locked && path === "relay") return NOT_APPROVED;
       this.registry.enroll({ publicKey, kind: "device", name, platform: platform || "android", via: "token" });
       this.wrongTokens.delete(publicKey);
       return { ok: true, enrolled: true };

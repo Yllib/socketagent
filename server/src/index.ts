@@ -12703,8 +12703,9 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
       }
       // The key exchange proved the key. The gate decides: a recorded device
       // gets in by its key, even with a token a device removal has rotated;
-      // an unknown key needs the right token and an unlocked computer; see
-      // DeviceAuthGate.directAuth for what a socket from this computer adds.
+      // an unknown key needs the right token, locked or not; see
+      // DeviceAuthGate.directAuth for why, and for what a socket from this
+      // computer adds.
       const holdsToken = msg.token === AUTH_TOKEN;
       const outcome = deviceAuthGate.directAuth(publicKey, { token: msg.token, name: msg.name, platform: msg.platform }, transport.fromThisComputer);
       const peer: { publicKey: string; close: (reason: string) => void; open?: () => void } = {

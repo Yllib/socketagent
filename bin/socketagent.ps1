@@ -42,7 +42,10 @@ function Register-SocketAgentRecovery {
 }
 
 $cmd = if ($Args.Count -gt 0) { $Args[0] } else { "help" }
-$rest = if ($Args.Count -gt 1) { $Args[1..($Args.Count - 1)] } else { @() }
+# The @() matters. An `if` hands a lone item back as a bare string, and
+# splatting a string passes its characters one by one, so `pair --reset`
+# reached node as "-", "-", "r", "e", "s", "e", "t".
+$rest = @(if ($Args.Count -gt 1) { $Args[1..($Args.Count - 1)] })
 
 switch ($cmd.ToLowerInvariant()) {
     { $_ -in @("pair", "qr") } {

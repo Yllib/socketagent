@@ -1756,12 +1756,21 @@ function renewPairingSecret(): void {
  * state file and of a relay room another key has claimed.
  */
 function startPairingOver(): void {
-  const hadState = deviceRegistry.readable;
-  deviceRegistry.resetPairing();
+  const { newOwnerKey } = deviceRegistry.resetPairing();
+  const hadState = !newOwnerKey;
   PAIRING_TOKEN = crypto.randomBytes(32).toString("hex");
   process.env.PAIRING_TOKEN = PAIRING_TOKEN;
   writeEnvValue(ENV_PATH, "PAIRING_TOKEN", PAIRING_TOKEN);
   console.log("[Devices] Pairing started over: new room ID and pairing secret");
+  // The link room keeps its ID unless this computer can no longer use it:
+  // its owner key is new, or the relay says another key owns the room.
+  // Other computers then have to be linked to this one again.
+  if (LINK_ROOM_TOKEN && (newOwnerKey || relayLinkClient?.ownerMismatch)) {
+    LINK_ROOM_TOKEN = crypto.randomBytes(32).toString("hex");
+    writeEnvValue(ENV_PATH, "LINK_ROOM_TOKEN", LINK_ROOM_TOKEN);
+    relayLinkClient?.moveRoom(LINK_ROOM_TOKEN);
+    console.log("[Links] New link room ID. Link other computers to this one again from the app.");
+  }
   for (const entry of deviceRegistry.list()) {
     if (entry.kind !== "device") continue;
     dropDirectPeersWithKey(entry.publicKey, "Pairing reset");
@@ -7801,7 +7810,8 @@ function createConnectionHandler(
               const requested = new URL(msg.config.relayUrl || "");
               if (requested.origin !== allowed.origin) throw new Error("Use this computer's configured relay for transfers");
             }
-            job = transferJobs.start(msg.config);
+            // A static-box frame can be replayed, so it may not change a job's transfer secret.
+            job = transferJobs.start(msg.config, channelKindForMessage(msg) !== "static");
           } else if (msg.action === "status") job = transferJobs.status(msg.jobId || "");
           else if (msg.action !== "list") throw new Error("Unknown transfer action");
           sendJson({ type: "session_transfer_job_result", requestId: msg.requestId, ok: true,

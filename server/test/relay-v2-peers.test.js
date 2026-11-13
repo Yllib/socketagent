@@ -348,4 +348,11 @@ test("the relay client joins new-style, proves it owns the room, and never falls
   });
   assert.throws(() => keyless.connect(), /owner key/);
   assert.equal(joins.length, 1);
+
+  // `pair --reset` moves the computer to a new room. That join does not wait out the ten minutes.
+  assert.equal(client.ownerMismatch, true);
+  client.moveRoom("the-new-room");
+  assert.equal(client.ownerMismatch, false);
+  await once(relay, "connection");
+  assert.equal(joins[1].headers["x-socketagent-room"], "the-new-room");
 });

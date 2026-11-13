@@ -464,10 +464,13 @@ export class DeviceRegistry {
    *
    * It is the recovery for an unreadable state file too. Then nothing can be
    * kept: the lists start empty with a new relay owner key, and the old file
-   * is left beside the new one as `<name>.unreadable`.
+   * is left beside the new one as `<name>.unreadable`. `newOwnerKey` tells
+   * the caller that happened, because the relay still knows this computer's
+   * link room under the lost key and the room needs a new ID as well.
    */
-  resetPairing(): void {
+  resetPairing(): { newOwnerKey: boolean } {
     const now = new Date().toISOString();
+    const newOwnerKey = !this.state;
     if (this.state) {
       const nextId = Math.max(...this.state.secrets.map((secret) => secret.id)) + 1;
       this.state.secrets = [{ id: nextId, secret: randomSecret(), createdAt: now }];
@@ -485,5 +488,6 @@ export class DeviceRegistry {
       this.unreadable = undefined;
     }
     this.write();
+    return { newOwnerKey };
   }
 }

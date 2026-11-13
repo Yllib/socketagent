@@ -355,6 +355,7 @@ export class RelayClient {
   private relaySupportsMultiDevice = false;
   /** The relay accepted this socket as the room's owner. Only then does it take `relay_push`. */
   private ownsRoom = false;
+  private refusedAsOwner = false;
   private pendingPushes = new Map<string, PendingRelayPush>();
   private nextPushId = 1;
   private status: RelayStatus = "disconnected";
@@ -442,6 +443,7 @@ export class RelayClient {
     this.ws.on("close", (code) => {
       console.log(`[Relay] Disconnected`);
       if (code === RELAY_CLOSE_OWNER_MISMATCH) {
+        this.refusedAsOwner = true;
         this.reconnectDelay = OWNER_MISMATCH_RETRY_MS;
         console.error(`[Relay${this.laneTag()}] Another key owns this relay room, so this computer cannot use it. Trying again in 10 minutes. ${STATE_RESET_HINT}`);
       } else if (code === RELAY_CLOSE_CLAIM_LIMIT) {
@@ -598,12 +600,24 @@ export class RelayClient {
 
   /**
    * Moves to another relay room. Peers in the old room are dropped, and the
-   * client reconnects with `pairingToken` right away.
+   * client reconnects with `pairingToken` right away, also when it was
+   * waiting out a refused join.
    */
   moveRoom(pairingToken: string): void {
     this.opts = { ...this.opts, pairingToken };
     this.reconnectDelay = 1000;
-    if (this.ws) this.ws.close();
+    this.refusedAsOwner = false;
+    if (this.ws) {
+      this.ws.close();
+      return;
+    }
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.connect();
+  }
+
+  /** The relay's last answer to this room was that another key owns it. */
+  get ownerMismatch(): boolean {
+    return this.refusedAsOwner;
   }
 
   /** Disconnect and stop reconnecting */
@@ -864,6 +878,7 @@ export class RelayClient {
     if (parsed.type === "relay_capabilities") {
       this.relaySupportsMultiDevice = !!parsed.multiDevice;
       this.ownsRoom = parsed.owner === true;
+      if (this.ownsRoom) this.refusedAsOwner = false;
       if (this.relaySupportsMultiDevice) {
         console.log(`[Relay] Relay supports multi-device routing`);
       }

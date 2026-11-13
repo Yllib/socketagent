@@ -69,6 +69,7 @@ function durableJson(file: string, value: unknown): void {
 }
 function hash(data: Buffer): string { return createHash("sha256").update(data).digest("hex"); }
 
+const NEEDS_UPDATE = "Update both computers and the app to transfer between computers";
 const OLD_TRANSPORT_OFF = "This transfer uses the old transport, which is off on this computer. Start it again from the app.";
 
 /**
@@ -148,22 +149,35 @@ export class SessionTransferJobs {
   private needsOldTransport(c: TransferJobConfig): boolean {
     return c.role !== "local" && !c.transferSecret && this.options.legacyTransport === false;
   }
-  start(config: TransferJobConfig) {
+  /**
+   * Starts a job, or takes a repeated start for one that exists. A repeat may
+   * renew the ticket and the transfer secret and nothing else. The secret of
+   * the latest accepted start is the job's secret, and a start that names
+   * none keeps the one the job has. `secretMayChange` false refuses a
+   * different secret: index.ts passes it for a static-box channel, whose
+   * frames a relay can replay.
+   */
+  start(config: TransferJobConfig, secretMayChange = true) {
     this.validate(config);
-    if (this.needsOldTransport(config)) throw new Error("Update both computers and the app to transfer between computers");
     const existing = this.jobs.get(config.jobId);
     if (existing) {
       // Renew credentials, but never allow a retry to change the authorized operation or identity.
-      const identity = (c: TransferJobConfig) => JSON.stringify({ ...c, ticket: undefined });
+      const identity = (c: TransferJobConfig) => JSON.stringify({ ...c, ticket: undefined, transferSecret: undefined });
       if (identity(existing.config) !== identity(config)) throw new Error("Transfer ID already belongs to another operation");
+      const secretChanged = config.transferSecret !== undefined && config.transferSecret !== existing.config.transferSecret;
+      if (secretChanged && !secretMayChange) throw new Error("Transfer ID already belongs to another operation");
+      if (this.needsOldTransport({ ...existing.config, ...config })) throw new Error(NEEDS_UPDATE);
       const renewed = existing.config.ticket !== config.ticket;
       existing.config.ticket = config.ticket;
+      if (secretChanged) existing.config.transferSecret = config.transferSecret;
       if (existing.phase === "failed") { existing.phase = "waiting"; existing.error = undefined; }
       this.save(existing);
-      if (renewed) this.getRuntime(existing).ws?.close();
+      // A channel built on the old ticket or secret goes. The next one handshakes again.
+      if (renewed || secretChanged) this.getRuntime(existing).ws?.close();
       this.launch(existing);
       return this.state(existing);
     }
+    if (this.needsOldTransport(config)) throw new Error(NEEDS_UPDATE);
     if ([...this.jobs.values()].filter(j => !j.settled && j.phase !== "failed").length >= 16) throw new Error("Too many active transfers");
     const job: Job = { config: { ...config }, phase: "preparing", bytes: 0 };
     fs.mkdirSync(this.folder(job), { recursive: true, mode: 0o700 });

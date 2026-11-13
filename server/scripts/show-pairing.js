@@ -83,13 +83,15 @@ function resetThroughServer(env) {
 
 /** Starts pairing over in the files, for when no server is running. */
 function resetInFiles() {
-  openTransportState(keysFile).resetPairing();
+  const { newOwnerKey } = openTransportState(keysFile).resetPairing();
   const roomId = crypto.randomBytes(32).toString("hex");
   const content = fs.readFileSync(envFile, "utf8");
   const next = /^PAIRING_TOKEN=.*$/m.test(content)
     ? content.replace(/^PAIRING_TOKEN=.*$/m, `PAIRING_TOKEN=${roomId}`)
     : `${content.trimEnd()}\nPAIRING_TOKEN=${roomId}\n`;
-  fs.writeFileSync(envFile, next, { mode: 0o600 });
+  // With a new owner key the relay refuses the old link room, so that ID
+  // goes too. The server makes a new one when it starts.
+  fs.writeFileSync(envFile, newOwnerKey ? next.replace(/^LINK_ROOM_TOKEN=.*\n?/m, "") : next, { mode: 0o600 });
 }
 
 async function main() {

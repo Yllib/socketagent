@@ -176,6 +176,35 @@ test("a link with a secret on both computers joins by header and runs on v2", as
   assert.deepEqual(manager.list().map((link) => link.online), [true]);
 });
 
+test("a repeated message with no link secret keeps the stored one, and a new secret replaces it", async (t) => {
+  const env = await computers(t);
+  const linkSecret = newSecret();
+  env.authorize(linkSecret);
+  const manager = env.source();
+  manager.set(env.record(linkSecret));
+  await env.until(() => manager.get(env.targetKey)?.online === true);
+  await env.until(() => env.registry.get(env.sourceKey)?.transport === 2, "the target to record the link as v2");
+
+  // The app's ticket refresh and an access change both leave linkSecret out.
+  manager.set(env.record());
+  env.authorize();
+  assert.equal(manager.get(env.targetKey)?.record.linkSecret, linkSecret);
+  assert.equal(env.registry.get(env.sourceKey)?.linkSecret, linkSecret);
+  assert.equal(env.registry.get(env.sourceKey)?.transport, 2, "the link is not moved back to the old path");
+
+  // Re-creating the link sends a new secret to both ends. Until the target has it too, the source gets silence.
+  const next = newSecret();
+  const before = env.joins.length;
+  manager.set(env.record(next));
+  await env.until(() => env.joins.length > before && env.joins[env.joins.length - 1].frames.length > 0, "the source to dial again");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const retry = env.joins[env.joins.length - 1];
+  assert.deepEqual(frameTypes(retry), ["hs1"], "one hs1, no answer, and no key exchange after it");
+  assert.equal(manager.get(env.targetKey)?.online, false);
+  env.authorize(next);
+  assert.equal(env.registry.get(env.sourceKey)?.linkSecret, next);
+});
+
 test("a link to a target from before this release has no secret and runs on the old path", async (t) => {
   const env = await computers(t, { knowsLinkUpgrade: false });
   // The app left linkSecret out of both messages, because the target is below computerLinks 2.

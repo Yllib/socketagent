@@ -113,6 +113,7 @@ test("show-pairing --reset with no server running starts over in the files", () 
   const computer = install();
   const first = computer.setup().split("|");
   assert.equal(computer.envValue("PORT"), "1", "the reset must only ever ask this install's own port");
+  fs.appendFileSync(computer.envFile, `LINK_ROOM_TOKEN=${"cd".repeat(32)}\n`);
   const state = computer.state();
   fs.writeFileSync(path.join(computer.folder, "transport.json"), JSON.stringify({ ...state, locked: true, removed: ["removed-key"] }));
 
@@ -125,6 +126,7 @@ test("show-pairing --reset with no server running starts over in the files", () 
   assert.equal(after.locked, false);
   assert.deepEqual(after.removed, ["removed-key"], "the removed list stays");
   assert.equal(after.relayKey, state.relayKey);
+  assert.equal(computer.envValue("LINK_ROOM_TOKEN"), "cd".repeat(32), "the link room stays while the owner key does");
   assert.equal(computer.showPairing(), second.join("|"));
 
   // It is the way out of a damaged state file too.
@@ -133,4 +135,7 @@ test("show-pairing --reset with no server running starts over in the files", () 
   const third = computer.showPairing("--reset").split("|");
   assert.equal(third[0], "SA3");
   assert.equal(fs.existsSync(path.join(computer.folder, "transport.json.unreadable")), true);
+  // The owner key is new, so the relay would refuse the old link room. The server makes a new ID at its next start.
+  assert.notEqual(computer.state().relayKey, state.relayKey);
+  assert.equal(computer.envValue("LINK_ROOM_TOKEN"), "");
 });

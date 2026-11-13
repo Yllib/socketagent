@@ -275,10 +275,13 @@ test("a computer link agrees a session with its target and cannot be replayed or
   assert.equal(link.online, true);
   assert.equal(linkPeers.has(toBase64(server.publicKey)), true);
 
+  // On a session-keyed channel the source first offers a link secret, to move the link to transport v2.
+  assert.deepEqual(requests.map((request) => request.action), ["link_upgrade"]);
+
   const pending = link.request("list_sessions", {}, "chat-1", undefined, 200).catch(() => undefined);
-  assert.equal(requests.length, 1);
+  assert.equal(requests.length, 2);
   fromPeer("l1", parseJsonObject(sent.at(-1) ?? "{}"));
-  assert.equal(requests.length, 1, "a replayed request is not handled twice");
+  assert.equal(requests.length, 2, "a replayed request is not handled twice");
 
   // Once the target has answered with a session, a static-box answer is refused.
   link.ws.send = () => {};

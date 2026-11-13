@@ -231,8 +231,32 @@ test('a job with a transfer secret runs on a v2 handshake, resumes mid-chunk, an
   assert.equal(records.filter(frame => frame.role === 'source').every(frame => frame.head[0] === 1), true);
   // The secret is not in what the app is told about the job.
   assert.equal(JSON.stringify(f.source.list()).includes(String(f.secretConfigs[0].transferSecret)), false);
-  // A retry may not swap the secret.
-  assert.throws(() => f.source.start({ ...f.secretConfigs[0], transferSecret: crypto.randomBytes(32).toString('base64') }), /another operation/);
+});
+
+test('the transfer secret of the latest start is the job\'s secret, and a start without one keeps it', async t => {
+  const f = await fixture(t);
+  const earlier = crypto.randomBytes(32).toString('base64');
+  // Another device started the job on the destination with its own secret.
+  f.destination.start({ ...f.secretConfigs[1], transferSecret: earlier });
+  // A start that names no secret does not strip it, so the job stays off the static box.
+  f.destination.start(f.configs[1]);
+  f.source.start(f.secretConfigs[0]);
+  await until(() => f.frames.some(frame => frame.role === 'source'));
+  await delay(300);
+  assert.deepEqual(f.frames.filter(frame => frame.role === 'destination'), [], 'secrets that disagree get silence');
+
+  // The device now sends its secret to the destination too. The old channel goes and both handshake again.
+  f.destination.start(f.secretConfigs[1]);
+  await until(() => f.source.status(f.jobId)?.phase === 'completed');
+  await until(() => f.destination.status(f.jobId)?.phase === 'completed');
+  f.verify();
+  assert.equal(f.frames.filter(frame => frame.head[0] !== 0x48).every(frame => isV2Record(frame.head)), true);
+
+  // A start that arrived in the static box may repeat the secret but not change it.
+  f.source.start(f.secretConfigs[0], false);
+  assert.throws(() => f.source.start({ ...f.secretConfigs[0], transferSecret: earlier }, false), /another operation/);
+  // No start may change what the job does.
+  assert.throws(() => f.source.start({ ...f.secretConfigs[0], targetCwd: '/elsewhere' }), /another operation/);
 });
 
 test('a transfer handshake from a key that is not the job\'s peerPublicKey gets no answer', async t => {

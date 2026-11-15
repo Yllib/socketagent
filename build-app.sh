@@ -196,7 +196,7 @@ BUILD_START=$SECONDS
 if $DEPLOY || $BUNDLE; then
   REMOTE_CLEAN="if (Test-Path '$REMOTE_DIR') { Remove-Item '$REMOTE_DIR' -Recurse -Force };"
 else
-  REMOTE_CLEAN="Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '$REMOTE_DIR/lib','$REMOTE_DIR/test','$REMOTE_DIR/test_support','$REMOTE_DIR/assets','$REMOTE_DIR/scripts','$REMOTE_DIR/android/app/src';"
+  REMOTE_CLEAN="Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '$REMOTE_DIR/lib','$REMOTE_DIR/third_party','$REMOTE_DIR/test','$REMOTE_DIR/test_support','$REMOTE_DIR/assets','$REMOTE_DIR/scripts','$REMOTE_DIR/android/app/src';"
 fi
 echo "  Syncing source..."
 tar cf - -C "$APP_DIR" \

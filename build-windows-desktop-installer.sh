@@ -68,7 +68,7 @@ VERSION="$(grep '^version:' "$APP_DIR/pubspec.yaml" | sed 's/version: //' | cut 
 # Fail before the build, not after it, when today's signing run is used up.
 if $SIGN; then "$ROOT/sign-windows.sh" --check; fi
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "powershell -NoProfile -Command \"if (Test-Path '$REMOTE_DIR') { Remove-Item -LiteralPath '$REMOTE_DIR' -Recurse -Force }; New-Item -ItemType Directory -Force '$REMOTE_DIR/build/installer-input' | Out-Null\""
-tar cf - -C "$APP_DIR" "${INPUTS[@]}" scripts/installer/test-server-discovery.ps1 | ssh "$HOST" "tar xf - -C $REMOTE_DIR"
+tar cf - -C "$APP_DIR" "${INPUTS[@]}" scripts/installer/test-server-discovery.ps1 scripts/installer/test-desktop-setup.ps1 | ssh "$HOST" "tar xf - -C $REMOTE_DIR"
 scp -q "$ROOT/install-windows.ps1" "$HOST:$REMOTE_DIR/build/installer-input/server-bootstrap.ps1"
 ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File $REMOTE_DIR/scripts/build-windows-installer.ps1 -Version $VERSION"
 mkdir -p "$OUT"

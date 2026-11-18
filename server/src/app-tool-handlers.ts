@@ -262,6 +262,7 @@ export async function handleBrowserSessionTool(
 ): Promise<McpMediaResult> {
   try {
     if (args.action === "list") {
+      await browserSessionManager.checkResponding();
       const listing = { profiles: browserSessionManager.list(), browsers: browserSessionManager.active() };
       return { content: [{ type: "text", text: JSON.stringify(listing, null, 2) }] };
     }

@@ -36,6 +36,8 @@ export interface BrowserSessionSummary {
   url?: string;
   title?: string;
   lastUsedAt?: string;
+  /** False when the browser's Chrome has stopped answering. Absent otherwise. */
+  responding?: false;
 }
 
 /** A session's identity plus the viewport its viewers must map taps through. */
@@ -225,6 +227,13 @@ interface ChromeInstance {
   claimed: Set<string>;
   /** Windows being opened. Their tabs can appear before Chrome says which window they are. */
   creating: number;
+  /**
+   * Chrome has stopped answering. Its windows fail at once, close stops it
+   * without asking, and open starts a new one in its place.
+   */
+  frozen: boolean;
+  /** A health check in flight, shared by everyone who asks. */
+  probe?: Promise<boolean>;
 }
 
 /** A window's first tab, as Chrome opened it. */
@@ -318,6 +327,10 @@ const INTERACTIVE_WINDOW_MS = 2_000;
 const MAX_UNACKED_FRAMES = 2;
 /** An unacknowledged frame this old counts as lost, so a dropped ack cannot stall the stream. */
 const FRAME_ACK_TIMEOUT_MS = 1_000;
+// A command still unanswered after this long has its Chrome checked, and
+// Chrome gets this long to answer the check.
+const SLOW_COMMAND_MS = 5_000;
+const PROBE_TIMEOUT_MS = 5_000;
 /** How soon a frame held for a backed-up connection checks again. */
 const CONGESTION_RETRY_MS = 40;
 
@@ -617,7 +630,8 @@ async function wait(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-async function stopChildProcess(processHandle: ChildProcess | undefined): Promise<void> {
+/** Stops a process this server spawned. [hard] skips the polite request, which a stuck process ignores. */
+async function stopChildProcess(processHandle: ChildProcess | undefined, hard = false): Promise<void> {
   if (!processHandle || processHandle.exitCode !== null) return;
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
@@ -628,7 +642,7 @@ async function stopChildProcess(processHandle: ChildProcess | undefined): Promis
       clearTimeout(timer);
       resolve();
     });
-    processHandle.kill("SIGTERM");
+    processHandle.kill(hard ? "SIGKILL" : "SIGTERM");
   });
 }
 
@@ -648,6 +662,10 @@ async function stopProcessId(pid: number, ms: number): Promise<void> {
     await wait(100);
   }
   try { process.kill(pid, "SIGKILL"); } catch {}
+}
+
+function frozenError(chrome: ChromeInstance): Error {
+  return new Error(`Browser profile ${chrome.profile} has stopped responding. Open it again to restart it. Its saved profile is kept.`);
 }
 
 async function reserveLoopbackPort(): Promise<number> {
@@ -737,21 +755,22 @@ class CdpClient {
   private pending = new Map<number, {
     resolve: (value: JsonRecord) => void;
     reject: (error: Error) => void;
-    timer: NodeJS.Timeout;
+    timers: NodeJS.Timeout[];
   }>();
   private listeners = new Map<string, Set<(params: JsonRecord, sessionId?: string) => void>>();
   /** Resolves when the connection closes, which it does when Chrome quits. */
   readonly closed: Promise<void>;
 
-  private constructor(socket: WebSocket) {
+  private constructor(socket: WebSocket, private readonly onSlow?: () => void) {
     this.socket = socket;
     this.closed = new Promise((resolve) => socket.once("close", () => resolve()));
     socket.on("message", (raw) => this.onMessage(raw.toString()));
-    socket.on("close", () => this.rejectAll(new Error("Browser connection closed.")));
-    socket.on("error", (error) => this.rejectAll(error));
+    socket.on("close", () => this.fail(new Error("Browser connection closed.")));
+    socket.on("error", (error) => this.fail(error));
   }
 
-  static async connect(url: string): Promise<CdpClient> {
+  /** [onSlow] runs each time a command has waited SLOW_COMMAND_MS for its answer. */
+  static async connect(url: string, onSlow?: () => void): Promise<CdpClient> {
     const socket = new WebSocket(url, { maxPayload: 32 * 1024 * 1024 });
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Browser connection timed out.")), 15_000);
@@ -764,7 +783,7 @@ class CdpClient {
         reject(error);
       });
     });
-    return new CdpClient(socket);
+    return new CdpClient(socket, onSlow);
   }
 
   /** Sends a command to the page, or to the attached child target [sessionId]. */
@@ -772,11 +791,12 @@ class CdpClient {
     if (this.socket.readyState !== WebSocket.OPEN) throw new Error("Browser connection is not open.");
     const id = ++this.nextId;
     return await new Promise<JsonRecord>((resolve, reject) => {
+      const slow = setTimeout(() => this.onSlow?.(), SLOW_COMMAND_MS);
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Browser command timed out: ${method}`));
       }, 20_000);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timers: [slow, timer] });
       this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
@@ -821,14 +841,15 @@ class CdpClient {
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
-    clearTimeout(pending.timer);
+    for (const timer of pending.timers) clearTimeout(timer);
     if (message.error) pending.reject(new Error(message.error.message || "Browser command failed."));
     else pending.resolve(message.result || {});
   }
 
-  private rejectAll(error: Error): void {
+  /** Fail every command still waiting for its answer. */
+  fail(error: Error): void {
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      for (const timer of pending.timers) clearTimeout(timer);
       pending.reject(error);
     }
     this.pending.clear();
@@ -1540,7 +1561,8 @@ export class BrowserSessionManager {
   /** Show tab [id]: connect to it, move the live view over, and bring it forward. */
   private async activateTab(session: RunningBrowserSession, id: string): Promise<void> {
     if (session.activeTab === id || !session.tabs.has(id) || this.sessions.get(session.id) !== session) return;
-    const cdp = await CdpClient.connect(`ws://127.0.0.1:${session.chrome.port}/devtools/page/${id}`);
+    const chrome = session.chrome;
+    const cdp = await CdpClient.connect(`ws://127.0.0.1:${chrome.port}/devtools/page/${id}`, () => void this.responds(chrome));
     // The old tab's connection is about to close, so nothing could answer its prompt.
     this.cancelPrompt(session);
     session.watch?.stop();
@@ -1836,6 +1858,8 @@ export class BrowserSessionManager {
     const profile = normalizeBrowserProfile(profileValue);
     const url = normalizeBrowserUrl(rawUrl);
     const label = boundedLabel(options.label, profile);
+    const running = this.chromes.get(profile);
+    if (running?.frozen) await this.stopChrome(running);
     const existing = options.reuse
       ? latestBrowser([...this.sessions.values()].filter((session) =>
         session.chrome.profile === profile && session.sessionId === options.sessionId))
@@ -1895,7 +1919,7 @@ export class BrowserSessionManager {
   }
 
   private async attachWindow(chrome: ChromeInstance, tab: WindowTab, spec: WindowSpec): Promise<RunningBrowserSession> {
-    const cdp = await CdpClient.connect(`ws://127.0.0.1:${chrome.port}/devtools/page/${tab.id}`);
+    const cdp = await CdpClient.connect(`ws://127.0.0.1:${chrome.port}/devtools/page/${tab.id}`, () => void this.responds(chrome));
     const frameTargets = new Set<string>();
     const session: RunningBrowserSession = {
       id: spec.id,
@@ -1976,13 +2000,16 @@ export class BrowserSessionManager {
     });
 
     let browserCdp: CdpClient | undefined;
+    let launched: ChromeInstance | undefined;
     try {
       const targets = await this.waitForPageTarget(debuggingPort, processHandle);
       const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl && target.id);
       if (!page?.id) throw new Error("Browser did not create an interactive page.");
       const version = z.object({ webSocketDebuggerUrl: z.string() })
         .parse(await (await fetch(`http://127.0.0.1:${debuggingPort}/json/version`)).json());
-      browserCdp = await CdpClient.connect(version.webSocketDebuggerUrl);
+      browserCdp = await CdpClient.connect(version.webSocketDebuggerUrl, () => {
+        if (launched) void this.responds(launched);
+      });
       // Chrome started by an elevated server restarts itself without admin
       // rights, so the process we spawned is gone and only the connection
       // closing says when the real one quits.
@@ -2001,7 +2028,9 @@ export class BrowserSessionManager {
         browsers: new Set<RunningBrowserSession>(),
         claimed: new Set([page.id]),
         creating: 0,
+        frozen: false,
       };
+      launched = chrome;
       void chrome.exited.then(() => this.forgetChrome(chrome));
       const tab = { id: page.id, windowId: await this.windowOf(chrome, page.id) };
       await this.trackTargets(chrome);
@@ -2038,7 +2067,36 @@ export class BrowserSessionManager {
       sessionId: session.sessionId,
       url: session.url,
       lastUsedAt: session.lastUsedAt,
+      ...(session.chrome.frozen ? { responding: false as const } : {}),
     }));
+  }
+
+  /** Check every Chrome, so active() says which browsers have stopped answering. */
+  async checkResponding(): Promise<void> {
+    await Promise.all([...this.chromes.values()].map((chrome) => this.responds(chrome)));
+  }
+
+  /**
+   * Whether [chrome] still answers. A Chrome whose main thread is stuck keeps
+   * its process and its debugging port, so only asking tells. When it does not
+   * answer, every command waiting on it fails now instead of timing out.
+   */
+  private async responds(chrome: ChromeInstance): Promise<boolean> {
+    chrome.probe ??= fetch(`http://127.0.0.1:${chrome.port}/json/list`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) })
+      .then((response) => response.ok, () => false)
+      .then((alive) => {
+        delete chrome.probe;
+        // A Chrome that is quitting stops answering too; that one is not stuck.
+        if (this.chromes.get(chrome.profile) !== chrome) return alive;
+        chrome.frozen = !alive;
+        if (!alive) {
+          const error = frozenError(chrome);
+          chrome.browserCdp.fail(error);
+          for (const session of chrome.browsers) session.cdp.fail(error);
+        }
+        return alive;
+      });
+    return await chrome.probe;
   }
 
   /**
@@ -2770,7 +2828,8 @@ export class BrowserSessionManager {
     if (!session) return;
     const chrome = session.chrome;
     this.detach(session);
-    if (chrome.browsers.size === 0) {
+    // A stuck Chrome cannot close one window, and its other windows are as dead.
+    if (chrome.browsers.size === 0 || chrome.frozen) {
       await this.stopChrome(chrome);
       return;
     }
@@ -2902,14 +2961,18 @@ export class BrowserSessionManager {
    * moments ago survives; Windows would otherwise lose them to a hard stop.
    */
   private async stopChrome(chrome: ChromeInstance): Promise<void> {
-    await Promise.race([
-      chrome.browserCdp.command("Browser.close").then(() => chrome.exited),
-      wait(5_000),
-    ]).catch(() => {});
+    // A stuck Chrome answers nothing and ignores a polite stop, so it is killed.
+    const hard = chrome.frozen;
+    if (!hard) {
+      await Promise.race([
+        chrome.browserCdp.command("Browser.close").then(() => chrome.exited),
+        wait(5_000),
+      ]).catch(() => {});
+    }
     this.forgetChrome(chrome);
-    await stopChildProcess(chrome.process);
+    await stopChildProcess(chrome.process, hard);
     // The connection closes before Chrome finishes writing, so give it time.
-    if (chrome.handoffPid) await stopProcessId(chrome.handoffPid, 5_000);
+    if (chrome.handoffPid) await stopProcessId(chrome.handoffPid, hard ? 0 : 5_000);
     await stopChildProcess(chrome.displayProcess);
     fs.rmSync(path.join(chrome.profileDir, "SocketAgent Uploads"), { recursive: true, force: true });
   }
@@ -2917,6 +2980,11 @@ export class BrowserSessionManager {
   private require(browserId: string): RunningBrowserSession {
     const session = this.sessions.get(browserId);
     if (!session) throw new Error(`Browser ${browserId} is not running. Open it first.`);
+    if (session.chrome.frozen) {
+      // Check again in the background, so a Chrome that was only slow comes back.
+      void this.responds(session.chrome);
+      throw frozenError(session.chrome);
+    }
     return session;
   }
 

@@ -8585,7 +8585,10 @@ function createConnectionHandler(
       case "set_model": {
         const model = msg.model;
         const targetId = String(msg.sessionId || "").trim();
-        const target = !targetId || activeSession?.getSessionId?.() === targetId
+        // A chat reopened after a restart has no live ID until its first turn,
+        // only the ID it will resume. Match that too, or the pick only reaches
+        // the saved settings and the open session sends with its old model.
+        const target = !targetId || (activeSession && sessionInstanceId(activeSession) === targetId)
           ? activeSession
           : activeSessions.get(targetId) ?? null;
         if (target) {

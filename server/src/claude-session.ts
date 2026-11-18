@@ -3259,7 +3259,7 @@ export class ClaudeSession {
       console.log(`[Model] Set to ${model || 'default'} for session ${this.sessionId || '(pending)'}`);
     }
     this.persistAgentSettings({ model });
-    const change = recordModelChange(this.sessionId, previous, model, this._lastSupportedModels?.models ?? []);
+    const change = recordModelChange(this.sessionId || this._resumeSessionId, previous, model, this._lastSupportedModels?.models ?? []);
     if (change) this.send(change);
   }
 
@@ -3316,7 +3316,7 @@ export class ClaudeSession {
   }
 
   private persistAgentSettings(patch: Partial<AgentSessionSettings>): void {
-    const sid = this.sessionId;
+    const sid = this.sessionId || this._resumeSessionId;
     if (sid) updateSessionAgentSettings(sid, patch);
   }
 

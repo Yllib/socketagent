@@ -1144,7 +1144,7 @@ export class CodexSession {
   async setModel(model?: string): Promise<void> {
     const previous = this._model;
     this.applyModel(model);
-    const change = recordModelChange(this.sessionId, previous, model, this._lastSupportedModels?.models ?? []);
+    const change = recordModelChange(this.sessionId || this._resumeSessionId, previous, model, this._lastSupportedModels?.models ?? []);
     if (change) this.send(change);
   }
 

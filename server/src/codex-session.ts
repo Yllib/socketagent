@@ -3405,9 +3405,13 @@ export class CodexSession {
       clearTimeout(this.appServerIdleStopTimer);
       this.appServerIdleStopTimer = null;
     }
+    // Await before the check below, never inside it. Two callers that both saw
+    // no client would each create one, and the session would keep the second,
+    // which never gets the handshake and refuses every request.
+    const hookArgs = await codexCaptureHookArgs();
     if (!this.appServer) {
       this.appServerTerminalFailureHandled = false;
-      const codex = buildCodexSpawn([...await codexCaptureHookArgs(), "app-server", "--listen", "stdio://"]);
+      const codex = buildCodexSpawn([...hookArgs, "app-server", "--listen", "stdio://"]);
       const socketAgentSessionId = this.sessionId || this.threadId || this._resumeSessionId || "";
       const codexEnv: NodeJS.ProcessEnv = { ...codex.env };
       codexEnv.SOCKETAGENT_PORT = process.env.PORT || "8085";

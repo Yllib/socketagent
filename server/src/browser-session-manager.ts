@@ -532,6 +532,17 @@ function restrictDirectory(target: string): void {
   try { fs.chmodSync(target, 0o700); } catch {}
 }
 
+/**
+ * Delete Chrome's record of the windows it had open. Chrome starts with
+ * --restore-last-session to keep sign-ins, and would otherwise also reopen
+ * those windows, which no agent owns.
+ */
+function forgetSavedWindows(profileDir: string): void {
+  for (const folder of ["Sessions", "Sessions_Encrypted"]) {
+    fs.rmSync(path.join(profileDir, "Default", folder), { recursive: true, force: true });
+  }
+}
+
 /** Chromium can leave control files and singleton links behind after a crash. */
 export function removeStaleBrowserControlFile(profileDir: string): void {
   const singletonLock = path.join(profileDir, "SingletonLock");
@@ -1968,6 +1979,7 @@ export class BrowserSessionManager {
     restrictDirectory(root);
     restrictDirectory(profileDir);
     removeStaleBrowserControlFile(profileDir);
+    forgetSavedWindows(profileDir);
     claimBrowserProfile(profileDir, serviceState.identity);
     const display = await startVirtualDisplay(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     const debuggingPort = await reserveLoopbackPort();
@@ -1992,6 +2004,9 @@ export class BrowserSessionManager {
       // there. Renderers keep their sandbox.
       `--disable-features=Translate,OptimizationHints,msEdgeFirstRunExperience${process.platform === "win32" && serviceState.service ? ",NetworkServiceSandbox" : ""}`,
       "--password-store=basic",
+      // Chrome drops cookies that have no expiry date when it starts, unless it
+      // is restoring its last session. Many sites sign in with such a cookie.
+      "--restore-last-session",
       "about:blank",
     ], {
       stdio: ["ignore", "pipe", "pipe"],

@@ -72,6 +72,17 @@ import {
 import type {
   DelegatedAgentLiveActivity,
 } from "./delegated-agent-types";
+import {
+  boardToolset,
+  commitBoardTurn,
+  forgetBoardDelivery,
+  handleProjectBoardTool,
+  prepareBoardTurn,
+  PROJECT_BOARD_TOOL_DESCRIPTION,
+  PROJECT_BOARD_TOOL_INPUT,
+  withBoardBlock,
+  type BoardTurn,
+} from "./project-board-tool";
 import { AGENT_SESSION_TOOL_DESCRIPTION, buildSocketAgentIntegrationInstructions, HTML_PLAN_TOOL_DESCRIPTION, REMEMBER_TOOL_DESCRIPTION } from "./socketagent-instructions";
 import { LIFETIME_GUIDANCE } from "./fleeting-sessions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
@@ -937,6 +948,13 @@ export class ClaudeSession {
   private _isCompacting = false;  // whether context compaction is in progress
   private _compactStartedAt: string | null = null;
   public _delegationSupervisorSessionId?: string;
+  /** A new child's parent board project, used until the child has a session ID. */
+  public projectBoardHint: string | null = null;
+  /** Digest of the board block this chat last received, kept in memory while it has no session ID. */
+  private _boardDigest: string | null = null;
+  private _boardDigestUnsaved = false;
+  /** Which board tools the running SDK process was started with. */
+  private _queryBoardTools: { projectBoard: boolean; taskBatch: boolean } | null = null;
   private _permissionMode: PermissionMode | null = null;  // the SDK's mode (e.g., "plan")
   // Super yolo: the SDK runs in bypassPermissions and every escalation that
   // still reaches canUseTool (Claude Code's own safety checks, explicit ask
@@ -3510,6 +3528,8 @@ export class ClaudeSession {
 
     const sid = resumeSessionId || this.sessionId || "";
     const userMsgUuid = claudeMessageUuid(messageId || crypto.randomUUID());
+    // Pulled after the running flag is set, so a second prompt cannot start alongside.
+    const boardTurn = await prepareBoardTurn(sid, this.projectBoardHint, this._boardDigest);
     const turnPromise = this._trackPendingTurn();
 
     if (sid) {
@@ -3521,9 +3541,17 @@ export class ClaudeSession {
       }));
     }
 
-    this.activeInputQueue.push(this._createUserMessage(prompt, sid, userMsgUuid));
+    this.activeInputQueue.push(this._createUserMessage(withBoardBlock(prompt, boardTurn), sid, userMsgUuid));
+    this._commitBoardTurn(sid, boardTurn);
     console.log(`[WarmIdle] Reusing Claude SDK stream for ${sid || "(pending)"}, prompt=${prompt.slice(0, 80)}...`);
     return turnPromise;
+  }
+
+  /** Records that the board block in [turn] went out with this chat's prompt. */
+  private _commitBoardTurn(sessionId: string, turn: BoardTurn): void {
+    this._boardDigest = turn.digest;
+    this._boardDigestUnsaved = !sessionId;
+    commitBoardTurn(sessionId, turn.digest);
   }
 
   private _deferQuerySettings(): void {
@@ -3564,6 +3592,19 @@ export class ClaudeSession {
     // The SDK stream also remains reusable while a completed root turn waits
     // for background work. A new phone prompt must join that process rather
     // than replacing activeQuery and orphaning its task lifecycle events.
+    const boardSessionId = resumeSessionId || this.sessionId || "";
+    if (this._boardDigestUnsaved && boardSessionId) {
+      commitBoardTurn(boardSessionId, this._boardDigest);
+      this._boardDigestUnsaved = false;
+    }
+    const boardTools = boardToolset(boardSessionId, this.projectBoardHint);
+    // The SDK fixes a process's tools when it starts. When a grant changed
+    // this chat's board tools, start a fresh process unless background work
+    // still needs the old one; the tool then appears on a later turn.
+    if (this.activeQuery && this.activeInputQueue && !this._isRunning && this._queryBoardTools
+      && JSON.stringify(this._queryBoardTools) !== JSON.stringify(boardTools) && !this._hasClaudeBackgroundWork()) {
+      this._querySettingsDirty = true;
+    }
     if (this._querySettingsDirty) await this._prepareQuerySettings();
     this.onBeforeRun?.(resumeSessionId);
     if (this.activeQuery && this.activeInputQueue && !this._isRunning) {
@@ -3592,6 +3633,7 @@ export class ClaudeSession {
     this.onActivity?.();
 
     try {
+      const boardTurn = await prepareBoardTurn(boardSessionId, this.projectBoardHint, this._boardDigest);
       // Strip CLAUDECODE env var to allow running inside a Claude Code session
       const cleanEnv: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {
@@ -3665,7 +3707,9 @@ export class ClaudeSession {
           return this.onComputersRequest(args, signal);
         },
         getAbortSignal: () => this.abortController?.signal,
+        getProjectBoardHint: () => this.projectBoardHint,
       };
+      this._queryBoardTools = boardTools;
 
       // Build the MCP server with app-facing tools.
       const appTools = createSdkMcpServer({
@@ -3753,25 +3797,35 @@ export class ClaudeSession {
             },
             async (args) => handleScheduleTaskTool(appToolContext, args),
           ),
-          tool(
-            "TaskBatch",
-            "Manage SocketAgent session working tasks in bulk. Use one call for two or more task changes instead of repeatedly calling TaskCreate or TaskUpdate. Modes: replace the managed task set, upsert several tasks, delete several IDs, clear completed tasks, or list the managed set. Native Claude tasks remain untouched.",
-            {
-              mode: z.enum(["replace", "upsert", "delete", "clear_completed", "list"]).describe("Bulk operation to perform"),
-              tasks: z.array(z.object({
-                task_id: z.string().optional().describe("Existing SocketAgent task ID for updates; omit when creating"),
-                subject: z.string().optional().describe("Short imperative task title; required when creating"),
-                description: z.string().optional().describe("Detailed task description"),
-                active_form: z.string().optional().describe("Present-continuous label shown while in progress"),
-                status: z.enum(["pending", "in_progress", "completed"]).optional(),
-                owner: z.string().optional(),
-                blocked_by: z.array(z.string()).optional(),
-                blocks: z.array(z.string()).optional(),
-              })).max(200).optional().describe("Tasks for replace or upsert"),
-              task_ids: z.array(z.string()).max(200).optional().describe("Task IDs for delete"),
-            },
-            async (args) => handleTaskBatchTool(appToolContext, args)
-          ),
+          ...(boardTools.taskBatch ? [
+            tool(
+              "TaskBatch",
+              "Manage SocketAgent session working tasks in bulk. Use one call for two or more task changes instead of repeatedly calling TaskCreate or TaskUpdate. Modes: replace the managed task set, upsert several tasks, delete several IDs, clear completed tasks, or list the managed set. Native Claude tasks remain untouched.",
+              {
+                mode: z.enum(["replace", "upsert", "delete", "clear_completed", "list"]).describe("Bulk operation to perform"),
+                tasks: z.array(z.object({
+                  task_id: z.string().optional().describe("Existing SocketAgent task ID for updates; omit when creating"),
+                  subject: z.string().optional().describe("Short imperative task title; required when creating"),
+                  description: z.string().optional().describe("Detailed task description"),
+                  active_form: z.string().optional().describe("Present-continuous label shown while in progress"),
+                  status: z.enum(["pending", "in_progress", "completed"]).optional(),
+                  owner: z.string().optional(),
+                  blocked_by: z.array(z.string()).optional(),
+                  blocks: z.array(z.string()).optional(),
+                })).max(200).optional().describe("Tasks for replace or upsert"),
+                task_ids: z.array(z.string()).max(200).optional().describe("Task IDs for delete"),
+              },
+              async (args) => handleTaskBatchTool(appToolContext, args)
+            ),
+          ] : []),
+          ...(boardTools.projectBoard ? [
+            tool(
+              "ProjectBoard",
+              PROJECT_BOARD_TOOL_DESCRIPTION,
+              PROJECT_BOARD_TOOL_INPUT,
+              async (args) => handleProjectBoardTool(appToolContext, args),
+            ),
+          ] : []),
           tool(
             "AgentSession",
             AGENT_SESSION_TOOL_DESCRIPTION,
@@ -4066,7 +4120,8 @@ export class ClaudeSession {
           "ScheduleReminder",
           "NotifyUser",
           "ScheduleTask",
-          "TaskBatch",
+          ...(boardTools.taskBatch ? ["TaskBatch"] : []),
+          ...(boardTools.projectBoard ? ["ProjectBoard"] : []),
           "AgentSession",
           "Computers",
           "Remember",
@@ -4093,12 +4148,13 @@ export class ClaudeSession {
       this._turnCorrelation = {};
       const promptSessionId = resumeTarget || this.sessionId || "";
       const transferContext = this._pendingTransferContext;
-      const nativePrompt = transferContext
+      const nativePrompt = withBoardBlock(transferContext
         ? `<socketagent_session_handoff>\n${transferContext}\n</socketagent_session_handoff>\n\nCurrent user message:\n${prompt}`
-        : prompt;
+        : prompt, boardTurn);
       const promptStream = new ClaudeInputQueue();
       this.activeInputQueue = promptStream;
       promptStream.push(this._createUserMessage(nativePrompt, promptSessionId, userMsgUuid));
+      this._commitBoardTurn(promptSessionId, boardTurn);
       // Validate and persist resumed-session history before query() launches a
       // Claude subprocess. A corrupt crash snapshot must not strand an orphan.
       // SocketAgent's restart continuation reaches the model but is not one of
@@ -5015,6 +5071,10 @@ export class ClaudeSession {
         // Forward compact boundary events (token count before compaction)
         if (message.type === "system" && message.subtype === "compact_boundary") {
           const meta = message.compact_metadata || {};
+          // The summary may drop the board block; the next turn delivers it again.
+          this._boardDigest = null;
+          this._boardDigestUnsaved = false;
+          forgetBoardDelivery(this.sessionId || "");
           console.log(`[SDK] Compact boundary: trigger=${meta.trigger} preTokens=${meta.pre_tokens}`);
           // Saved first so the live marker carries the history row's position;
           // the app then keeps one marker when a history reload replays it.

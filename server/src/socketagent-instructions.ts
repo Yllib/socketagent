@@ -51,7 +51,12 @@ export function buildSocketAgentIntegrationInstructions(options: {
     "- Important immediate phone notification -> NotifyUser.",
     "- Device reminder -> ScheduleReminder.",
     "- Deferred or recurring agent work -> ScheduleTask. Set linkToSession=true when the result should return to this conversation and continue its agent; omit or false for a standalone task. Each run executes independently, then reports success or failure to the linked session, even while the app is closed.",
-    "- Two or more working-task mutations -> TaskBatch. Use one replace, upsert, or delete call instead of looping single-task tools; use clear_completed to remove finished SocketAgent tasks in bulk and list to inspect the managed set. TaskBatch preserves native Claude tasks.",
+    ...(options.toolNames.includes("TaskBatch")
+      ? ["- Two or more working-task mutations -> TaskBatch. Use one replace, upsert, or delete call instead of looping single-task tools; use clear_completed to remove finished SocketAgent tasks in bulk and list to inspect the managed set. TaskBatch preserves native Claude tasks."]
+      : []),
+    ...(options.toolNames.includes("ProjectBoard")
+      ? ["- Work that outlives this turn, such as decisions waiting on the user, work waiting on someone else, or work still in progress -> ProjectBoard, the project's shared board. Follow the statuses and rules in the <socketagent_project_board> block. Put the full source material the user needs to decide in a card's detail, and give every card waiting on the user an ask. Your step list inside one turn stays in your native todo tool."]
+      : []),
     ...(options.toolNames.includes("ReportSubagentAssignment")
       ? ["- If you are a spawned Codex subagent, call ReportSubagentAssignment exactly once before any commentary or other tool use. Pass agent_path exactly as shown in your NEW_TASK envelope and copy the complete readable NEW_TASK payload into prompt. This is an internal UI metadata handshake. Never call it from the root agent."]
       : []),

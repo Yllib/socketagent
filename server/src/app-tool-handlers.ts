@@ -87,6 +87,8 @@ export interface AppToolContext {
   reportSubagentAssignment?(agentPath: string, prompt: string): boolean;
   requestTranscriptAccess?(detail: string): Promise<boolean>;
   requestPluginAuthorization?(pluginName: string): Promise<boolean>;
+  /** A new child's parent board project, until the child has a session ID. */
+  getProjectBoardHint?(): string | null;
 }
 
 export interface SessionMemoryToolArgs {

@@ -31,6 +31,12 @@ import {
 } from "./app-tool-handlers";
 import { COMPUTERS_TOOL_DESCRIPTION, COMPUTERS_TOOL_INPUT, handleComputersTool } from "./computers-tool";
 import {
+  handleProjectBoardTool,
+  PROJECT_BOARD_TOOL_DESCRIPTION,
+  PROJECT_BOARD_TOOL_INPUT,
+  type BoardToolset,
+} from "./project-board-tool";
+import {
   AGENT_SESSION_TOOL_DESCRIPTION,
   HTML_PLAN_TOOL_DESCRIPTION,
   REMEMBER_TOOL_DESCRIPTION,
@@ -84,6 +90,10 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
     description: "Create, update, delete, clear, or list many session working tasks in one call.",
   },
   {
+    name: "ProjectBoard",
+    description: "List, read, create, update, move or delete cards on this chat's project board, or propose new board rules.",
+  },
+  {
     name: "ReportSubagentAssignment",
     description: "Internal SocketAgent metadata handshake for spawned Codex subagents.",
   },
@@ -117,19 +127,35 @@ export const SOCKETAGENT_APP_TOOLS: SocketAgentAppToolManifest[] = [
   },
 ];
 
+/** The tool names a chat gets: ProjectBoard in a board project, TaskBatch otherwise (see boardToolset). */
+export function socketAgentAppToolNames(board: BoardToolset): string[] {
+  return SOCKETAGENT_APP_TOOLS.map((tool) => tool.name).filter((name) =>
+    (name !== "TaskBatch" || board.taskBatch) && (name !== "ProjectBoard" || board.projectBoard));
+}
+
 interface CodexMcpRegistration {
   token: string;
   context: AppToolContext;
+  board: BoardToolset;
   transports: Map<string, StreamableHTTPServerTransport>;
 }
 
 const registrations = new Map<string, CodexMcpRegistration>();
 
-export function registerCodexAppMcp(context: AppToolContext): { token: string; unregister: () => void } {
+/**
+ * Registers a per-process MCP endpoint for [context]. [board] fixes which of
+ * ProjectBoard and TaskBatch it offers; the session registers again (with a
+ * new app-server) when that changes.
+ */
+export function registerCodexAppMcp(
+  context: AppToolContext,
+  board: BoardToolset = { projectBoard: false, taskBatch: true },
+): { token: string; unregister: () => void } {
   const token = randomBytes(32).toString("base64url");
   const registration: CodexMcpRegistration = {
     token,
     context,
+    board,
     transports: new Map<string, StreamableHTTPServerTransport>(),
   };
   registrations.set(token, registration);
@@ -151,7 +177,7 @@ function unregisterCodexAppMcp(token: string): void {
   registration.transports.clear();
 }
 
-function createServer(context: AppToolContext): McpServer {
+function createServer(context: AppToolContext, board: BoardToolset): McpServer {
   const server = new McpServer({
     name: "socketagent-app",
     version: "1.0.0",
@@ -311,28 +337,42 @@ function createServer(context: AppToolContext): McpServer {
     async (args) => handleScheduleTaskTool(context, args),
   );
 
-  server.registerTool(
-    "TaskBatch",
-    {
-      title: "Task Batch",
-      description: "Manage SocketAgent session working tasks in bulk. Use one call for two or more task changes instead of repeatedly calling single-task tools. Native Claude tasks remain untouched.",
-      inputSchema: {
-        mode: z.enum(["replace", "upsert", "delete", "clear_completed", "list"]).describe("replace the managed set; create/update several tasks; delete several IDs; clear completed tasks; or inspect the managed set"),
-        tasks: z.array(z.object({
-          task_id: z.string().optional().describe("Existing SocketAgent task ID for updates; omit when creating"),
-          subject: z.string().optional().describe("Short imperative task title; required when creating"),
-          description: z.string().optional().describe("Detailed task description"),
-          active_form: z.string().optional().describe("Present-continuous label shown while in progress"),
-          status: z.enum(["pending", "in_progress", "completed"]).optional(),
-          owner: z.string().optional(),
-          blocked_by: z.array(z.string()).optional(),
-          blocks: z.array(z.string()).optional(),
-        })).max(200).optional().describe("Tasks for replace or upsert"),
-        task_ids: z.array(z.string()).max(200).optional().describe("Task IDs for delete"),
+  if (board.taskBatch) {
+    server.registerTool(
+      "TaskBatch",
+      {
+        title: "Task Batch",
+        description: "Manage SocketAgent session working tasks in bulk. Use one call for two or more task changes instead of repeatedly calling single-task tools. Native Claude tasks remain untouched.",
+        inputSchema: {
+          mode: z.enum(["replace", "upsert", "delete", "clear_completed", "list"]).describe("replace the managed set; create/update several tasks; delete several IDs; clear completed tasks; or inspect the managed set"),
+          tasks: z.array(z.object({
+            task_id: z.string().optional().describe("Existing SocketAgent task ID for updates; omit when creating"),
+            subject: z.string().optional().describe("Short imperative task title; required when creating"),
+            description: z.string().optional().describe("Detailed task description"),
+            active_form: z.string().optional().describe("Present-continuous label shown while in progress"),
+            status: z.enum(["pending", "in_progress", "completed"]).optional(),
+            owner: z.string().optional(),
+            blocked_by: z.array(z.string()).optional(),
+            blocks: z.array(z.string()).optional(),
+          })).max(200).optional().describe("Tasks for replace or upsert"),
+          task_ids: z.array(z.string()).max(200).optional().describe("Task IDs for delete"),
+        },
       },
-    },
-    async (args) => handleTaskBatchTool(context, args),
-  );
+      async (args) => handleTaskBatchTool(context, args),
+    );
+  }
+
+  if (board.projectBoard) {
+    server.registerTool(
+      "ProjectBoard",
+      {
+        title: "Project Board",
+        description: PROJECT_BOARD_TOOL_DESCRIPTION,
+        inputSchema: PROJECT_BOARD_TOOL_INPUT,
+      },
+      async (args) => handleProjectBoardTool(context, args),
+    );
+  }
 
   server.registerTool(
     "ReportSubagentAssignment",
@@ -527,7 +567,7 @@ export async function handleCodexAppMcpRequest(req: IncomingMessage, res: Server
       const sid = transport?.sessionId;
       if (sid) registration.transports.delete(sid);
     };
-    await createServer(registration.context).connect(transport);
+    await createServer(registration.context, registration.board).connect(transport);
   }
 
   if (!transport) {

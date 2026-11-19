@@ -3852,6 +3852,51 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "project_board_grants"
+            },
+            "boards": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "secret": {
+                    "type": "string"
+                  },
+                  "sessionIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "projectId",
+                  "name",
+                  "secret",
+                  "sessionIds"
+                ]
+              }
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "boards",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "terminal_kill"
             },
             "commandId": {

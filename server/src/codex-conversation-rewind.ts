@@ -2,6 +2,7 @@ import type { HistoryEntry } from "./protocol";
 import { CodexAppServerProtocolError, type CodexAppServerClient } from "./codex-app-server-client";
 import { parseRewindThread, parseRewindResponse, parseRewindPage, parseRewindUserMessage, readRewindHistoryMode } from "./codex-rewind-contract";
 import { invalidateCodexInstructions } from "./codex-instruction-delivery";
+import { forgetBoardDelivery } from "./project-board-tool";
 import { archiveHistorySnapshot, getConversationRewindBoundary, truncateConversationHistory } from "./session-store";
 
 const rewinding = new Set<string>();
@@ -55,6 +56,7 @@ export async function rewindCodexConversation(client: Pick<CodexAppServerClient,
       if ((readRewindHistoryMode(resumed) || thread.historyMode) === "paginated") {
         await client.revertThread(sessionId, thread.turns[target.turnIndex].id);
         invalidateCodexInstructions(sessionId);
+        forgetBoardDelivery(sessionId);
         // Revert returns metadata only. Verify the retained IDs using the
         // native paginated history, never treat its empty turns field as empty history.
         turns = [];
@@ -71,6 +73,7 @@ export async function rewindCodexConversation(client: Pick<CodexAppServerClient,
       } else {
         const rolledBack = await client.rollbackThread(sessionId, target.numTurns);
         invalidateCodexInstructions(sessionId);
+        forgetBoardDelivery(sessionId);
         turns = parseRewindResponse(rolledBack).turns;
       }
       if (!Array.isArray(turns) || turns.length !== target.turnIndex

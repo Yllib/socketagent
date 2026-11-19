@@ -1041,6 +1041,22 @@ export interface TerminalDetachMessage {
   type: "terminal_detach";
 }
 
+/**
+ * Every project board this computer may use, with the secret and the chats
+ * on this computer in each project (docs/project-boards.md). The app sends
+ * the full set on every connect and change; it replaces what the server held.
+ */
+export interface ProjectBoardGrantsMessage {
+  type: "project_board_grants";
+  boards: {
+    projectId: string;
+    name: string;
+    /** Standard base64 of the 32-byte board secret. */
+    secret: string;
+    sessionIds: string[];
+  }[];
+}
+
 export interface TerminalKillMessage {
   type: "terminal_kill";
 }
@@ -1718,6 +1734,7 @@ export type ClientMessage = { commandId?: string } & (
   | TerminalInputMessage
   | TerminalResizeMessage
   | TerminalDetachMessage
+  | ProjectBoardGrantsMessage
   | TerminalKillMessage
   | RegisterPushTokenMessage
   | UnregisterPushTokenMessage
@@ -3915,6 +3932,13 @@ export interface SessionMemoryErrorServerMessage {
   message: string;
 }
 
+/** A child agent started by a chat in a board project joined that project on this computer. */
+export interface ProjectBoardMemberServerMessage {
+  type: "project_board_member";
+  projectId: string;
+  sessionId: string;
+}
+
 export interface BrowserSessionOpenServerMessage {
   type: "browser_session_open";
   /** The browser's ID. */
@@ -4228,4 +4252,5 @@ export type ServerMessage =
   | TerminalExitedServerMessage
   | TerminalErrorServerMessage
   | SessionMemoryStateServerMessage
-  | SessionMemoryErrorServerMessage;
+  | SessionMemoryErrorServerMessage
+  | ProjectBoardMemberServerMessage;

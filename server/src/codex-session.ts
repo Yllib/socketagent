@@ -77,7 +77,15 @@ import type {
   AgentSessionToolExecutor,
   DelegatedAgentLiveActivity,
 } from "./delegated-agent-types";
-import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS } from "./codex-app-mcp";
+import { registerCodexAppMcp, SOCKETAGENT_APP_TOOLS, socketAgentAppToolNames } from "./codex-app-mcp";
+import {
+  boardToolset,
+  commitBoardTurn,
+  forgetBoardDelivery,
+  prepareBoardTurn,
+  type BoardToolset,
+  type BoardTurn,
+} from "./project-board-tool";
 import { buildSocketAgentIntegrationInstructions } from "./socketagent-instructions";
 import { pendingSecureInputMessagesForSession, redactSecretsDeep, secureInputInventoryForAgent } from "./secure-input-store";
 import { SessionEventDelivery } from "./session-event-delivery";
@@ -732,6 +740,10 @@ const CODEX_BACKGROUND_TERMINAL_POLL_MS = 15_000;
 
 export class CodexSession {
   public _delegationSupervisorSessionId?: string;
+  /** A new child's parent board project, used until the child has a session ID. */
+  public projectBoardHint: string | null = null;
+  /** Board tools of the current MCP registration; Codex reads a server's tools once per process. */
+  private appServerBoardTools: BoardToolset | null = null;
   private sessionId: string | null = null; // SocketAgent session id (= codex thread_id)
   private threadId: string | null = null;  // codex thread_id (for resume)
   private appServer: CodexAppServerClient | null = null;
@@ -1892,6 +1904,7 @@ export class CodexSession {
       await this.ensureAppServer();
       await this.appServer!.rollbackThread(threadId, Math.floor(numTurns));
       invalidateCodexInstructions(threadId);
+      forgetBoardDelivery(threadId);
     } finally {
       this._rewindPending = false;
       this.scheduleAppServerIdleStop();
@@ -3202,6 +3215,7 @@ export class CodexSession {
 
     try {
       await this.resetInvalidatedAppServerAuthentication();
+      const boardTurn = await this.prepareBoardTools(resumeTarget || this.sessionId || "");
       await this.ensureAppServer();
 
       // Current app-server versions require model on turn/start. A new session
@@ -3255,6 +3269,7 @@ export class CodexSession {
       if (!this.threadId) throw new Error("codex app-server did not return a thread id");
       await deliverCodexInstructions(this.appServer!, this.threadId,
         threadConfig.developerInstructions, startedNewThread);
+      await this.deliverBoardBlock(this.threadId, boardTurn);
       const gitInfo = codexThreadGitInfo(this.cwd);
       if (gitInfo) {
         void this.appServer!.updateThreadMetadata({
@@ -3394,6 +3409,35 @@ export class CodexSession {
   private stopCommandCaptures(): void {
     for (const capture of this.commandCaptures.values()) capture.stop();
     this.commandCaptures.clear();
+  }
+
+  /**
+   * Pulls the chat's board and, when a grant changed its board tools since
+   * the app-server started, stops the idle app-server so the next one reads
+   * the new tool list. Background terminals and subagents end with their
+   * process, so a chat running them keeps the old tools until they finish.
+   */
+  private async prepareBoardTools(sessionId: string): Promise<BoardTurn> {
+    const turn = await prepareBoardTurn(sessionId, this.projectBoardHint, null);
+    const tools = boardToolset(sessionId, this.projectBoardHint);
+    const otherWork = this.backgroundTerminals.size > 0 || this.hasRunningSubagents || this._isCompacting
+      || this.pendingQuestions.size > 0;
+    if (this.appServer && this.appServerBoardTools && !otherWork
+      && JSON.stringify(tools) !== JSON.stringify(this.appServerBoardTools)) {
+      await this.stopAppServerClient();
+    }
+    return turn;
+  }
+
+  /** Adds the board block as developer instructions when it changed, the way changed guidance is delivered. */
+  private async deliverBoardBlock(threadId: string, turn: BoardTurn): Promise<void> {
+    try {
+      if (turn.block) await this.appServer!.injectDeveloperInstructions(threadId, turn.block);
+      commitBoardTurn(threadId, turn.digest);
+    } catch (error: unknown) {
+      // Not recorded, so the next turn tries again.
+      console.warn(`[codex app-server] Could not deliver the project board block: ${codexAppServerErrorMessage(error, String(error))}`);
+    }
   }
 
   private async ensureAppServer(): Promise<void> {
@@ -3710,6 +3754,7 @@ export class CodexSession {
     if (this.appServerMcpRegistration) {
       this.appServerMcpRegistration.unregister();
       this.appServerMcpRegistration = null;
+      this.appServerBoardTools = null;
     }
     if (!client) return;
     let stopped = false;
@@ -3828,7 +3873,8 @@ export class CodexSession {
 
   private appServerConfig(): Record<string, JsonValue> {
     if (!this.appServerMcpRegistration) {
-      this.appServerMcpRegistration = registerCodexAppMcp(this.createAppToolContext());
+      this.appServerBoardTools = this.currentBoardTools();
+      this.appServerMcpRegistration = registerCodexAppMcp(this.createAppToolContext(), this.appServerBoardTools);
     }
     const mcpUrl = this.buildCodexMcpUrl(this.appServerMcpRegistration.token);
     return {
@@ -4036,8 +4082,13 @@ export class CodexSession {
     this._pendingUserPrompt = null;
   }
 
+  private currentBoardTools(): BoardToolset {
+    return boardToolset(this.sessionId || this.threadId || this._resumeSessionId || "", this.projectBoardHint);
+  }
+
   private createAppToolContext(): AppToolContext {
     return {
+      getProjectBoardHint: () => this.projectBoardHint,
       getSessionId: () => this.sessionId || "",
       getDelegationSupervisorSessionId: () =>
         String(
@@ -6465,6 +6516,7 @@ export class CodexSession {
   private emitCompactBoundary(sid: string, trigger: string): void {
     if (this._compactBoundaryEmitted) return;
     invalidateCodexInstructions(sid);
+    forgetBoardDelivery(sid);
     this._compactBoundaryEmitted = true;
     const boundaryTrigger = trigger === "manual" ? "manual" : "auto";
     this._compactBoundaryTrigger = "auto";
@@ -6541,7 +6593,7 @@ export class CodexSession {
 
     parts.push(buildSocketAgentIntegrationInstructions({
       mcpServerName: "socketagent_app",
-      toolNames: SOCKETAGENT_APP_TOOLS.map((tool) => tool.name),
+      toolNames: socketAgentAppToolNames(this.appServerBoardTools ?? this.currentBoardTools()),
       secureInventory: secureInputInventoryForAgent(this.sessionId || undefined, this.cwd),
       discoverMissingTools: true,
     }));

@@ -112,11 +112,12 @@ import {
 import { listSkills, getSkill, saveSkill, deleteSkill, listMarketplacePlugins, runPluginCommand, listMarketplaces, addMarketplace, updateMarketplace, removeMarketplace } from "./skills-manager";
 import { handleCodexAppMcpRequest, isCodexAppMcpRequest } from "./codex-app-mcp";
 import { AiConnectorStore } from "./ai-connector-store";
+import { projectBoards } from "./project-board-store";
 import { AUTH_CODE_TTL_MS, AiConnectorOAuth, PendingSignIn, normalizePublicUrl } from "./ai-connector-oauth";
 import { ConnectorHostActions } from "./ai-connector-host-actions";
 import { AiConnectorHttp } from "./ai-connector-http";
 import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store";
-import type { AiConnectorStatusServerMessage } from "./protocol";
+import type { AiConnectorStatusServerMessage, ProjectBoardMemberServerMessage } from "./protocol";
 import { isAuthFailureMessage } from "./backend-auth";
 import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
 import { clearPushRegistrations, dropDeviceRegistrations, getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, relayPushTokens, sendPushNotification, setPushTransport, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
@@ -2726,6 +2727,12 @@ function deliverDelegatedAgentReport(record: DelegatedAgentRecord, run: Delegate
   });
 }
 
+/** Tells the app a chat joined a board project on this computer, so it files the chat there and sends a new grant. */
+function announceProjectBoardMember(projectId: string, sessionId: string): void {
+  const message: ProjectBoardMemberServerMessage = { type: "project_board_member", projectId, sessionId };
+  broadcastControlMessage({ ...message });
+}
+
 function registerDelegatedChildSession(
   record: DelegatedAgentRecord,
   session: Session,
@@ -2733,6 +2740,12 @@ function registerDelegatedChildSession(
 ): string | null {
   const sessionId = session.getSessionId();
   if (!sessionId) return null;
+  // A child of a chat in a board project joins that project here at once.
+  const boardProject = session.projectBoardHint;
+  session.projectBoardHint = null;
+  if (boardProject && projectBoards().addMember(boardProject, sessionId)) {
+    announceProjectBoardMember(boardProject, sessionId);
+  }
   if (activeSessions.get(temporaryId) === session) activeSessions.delete(temporaryId);
   activeSessions.set(sessionId, session);
   updateDelegatedAgent(record.delegationId, {
@@ -2837,6 +2850,10 @@ async function launchDelegatedAgentTurn(
       await restorePersistedAgentSettings(child, childInfo);
     } else {
       child.sessionLifetime = record.lifetime;
+      // Until it has a session ID, the new child uses its parent's board.
+      if (!record.remoteSupervisor) {
+        child.projectBoardHint = projectBoards().projectFor(record.parentSessionId || record.supervisorSessionId);
+      }
       await restorePersistedAgentSettings(child, undefined);
       await applyInitialSessionSettings(child, record.backend, {
         ...(record.agentSettings || {}),
@@ -5193,6 +5210,15 @@ function createConnectionHandler(
           appServerId,
           registered: isPushTokenRegistered(token, appServerId, deliveryRoute, channelKindForMessage(msg) === "v2"),
         });
+        break;
+      }
+
+      case "project_board_grants": {
+        const store = projectBoards();
+        // Chats that joined a board project here but are not in the grant yet:
+        // the app may have missed the first notice while it was offline.
+        for (const member of store.replaceGrants(msg.boards)) announceProjectBoardMember(member.projectId, member.sessionId);
+        store.syncAll();
         break;
       }
 
@@ -11682,6 +11708,11 @@ async function initializeListeningServer(): Promise<void> {
     console.log(`[AppMonitor] Restored ${restoredMonitors} durable monitor(s)`);
   }
   computerLinks.start();
+  // Send writes queued while the server was down and warm each board's cache.
+  projectBoards().syncAll();
+  // Pull every board every two minutes too, so items from outside services
+  // (Feedback Hub tickets) become cards while no chat is running.
+  setInterval(() => projectBoards().syncAll(), 120_000).unref();
   serverReady = true;
   transferJobs.resume();
   recoverInterruptedSessions();

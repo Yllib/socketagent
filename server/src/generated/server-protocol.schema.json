@@ -506,6 +506,9 @@
         },
         {
           "$ref": "#/definitions/SessionMemoryErrorServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ProjectBoardMemberServerMessage"
         }
       ]
     },
@@ -9474,6 +9477,26 @@
         "type",
         "sessionId",
         "message"
+      ]
+    },
+    "ProjectBoardMemberServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "project_board_member"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "projectId",
+        "sessionId"
       ]
     }
   }

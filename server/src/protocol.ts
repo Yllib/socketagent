@@ -1384,7 +1384,7 @@ export interface RestoreScheduledTaskMessage {
 
 /** "connector" is an AI client (Claude, ChatGPT) signed in through the AI connector. */
 export type DeviceKind = "device" | "computer" | "connector";
-export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "computer" | "connector";
+export type DevicePlatform = "android" | "windows" | "linux" | "macos" | "ios" | "web" | "computer" | "connector";
 export type DeviceRegistryMode = "learning" | "enforced";
 /** "ask" puts an approval card in the source chat; the user may allow the rest of that chat. */
 export type ComputerConfirm = "ask" | "never";
@@ -1419,6 +1419,25 @@ export interface DeviceApproveMessage {
   requestId?: string;
   publicKey: string;
   name?: string;
+}
+
+/**
+ * A recorded device on a v2 channel tells the computer its account's pass
+ * key. `pass` is that key's signature over the sender's own device key, which
+ * proves the sender holds it. `retired` lists pass keys the account dropped
+ * when its master key changed, and the computer never trusts those again.
+ *
+ * From a sender that came in by the pairing code, or by Allow from such a
+ * device, the computer trusts the pass key while that sender, or another
+ * like it that sent the same key, stays recorded. It also deletes the
+ * records the retired keys vouched for. From a sender a pass put on record,
+ * the pass key is noted and trusted for nothing, and no record is deleted.
+ */
+export interface AccountPassKeyMessage {
+  type: "account_pass_key";
+  requestId?: string;
+  pass: { k: string; s: string };
+  retired?: string[];
 }
 
 export interface DeviceDenyMessage {
@@ -1698,6 +1717,7 @@ export type ClientMessage = { commandId?: string } & (
   | DeviceAuthMessage
   | DeviceListMessage
   | DeviceApproveMessage
+  | AccountPassKeyMessage
   | DeviceDenyMessage
   | DeviceRemoveMessage
   | DeviceLockMessage
@@ -3187,6 +3207,14 @@ export interface DeviceListResultServerMessage {
   /** The caller's own key when it arrived through the relay. */
   self?: string;
   pending: Array<{ publicKey: string; name: string; platform: DevicePlatform; code: string }>;
+  /**
+   * Account pass keys this computer trusts: a new key with a pass from one
+   * is added without Allow. `devices` are the recorded devices that make the
+   * pass key trusted: they carry it, and no pass put them on record.
+   * Removing them all ends the trust. Absent on servers without account
+   * passes.
+   */
+  accounts?: Array<{ passKey: string; devices: string[] }>;
 }
 
 interface DeviceOperationOutcome {
@@ -3198,6 +3226,18 @@ interface DeviceOperationOutcome {
 
 export interface DeviceApproveResultServerMessage extends DeviceOperationOutcome {
   type: "device_approve_result";
+}
+
+export interface AccountPassKeyResultServerMessage {
+  type: "account_pass_key_result";
+  requestId?: string;
+  ok: boolean;
+  error?: string;
+  /**
+   * Why the pass key was not taken. `retired` tells the device its vault
+   * copy is old: its account has moved to a new master key.
+   */
+  reason?: "unrecorded" | "retired" | "full";
 }
 
 export interface DeviceDenyResultServerMessage extends DeviceOperationOutcome {
@@ -4188,6 +4228,7 @@ export type ServerMessage =
   | DeviceListResultServerMessage
   | AiConnectorStatusServerMessage
   | DeviceApproveResultServerMessage
+  | AccountPassKeyResultServerMessage
   | DeviceDenyResultServerMessage
   | DeviceRemoveResultServerMessage
   | PairingResetResultServerMessage

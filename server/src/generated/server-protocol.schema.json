@@ -313,6 +313,9 @@
           "$ref": "#/definitions/DeviceApproveResultServerMessage"
         },
         {
+          "$ref": "#/definitions/AccountPassKeyResultServerMessage"
+        },
+        {
           "$ref": "#/definitions/DeviceDenyResultServerMessage"
         },
         {
@@ -6380,6 +6383,7 @@
         "linux",
         "macos",
         "ios",
+        "web",
         "computer",
         "connector"
       ]
@@ -6445,6 +6449,27 @@
               "name",
               "platform",
               "code"
+            ]
+          }
+        },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "passKey": {
+                "type": "string"
+              },
+              "devices": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "passKey",
+              "devices"
             ]
           }
         }
@@ -6596,6 +6621,36 @@
         "ok",
         "publicKey",
         "type"
+      ]
+    },
+    "AccountPassKeyResultServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "account_pass_key_result"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "unrecorded",
+            "retired",
+            "full"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "ok"
       ]
     },
     "DeviceDenyResultServerMessage": {

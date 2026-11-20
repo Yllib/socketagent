@@ -1,4 +1,4 @@
-import { DeviceEntry, DeviceRegistry, DevicePlatform, deviceFingerprint } from "./device-registry";
+import { DeviceEntry, DeviceRegistry, DevicePlatform, deviceFingerprint, appPlatformOf } from "./device-registry";
 import { constantTimeEqual } from "./secret-compare";
 import { isLoopbackAddress } from "./loopback-request";
 
@@ -142,7 +142,7 @@ export class DeviceAuthGate {
     const reason = this.barred(publicKey, "control");
     if (reason) return { ok: false, reason, close: true };
     const name = (request.name || "").trim().slice(0, 80);
-    const platform = request.platform;
+    const platform = request.platform === undefined ? undefined : appPlatformOf(request.platform);
     if (this.registry.get(publicKey)) {
       this.registry.touch(publicKey, { name: name || undefined, platform });
       return { ok: true, enrolled: false };
@@ -216,6 +216,17 @@ export class DeviceAuthGate {
 }
 
 /**
+ * The `vouchedBy` a record takes from the device that makes it, by Allow or
+ * by linking a computer. [maker] is that device's key, or undefined for a
+ * client on this computer itself. Undefined means the new record is not
+ * marked: its maker came in by the pairing code, or is no recorded device.
+ */
+export function inheritedVouchedBy(registry: DeviceRegistry, maker: string | undefined): string | undefined {
+  const by = maker ? registry.get(maker) : undefined;
+  return by?.kind === "device" ? by.vouchedBy : undefined;
+}
+
+/**
  * Records the device key a `device_approve` names. [waiting] is set when the
  * key is held for an answer: its owner was shown a code for it, and the
  * record is made as it always was. A key already on record keeps its
@@ -229,17 +240,24 @@ export class DeviceAuthGate {
  * refuses it. An approver on the old path writes a vault with AUTH_TOKEN and
  * no pairing secret, so the invited device has only the old path to come in
  * by, and the record is made there for it to carry over from.
+ *
+ * [approver] is the device key the approval came from, when it has one. A
+ * new record takes that device's `vouchedBy`: what a device that a pass let
+ * in approves goes with it when its account retires that pass key, and what
+ * those approve in turn. A key already on record keeps what it has.
  */
 export function recordApprovedDevice(
   registry: DeviceRegistry,
-  approval: { publicKey: string; name: string; approverOnV2: boolean; waiting?: { name: string; platform: DevicePlatform } },
+  approval: { publicKey: string; name: string; approverOnV2: boolean; approver?: string; waiting?: { name: string; platform: DevicePlatform } },
 ): DeviceEntry {
   const { publicKey, waiting } = approval;
   const existing = registry.get(publicKey);
+  const vouchedBy = inheritedVouchedBy(registry, approval.approver);
   return registry.enroll({
     publicKey, kind: "device", via: "approval",
     name: approval.name || waiting?.name || existing?.name || "",
     platform: waiting?.platform || existing?.platform || "android",
     ...(approval.approverOnV2 && !waiting && !existing ? { transport: 2 } : {}),
+    ...(vouchedBy ? { vouchedBy } : {}),
   });
 }

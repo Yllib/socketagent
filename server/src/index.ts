@@ -83,11 +83,12 @@ import { relayClientOptions, type RelayLaneOptions } from "./relay-lanes";
 import { DirectV2Sockets, DirectV2Transport, MAX_DIRECT_FRAME_BYTES } from "./direct-v2-transport";
 import { MAX_HANDSHAKE_FRAME_BYTES } from "./transport-v2";
 import { BIN_MARKER_UPLOAD_CHUNK, DirectClientTransport } from "./direct-client-transport";
-import { broadcastDirectCapabilities, removeRegisteredKey } from "./device-removal";
+import { broadcastDirectCapabilities, closeDroppedKey, removeRegisteredKey } from "./device-removal";
 import { hasOriginHeader, hasReadableTarget, isLoopbackRequest } from "./loopback-request";
 import { ViewHub, parseViewSet } from "./view-hub";
 import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
-import { DeviceAuthGate, recordApprovedDevice } from "./device-auth";
+import { retiredPassKeysOf, verifiedPassKey } from "./account-pass";
+import { DeviceAuthGate, inheritedVouchedBy, recordApprovedDevice } from "./device-auth";
 import { constantTimeEqual } from "./secret-compare";
 import {
   ComputerLinkPeerApi, accessFor, approvalSummary, oneTimeDigest,
@@ -1565,7 +1566,10 @@ function startPairingOver(): void {
   // No phone keeps getting notifications across a reset. The relay is sent
   // the empty list for the room this computer is about to leave.
   clearPushRegistrations();
-  const { newOwnerKey } = deviceRegistry.resetPairing();
+  const { newOwnerKey, dropped } = deviceRegistry.resetPairing();
+  // The reset deleted every record a pass put here. An AI client or a link
+  // among them would otherwise keep its tokens or its open channel.
+  for (const publicKey of dropped) closeDroppedKey(publicKey, droppedKeySteps());
   const hadState = !newOwnerKey;
   rotateAuthToken("pairing was started over");
   PAIRING_TOKEN = crypto.randomBytes(32).toString("hex");
@@ -1665,6 +1669,8 @@ function serverCapabilitiesPayload(
     backendConfig: { version: 1 },
     transport: { version: 2 },
     deviceAuth: { version: 1, mode: deviceRegistry.mode },
+    // Registering a pass key needs a channel that proved the sender's key.
+    accountPasses: oldPath ? undefined : { version: 1 },
     computerLinks: { version: 2 },
     directE2e: oldPath ? { serverPubkey: toBase64(loadServerKeyPair().publicKey) } : undefined,
     relayPairing: oldPath && holdsToken ? relayPairingInfo() : undefined,
@@ -3484,12 +3490,14 @@ const aiConnectorOAuth = new AiConnectorOAuth({
     }).catch(() => undefined);
   },
   signInSettled: (signIn: PendingSignIn) => clearDevicePending(signIn.publicKey),
-  grantAccess: (signIn: PendingSignIn) => {
+  grantAccess: (signIn: PendingSignIn, vouchedBy?: string) => {
     deviceRegistry.enroll({
       // The AI client has its own permission prompts, so actions run without
       // a card here unless the user turns "Ask before each action" on.
       publicKey: signIn.publicKey, kind: "connector", via: "connector", name: signIn.clientName, platform: "connector",
       access: { read: true, agents: true, commands: true }, confirm: "never",
+      // Marked like the device that approved it, and revoked with it.
+      ...(vouchedBy ? { vouchedBy } : {}),
     });
     const now = new Date().toISOString();
     const sessionId = `connector-${crypto.createHash("sha256").update(signIn.publicKey).digest("hex").slice(0, 24)}`;
@@ -4086,6 +4094,27 @@ function dropDirectPeersWithKey(publicKey: string, reason: string): void {
   for (const peer of [...keyedDirectPeers]) if (peer.publicKey === publicKey) peer.close(reason);
 }
 
+/**
+ * Closes every channel a device key has open: relay, bulk and both direct
+ * paths. An open v2 channel is told nothing and just ends.
+ */
+function dropDeviceChannels(publicKey: string): void {
+  relayClient?.dropPeersWithKey(publicKey, "removed");
+  relayBulkClient?.dropPeersWithKey(publicKey, "removed");
+  dropDirectPeersWithKey(publicKey, "Removed");
+  directV2Sockets.dropKey(publicKey, "Removed");
+}
+
+/** What `closeDroppedKey` closes for a key whose record a pass put here and is now deleted. */
+function droppedKeySteps(): Parameters<typeof closeDroppedKey>[1] {
+  return {
+    dropDeviceChannels,
+    dropPushRegistrations: dropDeviceRegistrations,
+    revokeConnector: (key) => aiConnectorOAuth.revokeKey(key),
+    dropLinkPeers: (key) => relayLinkClient?.dropPeersWithKey(key, "removed"),
+  };
+}
+
 function onlineDeviceKeys(): Set<string> {
   return new Set([
     ...(relayClient?.openPeerKeys() ?? []),
@@ -4116,6 +4145,7 @@ function deviceListResult(requestId: string | undefined, self: string | undefine
     pending: Array.from(pendingDeviceNotices, ([publicKey, notice]) => ({
       publicKey, name: notice.name, platform: notice.platform, code: notice.code,
     })),
+    accounts: deviceRegistry.trustedPassKeys(),
   };
 }
 
@@ -10261,7 +10291,7 @@ function createConnectionHandler(
           break;
         }
         const publicKey = normalizePublicKey(msg.publicKey);
-        if (aiConnectorOAuth.approveSignIn(publicKey)) {
+        if (aiConnectorOAuth.approveSignIn(publicKey, inheritedVouchedBy(deviceRegistry, relayPeerKeyForMessage(msg)))) {
           // An AI client's sign-in, shown like a pending device. The browser
           // page waiting on it gets its code on the next refresh.
           sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });
@@ -10280,6 +10310,7 @@ function createConnectionHandler(
           publicKey,
           name: (msg.name || "").trim(),
           approverOnV2: channelKindForMessage(msg) === "v2",
+          approver: relayPeerKeyForMessage(msg),
           waiting: notice && notice.expiresAt > Date.now() ? notice : undefined,
         });
         relayClient?.approvePeersWithKey(publicKey);
@@ -10288,6 +10319,34 @@ function createConnectionHandler(
         directV2Sockets.approveKey(publicKey);
         clearDevicePending(publicKey);
         sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });
+        break;
+      }
+
+      case "account_pass_key": {
+        // Only a recorded device that proved its key on v2 may vouch for its
+        // account, and nothing is verified for anyone else. It could already
+        // approve any waiting key, and the trust lasts only while its record
+        // does, so its account's pass key gives it nothing new. It saves a
+        // prompt for devices that sign in to that account later. The pass
+        // key of a device that a pass let in is noted and trusted for nothing.
+        const requestId = msg.requestId;
+        const sender = relayPeerKeyForMessage(msg);
+        if (!sender || channelKindForMessage(msg) !== "v2" || deviceRegistry.get(sender)?.kind !== "device") {
+          sendJson({ type: "account_pass_key_result", requestId, ok: false, error: "Only a paired device on the new transport can do this" });
+          break;
+        }
+        const passKey = verifiedPassKey(msg.pass, sender);
+        if (!passKey) {
+          sendJson({ type: "account_pass_key_result", requestId, ok: false, error: "The pass does not match this device" });
+          break;
+        }
+        const { accepted, refusal, dropped } = deviceRegistry.registerPassKey(sender, passKey, retiredPassKeysOf(msg.retired));
+        // Records a retired key vouched for are gone. Their devices are not
+        // removed: each dials again and gets in with a pass from the new key.
+        // A computer link or an AI client among them has to be made again.
+        for (const publicKey of dropped) closeDroppedKey(publicKey, droppedKeySteps());
+        const error = refusal === "full" ? "This computer takes no more pass keys" : "That pass key was retired";
+        sendJson({ type: "account_pass_key_result", requestId, ok: accepted, ...(accepted ? {} : { error }), ...(refusal ? { reason: refusal } : {}) });
         break;
       }
 
@@ -10336,12 +10395,7 @@ function createConnectionHandler(
           break;
         }
         removeRegisteredKey(entry, msg.keepToken === true, {
-          dropDeviceChannels: (key) => {
-            relayClient?.dropPeersWithKey(key, "removed");
-            relayBulkClient?.dropPeersWithKey(key, "removed");
-            dropDirectPeersWithKey(key, "Removed");
-            directV2Sockets.dropKey(key, "Removed");
-          },
+          dropDeviceChannels,
           rotateAuthToken,
           revoke: (key) => { deviceRegistry.revoke(key); },
           clearPending: clearDevicePending,
@@ -10378,6 +10432,10 @@ function createConnectionHandler(
         // With a link secret the link runs on transport v2. Without one the
         // record keeps the secret it has, or stays on the old path.
         const linkSecret = msg.linkSecret === undefined ? {} : { linkSecret: normalizePublicKey(msg.linkSecret) };
+        // A link made by a device that a pass let in is marked like that
+        // device, and goes with it when its account retires the pass key.
+        const inherited = inheritedVouchedBy(deviceRegistry, relayPeerKeyForMessage(msg));
+        const vouchedBy = inherited ? { vouchedBy: inherited } : {};
         if (msg.oneTime) {
           // One request only. An existing link keeps its settings; without
           // one, a link with no access lasts as long as the grant.
@@ -10390,7 +10448,7 @@ function createConnectionHandler(
             deviceRegistry.enroll({
               publicKey, kind: "computer", via: "link", name, platform: "computer",
               access: { read: false, agents: false, commands: false }, confirm: "ask", expiresAt: grantExpiresAt,
-              ...linkSecret,
+              ...linkSecret, ...vouchedBy,
             });
           }
         } else {
@@ -10398,7 +10456,7 @@ function createConnectionHandler(
             publicKey, kind: "computer", via: "link", name, platform: "computer",
             access: msg.access, confirm: msg.confirm,
             ...(msg.expiresAt !== undefined ? { expiresAt: msg.expiresAt } : {}),
-            ...linkSecret,
+            ...linkSecret, ...vouchedBy,
           });
         }
         sendJson({ type: "device_approve_result", requestId, ok: true, publicKey });

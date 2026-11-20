@@ -57,6 +57,27 @@ export function removeRegisteredKey(entry: DeviceEntry, keepToken: boolean, step
   }
 }
 
+/**
+ * Closes what [publicKey] still holds after its record was deleted because
+ * its account retired the pass key that vouched for it. The record is
+ * already gone, so every step runs: each is keyed, and a key that is a
+ * device has no link channel or AI client tokens to lose, and the other way
+ * round. A device stops getting notifications, a linked computer's channel
+ * closes, and an AI client's tokens stop working at once.
+ *
+ * Unlike a removal this changes neither AUTH_TOKEN nor the pairing secret:
+ * the account's own devices are among the dropped and come straight back.
+ */
+export function closeDroppedKey(
+  publicKey: string,
+  steps: Pick<DeviceRemovalSteps, "dropDeviceChannels" | "dropPushRegistrations" | "revokeConnector" | "dropLinkPeers">,
+): void {
+  steps.dropDeviceChannels(publicKey);
+  steps.dropPushRegistrations(publicKey, false);
+  steps.revokeConnector(publicKey);
+  steps.dropLinkPeers(publicKey);
+}
+
 /** The three capability payloads one broadcast chooses between. */
 export interface CapabilityPayloads {
   /** For an old-path client that holds AUTH_TOKEN: carries the token and the room. */

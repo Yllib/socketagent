@@ -314,11 +314,177 @@ writes them back, so a new field doesn't need another bump.
      key, or start over.
 3. Derive the keys and GET the vault.
 4. Merge, add this device to `devices`, PUT, and adopt the computers.
-5. Enroll on each computer with the stored token (section 1). For computers
-   with no token in the vault, this device asks to be approved, and any
-   account device that is connected to that computer sends `device_approve`
-   for keys listed in the vault's `devices`. That approval is automatic,
-   because the user already proved the account through Google and the PIN.
+5. Connect to each computer. The handshake carries this device's pass (see
+   "Device passes" below), so a computer that trusts the account adds the
+   key without asking. A computer that doesn't trust it yet holds the key,
+   and any account device connected to it sends `device_approve` for keys
+   listed in the vault's `devices`, reading the vault again first when its
+   copy doesn't list the key. Either way nobody is asked, because the user
+   already proved the account through Google and the PIN. The Allow prompt
+   is only for keys the account doesn't list, such as a QR scan.
+
+### Device passes
+
+Every account device derives a pass key from the master key:
+`SHA-512("socketagent-device-pass-key-v1" || masterKey)[0..32]` as an
+Ed25519 seed. It is a different key from the account ID's, so computers
+can't link it to the relay's records. A pass is that key's signature over
+`"socketagent-device-pass-v1" || 0x00 || devicePublicKey` and travels as
+`{k, s}`, both base64.
+
+- The control lane's handshake payload carries `pass`. The computer checks
+  it only for a key it has no record of. When the signature is valid for
+  the key the handshake proved, and the pass key is trusted and not
+  retired, a locked computer adds the key instead of holding it. The record
+  gets `via: "approval"` and `vouchedBy`, the pass key that let it in. The
+  key must still prove the current pairing secret. A removed key still
+  waits for Allow, and a previous secret still gets silence. An unlocked
+  computer adds any key that proves the pairing code, so there the pass
+  does nothing and the record gets no `vouchedBy`.
+- The computer keeps apart the devices a pass put on record and the rest.
+  A record with `vouchedBy` came in by a pass. A record without it came in
+  by the pairing code, or by Allow from a device without it.
+  `device_approve` copies the approver's `vouchedBy` onto the record it
+  makes, so what a pass-admitted device approves is marked like its
+  approver, and so is what those approve. `device_authorize` does the same
+  for the linked computer's record, so a link is marked like the device
+  that made it. An AI client's sign-in is approved with `device_approve`
+  too, and its record is marked like the device that approved it. Allow or
+  a link from the computer itself leaves no mark. A record keeps what it
+  was made with: approving or linking a recorded key again neither clears
+  `vouchedBy` nor adds it.
+- A computer learns a pass key from `account_pass_key {pass, retired?}`.
+  A device sends it on a v2 channel after every `server_capabilities` that
+  carries `accountPasses`, and again to every connected computer as soon as
+  its account's master key or retired list changes. The computer takes it
+  only from a recorded device on a v2 channel, and checks that before it
+  verifies anything. `pass` is the sender's own pass, which shows it holds
+  the key. A pass key that is a point of small order is refused, because
+  signatures for those can be made up.
+- A device that last synced its vault more than two minutes ago starts a
+  sync as it sends `account_pass_key` after `server_capabilities`. An app
+  left open may have missed a change of master key, and a computer that was
+  asleep during the change learns of it from this message. The device does
+  not wait for the sync. It sends the key it holds, and sends again when the
+  sync brings a new key or a newly retired one. While the relay can't be
+  reached it tries once in 30 seconds.
+- Trust is tied to device records. The sender's record stores the pass key
+  as `passKey`. The computer trusts a pass key only while at least one
+  recorded device without `vouchedBy` carries it. Removing those devices
+  ends the trust, so a pass key is never stronger than the devices that
+  told the computer about it. A device carries one pass key.
+  `device_list_result.accounts` lists each trusted pass key with the
+  devices that make it trusted, and the Devices screen shows them under
+  "Trusted accounts".
+- A device with `vouchedBy` makes no pass key trusted. It may have come in
+  by an old pass before the computer heard that key was retired, and the
+  computer can't tell it from the account's real devices. Its `passKey` is
+  stored on its record and no pass is checked against it. So a device let
+  in by an old pass can't make up a pass key and vouch more keys in with
+  it, and neither can anything it approves.
+- Changing the master key (first PIN, Remove) adds the old pass key to the
+  vault's `retiredPassKeys`. The device that makes the change does it, and
+  so does every device that follows the move, so one updated device that
+  stays is enough when the change came from an older build. Devices send
+  the list with `account_pass_key`.
+- A retired pass key is never trusted again, whichever recorded device
+  reports it. The computer keeps every pass key it has trusted in
+  `passKeys`, marked `retiredAt` once retired, and never drops one. It
+  applies the whole `retired` list to those keys, however long the list is:
+  the vault appends the newest key last, so a limit on the front would lose
+  it behind made-up entries. Retired keys it never trusted go on
+  `retiredPassKeys`, the last 256 of a message, oldest out first. No record
+  goes on carrying a retired key.
+- `passKeys` holds at most 256 entries. An account adds one per change of
+  master key. Past that the computer takes no new pass key and answers
+  `ok: false`, so that account's new devices wait for Allow. Retirements
+  are still applied when the list is full. Only a device without
+  `vouchedBy` adds an entry, so a device let in by an old pass can't fill
+  the list.
+- When a device without `vouchedBy` names retired keys, the computer also
+  deletes every record those keys vouched for and closes its channels.
+  Those keys do not go on the removed list, so the account's real devices
+  dial again and get in with a pass from the new key. A key that a removed
+  device made for itself with the old pass key is deleted with them and
+  then waits for Allow. A device with `vouchedBy` deletes no record,
+  whatever it reports, and its own record goes the same way as the others.
+  Two such devices would otherwise delete each other in turn.
+- The computer links and AI clients those keys vouched for are deleted in
+  the same step. A link's channel closes and an AI client's tokens are
+  revoked, so neither works from that moment. Those made by a device
+  without `vouchedBy` stay. Nothing is put on the removed list, so the user
+  can link the computer or sign the AI client in again.
+- A deleted device also loses its push registrations, so it gets no more
+  notifications. The pairing secret is not renewed, because the account's
+  own devices are among the deleted and come back with it.
+- The app approves a waiting device unasked only on the word of a vault it
+  read in the last two minutes. With an older copy it syncs first, and
+  approves only when that sync succeeded and the vault still lists the
+  device. Otherwise it asks the user. An old copy may list a device the
+  account has since removed, and what a code-paired device approves gets a
+  record with no `vouchedBy`.
+- `account_pass_key_result` carries `reason` when the key was not taken.
+  On `retired` the app syncs its vault at once, once per pass key.
+- What the rule costs:
+  - A computer where every recorded device has `vouchedBy` trusts no pass
+    key. A new device there waits for Allow. An account device gives it
+    unasked when the vault lists the new key, so the new device gets in as
+    soon as one is connected to that computer, and waits while none is.
+    This happens to a locked computer once the devices that paired by code
+    are all removed. `socketagent pair --reset` ends it: the reset deletes
+    every record with `vouchedBy`, and a device that then scans the new
+    code is recorded without it. Allow from the computer itself for a new
+    key ends it too. Nothing a device sends takes `vouchedBy` off a record.
+  - After a change of master key, the new pass key is trusted from the
+    moment a device without `vouchedBy` reports it. Until then the old key
+    is retired, the new one is not yet trusted, and new devices wait for
+    Allow as above. Devices already on record are not touched. When that
+    report comes, the records the old key vouched for are deleted and their
+    devices dial again with a pass from the new key.
+  - A key that came in by an old pass stays on record until a device
+    without `vouchedBy` reports the retirement, or the user removes it on
+    the Devices screen. On a computer where every device has `vouchedBy`,
+    only the user removes it. It can vouch for nothing in the meantime, but
+    it is a recorded device and can do what any paired device can.
+  - A link or an AI client sign-in the user made from a pass-admitted
+    device is deleted at the next change of master key that a device
+    without `vouchedBy` reports, and has to be made again. Changing an
+    existing link's access from a pass-admitted device is not undone.
+  - A device with `vouchedBy` can remove any other device, the code-paired
+    ones included. That is wanted: a pass-admitted tablet must be able to
+    remove a lost phone. A key that came in by an old pass can do the same,
+    and with no code-paired device left nothing deletes it until the user
+    removes it or resets pairing.
+  - Any recorded device can retire a pass key, and a device that came in
+    by an old pass can name the account's current one. That computer then
+    never trusts it again and new devices wait for Allow there until the
+    next change of master key. The rule stays because it is what lets a
+    pass-admitted device end trust in an old key while the code-paired
+    device is away.
+- An account with no PIN sends no `pass` and no `account_pass_key`. Its
+  master key sits unsealed in Drive, and this keeps honest devices from
+  advertising the pass key that comes from it. It is no defence against
+  someone who already holds that master key. They can write a `pin` into
+  the vault, which devices take when the relay has no PIN record, and the
+  devices then send the pass key. They can also write their own key into
+  the vault's `devices`, which a connected account device approves unasked,
+  so the pass gives them nothing more. A plain account is only as safe as
+  its Google account until the first PIN is set. That is a change of master
+  key, and it retires the plain key's pass key.
+- `socketagent pair --reset` deletes every record with `vouchedBy`:
+  devices, linked computers and AI clients. It closes their channels and
+  revokes the AI clients' tokens. The reset can't tell which of them came
+  from an old pass. They are not put on the removed list, and the computer
+  is unlocked afterwards, so the account's own devices scan the new code
+  and are recorded without `vouchedBy`. Links and AI client sign-ins made
+  from pass-admitted devices have to be made again. Records without
+  `vouchedBy` stay as they were, less their `passKey`, so no account is
+  trusted until one of its devices connects again with the new code.
+  Retired keys stay retired. Only this command does it. The app's pairing
+  reset renews the code and touches no record.
+- Servers without `accountPasses` ignore `pass`, and older servers drop the
+  pass fields from `transport.json` on load. Both fall back to approval by a
+  connected device.
 
 A signed-in device never takes a key from Drive. On each sync it asks the
 relay for the vault first. It moves to a new key only when the relay's
@@ -396,6 +562,50 @@ Settings gets an Account screen with these actions:
   device unlock on Android
 - see when the PIN was set, when it was last used on a new device, and how
   many wrong tries it has had
+
+### The web app
+
+The web app is the Flutter app built for the browser (`build-app.sh --web`).
+It reaches computers only through the relay, joining as a phone with the
+join headers sent as WebSocket subprotocols (`socketagent-v2` plus
+`sa.<field>.<base64url>`), because browsers can't set headers.
+
+It signs in with Google Identity Services' token client and the same "Web
+application" OAuth client as Android (`SA_GOOGLE_WEB_CLIENT_ID` overrides
+it). That client's Authorized JavaScript origins must list every origin
+that serves the app. A browser can't restore Google without a tap, so on
+the web a missing session is not an error; the actions that need Google ask
+for it.
+
+Every browser is one device. The vault holds the shared key pair:
+
+```jsonc
+"webDevice": { "publicKey": "<b64>", "privateKey": "<b64>", "createdAt": 0 },
+"browsers": [{ "id": "<random per browser>", "label": "Chrome on Windows", "seenAt": 0 }]
+```
+
+- The first browser to sign in gives its own key. Later browsers take that
+  key on their first sync, before any computer is added, so computers list
+  one device named Web with platform `web`.
+- Two browsers that make a key at once keep the older one. The other moves
+  to it and forgets its own key.
+- Holding the private key in the vault trusts nobody new: any account device
+  can already act for the account.
+- `browsers` is for the device list only. A browser marks itself seen at most
+  twice a day, and entries unseen for 30 days drop off.
+- Sign out all browsers is Remove for the web key. The new vault has no
+  `webDevice` and no `browsers`, and the next browser to sign in makes a new
+  key. Forget is refused for the web key, since every browser still holds it.
+
+A browser forgets the account after 30 days unused. With Remember this
+browser off, the keys live in session storage, and everything else is wiped
+when a new browser session opens the app. The choice is offered only before
+sign-in, and changing it wipes the browser's storage and reloads.
+
+Servers before `web` saved the old `device_auth` path's platform unchecked,
+and an unknown value made `devices.json` unreadable on the next start. The
+app sends only `android`, `windows`, `linux`, `macos` or `ios` on that path,
+and the server now maps any platform it doesn't know to `android`.
 
 ## 3. Computer links and the agent tools (relay + server + app)
 

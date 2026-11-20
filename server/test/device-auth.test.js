@@ -5,7 +5,7 @@ const test = require("node:test");
 const dataDir = require("./test-data-dir");
 
 const { DeviceRegistry } = require("#server/device-registry");
-const { DeviceAuthGate, recordApprovedDevice } = require("#server/device-auth");
+const { DeviceAuthGate, inheritedVouchedBy, recordApprovedDevice } = require("#server/device-auth");
 const { channelKindForMessage, RelayClient } = require("#server/relay-client");
 const { rotateAuthTokenInEnv } = require("#server/env-file");
 const { SessionKeyedPeerStore, SessionOffer, decrypt, encrypt, generateKeyPair, toBase64 } = require("#server/relay-crypto");
@@ -655,6 +655,63 @@ test("a key approved unseen by a device on v2 is recorded for v2 only and must p
   assert.equal(recordApprovedDevice(registry, { publicKey: key, name: "", approverOnV2: false, waiting: { name: "x", platform: "ios" } }).transport, 2);
 });
 
+test("what a device let in by a pass approves goes with it when the pass key is retired", () => {
+  const { registry } = approvalSetup();
+  const newKey = () => toBase64(generateKeyPair().publicKey);
+  const account = newKey();
+  /** Records a v2 device. @param {string} [vouchedBy] */
+  const device = (vouchedBy) => registry.enroll({
+    publicKey: newKey(), kind: "device", name: "Pixel", platform: "android", via: "token", transport: 2, ...(vouchedBy ? { vouchedBy } : {}),
+  }).publicKey;
+  /** The record [approver] makes by approving a new key. @param {string} [approver] */
+  const approved = (approver) => recordApprovedDevice(registry, { publicKey: newKey(), name: "", approverOnV2: true, approver });
+  const phone = device();
+  const stranger = device(account);
+
+  const first = approved(stranger);
+  assert.equal(first.vouchedBy, account);
+  const second = approved(first.publicKey);
+  assert.equal(second.vouchedBy, account, "and so does what that one approves");
+  const allowed = approved(phone);
+  assert.equal(allowed.vouchedBy, undefined, "Allow from a device that came in by the code leaves no mark");
+  const local = approved();
+  assert.equal(local.vouchedBy, undefined, "nor does Allow from this computer itself");
+  // A key already on record keeps what it has, whoever approves it again.
+  assert.equal(recordApprovedDevice(registry, { publicKey: phone, name: "", approverOnV2: true, approver: stranger }).vouchedBy, undefined);
+  assert.equal(recordApprovedDevice(registry, { publicKey: first.publicKey, name: "", approverOnV2: true, approver: phone }).vouchedBy, account);
+
+  // What the stranger approved is trusted for no more than the stranger is.
+  registry.registerPassKey(first.publicKey, newKey(), []);
+  assert.deepEqual(registry.trustedPassKeys(), []);
+
+  // A computer link takes the mark of the device that makes it, as
+  // `device_authorize` records it.
+  /** Records the link [maker] makes. @param {string} [maker] */
+  const linked = (maker) => {
+    const vouchedBy = inheritedVouchedBy(registry, maker);
+    return registry.enroll({
+      publicKey: newKey(), kind: "computer", name: "Mac", platform: "computer", via: "link", transport: 2,
+      access: { read: true, agents: true, commands: true }, confirm: "never", ...(vouchedBy ? { vouchedBy } : {}),
+    });
+  };
+  const strangersLink = linked(second.publicKey);
+  assert.equal(strangersLink.vouchedBy, account);
+  const [phonesLink, localLink] = [linked(phone), linked()];
+  assert.equal(phonesLink.vouchedBy, undefined);
+  assert.equal(localLink.vouchedBy, undefined);
+  assert.equal(inheritedVouchedBy(registry, strangersLink.publicKey), undefined, "a linked computer hands nothing on");
+  assert.equal(inheritedVouchedBy(registry, newKey()), undefined);
+
+  assert.deepEqual(
+    registry.registerPassKey(phone, newKey(), [account]).dropped,
+    [stranger, first.publicKey, second.publicKey, strangersLink.publicKey],
+  );
+  assert.equal(registry.get(phonesLink.publicKey)?.kind, "computer");
+  assert.equal(registry.get(localLink.publicKey)?.kind, "computer");
+  assert.equal(registry.get(allowed.publicKey)?.kind, "device");
+  assert.equal(registry.get(local.publicKey)?.kind, "device");
+});
+
 test("a key approved unseen by a device on the old path gets in on the old path and carries over", () => {
   const { registry, gate, handshake } = approvalSetup();
 
@@ -670,4 +727,21 @@ test("a key approved unseen by a device on the old path gets in on the old path 
   assert.equal(handshake(invited, registry.currentSecret().secret, true), "open");
   assert.equal(registry.get(key)?.transport, 2);
   assert.deepEqual(gate.authorize(key, "control"), { admission: "refused", reason: "not_approved" });
+});
+
+test("a platform the state file does not know is saved as android, so the file still loads", () => {
+  const file = registryFile();
+  const registry = new DeviceRegistry(file, registryFile());
+  const gate = new DeviceAuthGate(registry, () => AUTH_TOKEN);
+  const odd = toBase64(generateKeyPair().publicKey);
+  const browser = toBase64(generateKeyPair().publicKey);
+  assert.equal(gate.deviceAuth(odd, "control", { token: AUTH_TOKEN, name: "Toaster", platform: /** @type {never} */ ("fuchsia") }).ok, true);
+  assert.equal(gate.deviceAuth(browser, "control", { token: AUTH_TOKEN, name: "Web", platform: "web" }).ok, true);
+  // An enrolled device renaming itself goes through the same check.
+  gate.deviceAuth(browser, "control", { name: "Web", platform: /** @type {never} */ ("fuchsia") });
+
+  const reloaded = new DeviceRegistry(file, registryFile());
+  assert.equal(reloaded.readable, true);
+  assert.equal(reloaded.get(odd)?.platform, "android");
+  assert.equal(reloaded.get(browser)?.platform, "android");
 });

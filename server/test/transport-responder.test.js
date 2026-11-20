@@ -17,6 +17,8 @@ const {
 const { encodeHs1Frame, parseHs1Frame, secretTag } = require("#server/transport-v2");
 const { parseJsonObject } = require("#server/value-guards");
 const { dial } = require("./v2-initiator");
+const nacl = require("tweetnacl");
+const { devicePassMessage } = require("#server/account-pass");
 
 const ROOM_ID = "ab".repeat(32);
 const LINK_ROOM_ID = "cd".repeat(32);
@@ -67,27 +69,33 @@ test("the admission table of spec 7.3", () => {
   /** @type {[Parameters<typeof admissionFor>[0], ReturnType<typeof admissionFor>][]} */
   const rows = [
     // Rule 2: another kind of key, whatever it proves.
-    [{ lane: "control", standing: "other-kind", fitted: "current", locked: false }, "silent"],
-    [{ lane: "bulk", standing: "other-kind", fitted: "current", locked: false }, "silent"],
+    [{ lane: "control", standing: "other-kind", fitted: "current", locked: false, vouched: false }, "silent"],
+    [{ lane: "bulk", standing: "other-kind", fitted: "current", locked: false, vouched: false }, "silent"],
     // Rules 3 and 4.
-    [{ lane: "control", standing: "device", fitted: "current", locked: true }, "open"],
-    [{ lane: "control", standing: "device", fitted: "previous", locked: true }, "open-update"],
-    [{ lane: "bulk", standing: "device", fitted: "current", locked: true }, "open"],
-    [{ lane: "bulk", standing: "device", fitted: "previous", locked: true }, "open"],
+    [{ lane: "control", standing: "device", fitted: "current", locked: true, vouched: false }, "open"],
+    [{ lane: "control", standing: "device", fitted: "previous", locked: true, vouched: false }, "open-update"],
+    [{ lane: "bulk", standing: "device", fitted: "current", locked: true, vouched: false }, "open"],
+    [{ lane: "bulk", standing: "device", fitted: "previous", locked: true, vouched: false }, "open"],
     // Rules 5 and 6: a removed key asks again, locked or not.
-    [{ lane: "control", standing: "removed", fitted: "current", locked: false }, "hold"],
-    [{ lane: "control", standing: "removed", fitted: "current", locked: true }, "hold"],
-    [{ lane: "control", standing: "removed", fitted: "previous", locked: false }, "silent"],
+    [{ lane: "control", standing: "removed", fitted: "current", locked: false, vouched: false }, "hold"],
+    [{ lane: "control", standing: "removed", fitted: "current", locked: true, vouched: false }, "hold"],
+    [{ lane: "control", standing: "removed", fitted: "previous", locked: false, vouched: false }, "silent"],
     // Rules 7 to 9.
-    [{ lane: "control", standing: "unknown", fitted: "current", locked: false }, "add"],
-    [{ lane: "control", standing: "unknown", fitted: "current", locked: true }, "hold"],
-    [{ lane: "control", standing: "unknown", fitted: "previous", locked: false }, "silent"],
+    [{ lane: "control", standing: "unknown", fitted: "current", locked: false, vouched: false }, "add"],
+    [{ lane: "control", standing: "unknown", fitted: "current", locked: true, vouched: false }, "hold"],
+    [{ lane: "control", standing: "unknown", fitted: "previous", locked: false, vouched: false }, "silent"],
     // Bulk never adds or holds.
-    [{ lane: "bulk", standing: "unknown", fitted: "current", locked: false }, "refuse"],
-    [{ lane: "bulk", standing: "unknown", fitted: "current", locked: true }, "refuse"],
-    [{ lane: "bulk", standing: "removed", fitted: "current", locked: false }, "refuse"],
-    [{ lane: "bulk", standing: "removed", fitted: "previous", locked: false }, "silent"],
-    [{ lane: "bulk", standing: "unknown", fitted: "previous", locked: false }, "silent"],
+    [{ lane: "bulk", standing: "unknown", fitted: "current", locked: false, vouched: false }, "refuse"],
+    [{ lane: "bulk", standing: "unknown", fitted: "current", locked: true, vouched: false }, "refuse"],
+    [{ lane: "bulk", standing: "removed", fitted: "current", locked: false, vouched: false }, "refuse"],
+    [{ lane: "bulk", standing: "removed", fitted: "previous", locked: false, vouched: false }, "silent"],
+    [{ lane: "bulk", standing: "unknown", fitted: "previous", locked: false, vouched: false }, "silent"],
+    // A pass from a trusted account adds a new key on a locked computer, and
+    // changes nothing else.
+    [{ lane: "control", standing: "unknown", fitted: "current", locked: true, vouched: true }, "add"],
+    [{ lane: "control", standing: "removed", fitted: "current", locked: true, vouched: true }, "hold"],
+    [{ lane: "control", standing: "unknown", fitted: "previous", locked: true, vouched: true }, "silent"],
+    [{ lane: "bulk", standing: "unknown", fitted: "current", locked: true, vouched: true }, "refuse"],
   ];
   for (const [input, expected] of rows) assert.equal(admissionFor(input), expected, JSON.stringify(input));
 });
@@ -247,6 +255,135 @@ test("rule 8: a locked computer holds a new key until a paired device allows it"
   // Allow before the index has recorded the key does nothing.
   assert.equal(env.responder.approve(outcome.handshake), null);
   assert.equal(env.responder.heldCount, 0);
+});
+
+/** An account pass key, and a pass it signs for one device key (base64). */
+function passKeyPair() {
+  const keys = nacl.sign.keyPair();
+  const key = Buffer.from(keys.publicKey).toString("base64");
+  /** @param {string} devicePublicKey */
+  const passFor = (devicePublicKey) => ({
+    k: key,
+    s: Buffer.from(nacl.sign.detached(devicePassMessage(Buffer.from(devicePublicKey, "base64")), keys.secretKey)).toString("base64"),
+  });
+  return { key, passFor };
+}
+
+/**
+ * A device whose message 1 carries the pass [makePass] gives for its own key.
+ * @param {ReturnType<typeof setup>} env
+ * @param {(devicePublicKey: string) => { k: string, s: string }} makePass
+ */
+function deviceWithPass(env, makePass) {
+  const keyPair = generateKeyPair();
+  const publicKey = Buffer.from(keyPair.publicKey).toString("base64");
+  return env.device({ keys: keyPair, payload: { app: "1.2.0", name: "Web", platform: "web", caps: {}, pass: makePass(publicKey) } });
+}
+
+/**
+ * Records a device that tells the computer its account's pass key.
+ * @param {ReturnType<typeof setup>} env
+ * @param {string} passKey
+ */
+function deviceOnAccount(env, passKey) {
+  const publicKey = Buffer.from(generateKeyPair().publicKey).toString("base64");
+  env.registry.enroll({ publicKey, kind: "device", name: "Pixel", platform: "android", via: "token", transport: 2 });
+  assert.equal(env.registry.registerPassKey(publicKey, passKey, []).accepted, true);
+  return publicKey;
+}
+
+test("a locked computer adds a new key that carries a pass from an account it trusts", () => {
+  const env = setup();
+  env.registry.lock();
+  const account = passKeyPair();
+  deviceOnAccount(env, account.key);
+  const device = deviceWithPass(env, account.passFor);
+  const { outcome, status } = answer(env, device);
+  assert.equal(status, "open");
+  assert.ok(outcome.result === "answered");
+  assert.equal(env.registry.get(device.publicKey), undefined, "nothing is recorded before transport_ready");
+  assert.deepEqual(env.responder.ready(outcome.handshake), { result: "open" });
+  const entry = env.registry.get(device.publicKey);
+  assert.equal(entry?.via, "approval");
+  assert.equal(entry?.platform, "web");
+  assert.equal(entry?.vouchedBy, account.key, "the record names the pass key that let it in");
+});
+
+test("an unlocked computer records no pass, because the pairing code let the key in", () => {
+  const env = setup();
+  const account = passKeyPair();
+  deviceOnAccount(env, account.key);
+  const device = deviceWithPass(env, account.passFor);
+  const { outcome } = answer(env, device);
+  assert.ok(outcome.result === "answered");
+  assert.deepEqual(env.responder.ready(outcome.handshake), { result: "open" });
+  const entry = env.registry.get(device.publicKey);
+  assert.equal(entry?.via, "token");
+  assert.equal(entry?.vouchedBy, undefined);
+});
+
+test("a device a pass let in can't vouch more keys in with a pass key of its own", () => {
+  const env = setup();
+  env.registry.lock();
+  const account = passKeyPair();
+  const madeUp = passKeyPair();
+  deviceOnAccount(env, account.key);
+  // The account retired this pass key, but the computer has not heard yet.
+  const stranger = deviceWithPass(env, account.passFor);
+  const admitted = answer(env, stranger).outcome;
+  assert.ok(admitted.result === "answered");
+  assert.deepEqual(env.responder.ready(admitted.handshake), { result: "open" });
+
+  // It reports the retirement itself and offers a pass key it made up.
+  assert.equal(env.registry.registerPassKey(stranger.publicKey, madeUp.key, [account.key]).accepted, true);
+  assert.equal(env.registry.get(stranger.publicKey)?.passKey, madeUp.key);
+  for (const pass of [madeUp.passFor, account.passFor]) {
+    const { outcome, status } = answer(env, deviceWithPass(env, pass));
+    assert.equal(status, "pending");
+    assert.ok(outcome.result === "answered");
+    assert.equal(env.responder.ready(outcome.handshake).result, "held");
+  }
+});
+
+test("a pass is no use from an untrusted or retired account, for another key, or for a removed key", () => {
+  const env = setup();
+  env.registry.lock();
+  const trusted = passKeyPair();
+  const stranger = passKeyPair();
+  const phone = deviceOnAccount(env, trusted.key);
+  const other = generateKeyPair();
+  const otherKey = Buffer.from(other.publicKey).toString("base64");
+
+  // Signed by a key this computer never trusted.
+  assert.equal(answer(env, deviceWithPass(env, stranger.passFor)).status, "pending");
+  // A valid pass, but for a different device key.
+  assert.equal(answer(env, deviceWithPass(env, () => trusted.passFor(otherKey))).status, "pending");
+  // A removed key asks again, pass or not.
+  const removed = deviceWithPass(env, trusted.passFor);
+  env.registry.enroll({ publicKey: removed.publicKey, kind: "device", name: "Old", platform: "android", via: "token" });
+  env.registry.revoke(removed.publicKey);
+  assert.equal(answer(env, removed).status, "pending");
+
+  // Retired between hs2 and transport_ready: the handshake closes and nothing is recorded.
+  const late = deviceWithPass(env, trusted.passFor);
+  const { outcome, status } = answer(env, late);
+  assert.equal(status, "open");
+  assert.ok(outcome.result === "answered");
+  env.registry.registerPassKey(phone, stranger.key, [trusted.key]);
+  assert.deepEqual(env.responder.ready(outcome.handshake), { result: "closed" });
+  assert.equal(env.registry.get(late.publicKey), undefined);
+});
+
+test("a pass stops working when the device that told the computer about the account is removed", () => {
+  const env = setup();
+  env.registry.lock();
+  const account = passKeyPair();
+  const phone = deviceOnAccount(env, account.key);
+  env.registry.revoke(phone);
+  const { outcome, status } = answer(env, deviceWithPass(env, account.passFor));
+  assert.equal(status, "pending");
+  assert.ok(outcome.result === "answered");
+  assert.equal(env.responder.ready(outcome.handshake).result, "held");
 });
 
 test("an allowed key is marked v2 and told about a secret that changed while it waited", () => {

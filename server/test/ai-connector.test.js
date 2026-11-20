@@ -14,7 +14,9 @@ const {
 const { AiConnectorHttp } = require("#server/ai-connector-http");
 const { DeviceRegistry } = require("#server/device-registry");
 const { ComputerLinkPeerApi } = require("#server/computer-link-peer");
-const { generateKeyPair } = require("#server/relay-crypto");
+const { generateKeyPair, toBase64 } = require("#server/relay-crypto");
+const { inheritedVouchedBy } = require("#server/device-auth");
+const { closeDroppedKey } = require("#server/device-removal");
 const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const { StreamableHTTPClientTransport } = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
 const { UnauthorizedError } = require("@modelcontextprotocol/sdk/client/auth.js");
@@ -51,7 +53,8 @@ function oauthError(err) {
 
 /**
  * A store, OAuth server and listener sharing one fake clock, with a host that records everything.
- * @param {{ fetchClientMetadata?: (clientId: string) => Promise<ClientMetadataDocument> }} options
+ * With [registry] the host records each approved client there, as the server does.
+ * @param {{ fetchClientMetadata?: (clientId: string) => Promise<ClientMetadataDocument>, registry?: InstanceType<typeof DeviceRegistry> }} options
  */
 function setup(options = {}) {
   const clock = { now: 1_760_000_000_000 };
@@ -71,8 +74,12 @@ function setup(options = {}) {
     serverName: () => "Desktop",
     signInPending: (signIn) => pending.push(signIn),
     signInSettled: (signIn) => settled.push(signIn.status),
-    grantAccess: (signIn) => {
+    grantAccess: (signIn, vouchedBy) => {
       granted.push(signIn.clientName);
+      options.registry?.enroll({
+        publicKey: signIn.publicKey, kind: "connector", via: "connector", name: signIn.clientName, platform: "connector",
+        access: { read: true, agents: true, commands: true }, confirm: "never", ...(vouchedBy ? { vouchedBy } : {}),
+      });
       return { sessionId: `connector-${granted.length}` };
     },
     grantAbandoned: (grant) => abandoned.push(grant.publicKey),
@@ -108,9 +115,10 @@ function pkce() {
 
 /**
  * Registers a public client, starts a sign-in and approves it on the "phone". Returns what the token endpoint needs.
- * @param {ReturnType<typeof setup>} env @param {Record<string, string>} overrides
+ * [vouchedBy] is the approving device's mark, when a pass put that device on record.
+ * @param {ReturnType<typeof setup>} env @param {Record<string, string>} overrides @param {string} [vouchedBy]
  */
-async function signIn(env, overrides = {}) {
+async function signIn(env, overrides = {}, vouchedBy = undefined) {
   const registration = env.oauth.register({
     client_name: "Claude", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"], token_endpoint_auth_method: "none",
   });
@@ -120,7 +128,7 @@ async function signIn(env, overrides = {}) {
     code_challenge: challenge, code_challenge_method: "S256", state: "xyz", resource: env.oauth.resourceUrl, ...overrides,
   });
   const started = await env.oauth.authorize(query);
-  assert.equal(env.oauth.approveSignIn(started.publicKey), true);
+  assert.equal(env.oauth.approveSignIn(started.publicKey, vouchedBy), true);
   const location = new URL(env.oauth.redirectFor(started.requestId) ?? "");
   const code = location.searchParams.get("code") ?? "";
   return { registration, verifier, code, location, started };
@@ -266,6 +274,54 @@ test("approval on the phone issues a one-time code that needs the PKCE verifier"
   env.oauth.revokeKey(again.started.publicKey);
   assert.equal(env.oauth.authenticateBearer(`Bearer ${refreshed.access_token}`), undefined);
   assert.throws(() => env.oauth.token({ grant_type: "refresh_token", client_id: again.registration.client_id, refresh_token: refreshed.refresh_token }), (err) => oauthError(err).code === "invalid_grant");
+});
+
+test("an AI client approved by a device a pass let in is revoked when that pass key is retired", async () => {
+  const registry = new DeviceRegistry(path.join(dataDir, `connector-transport-${++counter}.json`));
+  const env = setup({ registry });
+  env.store.saveSettings({ publicUrl: "https://agent.example.com" });
+  const newKey = () => toBase64(generateKeyPair().publicKey);
+  const account = newKey();
+  /** Records a v2 device. @param {string} [vouchedBy] */
+  const device = (vouchedBy) => registry.enroll({
+    publicKey: newKey(), kind: "device", name: "Pixel", platform: "android", via: "token", transport: 2, ...(vouchedBy ? { vouchedBy } : {}),
+  }).publicKey;
+  const [phone, stranger] = [device(), device(account)];
+  /** Signs an AI client in with [approver]'s Allow. Returns its key and its bearer header. @param {string} approver */
+  const client = async (approver) => {
+    const { started, code, registration, verifier } = await signIn(env, {}, inheritedVouchedBy(registry, approver));
+    const tokens = env.oauth.token({
+      grant_type: "authorization_code", client_id: registration.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback",
+      resource: env.oauth.resourceUrl, code, code_verifier: verifier,
+    });
+    return { key: started.publicKey, bearer: `Bearer ${tokens.access_token}` };
+  };
+  const strangers = await client(stranger);
+  const phones = await client(phone);
+  assert.equal(registry.get(strangers.key)?.vouchedBy, account, "the client is marked like the device that approved it");
+  assert.equal(registry.get(phones.key)?.vouchedBy, undefined);
+  assert.ok(env.oauth.authenticateBearer(strangers.bearer));
+
+  // The phone came in by the pairing code and reports the retirement.
+  const { dropped } = registry.registerPassKey(phone, newKey(), [account]);
+  assert.deepEqual(dropped, [stranger, strangers.key]);
+  /** @type {string[]} */
+  const unregistered = [];
+  for (const publicKey of dropped) {
+    closeDroppedKey(publicKey, {
+      dropDeviceChannels: () => undefined,
+      dropPushRegistrations: (key, alsoUnkeyed) => { unregistered.push(`${key} ${alsoUnkeyed}`); },
+      revokeConnector: (key) => env.oauth.revokeKey(key),
+      dropLinkPeers: () => undefined,
+    });
+  }
+  assert.equal(registry.get(strangers.key), undefined);
+  assert.equal(env.oauth.authenticateBearer(strangers.bearer), undefined, "its tokens stop working at once");
+  assert.equal(env.store.grantForKey(strangers.key), undefined);
+  assert.ok(env.oauth.authenticateBearer(phones.bearer), "a client a code-paired device approved stays");
+  // The dropped device gets no more notifications. Push registrations under
+  // no key are left alone, since the account's own devices are dropped too.
+  assert.deepEqual(unregistered, [`${stranger} false`, `${strangers.key} false`]);
 });
 
 test("an approval the client never redeems is dropped with its device entry", async () => {

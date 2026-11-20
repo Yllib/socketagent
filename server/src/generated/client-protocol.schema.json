@@ -2889,6 +2889,46 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "account_pass_key"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "pass": {
+              "type": "object",
+              "properties": {
+                "k": {
+                  "type": "string"
+                },
+                "s": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "k",
+                "s"
+              ]
+            },
+            "retired": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pass",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "device_deny"
             },
             "requestId": {
@@ -5323,6 +5363,7 @@
         "linux",
         "macos",
         "ios",
+        "web",
         "computer",
         "connector"
       ]

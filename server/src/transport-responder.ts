@@ -1,4 +1,6 @@
 import type { DeviceRegistry, DevicePlatform, PairingSecret } from "./device-registry";
+import { appPlatformOf } from "./device-registry";
+import { verifiedPassKey } from "./account-pass";
 import { NoiseError, readMessage1, type NoiseAcceptedMessage1, type NoiseKeyPair } from "./noise-ikpsk1";
 import { isRecord } from "./value-guards";
 import { isLoopbackAddress } from "./loopback-request";
@@ -72,16 +74,21 @@ export type FittedSecret = "current" | "previous";
  */
 export type Admission = "open" | "open-update" | "add" | "hold" | "refuse" | "silent";
 
-/** The admission table of spec 7.3, for a key the handshake has proved. */
-export function admissionFor(input: { lane: DeviceLane; standing: KeyStanding; fitted: FittedSecret; locked: boolean }): Admission {
-  const { lane, standing, fitted, locked } = input;
+/**
+ * The admission table of spec 7.3, for a key the handshake has proved.
+ * [vouched] means its message 1 carried a pass from an account pass key this
+ * computer trusts: such a key is added on a locked computer too, as long as
+ * it proved the current secret and was never removed.
+ */
+export function admissionFor(input: { lane: DeviceLane; standing: KeyStanding; fitted: FittedSecret; locked: boolean; vouched: boolean }): Admission {
+  const { lane, standing, fitted, locked, vouched } = input;
   if (standing === "other-kind") return "silent";
   if (standing === "device") return fitted === "previous" && lane === "control" ? "open-update" : "open";
   if (fitted === "previous") return "silent";
   if (lane === "bulk") return "refuse";
   // A removed key that proves the current secret always asks, locked or not.
   if (standing === "removed") return "hold";
-  return locked ? "hold" : "add";
+  return locked && !vouched ? "hold" : "add";
 }
 
 export type PairingUpdate = {
@@ -114,6 +121,8 @@ export interface AcceptedHandshake {
   readonly caps: Record<string, unknown>;
   /** The id of the pairing secret the handshake proved. 0 on the link lane and on `local-request`. */
   readonly secretId: number;
+  /** The account pass key whose valid pass message 1 carried for this key, if any. Trust is checked separately. */
+  readonly passKey?: string;
 }
 
 export type Hs1Outcome =
@@ -184,8 +193,6 @@ const MAX_PSK_TRIES = 4;
 export const HANDSHAKE_WAIT_MS = 10 * 1000;
 /** How long a held peer waits for Allow before it is told `not_approved`. */
 export const HELD_PEER_WAIT_MS = 10 * 60 * 1000;
-
-const DEVICE_PLATFORMS: readonly DevicePlatform[] = ["android", "windows", "linux", "macos", "ios"];
 
 /** A secret the responder may try against one `hs1`. A null tag fits any `k`. */
 interface SecretCandidate {
@@ -334,6 +341,7 @@ export class TransportResponder {
     arrival: Hs1Arrival,
     status: "open" | "pending" | "refused",
     reason?: HandshakeRefusal,
+    passKey?: string,
   ): Hs1Outcome {
     if (status === "pending" && (this.held.size >= MAX_HELD_PEERS || !this.takePendingAnswer())) {
       status = "refused";
@@ -352,9 +360,10 @@ export class TransportResponder {
       channel: new TransportChannel({ role: "responder", sendKey: answer.sendKey, receiveKey: answer.receiveKey }),
       code: approvalCode(answer.handshakeHash),
       name: typeof payload.name === "string" ? payload.name.trim().slice(0, 80) : "",
-      platform: DEVICE_PLATFORMS.find((candidate) => candidate === payload.platform) ?? "android",
+      platform: appPlatformOf(payload.platform),
       caps: isRecord(payload.caps) ? payload.caps : {},
       secretId: proved.candidate.id,
+      ...(passKey ? { passKey } : {}),
     };
     // Held peers count from hs2, so a replay can fill the table for 10 s at most.
     if (status === "pending") this.held.add(handshake);
@@ -393,12 +402,15 @@ export class TransportResponder {
     if (!proved) return silent;
 
     const claimed = this.standing(proved.publicKey);
+    // Only a key the record doesn't know yet has any use for a pass.
+    const passKey = claimed === "unknown" ? verifiedPassKey(proved.payload.pass, proved.publicKey) ?? undefined : undefined;
     const admission = admissionFor({
       lane, standing: claimed, fitted: proved.candidate.id === current.id ? "current" : "previous", locked: registry.locked,
+      vouched: passKey !== undefined && registry.trustsPassKey(passKey),
     });
     if (admission === "silent") return silent;
     if (admission === "refuse") return this.answer(proved, arrival, "refused", "not_approved");
-    return this.answer(proved, arrival, admission === "hold" ? "pending" : "open");
+    return this.answer(proved, arrival, admission === "hold" ? "pending" : "open", undefined, passKey);
   }
 
   /**
@@ -479,14 +491,25 @@ export class TransportResponder {
     const now = this.fittedNow(handshake);
     if (!now) return this.close(handshake);
     const { publicKey, name, platform } = handshake;
-    const admission = admissionFor({ lane: handshake.lane, standing: this.standing(publicKey), fitted: now.fitted, locked: registry.locked });
+    // The pass key may have been retired since hs1, so trust is asked again.
+    const vouched = handshake.passKey !== undefined && registry.trustsPassKey(handshake.passKey);
+    const admission = admissionFor({ lane: handshake.lane, standing: this.standing(publicKey), fitted: now.fitted, locked: registry.locked, vouched });
 
     if (admission === "hold" && handshake.status === "pending") {
       return { result: "held", notice: { publicKey, name: name || "Unknown device", platform, code: handshake.code } };
     }
     if (handshake.status !== "open") return this.close(handshake);
     if (admission === "add") {
-      registry.enroll({ publicKey, kind: "device", name, platform, via: "token", transport: 2, secretId: now.current.id });
+      // "approval" for a key the account vouched for: the user approved it
+      // by signing in with Google and the PIN. The field keeps values older
+      // servers can read. The record names the pass key that vouched, so it
+      // goes when the account retires that key. On an unlocked computer the
+      // pairing code alone let the key in, so the pass is not recorded.
+      const vouchedBy = vouched && registry.locked ? handshake.passKey : undefined;
+      registry.enroll({
+        publicKey, kind: "device", name, platform, via: vouchedBy ? "approval" : "token", transport: 2, secretId: now.current.id,
+        ...(vouchedBy ? { vouchedBy } : {}),
+      });
       return { result: "open" };
     }
     if (admission !== "open" && admission !== "open-update") return this.close(handshake);

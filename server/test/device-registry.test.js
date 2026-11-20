@@ -4,7 +4,8 @@ const path = require("node:path");
 const test = require("node:test");
 const dataDir = require("./test-data-dir");
 
-const { DeviceRegistry, MAX_PREVIOUS_SECRETS, PREVIOUS_SECRET_LIFETIME_MS } = require("#server/device-registry");
+const { DeviceRegistry, MAX_KNOWN_PASS_KEYS, MAX_PREVIOUS_SECRETS, MAX_RETIRED_PASS_KEYS, PREVIOUS_SECRET_LIFETIME_MS } = require("#server/device-registry");
+const { retiredPassKeysOf } = require("#server/account-pass");
 const { generateKeyPair, toBase64 } = require("#server/relay-crypto");
 const { isRecord, parseJsonObject, unknownArray } = require("#server/value-guards");
 
@@ -177,4 +178,260 @@ test("secretId only moves forward and never lands on a computer record", () => {
   assert.equal(registry.get(computer)?.secretId, undefined);
   registry.touch(phone, { secretId: 1 });
   assert.equal(registry.get(phone)?.secretId, next.id);
+});
+
+/**
+ * Records a v2 device, as a finished handshake does.
+ * @param {InstanceType<typeof DeviceRegistry>} registry
+ * @param {{ vouchedBy?: string }} [options]
+ */
+function recordedDevice(registry, options = {}) {
+  const publicKey = newKey();
+  registry.enroll({ publicKey, kind: "device", name: "Pixel", platform: "android", via: "token", transport: 2, ...options });
+  return publicKey;
+}
+
+test("a pass key is trusted only while a recorded device carries it", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const [account, other] = [newKey(), newKey()];
+  const [phone, tablet] = [recordedDevice(registry), recordedDevice(registry)];
+
+  assert.deepEqual(registry.registerPassKey(newKey(), account, []), { accepted: false, refusal: "unrecorded", dropped: [] }, "an unrecorded key registers nothing");
+  assert.equal(registry.trustsPassKey(account), false);
+
+  assert.equal(registry.registerPassKey(phone, account, []).accepted, true);
+  assert.equal(registry.registerPassKey(tablet, account, []).accepted, true);
+  assert.equal(registry.trustsPassKey(account), true);
+  assert.deepEqual(registry.trustedPassKeys(), [{ passKey: account, devices: [phone, tablet] }]);
+  assert.deepEqual(new DeviceRegistry(state).trustedPassKeys(), [{ passKey: account, devices: [phone, tablet] }], "kept across restarts");
+
+  // A device carries one account. Moving to another drops its word for the first.
+  registry.registerPassKey(tablet, other, []);
+  assert.deepEqual(registry.trustedPassKeys(), [{ passKey: account, devices: [phone] }, { passKey: other, devices: [tablet] }]);
+
+  registry.revoke(phone);
+  assert.equal(registry.trustsPassKey(account), false, "removing the last device that carries the key ends the trust");
+  assert.equal(registry.trustsPassKey(other), true);
+
+  registry.resetPairing();
+  assert.equal(registry.get(tablet)?.transport, 2);
+  assert.deepEqual(registry.trustedPassKeys(), [], "reset trusts no account until one of its devices says so again");
+});
+
+test("a retired pass key is never trusted again and the records it vouched for are deleted", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const [first, second] = [newKey(), newKey()];
+  const phone = recordedDevice(registry);
+  registry.registerPassKey(phone, first, []);
+  const [tablet, laptop] = [recordedDevice(registry, { vouchedBy: first }), recordedDevice(registry, { vouchedBy: first })];
+  registry.registerPassKey(tablet, first, []);
+
+  // The phone came in by the pairing code and followed the account to a new
+  // master key. Both records the old key vouched for go, without landing on
+  // the removed list.
+  assert.deepEqual(registry.registerPassKey(phone, second, [first]), { accepted: true, dropped: [tablet, laptop] });
+  assert.equal(registry.get(tablet), undefined);
+  assert.equal(registry.isRevoked(tablet), false);
+  assert.equal(registry.isRevoked(laptop), false);
+  assert.equal(registry.trustsPassKey(first), false);
+  assert.deepEqual(registry.trustedPassKeys(), [{ passKey: second, devices: [phone] }]);
+
+  // A device still holding the old key can't bring it back.
+  assert.equal(registry.registerPassKey(phone, first, []).refusal, "retired");
+  assert.equal(registry.trustsPassKey(first), false);
+  assert.equal(registry.get(phone)?.passKey, second);
+
+  const reloaded = new DeviceRegistry(state);
+  assert.equal(reloaded.trustsPassKey(second), true);
+  reloaded.resetPairing();
+  assert.equal(reloaded.registerPassKey(phone, first, []).accepted, false, "a retired key stays retired after reset");
+});
+
+test("a pass key that only devices let in by a pass carry lets no key in", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const [old, madeUp, next] = [newKey(), newKey(), newKey()];
+  const phone = recordedDevice(registry);
+  registry.registerPassKey(phone, old, []);
+  // Both came in by a pass from the old key. The account has since retired
+  // it, and the stranger's pass was a stale one.
+  const [stranger, tablet] = [recordedDevice(registry, { vouchedBy: old }), recordedDevice(registry, { vouchedBy: old })];
+  /** The pass keys this computer remembers for good, as saved. */
+  const remembered = () => unknownArray(parseJsonObject(fs.readFileSync(state, "utf8")).passKeys).length;
+
+  // The stranger reports the retirement itself, with a pass key it made up.
+  assert.deepEqual(registry.registerPassKey(stranger, madeUp, [old]), { accepted: true, dropped: [] });
+  assert.equal(registry.trustsPassKey(old), false, "the retirement counts whoever reports it");
+  assert.equal(registry.get(stranger)?.passKey, madeUp);
+  assert.equal(registry.trustsPassKey(madeUp), false);
+  assert.deepEqual(registry.trustedPassKeys(), []);
+  assert.equal(registry.get(tablet)?.vouchedBy, old, "it deletes nobody else's record");
+  // More devices carrying the made-up key change nothing, and none of it
+  // uses up the keys this computer remembers.
+  registry.registerPassKey(tablet, madeUp, []);
+  assert.equal(registry.trustsPassKey(madeUp), false);
+  for (let count = 0; count < 5; count++) registry.registerPassKey(stranger, newKey(), []);
+  assert.equal(remembered(), 1);
+
+  // The tablet follows the account to its new key. That is not enough either:
+  // the computer can't tell it from the stranger.
+  assert.deepEqual(registry.registerPassKey(tablet, next, [old]), { accepted: true, dropped: [] });
+  assert.equal(registry.trustsPassKey(next), false);
+
+  // The phone came in by the pairing code. Its word makes the new key
+  // trusted and deletes every record the old key vouched for, the stranger's
+  // included. The tablet comes back with a pass from the new key.
+  assert.deepEqual(registry.registerPassKey(phone, next, [old]), { accepted: true, dropped: [stranger, tablet] });
+  assert.deepEqual(registry.trustedPassKeys(), [{ passKey: next, devices: [phone] }]);
+  assert.equal(registry.isRevoked(tablet), false);
+});
+
+test("how a device got on record is settled when the record is made", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const account = newKey();
+  const [phone, tablet] = [recordedDevice(registry), recordedDevice(registry, { vouchedBy: account })];
+  /** @param {string} publicKey @param {string} [vouchedBy] */
+  const approveAgain = (publicKey, vouchedBy) => registry.enroll({
+    publicKey, kind: "device", name: "", platform: "android", via: "approval", ...(vouchedBy ? { vouchedBy } : {}),
+  });
+
+  assert.equal(approveAgain(tablet).vouchedBy, account, "approving it again does not clear the pass that let it in");
+  assert.equal(approveAgain(phone, account).vouchedBy, undefined, "and puts no pass on a device that came in without one");
+  assert.equal(approveAgain(tablet, newKey()).vouchedBy, account);
+});
+
+/**
+ * Records a linked computer, as `device_authorize` does.
+ * @param {InstanceType<typeof DeviceRegistry>} registry
+ * @param {{ publicKey?: string, vouchedBy?: string }} [options]
+ */
+function linkedComputer(registry, options = {}) {
+  return registry.enroll({
+    publicKey: newKey(), kind: "computer", name: "Mac", platform: "computer", via: "link", transport: 2,
+    access: { read: true, agents: false, commands: false }, confirm: "ask", ...options,
+  });
+}
+
+test("a computer link made by a device a pass let in goes when the pass key is retired", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const [old, next] = [newKey(), newKey()];
+  const phone = recordedDevice(registry);
+  registry.registerPassKey(phone, old, []);
+  const laptop = recordedDevice(registry, { vouchedBy: old });
+  const [marked, plain] = [linkedComputer(registry, { vouchedBy: old }), linkedComputer(registry)];
+  assert.equal(marked.vouchedBy, old);
+
+  // Linking a recorded computer again neither clears the mark nor adds one.
+  assert.equal(linkedComputer(registry, { publicKey: marked.publicKey }).vouchedBy, old);
+  assert.equal(linkedComputer(registry, { publicKey: plain.publicKey, vouchedBy: old }).vouchedBy, undefined);
+
+  // The laptop's own report deletes nothing, its link included.
+  assert.deepEqual(registry.registerPassKey(laptop, next, [old]).dropped, []);
+  assert.equal(registry.get(marked.publicKey)?.kind, "computer");
+
+  assert.deepEqual(registry.registerPassKey(phone, next, [old]).dropped, [laptop, marked.publicKey]);
+  assert.equal(registry.get(marked.publicKey), undefined);
+  assert.equal(registry.isRevoked(marked.publicKey), false, "the user can make the link again");
+  assert.equal(registry.get(plain.publicKey)?.kind, "computer", "a link from a device that came in by the code stays");
+});
+
+test("reset deletes every record a pass put there and keeps the rest unmarked", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const [account, gone] = [newKey(), newKey()];
+  const phone = recordedDevice(registry);
+  registry.registerPassKey(phone, account, []);
+  const tablet = recordedDevice(registry, { vouchedBy: gone });
+  const [marked, plain] = [linkedComputer(registry, { vouchedBy: gone }), linkedComputer(registry)];
+  const client = registry.enroll({
+    publicKey: newKey(), kind: "connector", name: "Claude", platform: "connector", via: "connector",
+    access: { read: true, agents: true, commands: true }, confirm: "never", vouchedBy: gone,
+  });
+  assert.equal(client.vouchedBy, gone, "an AI client keeps the mark of the device that approved it");
+  registry.registerPassKey(tablet, account, [gone]);
+
+  assert.deepEqual(registry.resetPairing().dropped, [tablet, marked.publicKey, client.publicKey]);
+  for (const publicKey of [tablet, marked.publicKey, client.publicKey]) {
+    assert.equal(registry.get(publicKey), undefined);
+    assert.equal(registry.isRevoked(publicKey), false, "deleted, not removed: it may pair again with the new code");
+  }
+  assert.equal(registry.get(plain.publicKey)?.kind, "computer");
+  assert.equal(registry.get(phone)?.vouchedBy, undefined);
+  assert.equal(registry.get(phone)?.passKey, undefined);
+  assert.deepEqual(registry.trustedPassKeys(), [], "nothing is trusted until a device connects and says so");
+
+  // The computer is unlocked, so the tablet comes back by the new code and
+  // is recorded like any key that pairs by code. Its word now counts.
+  registry.enroll({ publicKey: tablet, kind: "device", name: "Tab", platform: "android", via: "token", transport: 2 });
+  assert.equal(registry.registerPassKey(tablet, account, [gone]).accepted, true);
+  assert.deepEqual(new DeviceRegistry(state).trustedPassKeys(), [{ passKey: account, devices: [tablet] }]);
+  assert.equal(registry.registerPassKey(tablet, gone, []).refusal, "retired", "what was retired stays retired");
+});
+
+test("a retired key this computer trusted is kept however many unseen keys follow", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const phone = recordedDevice(registry);
+  const [trusted, unseen] = [newKey(), newKey()];
+  registry.registerPassKey(phone, trusted, []);
+  registry.registerPassKey(phone, newKey(), [trusted, unseen]);
+
+  const flood = Array.from({ length: MAX_RETIRED_PASS_KEYS }, newKey);
+  registry.registerPassKey(phone, newKey(), flood);
+  assert.equal(unknownArray(parseJsonObject(fs.readFileSync(state, "utf8")).retiredPassKeys).length, MAX_RETIRED_PASS_KEYS, "only never-trusted keys are capped");
+  assert.equal(registry.registerPassKey(phone, trusted, []).accepted, false);
+  assert.equal(new DeviceRegistry(state).registerPassKey(phone, trusted, []).accepted, false);
+  // A key nobody here ever trusted can fall off the capped list.
+  assert.equal(registry.registerPassKey(phone, unseen, []).accepted, true);
+});
+
+test("the real retired key is applied when it comes after any number of made-up ones", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const [first, second] = [newKey(), newKey()];
+  const phone = recordedDevice(registry);
+  registry.registerPassKey(phone, first, []);
+  const laptop = recordedDevice(registry, { vouchedBy: first });
+
+  // The vault appends the newest retired key last. A device that expects to
+  // be removed can write any number of made-up keys in front of it, and some
+  // entries that are no keys at all.
+  const junk = Array.from({ length: MAX_RETIRED_PASS_KEYS + 44 }, newKey);
+  const retired = retiredPassKeysOf([...junk, "not a key", 7, first]);
+  assert.equal(retired.length, junk.length + 1);
+  assert.equal(retired.at(-1), first);
+
+  assert.deepEqual(registry.registerPassKey(phone, second, retired), { accepted: true, dropped: [laptop] });
+  assert.equal(registry.trustsPassKey(first), false);
+  assert.equal(registry.registerPassKey(phone, first, []).refusal, "retired");
+  /** The retired keys this computer never trusted, as saved. */
+  const unseen = () => unknownArray(parseJsonObject(fs.readFileSync(state, "utf8")).retiredPassKeys);
+  assert.deepEqual(unseen(), junk.slice(-MAX_RETIRED_PASS_KEYS), "of the keys never trusted here, the newest are kept");
+
+  // Every device repeats the list on every connection. That writes nothing.
+  let writes = 0;
+  registry.onChange(() => writes++);
+  registry.registerPassKey(phone, second, retired);
+  assert.equal(writes, 0);
+});
+
+test("no new pass key is taken once the record of them is full", () => {
+  const { state } = paths();
+  const registry = new DeviceRegistry(state);
+  const phone = recordedDevice(registry);
+  const taken = Array.from({ length: MAX_KNOWN_PASS_KEYS }, newKey);
+  for (const key of taken) assert.equal(registry.registerPassKey(phone, key, []).accepted, true);
+
+  const extra = newKey();
+  assert.deepEqual(registry.registerPassKey(phone, extra, [taken[0]]), { accepted: false, refusal: "full", dropped: [] });
+  assert.equal(registry.trustsPassKey(extra), false);
+  assert.equal(registry.get(phone)?.passKey, taken.at(-1), "the device goes on carrying the key it had");
+  assert.equal(unknownArray(parseJsonObject(fs.readFileSync(state, "utf8")).passKeys).length, MAX_KNOWN_PASS_KEYS);
+  // A full record still hears retirements and still takes a key it knows.
+  assert.equal(registry.registerPassKey(phone, taken[0], []).refusal, "retired");
+  assert.equal(registry.registerPassKey(phone, taken[1], []).accepted, true);
 });

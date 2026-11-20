@@ -72,8 +72,11 @@ export interface AiConnectorOAuthHost {
   signInPending(signIn: PendingSignIn): void;
   /** The sign-in was decided or expired; phones drop the notice. */
   signInSettled(signIn: PendingSignIn): void;
-  /** Enrolls the client's key and creates its activity session. */
-  grantAccess(signIn: PendingSignIn): { sessionId: string };
+  /**
+   * Enrolls the client's key and creates its activity session. [vouchedBy]
+   * goes on the record: the approving device was let in by that pass key.
+   */
+  grantAccess(signIn: PendingSignIn, vouchedBy?: string): { sessionId: string };
   /** An approved sign-in the client never redeemed: the grant is gone, so its device entry should go too. */
   grantAbandoned(grant: AiConnectorGrant): void;
   /** Replaceable for tests; the default fetches the document over HTTPS. */
@@ -418,12 +421,16 @@ export class AiConnectorOAuth {
     return Array.from(this.signIns.values()).filter((entry) => entry.status === "pending").map((entry) => ({ ...entry }));
   }
 
-  /** The phone allowed the sign-in named by its key. Returns false when none was waiting. */
-  approveSignIn(publicKey: string): boolean {
+  /**
+   * The phone allowed the sign-in named by its key. Returns false when none
+   * was waiting. [vouchedBy] is the approving device's `vouchedBy`, when a
+   * pass put that device on record: the client's record is marked the same.
+   */
+  approveSignIn(publicKey: string, vouchedBy?: string): boolean {
     this.sweep();
     const signIn = Array.from(this.signIns.values()).find((entry) => entry.publicKey === publicKey && entry.status === "pending");
     if (!signIn) return false;
-    const { sessionId } = this.host.grantAccess(signIn);
+    const { sessionId } = this.host.grantAccess(signIn, vouchedBy);
     const grant = this.store.createGrant({
       clientId: signIn.clientId,
       clientName: signIn.clientName,

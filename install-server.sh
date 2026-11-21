@@ -6,9 +6,9 @@ set -euo pipefail
 # ══════════════════════════════════════════════
 #
 # Installs everything needed to run SocketAgent server on Linux or macOS:
-# Node.js, both supported agent CLIs, server dependencies, configuration, and
-# an OS-native background service. Agent sign-in happens later in the app or
-# directly through the relevant CLI.
+# Node.js, Claude, Codex, and Gemini CLIs, server dependencies, configuration,
+# and an OS-native background service. Agent sign-in happens later in the app
+# or directly through the relevant CLI.
 #
 # Usage:
 #   bash install-server.sh [--reset-pairing] [--port PORT]
@@ -37,6 +37,7 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$REPO_ROOT/server"
 ENV_FILE="$SERVER_DIR/.env"
 SOCKET_AGENT_HOME="${SOCKET_AGENT_HOME:-$HOME/.socket-agent}"
+export SOCKET_AGENT_HOME
 DATA_DIR="${SOCKETAGENT_DATA_DIR:-$SOCKET_AGENT_HOME}"
 LEGACY_DATA_DIR="$HOME/.claude-assistant"
 KEYS_FILE="$DATA_DIR/relay-keys.json"
@@ -44,6 +45,7 @@ SETUP_SCRIPT="$SERVER_DIR/scripts/setup.js"
 USER_NODE_DIR="${SOCKETAGENT_NODE_DIR:-$HOME/.local/share/socketagent/node}"
 NPM_GLOBAL_DIR="${SOCKETAGENT_NPM_GLOBAL_DIR:-$SOCKET_AGENT_HOME/toolchains/npm-global}"
 NPM_BIN_DIR="$NPM_GLOBAL_DIR/bin"
+AGY_BIN_DIR="$SOCKET_AGENT_HOME/toolchains/agy"
 OS_NAME="$(uname -s)"
 
 case "$OS_NAME" in
@@ -471,10 +473,26 @@ ensure_virtual_browser_display
 install_server_dependencies_and_build
 
 # ══════════════════════════════════════════════
-#  Phase 5: Generate Configuration
+#  Phase 5: Antigravity CLI (Gemini)
 # ══════════════════════════════════════════════
 
-phase "Phase 5: Generate Configuration"
+phase "Phase 5: Antigravity CLI (Gemini)"
+
+if node "$SERVER_DIR/scripts/install-gemini-cli.js"; then
+  if [[ -d "$AGY_BIN_DIR" ]]; then
+    export PATH="$AGY_BIN_DIR:$PATH"
+    ensure_shell_path "$AGY_BIN_DIR" "SocketAgent Antigravity CLI"
+  fi
+  ok "Managed Antigravity CLI (Gemini) is ready"
+else
+  warn "Antigravity CLI (Gemini) could not be installed right now. You can install it later from the app."
+fi
+
+# ══════════════════════════════════════════════
+#  Phase 6: Generate Configuration
+# ══════════════════════════════════════════════
+
+phase "Phase 6: Generate Configuration"
 
 if [[ "$RESET_PAIRING" == "true" ]]; then
   warn "Resetting pairing data..."
@@ -528,10 +546,10 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 6: Register Service
+#  Phase 7: Register Service
 # ══════════════════════════════════════════════
 
-phase "Phase 6: Register Service"
+phase "Phase 7: Register Service"
 
 NODE_PATH=$(command -v node)
 NPM_PATH=$(command -v npm)
@@ -543,7 +561,7 @@ chmod +x "$SERVER_DIR/scripts/start-server.sh" "$SERVER_DIR/scripts/restart-serv
 
 NODE_DIR=$(dirname "$NODE_PATH")
 SERVICE_PATH="$NODE_DIR"
-SERVICE_PATH="$SERVICE_PATH:$NPM_BIN_DIR"
+SERVICE_PATH="$SERVICE_PATH:$NPM_BIN_DIR:$AGY_BIN_DIR"
 SERVICE_PATH="$SERVICE_PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 if [[ "$OS_NAME" == "Darwin" ]]; then
@@ -677,17 +695,17 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  Phase 7: Install CLI
+#  Phase 8: Install CLI
 # ══════════════════════════════════════════════
 
-phase "Phase 7: Install CLI"
+phase "Phase 8: Install CLI"
 install_cli
 
 # ══════════════════════════════════════════════
-#  Phase 8: Finish & Phone Pairing
+#  Phase 9: Finish & Phone Pairing
 # ══════════════════════════════════════════════
 
-phase "Phase 8: Finish"
+phase "Phase 9: Finish"
 
 echo ""
 echo -e "  ${GREEN}===========================================${NC}"
@@ -700,7 +718,7 @@ else
   echo "  SocketAgent starts automatically on boot."
 fi
 echo ""
-echo "  Claude and Codex are installed. Sign in later from the app or CLI if needed."
+echo "  Claude, Codex, and Gemini are installed. Sign in later from the app or CLI if needed."
 echo ""
 echo -e "  ${CYAN}Open SocketAgent, choose Add Computer, and scan this pairing code.${NC}"
 echo "  On this computer's network the phone connects directly. Elsewhere it uses the relay."

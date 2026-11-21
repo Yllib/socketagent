@@ -1,10 +1,10 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     SocketAgent Windows Installer
 .DESCRIPTION
-    Installs everything needed to run SocketAgent on Windows: Node.js, both
-    supported agent CLIs, server dependencies, configuration, and scheduled
+    Installs everything needed to run SocketAgent on Windows: Node.js, Claude,
+    Codex, and Gemini CLIs, server dependencies, configuration, and scheduled
     task. Agent sign-in happens later in the app or directly through the CLI.
     Displays a QR code at the end for phone pairing.
 .PARAMETER ResetPairing
@@ -57,8 +57,10 @@ $NPM_GLOBAL_DIR = if ($env:SOCKETAGENT_NPM_GLOBAL_DIR) {
     Join-Path (Join-Path $SOCKET_AGENT_HOME "toolchains") "npm-global"
 }
 $NPM_BIN_DIR = $NPM_GLOBAL_DIR
+$AGY_BIN_DIR = Join-Path (Join-Path $SOCKET_AGENT_HOME "toolchains") "agy"
 New-Item -ItemType Directory -Path $NPM_BIN_DIR -Force | Out-Null
 $env:NPM_CONFIG_PREFIX = $NPM_GLOBAL_DIR
+$env:SOCKET_AGENT_HOME = $SOCKET_AGENT_HOME
 
 $currentPhase = ""
 $serverBuildDone = $false
@@ -683,10 +685,25 @@ Install-ServerDependenciesAndBuild
 if ($LASTEXITCODE -ne 0) { throw 'Could not repair managed command launchers' }
 
 # ══════════════════════════════════════════════
-#  Phase 5: Generate Configuration
+#  Phase 5: Antigravity CLI (Gemini)
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 5: Generate Configuration"
+Write-Phase "Phase 5: Antigravity CLI (Gemini)"
+
+$agyResult = Invoke-NativeCapture { & node (Join-Path (Join-Path $SERVER_DIR "scripts") "install-gemini-cli.js") }
+$agyResult.Output | ForEach-Object { Write-Host "  $_" }
+if ($agyResult.ExitCode -eq 0) {
+    Add-DirectoryToPath $AGY_BIN_DIR $true
+    Write-Ok "Managed Antigravity CLI (Gemini) is ready"
+} else {
+    Write-Warn "Antigravity CLI (Gemini) could not be installed right now. You can install it later from the app."
+}
+
+# ══════════════════════════════════════════════
+#  Phase 6: Generate Configuration
+# ══════════════════════════════════════════════
+
+Write-Phase "Phase 6: Generate Configuration"
 
 # Handle --ResetPairing flag
 if ($ResetPairing) {
@@ -746,10 +763,10 @@ if ($isUpgrade) {
 }
 
 # ══════════════════════════════════════════════
-#  Phase 6: Register Scheduled Task
+#  Phase 7: Register Scheduled Task
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 6: Register Windows Service"
+Write-Phase "Phase 7: Register Windows Service"
 
 $nodeExe = (Get-Command node).Source
 $powerShellExe = Get-CurrentPowerShellExecutable
@@ -792,7 +809,10 @@ $servicePath = $env:PATH -replace '"', ''
 if (-not (Test-PathListContains $servicePath $NPM_BIN_DIR)) {
     $servicePath = "$NPM_BIN_DIR;$servicePath"
 }
-foreach ($commandName in @("claude", "codex")) {
+if ((Test-Path $AGY_BIN_DIR) -and -not (Test-PathListContains $servicePath $AGY_BIN_DIR)) {
+    $servicePath = "$AGY_BIN_DIR;$servicePath"
+}
+foreach ($commandName in @("claude", "codex", "agy")) {
     $cmd = Get-Command $commandName -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source) {
         $cmdDir = (Split-Path $cmd.Source -Parent) -replace '"', ''
@@ -900,17 +920,17 @@ Write-Host "  Session data: $DATA_DIR"
 Write-Host "  Agent tools: $NPM_GLOBAL_DIR"
 
 # ══════════════════════════════════════════════
-#  Phase 7: Install CLI
+#  Phase 8: Install CLI
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 7: Install CLI"
+Write-Phase "Phase 8: Install CLI"
 Install-SocketAgentCli
 
 # ══════════════════════════════════════════════
-#  Phase 8: Finish & Phone Pairing
+#  Phase 9: Finish & Phone Pairing
 # ══════════════════════════════════════════════
 
-Write-Phase "Phase 8: Finish"
+Write-Phase "Phase 9: Finish"
 
 if ($env:SOCKETAGENT_UNATTENDED -ne '1') {
 # Set UTF-8 for QR code rendering in legacy terminals
@@ -926,7 +946,7 @@ Write-Host "  ===========================================" -ForegroundColor Gree
 Write-Host ""
 Write-Host "  SocketAgent starts automatically when you log in."
 Write-Host ""
-Write-Host "  Claude and Codex are installed. Sign in later from the app or CLI if needed."
+Write-Host "  Claude, Codex, and Gemini are installed. Sign in later from the app or CLI if needed."
 Write-Host ""
 Write-Host "  Open SocketAgent, choose Add Computer, and scan this pairing code." -ForegroundColor Cyan
 Write-Host "  On this computer's network the phone connects directly. Elsewhere it uses the relay."

@@ -69,3 +69,36 @@ esac
     fs.rmSync(fixture, { recursive: true, force: true });
   }
 });
+
+test("install-gemini-cli reuses an already working managed agy binary", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "socketagent-agy-bootstrap-"));
+  try {
+    const agyDir = path.join(fixture, "toolchains", "agy");
+    fs.mkdirSync(agyDir, { recursive: true });
+    const agyBin = path.join(agyDir, process.platform === "win32" ? "agy.exe" : "agy");
+    fs.writeFileSync(agyBin, "#!/bin/sh\necho '1.5.13-test'\n", { mode: 0o755 });
+
+    const result = spawnSync(process.execPath, [path.join(repoRoot, "server/scripts/install-gemini-cli.js")], {
+      encoding: "utf8",
+      env: { ...process.env, SOCKET_AGENT_HOME: fixture },
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /Managed Antigravity CLI already installed \(1\.5\.13-test\)/);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("OS bootstrap scripts install managed Antigravity CLI and add it to service PATH", () => {
+  const unixInstaller = read("install-server.sh");
+  assert.match(unixInstaller, /AGY_BIN_DIR="\$SOCKET_AGENT_HOME\/toolchains\/agy"/);
+  assert.match(unixInstaller, /install-gemini-cli\.js/);
+  assert.match(unixInstaller, /SERVICE_PATH="\$SERVICE_PATH:\$NPM_BIN_DIR:\$AGY_BIN_DIR"/);
+  assert.match(unixInstaller, /Claude, Codex, and Gemini are installed/);
+
+  const windowsInstaller = read("install.ps1");
+  assert.match(windowsInstaller, /\$AGY_BIN_DIR = Join-Path \(Join-Path \$SOCKET_AGENT_HOME "toolchains"\) "agy"/);
+  assert.match(windowsInstaller, /install-gemini-cli\.js/);
+  assert.match(windowsInstaller, /foreach \(\$commandName in @\("claude", "codex", "agy"\)\)/);
+  assert.match(windowsInstaller, /Claude, Codex, and Gemini are installed/);
+});

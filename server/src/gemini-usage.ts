@@ -9,7 +9,7 @@ import { socketAgentDataPath } from "./socket-agent-paths";
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_CLOUD_CODE_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
+const CLOUD_CODE_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const REQUEST_TIMEOUT_MS = 5_000;
 const TOKEN_REFRESH_TIMEOUT_MS = 5_000;
 const EXPIRY_SKEW_MS = 60_000;
@@ -355,8 +355,13 @@ interface AgyOAuthCredentials {
 function readAgyOAuthCredentials(): AgyOAuthCredentials | null {
   const tokenPath = oauthTokenPath();
   if (!fs.existsSync(tokenPath)) return null;
-  const rawText = fs.readFileSync(tokenPath, "utf8");
-  const rawJson: unknown = JSON.parse(rawText);
+  let rawJson: unknown;
+  try {
+    rawJson = JSON.parse(fs.readFileSync(tokenPath, "utf8"));
+  } catch {
+    // JSON.parse quotes the start of bad input in its message, and this file holds a token.
+    return null;
+  }
   const parsed = oauthTokenFileSchema.safeParse(rawJson);
   if (!parsed.success) return null;
   return {
@@ -463,7 +468,8 @@ export async function fetchGeminiAccountUsage(options: { model?: string } = {}):
     if (refreshed) creds = readAgyOAuthCredentials() ?? creds;
   }
 
-  const endpoint = (process.env.GOOGLE_CLOUD_ASSIST_ENDPOINT || DEFAULT_CLOUD_CODE_ENDPOINT).replace(/\/+$/, "");
+  // Fixed on purpose: the request carries the account's bearer token.
+  const endpoint = CLOUD_CODE_ENDPOINT;
   let fullUsage: GeminiAccountUsage | null;
   try {
     fullUsage = await fetchFullGeminiAccountUsageWithCreds(endpoint, creds);

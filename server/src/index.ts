@@ -1133,8 +1133,10 @@ function maybeFinalizeLogicalRun(sessionId: string): void {
   const current = getSessionRunStats(sessionId)?.current;
   if (!current?.supervisorSettled) return;
   if (delegatedWorkOutstanding(sessionId, current.startedAt)) return;
+  // Gemini's background commands belong to the run that started them; Claude
+  // and Codex runs finish when their turn does, as before.
   const active = activeSessions.get(sessionId);
-  if (active && active.activeBackgroundTasks.size > 0) return;
+  if (active instanceof GeminiSession && active.activeBackgroundTasks.size > 0) return;
   finishLogicalRunNow(sessionId, current.pendingOutcome || "completed");
 }
 
@@ -12005,7 +12007,7 @@ function buildStatusSyncPayload(): Record<string, unknown> {
     const active = activeSessions.get(sid);
     const liveHarness = !!active && sessionAgentIsWorking(active);
     const delegatedWorkActive = delegatedWorkOutstanding(sid, current.startedAt);
-    const backgroundWorkActive = !!active && active.activeBackgroundTasks.size > 0;
+    const backgroundWorkActive = active instanceof GeminiSession && active.activeBackgroundTasks.size > 0;
     if (!liveHarness && !delegatedWorkActive && !backgroundWorkActive) {
       // Do not expose a stale persisted run as live. /continue and ordinary
       // prompts settle the record; this guard also self-heals list state from

@@ -144,6 +144,8 @@ export class AcpClient extends EventEmitter {
       shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(this.options.command),
     });
     this.proc = proc;
+    // A write after agy exits fails with EPIPE; the exit handler already rejects what was pending.
+    proc.stdin.on("error", () => {});
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
     proc.stderr.setEncoding("utf8");
@@ -152,6 +154,8 @@ export class AcpClient extends EventEmitter {
       this.emit("stderr", chunk);
     });
     proc.on("error", (error) => {
+      // No pid means agy never started, and no exit event follows.
+      if (proc.pid === undefined && this.proc === proc) this.proc = null;
       this.rejectAll(error);
       this.emit("error", error);
     });

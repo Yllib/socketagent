@@ -71,8 +71,11 @@ function releasePlatform(): string {
   throw new Error(`The Antigravity CLI does not run on ${process.platform}.`);
 }
 
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
+
 async function download(url: string, signal?: AbortSignal): Promise<Buffer> {
-  const response = await fetch(url, { signal });
+  const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+  const response = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
   if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
   return Buffer.from(await response.arrayBuffer());
 }
@@ -170,7 +173,8 @@ export function startAgyLogin(command: string, options: { env?: NodeJS.ProcessEn
     const onOutput = (chunk: Buffer) => {
       output = (output + chunk.toString("utf8")).slice(-16_000);
       if (announced) return;
-      const url = output.match(/https:\/\/\S+/g)?.find(isGoogleSignInUrl);
+      // Only a link followed by whitespace is complete; a chunk can end mid-URL.
+      const url = [...output.matchAll(/(https:\/\/\S+)\s/g)].map((match) => match[1]).find(isGoogleSignInUrl);
       if (!url) return;
       announced = true;
       resolveLogin({
@@ -185,6 +189,7 @@ export function startAgyLogin(command: string, options: { env?: NodeJS.ProcessEn
         done,
       });
     };
+    child.stdin.on("error", () => {});
     child.stdout.on("data", onOutput);
     child.stderr.on("data", onOutput);
     child.on("error", (error) => {

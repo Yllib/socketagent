@@ -79,6 +79,7 @@ import { promptTitle } from "./prompt-title";
 import { recordSessionMemoryContextUsage, remapSessionMemory } from "./session-memory-store";
 
 const IDLE_STOP_MS = 10 * 60_000;
+const OUT_OF_TURN_STALL_MS = 2 * 60_000;
 const MCP_SERVER_NAME = "socketagent_app";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const MAX_INLINE_PROMPT_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -469,11 +470,14 @@ export class GeminiSession {
   private mcpRegistration: ReturnType<typeof registerCodexAppMcp> | null = null;
   private boardTools: BoardToolset | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private abortKillTimer: ReturnType<typeof setTimeout> | null = null;
 
   private _isRunning = false;
   private _outOfTurnRunning = false;
   private outOfTurnIdleTimer: ReturnType<typeof setTimeout> | null = null;
   protected outOfTurnSettleMs = 350;
+  /** How long Stop waits for agy to cancel before stopping the process. */
+  protected abortKillMs = 5_000;
   private _runStartedAt: string | null = null;
   private _abortRequested = false;
   private _model: string | null = null;
@@ -794,16 +798,6 @@ export class GeminiSession {
 
   // ─── Turns ────────────────────────────────────────────────────────
 
-  async runQueryWithOptions(prompt: string, resumeSessionId?: string, options: { messageId?: string } = {}): Promise<void> {
-    const previous = this._currentClientMessageId;
-    this._currentClientMessageId = options.messageId || null;
-    try {
-      return await this.runQuery(prompt, resumeSessionId);
-    } finally {
-      this._currentClientMessageId = previous;
-    }
-  }
-
   /** Runs one turn: a new agy session on the first call, the same one after that. */
   async runQuery(prompt: string, resumeSessionId?: string, clientMessageId?: string): Promise<void> {
     if (this._isRunning) throw new Error("This Gemini session is already running a turn");
@@ -830,6 +824,7 @@ export class GeminiSession {
     if (!this.sessionId && resumeTarget) this.sessionId = resumeTarget;
     try {
       const sessionId = await this.openSession();
+      this.throwIfAborted();
       this.send({
         type: "session_state_changed",
         state: "running",
@@ -846,6 +841,7 @@ export class GeminiSession {
       }));
       await this.applyConfig();
       const blocks = await this.promptBlocks(sessionId, prompt);
+      this.throwIfAborted();
       let currentPromise = this.startSessionPrompt(sessionId, blocks);
       this.flushPendingSteers();
       let result: ReturnType<typeof acpPromptResultSchema.parse>;
@@ -888,10 +884,15 @@ export class GeminiSession {
       this.rejectPendingSteers(error instanceof Error ? error : new Error(String(error)));
       this.finishStreams();
       this.settleToolCalls("(failed)");
-      if (!this._abortRequested) this.reportTurnError(error);
+      if (!this._abortRequested) {
+        this.reportTurnError(error);
+        // index.ts skips its own error card for errors a session already showed.
+        if (error instanceof Error) Object.assign(error, { socketAgentSurfaced: true });
+      }
       throw error;
     } finally {
       if (clientMessageId !== undefined) this._currentClientMessageId = previousClientMessageId;
+      this.clearAbortKillTimer();
       this._activePromptPromise = null;
       this._steerDispatchPromise = null;
       this.rejectPendingSteers(new Error("Gemini turn ended before message was steered"));
@@ -922,7 +923,7 @@ export class GeminiSession {
   async injectMessage(text: string, priority: "now" | "next" | "later" = "now", messageId?: string, _options: object = {}): Promise<void> {
     if (!this._isRunning) {
       if (this._outOfTurnRunning) this.finishOutOfTurnRun(false);
-      return this.runQueryWithOptions(text, undefined, { messageId });
+      return this.runQuery(text, undefined, messageId ?? "");
     }
     if (priority === "later") {
       return new Promise((resolve, reject) => {
@@ -994,7 +995,7 @@ export class GeminiSession {
   private runNextQueuedPrompt(): void {
     const next = this._queuedPrompts.shift();
     if (!next) return;
-    this.runQueryWithOptions(next.text, undefined, { messageId: next.messageId }).then(next.resolve, next.reject);
+    this.runQuery(next.text, undefined, next.messageId ?? "").then(next.resolve, next.reject);
   }
 
   interrupt(): void { void this.abort(); }
@@ -1004,22 +1005,55 @@ export class GeminiSession {
     this.cancelPendingQuestions();
     this.rejectPendingSteers(new Error("Gemini turn interrupted"));
     for (const prompt of this._queuedPrompts.splice(0)) prompt.reject(new Error("Gemini turn interrupted"));
-    this.clearBackgroundToolCalls("stopped", "(interrupted)");
-    if (this._outOfTurnRunning) this.finishOutOfTurnRun(false);
+    // ACP has no call that stops one background command, and session/cancel
+    // leaves them running, so stopping them means stopping agy. The same
+    // goes for a turn still waiting on agy to start or open its session.
+    const stopProcess = this.backgroundToolCalls.size > 0 || (this._isRunning && (!this.client || !this.openSessionId));
     const sid = this.sessionId || this._resumeSessionId || "";
     if (sid) await stopAppMonitorsForSession(sid);
-    if (!this.client || !this.openSessionId) return;
+    if (this._outOfTurnRunning) this.finishOutOfTurnRun(false);
+    if (stopProcess || !this.client || !this.openSessionId) {
+      await this.stopClient();
+      return;
+    }
     this.client.notify("session/cancel", { sessionId: this.openSessionId });
+    if (!this._isRunning) return;
     // agy answers the prompt with stopReason "cancelled". If it does not
-    // within a few seconds, stopping the process ends the turn.
-    const client = this.client;
-    setTimeout(() => {
-      if (this._isRunning && this.client === client) void this.stopClient();
-    }, 5_000).unref?.();
+    // within a few seconds, stopping the process ends the turn. The turn's
+    // finally clears this timer, so it never reaches the next turn.
+    this.clearAbortKillTimer();
+    this.abortKillTimer = setTimeout(() => {
+      this.abortKillTimer = null;
+      if (this._isRunning) void this.stopClient();
+    }, this.abortKillMs);
+    this.abortKillTimer.unref?.();
+  }
+
+  private clearAbortKillTimer(): void {
+    if (this.abortKillTimer) clearTimeout(this.abortKillTimer);
+    this.abortKillTimer = null;
+  }
+
+  private throwIfAborted(): void {
+    if (this._abortRequested) throw new Error("Gemini turn interrupted");
   }
 
   stopMonitoring(taskId: string): void { stopAppMonitor(taskId, true, true); }
-  async stopTask(_taskId: string): Promise<void> {}
+
+  /** agy cannot stop one command, so this stops agy, which ends all of its background commands. */
+  async stopTask(taskId: string): Promise<void> {
+    if (!this.backgroundToolCalls.has(taskId)) return;
+    if (this._isRunning) {
+      const sid = this.sessionId || this._resumeSessionId;
+      this.send({
+        type: "error",
+        message: "Gemini can stop its background commands only between turns. Stop the turn to end them now.",
+        ...(sid ? { sessionId: sid } : {}),
+      });
+      return;
+    }
+    await this.stopClient();
+  }
   refreshBackgroundTerminals(): void {}
 
   async dispose(): Promise<void> {
@@ -1046,12 +1080,26 @@ export class GeminiSession {
     client.on("error", () => { /* The pending request rejects with the cause. */ });
     client.on("exit", () => {
       if (this.client !== client) return;
-      this.client = null;
-      this.openSessionId = null;
+      this.handleClientExit();
     });
     this.client = client;
     await client.initialize();
     return client;
+  }
+
+  /**
+   * agy died on its own. A running turn fails through its rejected prompt;
+   * everything that lives outside a turn is settled here.
+   */
+  private handleClientExit(): void {
+    this.client = null;
+    this.openSessionId = null;
+    this.mcpRegistration?.unregister();
+    this.mcpRegistration = null;
+    this.cancelPendingQuestions();
+    if (!this._isRunning) this.settleToolCalls("(agy exited)");
+    this.clearBackgroundToolCalls("failed", "(agy exited)");
+    if (this._outOfTurnRunning) this.finishOutOfTurnRun(false);
   }
 
   private async stopClient(): Promise<void> {
@@ -1070,7 +1118,9 @@ export class GeminiSession {
   private scheduleIdleStop(): void {
     this.clearIdleTimer();
     this.idleTimer = setTimeout(() => {
-      if (!this.isBusy) void this.stopClient();
+      if (!this.client) return;
+      if (this.isBusy) this.scheduleIdleStop();
+      else void this.stopClient();
     }, IDLE_STOP_MS);
     this.idleTimer.unref?.();
   }
@@ -1319,7 +1369,10 @@ export class GeminiSession {
           ? update.content.text : "";
         if (!content) return;
         if (!this._isRunning) this.beginOutOfTurnRun(sid);
-        this.clearOutOfTurnIdleTimer();
+        // agy normally ends out-of-turn output with a usage_update. If one
+        // never comes, the run still ends once agy goes quiet.
+        if (this._outOfTurnRunning) this.scheduleOutOfTurnFinish(OUT_OF_TURN_STALL_MS);
+        else this.clearOutOfTurnIdleTimer();
         // If agy returned control to the model while a tool is still in_progress,
         // that tool was moved to the background (e.g. run_command WaitMsBeforeAsync).
         if (this.activeToolCalls.size > 0) this.promoteActiveToolsToBackground();
@@ -1591,14 +1644,14 @@ export class GeminiSession {
     this.outOfTurnIdleTimer = null;
   }
 
-  private scheduleOutOfTurnFinish(): void {
+  private scheduleOutOfTurnFinish(delayMs = this.outOfTurnSettleMs): void {
     this.clearOutOfTurnIdleTimer();
     this.outOfTurnIdleTimer = setTimeout(() => {
       this.outOfTurnIdleTimer = null;
       if (this._outOfTurnRunning && !this._isRunning && this.activeToolCalls.size === 0) {
         this.finishOutOfTurnRun(true);
       }
-    }, this.outOfTurnSettleMs);
+    }, delayMs);
     this.outOfTurnIdleTimer.unref?.();
   }
 
@@ -1734,6 +1787,14 @@ export class GeminiSession {
     return blocked.has(rawName.toLowerCase()) || blocked.has(canonicalName.toLowerCase());
   }
 
+  /** Whether [rawName] is one of the tools on SocketAgent's own MCP server, matched exactly. */
+  private isSocketAgentAppTool(rawName: string): boolean {
+    const prefix = `mcp_${MCP_SERVER_NAME}_`;
+    if (!rawName.startsWith(prefix)) return false;
+    const tools = socketAgentAppToolNames(this.boardTools ?? boardToolset(this.sessionId || "", this.projectBoardHint));
+    return tools.includes(rawName.slice(prefix.length));
+  }
+
   /** Plugin checks (protected files) first, then the phone, unless a Yolo mode says yes. */
   private async approve(toolCall: Record<string, unknown>): Promise<boolean> {
     if (this._abortRequested) return false;
@@ -1742,13 +1803,18 @@ export class GeminiSession {
     const normalized = normalizeGeminiToolCall(toolCall);
     if (this.isToolDisallowed(name, normalized.tool)) return false;
     // SocketAgent's own tools ask the phone themselves where it matters, as with Codex.
-    if (name.startsWith(`mcp_${MCP_SERVER_NAME}_`)) return true;
+    if (this.isSocketAgentAppTool(name)) return true;
     const paths = unknownArray(toolCall.locations).flatMap((entry) => isRecord(entry) && typeof entry.path === "string" ? [entry.path] : []);
-    const policyChecks: Array<[string, Record<string, unknown>]> = toolCall.kind === "edit" || toolCall.kind === "delete" || toolCall.kind === "move"
-      ? paths.map((filePath) => ["Edit", { file_path: filePath }])
+    const isFileChange = toolCall.kind === "edit" || toolCall.kind === "delete" || toolCall.kind === "move";
+    const normalizedPath = typeof normalized.input.file_path === "string" ? normalized.input.file_path : "";
+    const changedPaths = [...new Set(normalizedPath ? [...paths, normalizedPath] : paths)];
+    // A file change that names no file cannot be checked against protected paths.
+    if (isFileChange && changedPaths.length === 0) return false;
+    const policyChecks: Array<[string, Record<string, unknown>]> = isFileChange
+      ? changedPaths.map((filePath) => ["Edit", { file_path: filePath }])
       : toolCall.kind === "execute"
         ? [["Bash", { command: String(input.CommandLine ?? input.command ?? toolCall.title ?? "") }]]
-        : [[name, input]];
+        : [[normalized.tool, normalized.input]];
     for (const [tool, toolInput] of policyChecks) {
       for (const plugin of this._plugins) {
         const result = await plugin.canUseToolInterceptor?.(tool, toolInput, this.getSessionContext());

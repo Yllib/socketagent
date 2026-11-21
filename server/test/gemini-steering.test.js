@@ -83,7 +83,7 @@ test("Gemini steers a running turn via concurrent session/prompt without ending 
   session.client = client;
 
   try {
-    const runPromise = session.runQueryWithOptions("initial task", undefined, { messageId: "msg-1" });
+    const runPromise = session.runQuery("initial task", undefined, "msg-1");
 
     // Wait for the first turn's tool call to arrive.
     const deadline = Date.now() + 5_000;

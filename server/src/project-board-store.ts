@@ -22,6 +22,7 @@ import {
 } from "./project-board-relay";
 import {
   applyChange,
+  cardRecordId,
   changeRecordId,
   CONFIG_RECORD,
   intakeCardId,
@@ -33,6 +34,7 @@ import {
   parseConfig,
   parseIntakeItem,
   RECORD_ID_PATTERN,
+  ticketCard,
   type BoardCard,
   type BoardChange,
   type BoardConfig,
@@ -307,7 +309,14 @@ export class BoardReplica {
         : parseIntakeItem(plaintext);
       if (parsed.ok) {
         const { item } = parsed;
-        const cardId = intakeCardId(item.source, item.ref);
+        // The item's own card when it has one, a deleted one included, so the
+        // user's delete holds. Otherwise a card already linking the ticket,
+        // such as one an agent made before the service was connected.
+        const ownId = intakeCardId(item.source, item.ref);
+        const view = this.view();
+        const cardId = view.has(cardRecordId(ownId))
+          ? ownId
+          : ticketCard(this.cards(view), [item.ref, item.url ?? ""], this.config(view))?.id ?? ownId;
         const { outcome } = await this.queueLocked({ kind: "intake", cardId, itemId, item, at: Date.now() });
         if (outcome.ok && outcome.pending) continue;
         if (!outcome.ok) error = outcome.error;

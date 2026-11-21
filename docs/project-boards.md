@@ -209,6 +209,7 @@ All times are Unix ms. Unknown fields are kept when a record is rewritten.
   "detail": "<Markdown, up to 48 KiB: everything the user needs to decide without leaving the card, such as the ticket's full request text, the drafted reply, the proposed release notes>",
   "waitingOn": { "kind": "user" | "person" | "agent", "name": "..." },
   "ask": { "kind": "approve" | "send" | "decide" | "answer", "text": "<the exact question>", "sessionId": "..." },
+  "reply": { "approved": true, "text": "<answer, or a note>", "at": 0, "sentAt": 0 },
   "links": [{ "kind": "session" | "ticket" | "thread" | "url", "ref": "...", "label": "..." }],
   "history": [{ "at": 0, "by": "<'You', or the session's title>", "from": "inbox", "to": "waiting", "why": "..." }],
   "createdAt": 0, "updatedAt": 0
@@ -275,6 +276,26 @@ waiting on the user carries everything needed to decide in `detail`: the
 ticket's full request, the full drafted message, the full proposed text. The
 user approves from the card without opening the chat.
 
+### Images in a card
+
+Card images stay on the computer that made them. The board, and so the
+relay, holds only a link. When `create` or `update` gets a `detail` with a
+Markdown image `![Before](/abs/path.png)` or a `socketagent-compare` block,
+`board-images.ts` copies each file into this computer's inline image store
+and rewrites the link to
+
+```
+socketagent://image?id=<uuid>&name=image.png&computer=<relay public key>&computerName=<hostname>
+```
+
+The app finds the paired server whose `serverPubkey` equals `computer` and
+loads the image over that connection, the same way chat images load. A
+device not paired with that computer shows "Image on <computerName>, which
+this device isn't paired with." A file that can't be saved (missing, not
+PNG/JPEG/GIF/WebP, over 20 MB) fails the write, so an agent never leaves a
+broken before/after shot on a card. Links already carrying `computer` are
+left alone, so a later edit from another computer keeps them pointing home.
+
 ## App
 
 `BoardStore` (`lib/services/board_store.dart`) holds each board as the
@@ -302,10 +323,20 @@ sent. `project_board_member` files the child chat in the parent's project.
   notes that edit in place, links (a chat link opens that chat), the last
   four moves with their reasons, Move, Edit and Done. Right-click or
   long-press opens the same moves as a menu.
-- **Ask button:** opens the chat that asked with a reply already in its
-  message box ("Approved: <title>"). The user sends it, so approving still
-  happens in that chat in the user's own words, and the agent's approval
-  rules stay in force.
+- **Answers:** an approve or send ask has two buttons (Approve and
+  Decline, or Send it and Don't send); decide and answer asks open an
+  editor for the answer. The answer is saved on the card as `reply`,
+  marked "saved, not sent", and an edit button changes it, adds a note or
+  clears it. Nothing reaches the agent until the user sends it: Send on the
+  card, Send all on the bar under the board, or Send in the dialog that
+  leaving the board shows when answers were saved during the visit ("Not
+  now" keeps them saved). Each chat that asked gets one message listing all
+  of its answers ("Answers from the <board> board:", then each card's ID,
+  question and answer), so the answers are in that chat in the user's
+  words and the agent's approval rules stay in force. Sent answers get
+  `sentAt` and stop counting toward Needs you.
+  The server keeps `reply` while the ask stands, drops it when an agent
+  changes or clears the ask, and shows agents a reply only once it is sent.
 - **Editor:** title, status, notes, the ask (kind, exact question, the chat
   it was asked in), waiting on (a person or an agent), links and linked
   chats.
@@ -394,6 +425,12 @@ grant turns it into a card or updates the card it already made.
 
 - The card ID is `h_` plus the first 24 hex characters of
   `SHA-256(source + "\n" + ref)`, so every event for one item finds its card.
+- When no record has that ID, the item lands on a card that already has a
+  ticket link whose ref equals the item's `url` or `ref` (trailing slashes
+  ignored), preferring one not done, then the latest updated. This adopts
+  cards agents made before the service was connected. A deleted `h_` card
+  keeps its tombstone, so the user's delete still holds. The board tool's
+  `create` refuses a card whose ticket link another card already has.
 - `opened`, or any event whose card doesn't exist: create the card in the
   first status of kind `new`, with title, detail, notes = note, one link
   `{kind:"ticket", ref:url or ref, label:source + " " + ref}`, and a history

@@ -46,6 +46,18 @@ export const askSchema = z.object({
   sessionId: z.string().optional(),
 });
 export type CardAsk = z.output<typeof askSchema>;
+/**
+ * The user's answer to a card's ask, written by the app. approved is set for
+ * asks of kind approve and send; text is the answer or a note. sentAt is set
+ * once the app sent it to the chat that asked; before that it is only saved.
+ */
+export const replySchema = z.object({
+  approved: z.boolean().optional(),
+  text: z.string().max(MAX_DETAIL_BYTES).default(""),
+  at: z.number(),
+  sentAt: z.number().optional(),
+});
+export type CardReply = z.output<typeof replySchema>;
 export const waitingOnSchema = z.object({ kind: z.enum(WAITING_KINDS), name: z.string().min(1).max(200) });
 export type CardWaitingOn = z.output<typeof waitingOnSchema>;
 export const linkSchema = z.object({
@@ -84,6 +96,8 @@ export interface BoardCard {
   detail: string;
   waitingOn?: CardWaitingOn;
   ask?: CardAsk;
+  /** The user's answer to ask. It belongs to that ask and goes when the ask changes or clears. */
+  reply?: CardReply;
   links: CardLink[];
   history: CardMove[];
   createdAt: number;
@@ -145,6 +159,7 @@ export function parseCard(value: RecordValue | undefined): BoardCard | null {
     detail: text(value.detail),
     waitingOn: parsed(waitingOnSchema, value.waitingOn),
     ask: parsed(askSchema, value.ask),
+    reply: parsed(replySchema, value.reply),
     links: list(linkSchema, value.links),
     history: list(moveSchema, value.history),
     createdAt,
@@ -155,7 +170,7 @@ export function parseCard(value: RecordValue | undefined): BoardCard | null {
 }
 
 const KNOWN_CARD_FIELDS = new Set([
-  "v", "id", "title", "status", "notes", "detail", "waitingOn", "ask", "links", "history", "createdAt", "updatedAt", "intake",
+  "v", "id", "title", "status", "notes", "detail", "waitingOn", "ask", "reply", "links", "history", "createdAt", "updatedAt", "intake",
 ]);
 
 /** The record for [card], keeping unknown fields from the record it was read from. */
@@ -171,6 +186,7 @@ export function serializeCard(card: BoardCard): RecordValue {
     ...(card.detail ? { detail: card.detail } : {}),
     ...(card.waitingOn ? { waitingOn: card.waitingOn } : {}),
     ...(card.ask ? { ask: card.ask } : {}),
+    ...(card.ask && card.reply ? { reply: card.reply } : {}),
     links: card.links,
     history: card.history.slice(-MAX_HISTORY),
     createdAt: card.createdAt,
@@ -298,6 +314,7 @@ export function applyChange(base: RecordValue | undefined, change: BoardChange, 
       ...(changes.links !== undefined ? { links: changes.links ?? [] } : {}),
       waitingOn: changes.waitingOn === undefined ? card.waitingOn : changes.waitingOn ?? undefined,
       ask: changes.ask === undefined ? card.ask : changes.ask ?? undefined,
+      reply: changes.ask === undefined ? card.reply : undefined,
       updatedAt: change.at,
     };
   } else {
@@ -318,6 +335,7 @@ export function applyChange(base: RecordValue | undefined, change: BoardChange, 
       status: change.to,
       // An ask belongs to a status that waits on the user. Leaving one answers it.
       ask: change.ask ?? (target?.kind === "user" ? card.ask : undefined),
+      reply: change.ask ? undefined : card.reply,
       history: moved
         ? [...card.history, { at: change.at, by: change.by, from: card.status, to: change.to, why: change.why }].slice(-MAX_HISTORY)
         : card.history,
@@ -373,6 +391,23 @@ export function parseIntakeItem(plaintext: string): { ok: true; item: IntakeItem
 /** The card every event for one service item lands on: h_ and 24 hex characters of SHA-256(source + "\n" + ref). */
 export function intakeCardId(source: string, ref: string): string {
   return `h_${createHash("sha256").update(`${source}\n${ref}`, "utf8").digest("hex").slice(0, 24)}`;
+}
+
+const ticketKey = (ref: string): string => ref.trim().replace(/\/+$/, "");
+
+/**
+ * The card already tracking a ticket: one with a ticket link whose ref is one
+ * of [refs]. Prefers a card that isn't done, then the latest updated. Intake
+ * uses it so a Hub item lands on a card an agent made by hand, and create
+ * uses it to refuse a second card for the same ticket.
+ */
+export function ticketCard(cards: BoardCard[], refs: readonly string[], config: BoardConfig): BoardCard | undefined {
+  const wanted = new Set(refs.map(ticketKey).filter((ref) => ref.length > 0));
+  if (!wanted.size) return undefined;
+  const done = new Set(config.statuses.filter((status) => status.kind === "done").map((status) => status.key));
+  return cards
+    .filter((card) => card.links.some((link) => link.kind === "ticket" && wanted.has(ticketKey(link.ref))))
+    .sort((a, b) => Number(done.has(a.status)) - Number(done.has(b.status)) || b.updatedAt - a.updatedAt)[0];
 }
 
 /** [value] when it is an http or https URL, so a service can't hand the app another kind of link. */

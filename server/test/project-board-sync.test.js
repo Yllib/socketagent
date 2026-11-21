@@ -536,6 +536,64 @@ test("intake items open, update, close and reopen one card, and each is claimed"
   assert.equal(cards[0].id, cardId);
 });
 
+test("a saved answer survives an agent's edit, reaches agents once sent, and goes with its ask", async () => {
+  const relay = new FakeRelay();
+  const s = secret();
+  const session = chat("Release chat");
+  const a = computer(relay);
+  a.store.replaceGrants([grant("p_app", s, [session])]);
+  const id = String(cardOf(ok(await tool(a.store, session, {
+    action: "create", title: "Ship 1.4", status: "needs_you", ask: { kind: "approve", text: "Ship 1.4 tonight?" },
+  }))).id);
+  const keys = boardKeys(s);
+  const app = new ProjectBoardRelay("https://relay.test", keys, relay.fetch);
+  /** Writes [reply] on the card the way the app does. @param {Record<string, unknown>} reply */
+  const answer = async (reply) => {
+    const record = relay.board(keys.boardId).records.get(`card.${id}`);
+    assert.ok(record);
+    const card = relayRecord(relay, s, `card.${id}`);
+    await app.put(`card.${id}`, record.version, sealBoardRecord(keys.boardKey, JSON.stringify({ ...card, reply })));
+  };
+  /** The card as list shows it to an agent. */
+  const listed = async () => {
+    const cards = unknownArray(ok(await tool(a.store, session, { action: "list" })).cards);
+    const card = cards.find((c) => isRecord(c) && c.id === id);
+    assert.ok(isRecord(card));
+    return card;
+  };
+
+  await answer({ approved: true, text: "After 6pm", at: 1 });
+  ok(await tool(a.store, session, { action: "update", card_id: id, notes: "Built" }));
+  assert.deepEqual(relayRecord(relay, s, `card.${id}`).reply, { approved: true, text: "After 6pm", at: 1 });
+  assert.equal((await listed()).reply, undefined, "a saved answer stays private until sent");
+
+  await answer({ approved: true, text: "After 6pm", at: 1, sentAt: 2 });
+  assert.deepEqual((await listed()).reply, { approved: true, text: "After 6pm", sentAt: new Date(2).toISOString() });
+
+  ok(await tool(a.store, session, { action: "update", card_id: id, ask: { kind: "approve", text: "Ship 1.4.1 instead?" } }));
+  assert.equal(relayRecord(relay, s, `card.${id}`).reply, undefined, "a new question clears the old answer");
+});
+
+test("a Hub item lands on the card an agent already made for its ticket, and create refuses a second", async () => {
+  const relay = new FakeRelay();
+  const s = secret();
+  const session = chat("Triage");
+  const a = computer(relay);
+  a.store.replaceGrants([grant("p_app", s, [session])]);
+  const link = { kind: "ticket", ref: "https://hub.example/123/", label: "Hub 123" };
+  const made = cardOf(ok(await tool(a.store, session, { action: "create", title: "Crash", status: "doing", links: [link] })));
+  const again = await tool(a.store, session, { action: "create", title: "Crash again", links: [{ ...link, ref: "https://hub.example/123" }] });
+  assert.match(again.error ?? "", new RegExp(`${made.id}.*already tracks this ticket`));
+
+  const opened = postIntake(relay, s, hubItem({ event: "opened", title: "Crash on launch", url: "https://hub.example/123" }));
+  await a.store.board("p_app")?.sync();
+  const card = relayRecord(relay, s, `card.${made.id}`);
+  assert.equal(card.title, "Crash on launch");
+  assert.equal(card.status, "doing", "an opened item doesn't move an adopted card");
+  assert.deepEqual(card.intake, [opened]);
+  assert.equal(relay.board(boardKeys(s).boardId).records.has(`card.${intakeCard("Feedback Hub", "marina#123")}`), false);
+});
+
 test("two computers handling the same intake item change the card once", async () => {
   const relay = new FakeRelay();
   const s = secret();

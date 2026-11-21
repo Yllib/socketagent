@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import type { McpTextResult } from "./app-tool-handlers";
+import { attachBoardImages } from "./board-images";
 import { projectBoards, type BoardReplica, type BoardWriteOutcome } from "./project-board-store";
 import {
   ASK_KINDS,
@@ -18,6 +19,7 @@ import {
   statusSchema,
   statusSince,
   STATUS_KINDS,
+  ticketCard,
   WAITING_KINDS,
   waitingOnSchema,
   type BoardCard,
@@ -35,9 +37,13 @@ export const PROJECT_BOARD_TOOL_DESCRIPTION =
   + "create and update set title, notes (short: where it stands now), detail, links, waiting_on and ask. In update a field left out is unchanged and null clears it. "
   + "detail is Markdown, up to 48 KiB, and holds the full source material the user needs to decide from the card without opening this chat: "
   + "the ticket's full request text, the full drafted reply, the full proposed release notes. Paste the full text, not a summary or a pointer to the chat. "
+  + "detail can show screenshots from this computer, such as before and after shots of a UI change: a Markdown image ![Before](/absolute/path.png) or a socketagent-compare block. "
+  + "The image is saved on this computer and the card holds only a link, so the app loads it from here. "
   + "move changes a card's status with a one-line why. A card in a status of kind user needs an ask with the exact question; give it in the same call or set it first. "
+  + "A ticket link's ref is the ticket's web URL, so the app can open it; one ticket gets one card, and create refuses a second. "
   + "delete is for cards made by mistake; finished work moves to a done status. "
-  + "When the user answers from the app, a message such as \"Approved: <card title>\" arrives in the chat that asked; act on it and move the card on. "
+  + "The user answers asks in the app and sends the answers as one message to the chat that asked, starting \"Answers from the <board> board:\" and listing each card's ID, question and answer (Approved, Declined, Send it, Don't send, or the answer text). "
+  + "That message is the user's answer in their words; act on each answer and move its card on. A card's reply field shows an answer that was sent. "
   + "propose_rules submits a full new set of statuses and rules with a why; the user approves or declines it in the app. "
   + "Status keys, kinds and the user's rules arrive in a <socketagent_project_board> block.";
 
@@ -120,6 +126,14 @@ function cardSummary(card: BoardCard, config: BoardConfig) {
     notes: card.notes,
     ...(card.waitingOn ? { waitingOn: card.waitingOn } : {}),
     ...(card.ask ? { ask: card.ask } : {}),
+    // A saved answer stays private until the user sends it.
+    ...(card.reply?.sentAt !== undefined ? {
+      reply: {
+        ...(card.reply.approved !== undefined ? { approved: card.reply.approved } : {}),
+        ...(card.reply.text ? { text: card.reply.text } : {}),
+        sentAt: iso(card.reply.sentAt),
+      },
+    } : {}),
     ...(card.links.length ? { links: card.links } : {}),
     detailBytes: Buffer.byteLength(card.detail, "utf8"),
     inStatusSince: iso(statusSince(card)),
@@ -163,8 +177,11 @@ function parsedOr<T extends z.ZodType>(schema: T, value: unknown, field: string)
   return result.data;
 }
 
-/** Turns tool input into card field changes, validating each one that is present. */
-function fieldChanges(args: ProjectBoardToolArgs, sessionId: string): CardFieldChanges {
+/**
+ * Turns tool input into card field changes, validating each one that is
+ * present. Images in detail are saved on this computer and linked.
+ */
+async function fieldChanges(args: ProjectBoardToolArgs, sessionId: string): Promise<CardFieldChanges> {
   const changes: CardFieldChanges = {};
   if (args.title !== undefined) changes.title = args.title.trim();
   if (args.notes !== undefined) changes.notes = args.notes;
@@ -173,6 +190,17 @@ function fieldChanges(args: ProjectBoardToolArgs, sessionId: string): CardFieldC
       throw new Error(`detail is over 48 KiB (${MAX_DETAIL_BYTES} bytes). Keep the material the user needs to decide and link the rest.`);
     }
     changes.detail = args.detail;
+    if (args.detail) {
+      const { detail, failed } = await attachBoardImages(args.detail, sessionId);
+      if (failed > 0) {
+        throw new Error(`${failed} image${failed === 1 ? "" : "s"} in detail could not be saved on this computer. `
+          + "Use an absolute path to a PNG, JPEG, GIF or WebP file up to 20 MB that exists now.");
+      }
+      if (Buffer.byteLength(detail, "utf8") > MAX_DETAIL_BYTES) {
+        throw new Error(`detail is over 48 KiB (${MAX_DETAIL_BYTES} bytes) with its image links. Keep the material the user needs to decide and link the rest.`);
+      }
+      changes.detail = detail;
+    }
   }
   if (args.waiting_on !== undefined) {
     changes.waitingOn = args.waiting_on === null ? null : parsedOr(waitingOnSchema, args.waiting_on, "waiting_on");
@@ -255,7 +283,12 @@ export async function handleProjectBoardTool(ctx: ProjectBoardToolContext, args:
         await bounded(board.sync());
         const current = board.config();
         const status = args.status ?? current.statuses.find((candidate) => candidate.kind === "new")?.key ?? current.statuses[0].key;
-        const changes = fieldChanges(args, sessionId);
+        const changes = await fieldChanges(args, sessionId);
+        const tickets = (changes.links ?? []).filter((link) => link.kind === "ticket").map((link) => link.ref);
+        const tracking = ticketCard(board.cards(), tickets, current);
+        if (tracking) {
+          return textResult(`Card ${tracking.id} ("${tracking.title}") already tracks this ticket. Update or move it instead of making another.`, true);
+        }
         const id = newCardId();
         const card: RecordValue = {
           v: 1,
@@ -274,7 +307,7 @@ export async function handleProjectBoardTool(ctx: ProjectBoardToolContext, args:
         return write(board, { kind: "create", card }, config);
       }
       case "update": {
-        const changes = fieldChanges(args, sessionId);
+        const changes = await fieldChanges(args, sessionId);
         if (changes.title === "") return textResult("A card needs a title; title cannot be empty.", true);
         if (Object.keys(changes).length === 0) {
           return textResult("update needs at least one of title, notes, detail, waiting_on, ask or links. Use move to change the status.", true);
@@ -356,12 +389,12 @@ export function buildBoardBlock(projectName: string, config: BoardConfig): strin
     "- When you start work in this project, check the cards that concern it, especially ones waiting on the user or on someone else.",
     "- Move a card as soon as its work moves: to an active status while you work on it, to a waiting status after you send something, to a done status when it is finished or dropped. Give a one-line why.",
     "- A card in a status of kind other names who it is waiting on in waiting_on.",
-    "- The user answers a card's ask from the app, which puts a message in this chat such as \"Approved: <card title>\", \"Send it: <card title>\" or \"<card title>: <answer>\". That message is the user's answer to that card. Do what it approves, then move the card on.",
+    "- The user answers asks in the app and sends them as one message to the chat that asked, starting \"Answers from the <board> board:\". It lists each card's ID, the question and the answer: Approved, Declined, Send it, Don't send, or the answer text, sometimes with a note. That message is the user's answer to those cards, in their words. Do what each answer approves, then move each card on.",
     "",
     "Filling a card:",
     "- notes is short: where the work stands now.",
     "- detail is Markdown, up to 48 KiB. A card waiting on the user carries everything needed to decide there: the ticket's full request text, the full drafted message, the full proposed text such as release notes. Paste the full text, not a summary, so the user can approve from the card without opening this chat.",
-    "- Every card in a status of kind user has an ask: the exact question, with kind approve, send, decide or answer. Approving still happens in the chat, in the user's words.",
+    "- Every card in a status of kind user has an ask: the exact question, with kind approve, send, decide or answer. Act on an answer only once its message reaches this chat.",
     "- Agents cannot change statuses or rules. Use propose_rules; the user approves or declines it in the app.",
     "</socketagent_project_board>",
   ].join("\n");

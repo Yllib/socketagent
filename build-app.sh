@@ -6,6 +6,10 @@ if [[ "${1:-}" == "--windows" ]]; then
   shift
   exec "$(cd "$(dirname "$0")" && pwd)/build-windows-app.sh" "$@"
 fi
+if [[ "${1:-}" == "--web" ]]; then
+  shift
+  exec "$(cd "$(dirname "$0")" && pwd)/build-web-app.sh" "$@"
+fi
 
 # SocketAgent App Build Script
 #

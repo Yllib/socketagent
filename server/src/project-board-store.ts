@@ -50,6 +50,8 @@ import { errorMessage, isRecord } from "./value-guards";
  * an outbox so chats keep working while the relay is unreachable.
  */
 
+type HeldBoardKey = Pick<BoardGrant, "projectId" | "name" | "secret">;
+
 export interface BoardGrant {
   projectId: string;
   name: string;
@@ -79,6 +81,7 @@ const grantsFileSchema = z.object({
   })),
   members: z.array(z.object({ projectId: z.string(), sessionId: z.string(), reannounced: z.boolean().optional() })).default([]),
   gone: z.array(z.string()).default([]),
+  held: z.array(z.object({ projectId: z.string(), name: z.string(), secret: z.string() })).default([]),
 });
 const cacheFileSchema = z.object({
   v: z.literal(1),
@@ -559,6 +562,13 @@ export class ProjectBoardStore {
   private members: LocalMember[] = [];
   /** Board IDs the relay answered 410 for. A grant with one of these secrets is stale. */
   private gone: string[] = [];
+  /**
+   * Secrets of boards the app's grants stopped listing. The app may have lost
+   * a board it never turned off, and asks for its key back with
+   * project_board_key_request; dropping the key with the grant would lose the
+   * board's cards for good. Newest last, at most 50.
+   */
+  private held: HeldBoardKey[] = [];
   private readonly replicas = new Map<string, BoardReplica>();
   private delivered: Record<string, string>;
 
@@ -568,6 +578,7 @@ export class ProjectBoardStore {
     if (saved) {
       this.gone = saved.gone;
       this.grants = saved.boards.filter((grant) => this.usableGrant(grant));
+      this.held = saved.held.filter((key) => this.usableGrant({ ...key, sessionIds: [] }));
       this.members = saved.members.filter((member) => this.grants.some((grant) => grant.projectId === member.projectId));
     }
     this.delivered = readJson(this.deliveredFile, deliveredFileSchema) ?? {};
@@ -605,6 +616,13 @@ export class ProjectBoardStore {
     const next = new Map<string, BoardGrant>();
     for (const grant of boards) {
       if (this.usableGrant(grant)) next.set(grant.projectId, { ...grant, sessionIds: [...new Set(grant.sessionIds)] });
+    }
+    for (const old of this.grants) {
+      if (next.get(old.projectId)?.secret === old.secret) continue;
+      this.held = [
+        ...this.held.filter((key) => key.secret !== old.secret),
+        { projectId: old.projectId, name: old.name, secret: old.secret },
+      ].slice(-50);
     }
     this.grants = [...next.values()];
     const granted = new Set(this.grants.flatMap((grant) => grant.sessionIds));
@@ -652,6 +670,12 @@ export class ProjectBoardStore {
     return this.grants.find((grant) => grant.projectId === projectId);
   }
 
+  /** The key this computer holds for [projectId]'s board: its grant's, or the newest one a grant dropped. */
+  heldKey(projectId: string): string | undefined {
+    return this.grant(projectId)?.secret
+      ?? this.held.filter((key) => key.projectId === projectId).at(-1)?.secret;
+  }
+
   /** The local copy of [projectId]'s board. Null without a grant or a relay. */
   board(projectId: string): BoardReplica | null {
     const existing = this.replicas.get(projectId);
@@ -677,6 +701,8 @@ export class ProjectBoardStore {
     console.log(`[ProjectBoards] The relay no longer has the board for ${projectId}; dropping its grant`);
     const boardId = this.replicas.get(projectId)?.boardId;
     if (boardId) this.gone = [...this.gone.filter((id) => id !== boardId), boardId].slice(-200);
+    const secret = this.replicas.get(projectId)?.secret;
+    this.held = this.held.filter((key) => key.secret !== secret);
     this.replicas.delete(projectId);
     this.grants = this.grants.filter((grant) => grant.projectId !== projectId);
     this.members = this.members.filter((member) => member.projectId !== projectId);
@@ -720,7 +746,7 @@ export class ProjectBoardStore {
   }
 
   private saveGrants(): void {
-    writePrivateJson(this.grantsFile, { v: 1, boards: this.grants, members: this.members, gone: this.gone });
+    writePrivateJson(this.grantsFile, { v: 1, boards: this.grants, members: this.members, gone: this.gone, held: this.held });
   }
 }
 

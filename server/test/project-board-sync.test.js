@@ -191,6 +191,10 @@ test("grants live in project-boards.json, mode 0600, and each message replaces t
   assert.equal(reloaded.projectFor("chat-1"), "p_aa", "grants survive a restart");
   reloaded.replaceGrants([]);
   assert.equal(reloaded.projectFor("chat-1"), null, "an empty list drops every board");
+  assert.equal(reloaded.heldKey("p_aa"), s, "but the computer keeps the key for the app to ask back");
+  const again = new ProjectBoardStore({ dataDir, relayUrl: RELAY_URL, fetch: relay.fetch });
+  assert.equal(again.heldKey("p_aa"), s, "held keys survive a restart");
+  assert.equal(again.heldKey("p_none"), undefined);
 });
 
 test("a child agent joins its parent's project until the app's grant lists it", () => {

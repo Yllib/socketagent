@@ -1,3 +1,4 @@
+import { BACKENDS } from "./protocol";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as readline from "readline";
@@ -59,7 +60,7 @@ export const bundleHeaderSchema = z.object({
   schema: z.literal(TRANSFER_SCHEMA), version: z.literal(TRANSFER_VERSION),
   bundleId: z.string(), createdAt: z.string(),
   source: z.object({
-    serverLabel: z.string(), sessionId: z.string().min(1), backend: z.enum(["claude", "codex"]),
+    serverLabel: z.string(), sessionId: z.string().min(1), backend: z.enum(BACKENDS),
     cwd: z.string(),
   }).passthrough(),
   session: sessionInfoSchema,

@@ -1,3 +1,4 @@
+import { BACKENDS } from "./protocol";
 import { z } from "zod";
 import { sessionRunOutcomeSchema } from "./history-schema";
 import type {
@@ -9,7 +10,7 @@ type Shape<T> = { [K in keyof T]-?: z.ZodType<T[K]> };
 const optionalText = z.string().optional();
 const optionalNumber = z.number().optional();
 const optionalBoolean = z.boolean().optional();
-const backendSchema = z.enum(["claude", "codex"]);
+const backendSchema = z.enum(BACKENDS);
 
 const thinkingSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("adaptive") }).passthrough(),

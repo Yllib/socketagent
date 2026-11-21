@@ -23,6 +23,8 @@ const {
 } = require("#server/model-catalog-store");
 const { ClaudeSession } = require("#server/claude-session");
 const { CodexSession } = require("#server/codex-session");
+const { GeminiSession } = require("#server/gemini-session");
+const { parseAgyModelsOutput } = require("#server/gemini-cli");
 
 const { parseServerMessage } = require("#server/server-message");
 
@@ -159,4 +161,94 @@ test("Codex records a card with display names when the user switches models", as
   const cards = sent.filter((entry) => entry.type === "model_changed");
   assert.equal(cards.length, 1);
   assert.equal(cards[0].content, "Model changed from GPT-6-Sol to gpt-6.1-sol");
+});
+
+test("reads a persisted Gemini model catalog back from disk", () => {
+  saveCachedModelCatalog("gemini", [{ value: "gemini-4-neon", displayName: "Gemini 4 Neon", isDefault: true }]);
+
+  const storePath = require.resolve("#server/model-catalog-store");
+  delete require.cache[storePath];
+  const reloaded = require("#server/model-catalog-store");
+
+  const loaded = reloaded.getCachedModelCatalog("gemini");
+  assert.equal(loaded?.models[0]?.value, "gemini-4-neon");
+});
+
+test("parseAgyModelsOutput groups multi-effort families and keeps singletons standalone", () => {
+  const models = parseAgyModelsOutput([
+    "gemini-4-neon-high              Gemini 4 Neon (High)",
+    "gemini-4-neon-xhigh             Gemini 4 Neon (XHigh)",
+    "gemini-4-neon-low               Gemini 4 Neon (Low)",
+    "gemini-pro-orchestrator-neon    Orchestrator (Neon)",
+    "gpt-oss-120b-medium             GPT-OSS 120B (Medium)",
+  ].join("\n"));
+
+  assert.deepEqual(models, [
+    {
+      id: "gemini-4-neon",
+      value: "gemini-4-neon",
+      displayName: "Gemini 4 Neon",
+      description: "",
+      isDefault: true,
+      supportedReasoningEfforts: [
+        { reasoningEffort: "high" },
+        { reasoningEffort: "xhigh" },
+        { reasoningEffort: "low" },
+      ],
+      supportedEffortLevels: ["high", "xhigh", "low"],
+      defaultReasoningEffort: "high",
+    },
+    {
+      id: "gemini-pro-orchestrator-neon",
+      value: "gemini-pro-orchestrator-neon",
+      displayName: "Orchestrator (Neon)",
+      description: "",
+      isDefault: false,
+    },
+    {
+      id: "gpt-oss-120b-medium",
+      value: "gpt-oss-120b-medium",
+      displayName: "GPT-OSS 120B (Medium)",
+      description: "",
+      isDefault: false,
+    },
+  ]);
+});
+
+test("Gemini discovers models before a turn when cache is empty, then reuses fresh cache", async () => {
+  invalidateCachedModelCatalog("gemini");
+  /** @type {import("#server/protocol").ServerMessage[]} */
+  const sent = [];
+  const session = new GeminiSession(testSocket(sent), process.cwd(), []);
+  let discoveries = 0;
+  session.discoverSupportedModels = async () => {
+    discoveries += 1;
+    return [
+      { id: "gemini-4-neon", value: "gemini-4-neon", displayName: "Gemini 4 Neon", isDefault: true },
+    ];
+  };
+
+  await session.refreshSupportedModels();
+
+  assert.equal(discoveries, 1);
+  const discovered = sent.find((entry) => entry.type === "supported_models");
+  assert.equal(discovered?.backend, "gemini");
+  assert.equal(discovered?.models[0]?.value, "gemini-4-neon");
+  assert.equal(session.sessionModel, "gemini-4-neon");
+
+  /** @type {import("#server/protocol").ServerMessage[]} */
+  const sentCached = [];
+  const nextSession = new GeminiSession(testSocket(sentCached), process.cwd(), []);
+  nextSession.discoverSupportedModels = async () => {
+    discoveries += 1;
+    return [];
+  };
+
+  await nextSession.refreshSupportedModels();
+
+  assert.equal(discoveries, 1);
+  const cached = sentCached.find((entry) => entry.type === "supported_models");
+  assert.equal(cached?.backend, "gemini");
+  assert.equal(cached?.cached, true);
+  assert.equal(cached?.models[0]?.value, "gemini-4-neon");
 });

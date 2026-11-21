@@ -139,3 +139,17 @@ export function readCodexAuthState(env: NodeJS.ProcessEnv = process.env): Backen
   }
   return codexAuthStateFromAuthJson(readJsonFile(authPath));
 }
+
+/**
+ * Whether agy has a saved Google sign-in. agy keeps its token in the OS
+ * keyring when one is available and in a file otherwise; its record of the
+ * sign-in method is written either way and removed by /logout.
+ */
+export function geminiAuthState(env: NodeJS.ProcessEnv = process.env): BackendAuthState {
+  const home = env.HOME || env.USERPROFILE || os.homedir();
+  const dir = path.join(home, ".gemini", "antigravity-cli");
+  if (fs.existsSync(path.join(dir, "antigravity-oauth-token")) || fs.existsSync(path.join(dir, "cache", "acp-auth-state.json"))) {
+    return { authenticated: true };
+  }
+  return { authenticated: false, reason: "Gemini is not signed in to Google on this computer." };
+}

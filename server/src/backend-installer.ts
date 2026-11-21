@@ -9,6 +9,8 @@ import { spawn } from "child_process";
 import { killProcessTree, runProbe } from "./async-probe";
 import type { Backend } from "./protocol";
 import { managedNpmBinDir, managedNpmPrefix } from "./socket-agent-paths";
+import { geminiAuthState } from "./backend-auth";
+import { agyVersion, installAgy, resolveAgyCommand, startAgyLogin } from "./gemini-cli";
 
 export type BackendInstallPhase = "install" | "auth" | "probe";
 export type BackendInstallStatus = "running" | "completed" | "failed" | "cancelled";
@@ -126,6 +128,7 @@ function resolveManagedBackendCommand(env: NodeJS.ProcessEnv, backend: Backend):
 }
 
 function backendDisplayName(backend: Backend): string {
+  if (backend === "gemini") return "Antigravity CLI";
   return backend === "codex" ? "OpenAI Codex CLI" : "Claude Code CLI";
 }
 
@@ -497,7 +500,56 @@ async function runCodexDeviceAuth(options: {
   });
 }
 
+/**
+ * Gemini: installs Google's Antigravity CLI and signs it in. The sign-in link
+ * goes to the phone, and the code Google's page shows comes back through
+ * onBrowserCallbackReady's callback, which index.ts calls on auth_code.
+ */
+async function runGeminiInstall(options: BackendInstallOptions): Promise<void> {
+  if (options.reinstall || !resolveAgyCommand()) {
+    options.onProgress({ phase: "install", status: "running", message: "Installing Google's Antigravity CLI..." });
+    const version = await installAgy({
+      signal: options.signal,
+      onProgress: (message) => options.onProgress({ phase: "install", status: "running", message }),
+    });
+    options.onProgress({ phase: "install", status: "completed", message: `Antigravity CLI ${version} installed.` });
+  }
+  const command = resolveAgyCommand();
+  if (!command) throw new Error("The Antigravity CLI is missing after install.");
+
+  if (options.authenticate) {
+    if (!options.forceAuthenticate && geminiAuthState().authenticated) {
+      options.onProgress({ phase: "auth", status: "completed", message: "Gemini is already signed in to Google on this computer." });
+    } else {
+      const login = await startAgyLogin(command);
+      const abort = () => login.cancel();
+      options.signal?.addEventListener("abort", abort, { once: true });
+      try {
+        options.onBrowserCallbackReady?.((code) => login.submitCode(code));
+        options.onProgress({
+          phase: "auth",
+          status: "running",
+          message: "Sign in with the Google account that has your Google AI plan, then paste the code Google shows.",
+          authUrl: login.authUrl,
+        });
+        await login.done;
+      } catch (error: unknown) {
+        throw options.signal?.aborted ? new Error("Operation cancelled") : error;
+      } finally {
+        options.signal?.removeEventListener("abort", abort);
+      }
+      options.onProgress({ phase: "auth", status: "completed", message: "Gemini is signed in to Google." });
+    }
+  }
+
+  options.onProgress({ phase: "probe", status: "running", message: "Checking the Antigravity CLI..." });
+  const version = await agyVersion(command);
+  if (!version) throw new Error("The Antigravity CLI does not start.");
+  options.onProgress({ phase: "probe", status: "completed", message: `Antigravity CLI ${version} works.` });
+}
+
 export async function runBackendInstall(options: BackendInstallOptions): Promise<void> {
+  if (options.backend === "gemini") return runGeminiInstall(options);
   const env = installEnv();
   const label = backendDisplayName(options.backend);
 

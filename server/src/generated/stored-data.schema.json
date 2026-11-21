@@ -135,7 +135,8 @@
       "type": "string",
       "enum": [
         "claude",
-        "codex"
+        "codex",
+        "gemini"
       ]
     },
     "DelegatedAgentStatus": {
@@ -316,11 +317,7 @@
           "type": "string"
         },
         "backend": {
-          "type": "string",
-          "enum": [
-            "claude",
-            "codex"
-          ]
+          "$ref": "#/definitions/Backend"
         },
         "cwd": {
           "type": "string"

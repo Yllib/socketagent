@@ -1,3 +1,4 @@
+import { backendName } from "./protocol";
 import * as dns from "node:dns/promises";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -44,6 +45,7 @@ export function isBackendConnectionError(message: string): boolean {
 
 function providerHost(backend: Backend, env: NodeJS.ProcessEnv): string {
   if (backend === "codex") return "chatgpt.com";
+  if (backend === "gemini") return "cloudcode-pa.googleapis.com";
   try {
     return new URL(env.ANTHROPIC_BASE_URL || "").hostname || "api.anthropic.com";
   } catch {
@@ -154,8 +156,8 @@ export function connectionFailureMessage(
   diagnosis: ConnectionDiagnosis,
   options: { retrying?: boolean; env?: NodeJS.ProcessEnv } = {},
 ): string {
-  const name = backend === "codex" ? "Codex" : "Claude";
-  const provider = backend === "codex" ? "OpenAI" : "Anthropic";
+  const name = backendName(backend);
+  const provider = backend === "codex" ? "OpenAI" : backend === "gemini" ? "Google" : "Anthropic";
   const host = providerHost(backend, options.env ?? process.env);
   const next = options.retrying
     ? `${name} keeps retrying for a few minutes.`

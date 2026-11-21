@@ -44,7 +44,8 @@ import { flushSessionStore, flushSdkEventQueue, getTranscriptViewPage, onHistory
 import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ClaudeSession, refreshClaudeExecutableInfo } from "./claude-session";
-import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, type CodexTurnLineage, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
+import { CODEX_NATIVE_SLASH_COMMANDS, CodexSession, type CodexTurnLineage, archiveCodexAppServerThread, clearCodexAppServerGoal, compactCodexAppServerThread, createSession, sessionBackend, getCodexAppServerGoal, rollbackCodexAppServerThread, rewindCodexAppServerToMessage, Session, setCodexAppServerGoal, detectAvailableBackends, getCodexAvailability, isCodexAuthError, unarchiveCodexAppServerThread } from "./codex-session";
+import { GeminiSession } from "./gemini-session";
 import { startBashCapturePruning } from "./bash-capture";
 import { readFullOutput, startFullOutputTrimming } from "./full-output-store";
 import { listSessions as listStoredSessions, listSessionsWithNativeBackends, getSession, saveSession, getHistory, getHistoryCount, getLastHistorySessionSeq, getHistorySince, getRunBoundary, getHistoryPage, getHistoryPageToLastPrompt, getResumeHistoryPage, getCompletionTranscriptTarget, getHistoryEntryByToolUseId, appVisibleHistory, hasPersistedUserContentPrefix, hasPersistedPrompt, rememberListHistory, rememberSearchAllHistory, markComputerAccessResolved, updateMemoryCards, getMemoryCardEntry, deleteSession, deleteSessionArtifacts, makeSessionPermanent, clearSessionContext, cleanupPendingToolCalls, cleanupAllPendingToolCallsInBatches, compactHistoryStorage, getTodos, dismissTodos, getActiveTaskStates, getBrowserSessionHistory, backfillClaudeTasksFromHistory, settleStaleRuntimeTaskStates, getUnrecordedClaudeMessages, hasClaudeTranscript, appendHistory, appendHistoryBulk, appendNativeHistorySuffix, updateSessionActivity, updateSessionAgentSettings, getSdkEvents, getSdkEventCount, markQuestionAnswered, getPersistedSecureInputRequest, markSecureInputRequestResolved, getLastHistoryTimestamp, listSdkSessions, listCodexSessions, listCodexNativeSdkSessions, readCodexRolloutHistory, readCodexRolloutAgentSettings, readCodexAppServerThreadHistory, getRecentCwds, addRecentCwd, removeRecentCwd, truncateHistoryAtMessage, getLastPromptSuggestion, getLastPermissionMode, listArchivesWithNativeCodex, getArchiveHistory, restoreArchive, restoreCodexNativeArchive, deleteArchive, isCodexThreadArchived, isCodexNativeArchiveTs, getCodexNativeThreadSessionInfo, getClaudeNativeSessionInfo, markSessionArchived, archivedSessionIds, renameCodexNativeThread, renameClaudeNativeSession, invalidateCodexNativeListCache, findCodexRolloutFile, getJsonlPath, removeHtmlPlanHistoryEntries, updateHtmlPlanHistoryEntry, repairStoredTranscriptIdentitiesOnce } from "./session-store";
@@ -68,6 +69,8 @@ import {
   UPLOAD_ACK_VERSION,
   supportsSessionEventAcknowledgement,
   supportsMonitorOutputAcknowledgement,
+  backendName,
+  isBackend,
 } from "./protocol";
 import { encodeBinaryBrowserFrame } from "./browser-frame-wire";
 import { BINARY_FILE_DOWNLOAD_VERSION, BinaryFileDownloadChunkMetadata, fileTransferVersion, resolveFileResumeOffset } from "./file-transfer-wire";
@@ -120,7 +123,7 @@ import { AiConnectorHttp } from "./ai-connector-http";
 import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store";
 import type { AiConnectorStatusServerMessage, ProjectBoardMemberServerMessage } from "./protocol";
 import { isAuthFailureMessage } from "./backend-auth";
-import { clearBackendHealthOverride, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
+import { clearBackendHealthOverride, getBackendHealth, getGeminiAvailability, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
 import { clearPushRegistrations, dropDeviceRegistrations, getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, relayPushTokens, sendPushNotification, setPushTransport, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { pushSealingSecrets } from "./push-sealing";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
@@ -153,6 +156,7 @@ import { recordModelChange } from "./model-change";
 import { isBackendConnectionError } from "./backend-connection";
 import { getCachedRateLimitEvents } from "./rate-limit-cache";
 import { lastClaudePlanUsage } from "./claude-plan-usage-cache";
+import { fetchGeminiAccountUsage, lastGeminiAccountUsage, type GeminiAccountUsage } from "./gemini-usage";
 import { activeAppMonitorRecords, AppToolContext, rebindAppMonitorsForSession, restoreAppMonitors, setSessionReporter } from "./app-tool-handlers";
 import type { DurableMonitorRecord } from "./durable-monitor-store";
 import { applyInitialSessionSettings, isClaudeEffort } from "./initial-session-settings";
@@ -1129,6 +1133,8 @@ function maybeFinalizeLogicalRun(sessionId: string): void {
   const current = getSessionRunStats(sessionId)?.current;
   if (!current?.supervisorSettled) return;
   if (delegatedWorkOutstanding(sessionId, current.startedAt)) return;
+  const active = activeSessions.get(sessionId);
+  if (active && active.activeBackgroundTasks.size > 0) return;
   finishLogicalRunNow(sessionId, current.pendingOutcome || "completed");
 }
 
@@ -1979,7 +1985,11 @@ function attachSessionLifecycleCallbacks(session: Session): void {
   session.onActivity = () => {
     bindClientConversation(session);
     syncLiveSessionInstance(session);
-    if (!sessionIsBusy(session)) completeRecoverableRun(session);
+    if (!sessionIsBusy(session)) {
+      completeRecoverableRun(session);
+      const sid = sessionInstanceId(session);
+      if (sid) maybeFinalizeLogicalRun(sid);
+    }
     notifySessionActivity();
   };
   session.onHarnessRunStateChanged = (running: boolean) => {
@@ -4409,6 +4419,15 @@ function normalizeCodexPermissionMode(mode: unknown): string | null {
   return null;
 }
 
+function normalizeGeminiPermissionMode(mode?: string): string | null {
+  if (!mode) return null;
+  if (mode === "plan" || mode === "default" || mode === "acceptEdits" || mode === "bypassPermissions" || mode === "superYolo") {
+    return mode;
+  }
+  if (mode === "auto") return "default";
+  return null;
+}
+
 async function restorePersistedPermissionMode(session: Session, sessionInfo?: SessionInfo): Promise<void> {
   if (!sessionInfo) return;
   const historyMode = sessionInfo.id && !sessionInfo.permissionMode
@@ -4417,6 +4436,11 @@ async function restorePersistedPermissionMode(session: Session, sessionInfo?: Se
   const persisted = sessionInfo.permissionMode || historyMode;
   if (sessionInfo.backend === "codex") {
     const mode = session instanceof CodexSession ? normalizeCodexPermissionMode(persisted) : null;
+    if (mode) await session.setPermissionMode(mode, { recordHistory: false });
+    return;
+  }
+  if (sessionInfo.backend === "gemini" && session instanceof GeminiSession) {
+    const mode = normalizeGeminiPermissionMode(persisted);
     if (mode) await session.setPermissionMode(mode, { recordHistory: false });
     return;
   }
@@ -4471,12 +4495,12 @@ async function restorePersistedAgentSettings(session: Session, sessionInfo?: Ses
   const settings = persistedAgentSettings(sessionInfo);
   if (settings.model) await session.setModel(settings.model);
   if (settings.effort) {
-    if (session instanceof CodexSession) session.setEffort(settings.effort);
+    if (session instanceof CodexSession || session instanceof GeminiSession) session.setEffort(settings.effort);
     else if (isClaudeEffort(settings.effort)) session.setEffort(settings.effort);
   }
   if (settings.thinking) session.setThinking(settings.thinking);
   if (settings.disallowedTools) session.setDisallowedTools(settings.disallowedTools);
-  if (session instanceof ClaudeSession && settings.additionalDirectories) {
+  if ((session instanceof ClaudeSession || session instanceof GeminiSession) && settings.additionalDirectories) {
     session.setAdditionalDirectories(settings.additionalDirectories);
   }
   if (settings.systemPrompt !== undefined) {
@@ -4490,12 +4514,12 @@ async function restorePersistedAgentSettings(session: Session, sessionInfo?: Ses
   if (session instanceof CodexSession && settings.codexFastMode !== undefined) {
     session.setCodexFastMode(settings.codexFastMode);
   }
-  if (!(session instanceof CodexSession) && settings.claudeAutoCompact !== undefined) {
+  if (session instanceof ClaudeSession && settings.claudeAutoCompact !== undefined) {
     session.setClaudeAutoCompact(settings.claudeAutoCompact);
   }
-  if (!(session instanceof CodexSession) && settings.claudeAutoCompactWindow !== undefined) {
+  if (session instanceof ClaudeSession && settings.claudeAutoCompactWindow !== undefined) {
     session.setClaudeAutoCompactWindow(settings.claudeAutoCompactWindow);
-  } else if (!(session instanceof CodexSession)) {
+  } else if (session instanceof ClaudeSession) {
     session.setClaudeAutoCompactWindow(
       getClaudeAutoCompactWindow(),
       { inherited: true },
@@ -4726,6 +4750,23 @@ function createConnectionHandler(
 
   async function codexUnavailable(): Promise<boolean> {
     return !(await getCodexAvailability()).available;
+  }
+
+  /** Tells the app why Gemini can't run here; true when it can't. */
+  async function geminiUnavailable(sessionId?: string): Promise<boolean> {
+    const availability = await getGeminiAvailability();
+    if (availability.available) return false;
+    const health = getBackendHealth().find((entry) => entry.backend === "gemini");
+    // Sign-in installs agy first when it is missing, so both start from the same card.
+    if (health?.kind === "auth" || health?.kind === "install") {
+      const message = health.kind === "install"
+        ? "Gemini is not set up on this computer yet. Sign in to Google to install it."
+        : "Sign in to Google to use Gemini on this computer.";
+      sendJson({ type: "backend_auth_required", backend: "gemini", sessionId, message, detail: availability.reason });
+    } else {
+      sendJson({ type: "error", message: availability.reason || "Gemini is not available on this computer.", ...(sessionId ? { sessionId } : {}) });
+    }
+    return true;
   }
 
   function isCodexMissingAuthReason(reason: string | undefined): boolean {
@@ -5270,7 +5311,7 @@ function createConnectionHandler(
         const operation = (msg.operation === "auth" || (authenticate && !reinstall))
           ? "auth"
           : "repair";
-        const backendName = backend === "codex" ? "Codex" : "Claude";
+        const displayName = backendName(backend);
         const operationName = operation === "auth" ? "sign-in" : "reinstall";
 
         const sendProgress = (progress: Record<string, unknown>) => {
@@ -5305,7 +5346,7 @@ function createConnectionHandler(
             status: "running",
             message: typeof replay.message === "string" && replay.message.trim()
               ? replay.message
-              : `${backendName} backend ${activeOperationName} is already running on this server.`,
+              : `${displayName} backend ${activeOperationName} is already running on this server.`,
           });
           break;
         }
@@ -5360,7 +5401,7 @@ function createConnectionHandler(
         sendProgress({
           phase: "install",
           status: "running",
-          message: `Starting ${backendName} backend ${operationName}...`,
+          message: `Starting ${displayName} backend ${operationName}...`,
         });
         void runBackendInstall({
           backend,
@@ -5384,7 +5425,7 @@ function createConnectionHandler(
           sendProgress({
             phase: "probe",
             status: "completed",
-            message: `${backendName} backend ${operationName} completed.`,
+            message: `${displayName} backend ${operationName} completed.`,
           });
           broadcastServerCapabilities();
           sendJson({
@@ -5400,8 +5441,8 @@ function createConnectionHandler(
             phase: "probe",
             status: cancelled ? "cancelled" : "failed",
             message: cancelled
-              ? `${backendName} backend ${operationName} stopped.`
-              : `${backendName} ${operationName} failed: ${errorMessage(e) || String(e)}`,
+              ? `${displayName} backend ${operationName} stopped.`
+              : `${displayName} ${operationName} failed: ${errorMessage(e) || String(e)}`,
           });
           broadcastServerCapabilities();
         }).finally(() => {
@@ -5448,7 +5489,7 @@ function createConnectionHandler(
       case "backend_install_cancel": {
         const backend = msg.backend;
         const requestId = msg.requestId;
-        const backendName = backend === "codex" ? "Codex" : "Claude";
+        const displayName = backendName(backend);
         const active = activeBackendInstalls.get(backend);
         const operation = active?.operation || "repair";
         const operationName = operation === "auth" ? "sign-in" : "reinstall";
@@ -5467,7 +5508,7 @@ function createConnectionHandler(
           sendProgress({
             phase: operation === "auth" ? "auth" : "probe",
             status: "cancelled",
-            message: `No ${backendName} backend operation is running.`,
+            message: `No ${displayName} backend operation is running.`,
           });
           break;
         }
@@ -5484,7 +5525,7 @@ function createConnectionHandler(
         active.sendProgress?.({
           phase: operation === "auth" ? "auth" : "install",
           status: "running",
-          message: `Stopping ${backendName} backend ${operationName}...`,
+          message: `Stopping ${displayName} backend ${operationName}...`,
         });
         active.abortController?.abort();
         break;
@@ -5537,7 +5578,7 @@ function createConnectionHandler(
             const applyDefault = (session: Session | null | undefined) => {
               if (
                 session
-                && !(session instanceof CodexSession)
+                && session instanceof ClaudeSession
                 && session.claudeAutoCompactWindowOverride === undefined
               ) {
                 session.setClaudeAutoCompactWindow(
@@ -5621,6 +5662,7 @@ function createConnectionHandler(
           await sendCodexUnavailable();
           break;
         }
+        if (msg.backend === "gemini" && await geminiUnavailable()) break;
         // Detach old session so it stops sending to this client
         if (activeSession && activeSession.isRunning) {
           activeSession.detachWebSocket();
@@ -5633,7 +5675,7 @@ function createConnectionHandler(
         activeSession.setKokoroVoice(pendingKokoroVoice);
         activeSession.setKokoroSpeed(pendingKokoroSpeed);
         activeSession.setAppendSystemPrompt(getServerSystemPrompt(), { inherited: true });
-        if (!(activeSession instanceof CodexSession)) {
+        if (activeSession instanceof ClaudeSession) {
           activeSession.setClaudeAutoCompactWindow(getClaudeAutoCompactWindow(), { inherited: true });
         }
 
@@ -5726,6 +5768,7 @@ function createConnectionHandler(
           await sendCodexUnavailable("This is a Codex session, but Codex is not available on this server", msg.sessionId);
           break;
         }
+        if (sessionInfo.backend === "gemini" && await geminiUnavailable(msg.sessionId)) break;
 
         // Check if this session is still running in the background
         const existing = await recoverCanonicalLiveSession(msg.sessionId);
@@ -5909,7 +5952,7 @@ function createConnectionHandler(
         });
 
         // Send detailed context usage on resume (if session has an active query)
-        if (existing && !(existing instanceof CodexSession)) {
+        if (existing && existing instanceof ClaudeSession) {
           existing.getContextUsage().then((ctx) => {
             if (ctx) {
               sendJson({ type: "context_usage", sessionId: msg.sessionId, ...ctx });
@@ -6102,6 +6145,15 @@ function createConnectionHandler(
             });
             break;
           }
+          if (promptBackend === "gemini" && await geminiUnavailable(savedResumeId)) {
+            sendJson({
+              type: "prompt_failed",
+              messageId: promptMessageId,
+              ...(savedResumeId ? { sessionId: savedResumeId } : {}),
+              message: "Gemini is not available on this computer",
+            });
+            break;
+          }
           activeSession = createSession(promptBackend, transport, cwd, plugins, getStoredCodexDriver(savedPromptSession));
           await restorePersistedPermissionMode(activeSession, savedPromptSession);
           if (savedResumeId) activeSession._resumeSessionId = savedResumeId;
@@ -6114,7 +6166,7 @@ function createConnectionHandler(
         }
 
         if (!msg.sessionId && !activeSession.getSessionId() && msg.initialSettings) {
-          const initialBackend: Backend = activeSession instanceof CodexSession ? "codex" : "claude";
+          const initialBackend = sessionBackend(activeSession);
           const applied = await applyInitialSessionSettings(
             activeSession,
             initialBackend,
@@ -6292,7 +6344,7 @@ function createConnectionHandler(
           if (!turnAbortTracker.finish(sessionForRun, turnAbortState)) {
             settleLogicalRun(sessionForRun, "completed", resumeId);
           }
-          clearBackendHealthOverride(sessionForRun instanceof CodexSession ? "codex" : "claude");
+          clearBackendHealthOverride(sessionBackend(sessionForRun));
           broadcastSessionList();
         }).catch(async (err: unknown) => {
           bindClientConversation(sessionForRun);
@@ -6903,7 +6955,7 @@ function createConnectionHandler(
           createdAt: string;
           lastActive: string;
           tracked: boolean;
-          backend?: "claude" | "codex";
+          backend?: Backend;
         }>;
         if (all || recursive || query) {
           const nativeSessions = await listSessionsWithNativeBackends(true);
@@ -7023,7 +7075,7 @@ function createConnectionHandler(
             renameCodexNativeThread(msg.sessionId, session.cwd, msg.title).catch((err: unknown) => {
               console.warn(`[Rename] Codex native thread/name/set failed for ${msg.sessionId}: ${errorMessage(err) || err}`);
             });
-          } else if (session.backend !== "codex") {
+          } else if (session.backend === "claude" || !session.backend) {
             // A session that has not run a turn yet has no Claude Code file to title.
             renameClaudeNativeSession(msg.sessionId, session.cwd, msg.title).catch((err: unknown) => {
               console.warn(`[Rename] Claude renameSession failed for ${msg.sessionId}: ${errorMessage(err) || err}`);
@@ -7062,7 +7114,7 @@ function createConnectionHandler(
           saveFailed(`Folder not found on this computer: ${msg.cwd}`);
           break;
         }
-        const backend = msg.backend === "codex" ? "codex" : "claude";
+        const backend = isBackend(msg.backend) ? msg.backend : "claude";
         const codexDriver: CodexDriver | undefined = backend === "codex" ? "app-server" : undefined;
         const model = typeof msg.model === "string" ? msg.model.trim() : "";
         const effort = msg.effort && AGENT_EFFORTS.has(msg.effort) ? msg.effort : undefined;
@@ -7116,7 +7168,7 @@ function createConnectionHandler(
       }
 
       case "get_model_catalog": {
-        const backend = msg.backend === "codex" ? "codex" : "claude";
+        const backend = isBackend(msg.backend) ? msg.backend : "claude";
         const catalog = getCachedModelCatalog(backend);
         sendJson({
           type: "model_catalog",
@@ -7191,7 +7243,7 @@ function createConnectionHandler(
         if (msg.prompt !== undefined) task.prompt = msg.prompt;
         if (msg.cwd !== undefined) task.cwd = msg.cwd;
         if (msg.backend !== undefined) {
-          const nextBackend = msg.backend === "codex" ? "codex" : "claude";
+          const nextBackend = isBackend(msg.backend) ? msg.backend : "claude";
           if (task.backend && task.backend !== nextBackend) {
             task.sessionId = undefined;
             if (msg.model === undefined) task.model = undefined;
@@ -7851,6 +7903,16 @@ function createConnectionHandler(
       case "auth_code": {
         const code = msg.code;
         const authRequestId = msg.authRequestId;
+        const geminiLogin = activeBackendInstalls.get("gemini");
+        if (authRequestId && geminiLogin?.requestId === authRequestId) {
+          const accept = geminiLogin.acceptAuthCallback;
+          if (!accept) break;
+          geminiLogin.sendProgress?.({ phase: "auth", status: "running", message: "Finishing Google sign-in..." });
+          // The install's own promise reports success or agy's reason for failing.
+          // Never log the code.
+          accept(code).catch(() => {});
+          break;
+        }
         if (authRequestId && pendingClaudeBackendAuth.has(authRequestId)) {
           const pending = pendingClaudeBackendAuth.get(authRequestId)!;
           pending.sendProgress({
@@ -8476,7 +8538,7 @@ function createConnectionHandler(
         const effort = msg.effort;
         if (['minimal', 'low', 'medium', 'high', 'max', 'xhigh', 'ultra'].includes(effort)) {
           if (activeSession) {
-            if (activeSession instanceof CodexSession) activeSession.setEffort(effort);
+            if (activeSession instanceof CodexSession || activeSession instanceof GeminiSession) activeSession.setEffort(effort);
             else if (isClaudeEffort(effort)) activeSession.setEffort(effort);
           }
           console.log(`Effort set to ${effort} (session ${activeSession ? 'active' : 'none'})`);
@@ -8495,7 +8557,7 @@ function createConnectionHandler(
 
       case "set_claude_auto_compact": {
         const enabled = Boolean(msg.enabled);
-        if (activeSession && !(activeSession instanceof CodexSession)) {
+        if (activeSession && activeSession instanceof ClaudeSession) {
           activeSession.setClaudeAutoCompact(enabled);
         }
         console.log(`Claude auto-compact ${enabled ? "enabled" : "disabled"} (session ${activeSession ? 'active' : 'none'})`);
@@ -8503,7 +8565,7 @@ function createConnectionHandler(
       }
 
       case "set_claude_auto_compact_window": {
-        if (!activeSession || activeSession instanceof CodexSession) {
+        if (!(activeSession instanceof ClaudeSession)) {
           sendJson({ type: "error", message: "No active Claude session" });
           break;
         }
@@ -8572,7 +8634,7 @@ function createConnectionHandler(
         const targetSession = targetSessionId
           ? (targetSessionId === activeSessionId ? activeSession : activeSessions.get(targetSessionId))
           : activeSession;
-        if (targetSession instanceof ClaudeSession) {
+        if (targetSession instanceof ClaudeSession || targetSession instanceof GeminiSession) {
           targetSession.setAdditionalDirectories(directories);
           const sid = targetSession.getSessionId();
           if (sid) sendJson(sessionSettingsPayload(targetSession, sid));
@@ -8656,7 +8718,7 @@ function createConnectionHandler(
           // Not running here. The saved setting applies when the session resumes.
           const stored = getSession(targetId);
           updateSessionAgentSettings(targetId, { model });
-          const catalog = getCachedModelCatalog(stored?.backend === "codex" ? "codex" : "claude");
+          const catalog = getCachedModelCatalog(stored?.backend ?? "claude");
           const change = recordModelChange(targetId, stored?.agentSettings?.model, model, catalog?.models ?? []);
           if (change) sendJson({ ...change });
         } else if (targetId) {
@@ -9178,7 +9240,7 @@ function createConnectionHandler(
           }
           break;
         }
-        if (activeSession && activeSession.isRunning) {
+        if (activeSession instanceof ClaudeSession && activeSession.isRunning) {
           activeSession.getContextUsage().then((ctx) => {
             if (ctx) {
               sendJson({
@@ -9321,6 +9383,29 @@ function createConnectionHandler(
         break;
       }
 
+      case "get_gemini_usage": {
+        const sid = activeSession?.getSessionId?.() || activeSessionId || "";
+        const activeModel = activeSession instanceof GeminiSession
+          ? (activeSession.sessionModel ?? getSession(sid)?.agentSettings?.model)
+          : getSession(sid)?.agentSettings?.model;
+        let live: GeminiAccountUsage | null = null;
+        let error: string | undefined;
+        try {
+          live = await fetchGeminiAccountUsage({ model: activeModel });
+        } catch (e: unknown) {
+          error = errorMessage(e) || String(e);
+        }
+        const cached = live ? null : lastGeminiAccountUsage(activeModel);
+        if (cached) {
+          sendJson({ type: "gemini_usage", sessionId: sid, usage: cached, fetchedAt: cached.fetchedAt });
+        } else if (error) {
+          sendJson({ type: "gemini_usage", sessionId: sid, error });
+        } else {
+          sendJson({ type: "gemini_usage", sessionId: sid, usage: live });
+        }
+        break;
+      }
+
       case "get_codex_status": {
         if (activeSession instanceof CodexSession) {
           try {
@@ -9457,6 +9542,10 @@ function createConnectionHandler(
         const rewindSessionInfo = getSession(sessionId);
         const target = activeSessions.get(sessionId)
           || ((activeSession?.getSessionId() || activeSession?._resumeSessionId) === sessionId ? activeSession : undefined);
+        if (rewindSessionInfo?.backend === "gemini" || target instanceof GeminiSession) {
+          sendJson({ type: "rewind_conversation_result", sessionId, success: false, userMessageUuid: uuid, error: "Gemini sessions can't be rewound yet." });
+          break;
+        }
         if (rewindSessionInfo?.backend === "codex" || target instanceof CodexSession) {
           const rewindStartedAt = Date.now();
           console.log(`[CodexRewind] started session=${sessionId} dryRun=${dryRun}`);
@@ -9690,7 +9779,11 @@ function createConnectionHandler(
           sendJson({ type: "error", message: "Session not found" });
           break;
         }
-        // Both backends fork right away, so the new session has its own ID,
+        if (sessionInfo.backend === "gemini") {
+          sendJson({ type: "error", message: "Gemini sessions can't be forked yet." });
+          break;
+        }
+        // Claude and Codex fork right away, so the new session has its own ID,
         // a copy of the source's history and a place in the session list
         // before the first prompt. The app then opens it like any session.
         try {
@@ -11015,7 +11108,12 @@ async function continueSession(sessionId: string, prompt: string, recoveryId?: s
       abandonedRecoveryInstances.add(session);
       recoveryOwners.delete(session);
       if (activeSessions.get(sessionId) === session) activeSessions.delete(sessionId);
-      try { await boundedRecoverySetup(session instanceof CodexSession ? session.dispose() : session.abort(), 5_000); } catch {}
+      try {
+        await boundedRecoverySetup(
+          session instanceof CodexSession || session instanceof GeminiSession ? session.dispose() : session.abort(),
+          5_000,
+        );
+      } catch {}
       throw error;
     }
   } finally { continuationStarting.delete(sessionId); }
@@ -11907,7 +12005,8 @@ function buildStatusSyncPayload(): Record<string, unknown> {
     const active = activeSessions.get(sid);
     const liveHarness = !!active && sessionAgentIsWorking(active);
     const delegatedWorkActive = delegatedWorkOutstanding(sid, current.startedAt);
-    if (!liveHarness && !delegatedWorkActive) {
+    const backgroundWorkActive = !!active && active.activeBackgroundTasks.size > 0;
+    if (!liveHarness && !delegatedWorkActive && !backgroundWorkActive) {
       // Do not expose a stale persisted run as live. /continue and ordinary
       // prompts settle the record; this guard also self-heals list state from
       // older builds that omitted that lifecycle transition.
@@ -12145,12 +12244,15 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
     await restorePersistedPermissionMode(session, previousSessionInfo || undefined);
     await restorePersistedAgentSettings(session, previousSessionInfo || undefined);
     if (task.permissionMode) {
-      if (session instanceof CodexSession) await session.setPermissionMode(task.permissionMode, { recordHistory: false });
-      else await session.setPermissionMode(task.permissionMode);
+      if (session instanceof CodexSession || session instanceof GeminiSession) {
+        await session.setPermissionMode(task.permissionMode, { recordHistory: false });
+      } else {
+        await session.setPermissionMode(task.permissionMode);
+      }
     }
     if (task.model) await session.setModel(task.model);
     if (task.effort) {
-      if (session instanceof CodexSession) session.setEffort(task.effort);
+      if (session instanceof CodexSession || session instanceof GeminiSession) session.setEffort(task.effort);
       else session.setEffort(isClaudeEffort(task.effort) ? task.effort : "high");
     }
     attachSessionLifecycleCallbacks(session);
@@ -14088,7 +14190,9 @@ async function shutdownGracefully(reason: string): Promise<void> {
   console.log(`${reason}, cleaning up...`);
   httpServer.close();
   await Promise.allSettled([...new Set(activeSessions.values())].map(async session => {
-    try { await session.abort(); } finally { if (session instanceof CodexSession) await session.dispose(); }
+    try { await session.abort(); } finally {
+      if (session instanceof CodexSession || session instanceof GeminiSession) await session.dispose();
+    }
   }));
   flushSdkEventQueue();
   flushSessionStore();

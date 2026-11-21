@@ -4555,6 +4555,21 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "get_gemini_usage"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "consume_codex_reset"
             },
             "sessionId": {
@@ -5174,7 +5189,8 @@
       "type": "string",
       "enum": [
         "claude",
-        "codex"
+        "codex",
+        "gemini"
       ]
     },
     "InitialSessionSettings": {

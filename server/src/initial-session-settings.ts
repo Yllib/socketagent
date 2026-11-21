@@ -1,5 +1,6 @@
 import type { CodexSession } from "./codex-session";
 import type { ClaudeSession } from "./claude-session";
+import type { GeminiSession } from "./gemini-session";
 import { isRecord } from "./value-guards";
 import type {
   AgentEffort,
@@ -28,6 +29,14 @@ const CLAUDE_PERMISSION_MODES = new Set([
   "bypassPermissions",
   "superYolo",
 ]);
+// agy's modes are default, accept-edits and plan; the Yolo modes answer its prompts.
+const GEMINI_PERMISSION_MODES = new Set([
+  "plan",
+  "default",
+  "acceptEdits",
+  "bypassPermissions",
+  "superYolo",
+]);
 const CODEX_PERMISSION_MODES = new Set([
   "plan",
   "default",
@@ -38,7 +47,8 @@ const CODEX_PERMISSION_MODES = new Set([
 type CommonSettingsMethod = "setModel" | "setEffort" | "setThinking" | "setPermissionMode";
 export type InitialSettingsSession =
   | Pick<ClaudeSession, CommonSettingsMethod | "setClaudeAutoCompact" | "setClaudeAutoCompactWindow">
-  | Pick<CodexSession, CommonSettingsMethod | "setCodexFastMode" | "setCodexCollaborationMode">;
+  | Pick<CodexSession, CommonSettingsMethod | "setCodexFastMode" | "setCodexCollaborationMode">
+  | Pick<GeminiSession, CommonSettingsMethod>;
 
 function thinkingSetting(value: unknown): AgentThinkingSetting | undefined {
   if (!isRecord(value)) return undefined;
@@ -100,7 +110,7 @@ export async function applyInitialSessionSettings(
       session.setClaudeAutoCompactWindow(autoCompactWindow);
       applied.claudeAutoCompactWindow = autoCompactWindow;
     }
-  } else {
+  } else if (backend === "codex") {
     if (typeof raw.codexFastMode === "boolean" && "setCodexFastMode" in session) {
       session.setCodexFastMode(raw.codexFastMode);
       applied.codexFastMode = raw.codexFastMode;
@@ -119,7 +129,7 @@ export async function applyInitialSessionSettings(
     : "";
   const allowedPermissionModes = backend === "claude"
     ? CLAUDE_PERMISSION_MODES
-    : CODEX_PERMISSION_MODES;
+    : backend === "gemini" ? GEMINI_PERMISSION_MODES : CODEX_PERMISSION_MODES;
   if (permissionMode && allowedPermissionModes.has(permissionMode)) {
     await session.setPermissionMode(permissionMode);
     applied.permissionMode = permissionMode;

@@ -1,3 +1,4 @@
+import { BACKENDS } from "./protocol";
 import * as crypto from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -33,7 +34,7 @@ export interface AiConnectorToolHost {
 }
 
 const computerArg = z.string().optional().describe("A computer name from list_computers. Omit for the computer that runs the connector.");
-const backendArg = z.enum(["claude", "codex"]).optional();
+const backendArg = z.enum(BACKENDS).optional();
 const effortArg = z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional();
 
 function text(value: unknown, isError = false): McpTextResult {

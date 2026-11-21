@@ -24,7 +24,11 @@ function readCatalogs(): StoredModelCatalogs {
     const catalog = z.object({ models: z.array(z.record(z.string(), z.unknown())), updatedAt: z.string() });
     const parsed = z.object({
       schemaVersion: z.literal(MODEL_CATALOG_SCHEMA_VERSION),
-      catalogs: z.object({ claude: catalog.optional(), codex: catalog.optional() }),
+      catalogs: z.object({
+        claude: catalog.optional(),
+        codex: catalog.optional(),
+        gemini: catalog.optional(),
+      }),
     }).parse(JSON.parse(fs.readFileSync(MODEL_CATALOG_FILE, "utf8")));
     memoryCache = parsed.catalogs;
   } catch {

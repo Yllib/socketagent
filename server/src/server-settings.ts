@@ -1,3 +1,4 @@
+import { backendName } from "./protocol";
 import { parseJsonObject, errorMessage, errorCode } from "./value-guards";
 import * as fs from "fs";
 import * as os from "os";
@@ -9,7 +10,8 @@ import { resolveClientPath } from "./path-utils";
 import { backendConfigFileIdForPath } from "./backend-config-files";
 import { buildClaudeExecutableSpawn, getClaudeExecutableInfo, type ClaudeAvailability } from "./claude-session";
 import { BackgroundProbe, runProbe, type ProbeResult } from "./async-probe";
-import { readClaudeAuthState, readCodexAuthState } from "./backend-auth";
+import { geminiAuthState, readClaudeAuthState, readCodexAuthState } from "./backend-auth";
+import { agyVersion, managedAgyDir, resolveAgyCommand } from "./gemini-cli";
 import {
   legacyManagedNpmBinDir,
   managedNpmBinDir,
@@ -105,10 +107,11 @@ export function invalidateBackendHealthCache(): void {
   cachedBackendHealth = null;
   codexCliProbe.invalidate();
   claudeCliProbe.invalidate();
+  agyProbe.invalidate();
 }
 
 export function markBackendAuthRequired(backend: Backend, detail?: string): void {
-  const label = backend === "codex" ? "Codex" : "Claude";
+  const label = backendName(backend);
   backendHealthOverrides.set(backend, {
     backend,
     enabled: true,
@@ -246,13 +249,13 @@ function codexCommandSource(command: string): BackendHealthInfo["source"] {
 function managedSourceWarning(backend: Backend, source: BackendHealthInfo["source"]): string | undefined {
   if (source === "managed" || source === "explicit") return undefined;
   if (source === "sdk") {
-    return `${backend === "codex" ? "Codex" : "Claude"} is using the SDK-bundled executable instead of the SocketAgent-managed toolchain. Repair the backend to install and use the managed copy.`;
+    return `${backendName(backend)} is using the SDK-bundled executable instead of the SocketAgent-managed toolchain. Repair the backend to install and use the managed copy.`;
   }
   if (source === "legacy") {
-    return `${backend === "codex" ? "Codex" : "Claude"} is using the old SocketAgent toolchain location. Repair the backend to move it under .socket-agent.`;
+    return `${backendName(backend)} is using the old SocketAgent toolchain location. Repair the backend to move it under .socket-agent.`;
   }
   if (source === "system" || source === "path") {
-    return `${backend === "codex" ? "Codex" : "Claude"} is using the system install instead of the SocketAgent-managed toolchain. Local customizations can break SocketAgent.`;
+    return `${backendName(backend)} is using the system install instead of the SocketAgent-managed toolchain. Local customizations can break SocketAgent.`;
   }
   return undefined;
 }
@@ -464,6 +467,43 @@ function claudeHealth(): BackendHealthInfo | undefined {
   };
 }
 
+const agyProbe = new BackgroundProbe(async () => {
+  const command = resolveAgyCommand();
+  return { command, version: command ? await agyVersion(command) : null };
+}, BACKEND_HEALTH_CACHE_MS, notifyBackendHealthChange);
+
+/**
+ * Gemini is optional, so a computer without agy reports it as disabled
+ * rather than as an error to fix.
+ */
+function geminiHealth(): BackendHealthInfo | undefined {
+  const probe = agyProbe.peek();
+  if (!probe) return undefined;
+  const base: BackendHealthInfo = {
+    backend: "gemini",
+    enabled: true,
+    available: false,
+    severity: "error",
+    source: probe.command?.startsWith(managedAgyDir()) ? "managed" : "system",
+    ...(probe.command ? { command: probe.command } : {}),
+    installRoot: managedAgyDir(),
+  };
+  if (!probe.command) {
+    return { ...base, enabled: false, severity: "disabled", kind: "install", source: "unresolved", reason: "Runs Gemini with your Google AI plan." };
+  }
+  if (!probe.version) return { ...base, kind: "launch", reason: "The Antigravity CLI is installed but does not start." };
+  const auth = geminiAuthState();
+  if (!auth.authenticated) return { ...base, kind: "auth", version: probe.version, reason: auth.reason };
+  return { ...base, available: true, severity: "ok", version: probe.version };
+}
+
+/** Waits for a current check of agy. */
+export async function getGeminiAvailability(): Promise<{ available: boolean; reason?: string }> {
+  await agyProbe.fresh();
+  const health = backendHealthOverrides.get("gemini") ?? geminiHealth();
+  return health?.available ? { available: true } : { available: false, reason: health?.reason || "Gemini is not available." };
+}
+
 export function loadServerSettings(): ServerSettings {
   if (cachedSettings) return cachedSettings;
   ensureStoreDir();
@@ -610,6 +650,7 @@ export function getBackendHealth(): BackendHealthInfo[] {
   const derived: Array<[Backend, BackendHealthInfo | undefined]> = [
     ["claude", claudeHealth()],
     ["codex", codexCli && codexHealth(codexCli)],
+    ["gemini", geminiHealth()],
   ];
   const value = derived
     .map(([backend, entry]) => backendHealthOverrides.get(backend) ?? entry)

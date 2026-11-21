@@ -11,10 +11,21 @@ import { isRecord } from "./value-guards";
 /**
  * Which agent backend drives the session. "claude" uses the Claude Agent SDK
  * (subscription auth via the Claude Code CLI). "codex" uses the OpenAI Codex
- * CLI (subscription auth via ChatGPT Plus/Pro). Defaults to "claude" when
- * omitted for backward compatibility with existing sessions.
+ * CLI (subscription auth via ChatGPT Plus/Pro). "gemini" uses Google's
+ * Antigravity CLI (subscription auth via a Google AI plan). Defaults to
+ * "claude" when omitted for backward compatibility with existing sessions.
  */
-export type Backend = "claude" | "codex";
+export const BACKENDS = ["claude", "codex", "gemini"] as const;
+export type Backend = typeof BACKENDS[number];
+
+/** The backend's name as people see it. */
+export function backendName(backend: Backend): string {
+  return backend === "codex" ? "Codex" : backend === "gemini" ? "Gemini" : "Claude";
+}
+
+export function isBackend(value: unknown): value is Backend {
+  return typeof value === "string" && (BACKENDS as readonly string[]).includes(value);
+}
 
 /**
  * How long a session lives. A fleeting session is deleted once it has sat idle
@@ -1780,6 +1791,7 @@ export type ClientMessage = { commandId?: string } & (
   | { type: "get_status_sync" }
   | { type: "get_codex_status" }
   | { type: "get_claude_usage" }
+  | { type: "get_gemini_usage" }
   | { type: "consume_codex_reset"; sessionId: string; requestId: string; idempotencyKey: string; confirmed: boolean }
   | { type: "get_recent_cwds" }
   /** Reruns a limited Windows install's setup as administrator. Needs windowsSetupElevationVersion. */

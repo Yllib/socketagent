@@ -1,3 +1,4 @@
+import { isBackend } from "./protocol";
 import * as os from "os";
 import { parseStoredSessions } from "./session-schema";
 import { isRecord, unknownArray, errorMessage, parseJsonObject } from "./value-guards";
@@ -3709,7 +3710,7 @@ export function listArchives(): ArchiveEntry[] {
         const meta = parseJsonObject(fs.readFileSync(path.join(ARCHIVE_DIR, metaName), "utf-8"));
         if (typeof meta.title === "string" && meta.title) title = meta.title;
         if (typeof meta.cwd === "string" && meta.cwd) cwd = meta.cwd;
-        if (meta.backend === "claude" || meta.backend === "codex") backend = meta.backend;
+        if (isBackend(meta.backend)) backend = meta.backend;
         if (typeof meta.createdAt === "string") createdAt = meta.createdAt;
         if (typeof meta.clearedAt === "string" && meta.clearedAt) clearedAt = meta.clearedAt;
       } catch {}
@@ -3851,7 +3852,7 @@ export function restoreArchive(sid: string, ts: string): { ok: true; session: Se
       if (typeof meta.title === "string") metaTitle = meta.title;
       if (typeof meta.createdAt === "string") metaCreatedAt = meta.createdAt;
       if (typeof meta.cwd === "string") cwd = meta.cwd;
-      if (meta.backend === "claude" || meta.backend === "codex") metaBackend = meta.backend;
+      if (isBackend(meta.backend)) metaBackend = meta.backend;
       if (meta.codexDriver === "exec" || meta.codexDriver === "app-server") metaCodexDriver = "app-server";
       if (typeof meta.codexRolloutPath === "string") codexRolloutPath = meta.codexRolloutPath;
     } catch {}
@@ -4670,7 +4671,7 @@ export interface SdkSessionEntry {
   createdAt: string;
   lastActive: string;
   tracked: boolean; // true if already in SocketAgent store
-  backend?: "claude" | "codex"; // absent on legacy entries; treat as claude
+  backend?: Backend; // absent on legacy entries; treat as claude
 }
 
 /**

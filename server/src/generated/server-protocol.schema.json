@@ -3712,7 +3712,8 @@
       "type": "string",
       "enum": [
         "claude",
-        "codex"
+        "codex",
+        "gemini"
       ]
     },
     "SessionLifetime": {

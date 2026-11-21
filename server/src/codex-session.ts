@@ -105,6 +105,7 @@ import {
 import { buildCodexSpawn } from "./codex-env";
 import { listSkills } from "./skills-manager";
 import { ClaudeSession } from "./claude-session";
+import { GeminiSession } from "./gemini-session";
 import { maybeSendAgentAttentionPush } from "./push-notifications";
 import { LatestSnapshotDispatcher } from "./latest-snapshot-dispatcher";
 import { createInteractiveRequestId } from "./interactive-request-id";
@@ -6658,10 +6659,11 @@ export class CodexSession {
 // ─── Backend factory ────────────────────────────────────────────────────────
 
 /**
- * Union of the two session implementations. Most callers can treat them
- * interchangeably because CodexSession exposes shims for the ClaudeSession
- * methods it doesn't implement. Reach for `instanceof` only when a code path
- * needs a feature one backend doesn't support (e.g., MCP tools, fork, rewind).
+ * Union of the session implementations. Most callers can treat them
+ * interchangeably because CodexSession and GeminiSession expose shims for the
+ * ClaudeSession methods they don't implement. Reach for `instanceof` only when
+ * a code path needs a feature one backend doesn't support (e.g., MCP tools,
+ * fork, rewind).
  */
 /** Routing state owned by the server, separate from either provider's query state. */
 export interface SessionRuntimeMetadata {
@@ -6673,7 +6675,14 @@ export interface SessionRuntimeMetadata {
   onHarnessRunStateChanged?: (running: boolean) => void;
 }
 
-export type Session = (ClaudeSession | CodexSession) & SessionRuntimeMetadata;
+export type Session = (ClaudeSession | CodexSession | GeminiSession) & SessionRuntimeMetadata;
+
+/** Which backend a live session runs on. */
+export function sessionBackend(session: ClaudeSession | CodexSession | GeminiSession): Backend {
+  if (session instanceof CodexSession) return "codex";
+  if (session instanceof GeminiSession) return "gemini";
+  return "claude";
+}
 
 /**
  * Picks the right session implementation after checking backend availability.
@@ -6689,6 +6698,7 @@ export function createSession(
     return new CodexSession(ws, cwd, plugins);
   }
   const requestedBackend = backend || "claude";
+  if (requestedBackend === "gemini") return new GeminiSession(ws, cwd, plugins);
   // Only a finished check that failed refuses here. Callers that need a
   // current answer await getCodexAvailability before creating the session.
   if (requestedBackend === "codex") {
@@ -6829,5 +6839,5 @@ export async function getCodexAvailability(): Promise<CodexAvailability> {
  * installation, and auth state are reported separately through backendHealth.
  */
 export function detectAvailableBackends(): Backend[] {
-  return ["claude", "codex"];
+  return ["claude", "codex", "gemini"];
 }

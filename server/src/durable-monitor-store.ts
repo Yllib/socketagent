@@ -1,3 +1,4 @@
+import type { Backend } from "./protocol";
 import { parseStoredData } from "./stored-data";
 import { errorCode } from "./value-guards";
 import * as fs from "fs";
@@ -10,7 +11,7 @@ export type DurableMonitorStatus = "starting" | "running" | "completed" | "faile
 export interface DurableMonitorRecord {
   taskId: string;
   sessionId: string;
-  backend: "claude" | "codex";
+  backend: Backend;
   cwd: string;
   command: string;
   description: string;
@@ -147,7 +148,7 @@ export function removeDurableMonitorRecord(taskId: string): void {
 export function createDurableMonitorRecord(input: {
   taskId: string;
   sessionId: string;
-  backend: "claude" | "codex";
+  backend: Backend;
   cwd: string;
   command: string;
   description: string;

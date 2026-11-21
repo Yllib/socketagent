@@ -1,3 +1,4 @@
+import { BACKENDS } from "./protocol";
 import { randomBytes } from "crypto";
 import { IncomingMessage, ServerResponse } from "http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -321,7 +322,7 @@ function createServer(context: AppToolContext, board: BoardToolset): McpServer {
         name: z.string().optional().describe("Short human-readable label for the task, used in task lists and notifications"),
         prompt: z.string().describe("The prompt/instructions to execute at the scheduled time"),
         cwd: z.string().describe("Working directory for the scheduled task (absolute path)"),
-        backend: z.enum(["claude", "codex"]).optional().describe("Agent provider. Defaults to the current provider."),
+        backend: z.enum(BACKENDS).optional().describe("Agent provider. Defaults to the current provider."),
         model: z.string().optional().describe("Provider model ID. Omit to use the provider default."),
         effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Reasoning effort for the scheduled run."),
         permissionMode: z.enum(["plan", "default", "auto", "acceptEdits", "bypassPermissions", "superYolo"]).optional().describe("Sandbox/permission mode for the scheduled run."),
@@ -399,7 +400,7 @@ function createServer(context: AppToolContext, board: BoardToolset): McpServer {
         delegation_id: z.string().optional().describe("Stable delegation ID returned by start; alternative to session_id"),
         after_session_seq: z.number().int().nonnegative().optional().describe("For tail, return durable activity after this cursor. Omit for the newest page."),
         limit: z.number().int().min(1).max(50).optional().describe("For tail, maximum durable activity entries to return. Default 20."),
-        backend: z.enum(["claude", "codex"]).optional().describe("Backend for start. Defaults to the supervising agent's backend."),
+        backend: z.enum(BACKENDS).optional().describe("Backend for start. Defaults to the supervising agent's backend."),
         cwd: z.string().optional().describe("Absolute working directory for start. Defaults to the supervisor's directory."),
         label: z.string().optional().describe("Short human-readable label for the delegated work"),
         model: z.string().optional().describe("Optional provider model ID for start"),

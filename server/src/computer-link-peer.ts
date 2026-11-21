@@ -1,3 +1,4 @@
+import { BACKENDS } from "./protocol";
 import * as crypto from "crypto";
 import { z } from "zod";
 import type { Backend, ComputerApprovalToken } from "./protocol";
@@ -66,7 +67,7 @@ export const peerEventSchema = z.object({
   status: z.enum(["completed", "failed", "stopped"]),
   result: z.string(),
   label: z.string().optional(),
-  backend: z.enum(["claude", "codex"]).optional(),
+  backend: z.enum(BACKENDS).optional(),
 });
 export type PeerEvent = z.infer<typeof peerEventSchema>;
 
@@ -96,7 +97,7 @@ const agentArgs = z.object({
   prompt: z.string().optional(),
   session_id: z.string().optional(),
   delegation_id: z.string().optional(),
-  backend: z.enum(["claude", "codex"]).optional(),
+  backend: z.enum(BACKENDS).optional(),
   cwd: z.string().optional(),
   label: z.string().optional(),
   model: z.string().optional(),

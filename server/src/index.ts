@@ -5295,6 +5295,14 @@ function createConnectionHandler(
         break;
       }
 
+      case "project_board_key_request": {
+        // Only the user's own apps reach this handler; linked computers use
+        // the peer actions in computer-link-peer.ts.
+        const grant = projectBoards().grant(msg.projectId);
+        sendJson({ type: "project_board_key", projectId: msg.projectId, ...(grant ? { secret: grant.secret } : {}) });
+        break;
+      }
+
       case "get_server_settings": {
         sendJson({
           type: "server_settings",

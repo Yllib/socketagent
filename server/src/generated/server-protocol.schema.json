@@ -512,6 +512,9 @@
         },
         {
           "$ref": "#/definitions/ProjectBoardMemberServerMessage"
+        },
+        {
+          "$ref": "#/definitions/ProjectBoardKeyServerMessage"
         }
       ]
     },
@@ -9553,6 +9556,25 @@
         "type",
         "projectId",
         "sessionId"
+      ]
+    },
+    "ProjectBoardKeyServerMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "project_board_key"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "secret": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "projectId"
       ]
     }
   }

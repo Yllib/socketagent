@@ -1068,6 +1068,15 @@ export interface ProjectBoardGrantsMessage {
   }[];
 }
 
+/**
+ * Asks for the secret this computer holds for [projectId]'s board, so an app
+ * that lost it can turn the same board back on instead of making a new one.
+ */
+export interface ProjectBoardKeyRequestMessage {
+  type: "project_board_key_request";
+  projectId: string;
+}
+
 export interface TerminalKillMessage {
   type: "terminal_kill";
 }
@@ -1766,6 +1775,7 @@ export type ClientMessage = { commandId?: string } & (
   | TerminalResizeMessage
   | TerminalDetachMessage
   | ProjectBoardGrantsMessage
+  | ProjectBoardKeyRequestMessage
   | TerminalKillMessage
   | RegisterPushTokenMessage
   | UnregisterPushTokenMessage
@@ -3991,6 +4001,14 @@ export interface ProjectBoardMemberServerMessage {
   sessionId: string;
 }
 
+/** The answer to `project_board_key_request`. No secret: this computer holds no grant for that board. */
+export interface ProjectBoardKeyServerMessage {
+  type: "project_board_key";
+  projectId: string;
+  /** Standard base64 of the 32-byte board secret. */
+  secret?: string;
+}
+
 export interface BrowserSessionOpenServerMessage {
   type: "browser_session_open";
   /** The browser's ID. */
@@ -4306,4 +4324,5 @@ export type ServerMessage =
   | TerminalErrorServerMessage
   | SessionMemoryStateServerMessage
   | SessionMemoryErrorServerMessage
-  | ProjectBoardMemberServerMessage;
+  | ProjectBoardMemberServerMessage
+  | ProjectBoardKeyServerMessage;

@@ -3937,6 +3937,25 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "project_board_key_request"
+            },
+            "projectId": {
+              "type": "string"
+            },
+            "commandId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "projectId",
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "terminal_kill"
             },
             "commandId": {

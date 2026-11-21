@@ -883,7 +883,7 @@ export class GeminiSession {
     } catch (error: unknown) {
       this.rejectPendingSteers(error instanceof Error ? error : new Error(String(error)));
       this.finishStreams();
-      this.settleToolCalls("(failed)");
+      this.settleToolCalls(this._abortRequested ? "(interrupted)" : "(failed)");
       if (!this._abortRequested) {
         this.reportTurnError(error);
         // index.ts skips its own error card for errors a session already showed.
@@ -911,7 +911,8 @@ export class GeminiSession {
     const previous = this._activePromptPromise;
     if (previous) void previous.catch(() => {});
     this._activePromptGeneration++;
-    const next = this.client!.request("session/prompt", { sessionId, prompt }, 0);
+    if (!this.client) throw new Error("agy exited before the prompt was sent");
+    const next = this.client.request("session/prompt", { sessionId, prompt }, 0);
     this._activePromptPromise = next;
     return next;
   }
@@ -1471,6 +1472,8 @@ export class GeminiSession {
             this.emitBackgroundTasksChanged();
             this.onActivity?.();
           }
+          // A tool_call cleared the stall timer; rearm it once nothing is running.
+          if (this._outOfTurnRunning && this.activeToolCalls.size === 0) this.scheduleOutOfTurnFinish(OUT_OF_TURN_STALL_MS);
         }
         return;
       }
@@ -1806,10 +1809,12 @@ export class GeminiSession {
     if (this.isSocketAgentAppTool(name)) return true;
     const paths = unknownArray(toolCall.locations).flatMap((entry) => isRecord(entry) && typeof entry.path === "string" ? [entry.path] : []);
     const isFileChange = toolCall.kind === "edit" || toolCall.kind === "delete" || toolCall.kind === "move";
-    const normalizedPath = typeof normalized.input.file_path === "string" ? normalized.input.file_path : "";
-    const changedPaths = [...new Set(normalizedPath ? [...paths, normalizedPath] : paths)];
-    // A file change that names no file cannot be checked against protected paths.
-    if (isFileChange && changedPaths.length === 0) return false;
+    const namedPaths = [normalized.input.file_path, input.TargetFile, input.Path, input.AbsolutePath, input.file_path, input.path]
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+    const changedPaths = [...new Set([...paths, ...namedPaths])];
+    // A file change that names no file cannot be checked against protected
+    // paths, so it always goes to the phone, even in a Yolo mode.
+    const unchecked = isFileChange && changedPaths.length === 0;
     const policyChecks: Array<[string, Record<string, unknown>]> = isFileChange
       ? changedPaths.map((filePath) => ["Edit", { file_path: filePath }])
       : toolCall.kind === "execute"
@@ -1821,7 +1826,7 @@ export class GeminiSession {
         if (result?.behavior === "deny") return false;
       }
     }
-    if (this._permissionMode === "bypassPermissions" || this._permissionMode === "superYolo") return true;
+    if (!unchecked && (this._permissionMode === "bypassPermissions" || this._permissionMode === "superYolo")) return true;
 
     const questionId = createInteractiveRequestId("gemini_approval");
     const sessionId = this.sessionId || this._resumeSessionId || "";

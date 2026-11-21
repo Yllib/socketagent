@@ -153,7 +153,7 @@ test("agy exiting settles background tasks, open approvals and out-of-turn outpu
   }
 });
 
-test("A file change that names no file is denied without asking", async () => {
+test("A file change that names no file goes to the phone even in Yolo mode", async () => {
   /** @type {string[]} */
   const checked = [];
   /** @type {import("#server/plugin-api").SocketAgentPlugin} */
@@ -164,10 +164,18 @@ test("A file change that names no file is denied without asking", async () => {
       return input.file_path === "/etc/hosts" ? { behavior: "deny", message: "protected" } : undefined;
     },
   };
-  const session = new GeminiSession(testSocket([]), tempDir, [plugin]);
+  /** @type {import("#server/protocol").ServerMessage[]} */
+  const sent = [];
+  const session = new GeminiSession(testSocket(sent), tempDir, [plugin]);
   session._permissionMode = "bypassPermissions";
-  assert.equal(await session.approve({ kind: "edit", rawInput: {} }), false);
-  assert.equal(await session.approve({ kind: "edit", name: "write_to_file", rawInput: { TargetFile: "/etc/hosts" } }), false);
-  assert.deepEqual(checked, ["/etc/hosts"]);
+  const unnamed = session.approve({ kind: "edit", rawInput: {} });
+  await waitFor(() => sent.some((m) => m.type === "question"));
+  const question = sent.find((m) => m.type === "question");
+  assert.ok(question?.type === "question");
+  session.resolveQuestion(question.questionId, { [question.questions[0].question]: "Decline" });
+  assert.equal(await unnamed, false);
+  assert.equal(await session.approve({ kind: "delete", name: "delete_file", rawInput: { TargetFile: "/etc/hosts" } }), false);
+  assert.equal(await session.approve({ kind: "edit", rawInput: { TargetFile: "/tmp/notes.txt" } }), true);
+  assert.deepEqual(checked, ["/etc/hosts", "/tmp/notes.txt"]);
   await session.dispose();
 });

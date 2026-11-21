@@ -170,11 +170,10 @@ export function startAgyLogin(command: string, options: { env?: NodeJS.ProcessEn
     const done = new Promise<void>((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
     void done.catch(() => {});
     const timer = setTimeout(() => killProcessTree(child), options.timeoutMs ?? 15 * 60_000);
-    const onOutput = (chunk: Buffer) => {
-      output = (output + chunk.toString("utf8")).slice(-16_000);
+    let quietTimer: ReturnType<typeof setTimeout> | null = null;
+    const announce = (pattern: RegExp) => {
       if (announced) return;
-      // Only a link followed by whitespace is complete; a chunk can end mid-URL.
-      const url = [...output.matchAll(/(https:\/\/\S+)\s/g)].map((match) => match[1]).find(isGoogleSignInUrl);
+      const url = [...output.matchAll(pattern)].map((match) => match[1]).find(isGoogleSignInUrl);
       if (!url) return;
       announced = true;
       resolveLogin({
@@ -189,6 +188,15 @@ export function startAgyLogin(command: string, options: { env?: NodeJS.ProcessEn
         done,
       });
     };
+    const onOutput = (chunk: Buffer) => {
+      output = (output + chunk.toString("utf8")).slice(-16_000);
+      if (announced) return;
+      // A chunk can end mid-URL, so a link counts once whitespace follows it,
+      // or once agy has gone quiet with the link last.
+      announce(/(https:\/\/\S+)\s/g);
+      if (quietTimer) clearTimeout(quietTimer);
+      quietTimer = announced ? null : setTimeout(() => announce(/(https:\/\/\S+)$/g), 500);
+    };
     child.stdin.on("error", () => {});
     child.stdout.on("data", onOutput);
     child.stderr.on("data", onOutput);
@@ -199,6 +207,7 @@ export function startAgyLogin(command: string, options: { env?: NodeJS.ProcessEn
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (quietTimer) clearTimeout(quietTimer);
       // agy's own words say why, minus the link, which carries a PKCE challenge.
       const reason = output.replace(/https:\/\/\S+/g, "").split("\n").map((line) => line.trim()).filter(Boolean).pop();
       const error = new Error(reason || `Antigravity sign-in ended (exit ${code ?? "unknown"}).`);

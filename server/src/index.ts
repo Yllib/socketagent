@@ -38,8 +38,8 @@ import * as http from "http";
 import * as os from "os";
 import * as path from "path";
 import { RestartRecoveryStore, RestartRecoveryWorker, boundedRecoverySetup, buildFailureNote, RESTART_CONTINUATION_PROMPT } from "./restart-recovery";
-import { finishRecoveredScheduledTask } from "./scheduled-task-store";
-import { ScheduledTaskCallbacks, scheduledTaskReportMarker, scheduledTaskReportPrompt } from "./scheduled-task-callbacks";
+import { finishRecoveredScheduledTask, recordScheduledReminderRun } from "./scheduled-task-store";
+import { ScheduledTaskCallbacks, scheduledReminderMarker, scheduledReminderPrompt, scheduledTaskReportMarker, scheduledTaskReportPrompt } from "./scheduled-task-callbacks";
 import { flushSessionStore, flushSdkEventQueue, getTranscriptViewPage, onHistoryChanged } from "./session-store";
 import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
@@ -12163,14 +12163,33 @@ function syncScheduledTaskEdits(task: ScheduledTask): boolean {
   task.reuseSession = latest.reuseSession;
   task.notificationMode = latest.notificationMode;
   task.linkedSessionId = latest.linkedSessionId;
+  task.inSession = latest.inSession;
   task.lastReadAt = latest.lastReadAt;
   task.archivedAt = latest.archivedAt;
   return true;
 }
 
+/**
+ * Fires an in-session task: records a finished run whose only job is to put
+ * the prompt in the linked session. The callback outbox delivers it, so a
+ * restart or a busy session delays the message instead of losing or
+ * repeating it. No agent starts for the run itself.
+ */
+function sendScheduledReminder(task: ScheduledTask, trigger: "scheduled" | "manual"): void {
+  recordScheduledReminderRun(task, trigger);
+  saveScheduledTask(task);
+  console.log(`[Scheduler] Task ${task.id} sent its prompt to session ${task.linkedSessionId}`);
+  broadcastScheduledTaskList();
+  void scheduledTaskCallbacks.flush();
+}
+
 async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | "manual" = "scheduled"): Promise<void> {
   if (restartPreparing || shuttingDown) throw new Error("Server is preparing to restart");
   if (task.status === "running") return;
+  if (task.inSession && task.linkedSessionId) {
+    sendScheduledReminder(task, trigger);
+    return;
+  }
 
   const manualRun = trigger === "manual";
   const originalStatus = task.status;
@@ -12451,14 +12470,20 @@ const scheduledTaskCallbacks = new ScheduledTaskCallbacks({
     if (!sessionId) return;
     // The durable prompt is also the receipt if the process dies before saving
     // the outbox acknowledgement. Never inject the same run twice.
-    if (hasPersistedUserContentPrefix(sessionId, scheduledTaskReportMarker(task, run))) return;
-    const result = run.status === "failed"
-      ? run.error || "Scheduled task failed"
-      : run.sessionId ? delegatedAgentResult(run.sessionId, run.startedAt)
-      : run.resultSummary || "Task completed without a final text response.";
-    await runSessionReport(sessionId, scheduledTaskReportPrompt(task, run, result),
-      `scheduled-report:${task.id}:${run.startedAt}`, "scheduled task completion");
-    if (!hasPersistedUserContentPrefix(sessionId, scheduledTaskReportMarker(task, run))) {
+    const marker = run.inSession ? scheduledReminderMarker(task, run) : scheduledTaskReportMarker(task, run);
+    if (hasPersistedUserContentPrefix(sessionId, marker)) return;
+    if (run.inSession) {
+      await runSessionReport(sessionId, scheduledReminderPrompt(task, run),
+        `scheduled-reminder:${task.id}:${run.startedAt}`, "scheduled reminder");
+    } else {
+      const result = run.status === "failed"
+        ? run.error || "Scheduled task failed"
+        : run.sessionId ? delegatedAgentResult(run.sessionId, run.startedAt)
+        : run.resultSummary || "Task completed without a final text response.";
+      await runSessionReport(sessionId, scheduledTaskReportPrompt(task, run, result),
+        `scheduled-report:${task.id}:${run.startedAt}`, "scheduled task completion");
+    }
+    if (!hasPersistedUserContentPrefix(sessionId, marker)) {
       throw new Error("The session has not acknowledged the scheduled result yet");
     }
     const active = activeSessions.get(sessionId);

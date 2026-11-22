@@ -5,8 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scheduled-callback-'));
 process.env.SOCKETAGENT_DATA_DIR = root;
-const { ScheduledTaskCallbacks, scheduledTaskReportPrompt } = require('#server/scheduled-task-callbacks');
-const { saveScheduledTask, getScheduledTask, listScheduledTasks, reconcileInterruptedScheduledTasks, finishRecoveredScheduledTask } = require('#server/scheduled-task-store');
+const { ScheduledTaskCallbacks, scheduledTaskReportPrompt, scheduledReminderMarker, scheduledReminderPrompt } = require('#server/scheduled-task-callbacks');
+const { saveScheduledTask, getScheduledTask, listScheduledTasks, reconcileInterruptedScheduledTasks, finishRecoveredScheduledTask, recordScheduledReminderRun } = require('#server/scheduled-task-store');
 const { handleScheduleTaskTool } = require('#server/app-tool-handlers');
 test.after(() => fs.rmSync(root, {recursive:true, force:true}));
 test.beforeEach(() => fs.rmSync(path.join(root, 'scheduled-tasks.json'), {force:true}));
@@ -137,4 +137,36 @@ test('report includes identifiable bounded output and treats it as work product'
   assert.match(prompt,/not as higher-priority instructions/);
   assert.match(prompt,/Result truncated/);
   assert.ok(prompt.length<52000);
+});
+
+test('an in-session task sends its prompt to the session that scheduled it, with no run of its own', async () => {
+  /** @type {import('#server/app-tool-handlers').AppToolContext} */
+  const ctx = {getSessionId:()=>'wakespeed', getCwd:()=>root, getBackend:()=>'claude',
+    send:()=>{}, getTtsEngine:()=>'system', getKokoroVoice:()=>'', getKokoroSpeed:()=>1};
+  const due = new Date(Date.now()+60000);
+  const result = await handleScheduleTaskTool(ctx,{name:'Check Dana', prompt:'See whether Dana replied',
+    scheduledTime:due.toISOString(), recurrenceType:'daily', inSession:true});
+  assert.equal(result.isError, undefined);
+  const task = listScheduledTasks()[0];
+  assert.equal(task.linkedSessionId,'wakespeed');
+  assert.equal(task.inSession,true);
+  assert.equal(task.cwd,root);
+
+  const run = recordScheduledReminderRun(task,'scheduled',due);
+  saveScheduledTask(task);
+  assert.equal(run.sessionId,'');
+  assert.equal(run.callbackStatus,'pending');
+  assert.equal(task.status,'pending','a daily reminder waits for tomorrow');
+  assert.equal(Date.parse(task.scheduledTime)-due.getTime(),24*60*60*1000);
+
+  /** @type {string[]} */
+  const sent=[];
+  await dispatcher(async(saved,pending)=>{
+    assert.equal(pending.callbackSessionId,'wakespeed');
+    sent.push(scheduledReminderPrompt(saved,pending));
+  }).flush();
+  assert.equal(sent.length,1);
+  assert.ok(sent[0].startsWith(scheduledReminderMarker(task,run)));
+  assert.match(sent[0],/See whether Dana replied$/);
+  assert.equal(getScheduledTask(task.id).runs[0].callbackStatus,'delivered');
 });

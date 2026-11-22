@@ -20,6 +20,22 @@ export function scheduledTaskReportPrompt(task: ScheduledTask, run: TaskRun, res
   ].join("\n");
 }
 
+export function scheduledReminderMarker(task: ScheduledTask, run: TaskRun): string {
+  return `<socketagent_scheduled_reminder task_id="${task.id}" started_at="${run.startedAt}">`;
+}
+
+/** The message an in-session task sends into its linked session when due. */
+export function scheduledReminderPrompt(task: ScheduledTask, run: TaskRun): string {
+  return [
+    scheduledReminderMarker(task, run),
+    `Scheduled reminder: ${scheduledTaskDisplayName(task)}`,
+    "This conversation scheduled the message below to come back to it now. Act on it here.",
+    "</socketagent_scheduled_reminder>",
+    "",
+    task.prompt,
+  ].join("\n");
+}
+
 interface CallbackDependencies {
   list(): ScheduledTask[];
   get(id: string): ScheduledTask | undefined;

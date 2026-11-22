@@ -23,6 +23,8 @@ export interface TaskRun {
   callbackSessionId?: string;
   callbackStatus?: "pending" | "delivered";
   callbackDeliveredAt?: string;
+  /** The run sent the task's prompt into the linked session instead of starting an agent. */
+  inSession?: boolean;
   sessionId: string;
   codexDriver?: CodexDriver;
   startedAt: string;
@@ -55,6 +57,8 @@ export interface ScheduledTask {
   createdBySessionId?: string;
   /** Opt-in destination for results and automatic agent continuation. */
   linkedSessionId?: string;
+  /** Send the prompt into the linked session when due, instead of starting a run. */
+  inSession?: boolean;
   // Recurrence
   recurrence?: RecurrenceConfig;
   /** Carry bounded context from recent runs. The wire name is kept for client compatibility. */
@@ -427,6 +431,38 @@ const INTERRUPTED_RUN_ERROR =
  * effects. One-shot runs become failed. Interrupted manual runs leave a
  * pending or cancelled task as it was (see settleScheduledTaskAfterRun).
  */
+/**
+ * Records the run of an in-session task: finished at once, with the prompt
+ * waiting in the callback outbox for the linked session. Advances a recurring
+ * task to its next occurrence.
+ */
+export function recordScheduledReminderRun(
+  task: ScheduledTask,
+  trigger: "scheduled" | "manual",
+  now: Date = new Date(),
+): TaskRun {
+  const timestamp = now.toISOString();
+  const run: TaskRun = {
+    inSession: true,
+    callbackSessionId: task.linkedSessionId,
+    callbackStatus: "pending",
+    sessionId: "",
+    startedAt: timestamp,
+    completedAt: timestamp,
+    status: "completed",
+    trigger,
+    scheduledFor: task.scheduledTime,
+    ...(trigger === "manual" && task.status !== "running" ? { resumeTaskStatus: task.status } : {}),
+    resultSummary: "Sent to the session",
+  };
+  task.runs = [...(task.runs || []), run];
+  task.runCount = (task.runCount || 0) + 1;
+  task.lastRunAt = timestamp;
+  task.resultSummary = run.resultSummary;
+  settleScheduledTaskAfterRun(task, run, "completed", now.getTime());
+  return run;
+}
+
 export function reconcileInterruptedScheduledTask(
   task: ScheduledTask,
   now: Date = new Date(),

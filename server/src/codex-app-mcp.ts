@@ -317,11 +317,11 @@ function createServer(context: AppToolContext, board: BoardToolset): McpServer {
     "ScheduleTask",
     {
       title: "Schedule Task",
-      description: "Schedule a Codex/Claude prompt to run automatically at a future time. Use this when the user wants to defer work until later.",
+      description: "Schedule a Codex/Claude prompt to run automatically at a future time. Use this when the user wants to defer work until later. With inSession, the prompt instead arrives in this session as a message when due, so this agent follows up itself with its full context and no separate run.",
       inputSchema: {
         name: z.string().optional().describe("Short human-readable label for the task, used in task lists and notifications"),
         prompt: z.string().describe("The prompt/instructions to execute at the scheduled time"),
-        cwd: z.string().describe("Working directory for the scheduled task (absolute path)"),
+        cwd: z.string().optional().describe("Working directory for the scheduled run (absolute path). Required unless inSession."),
         backend: z.enum(BACKENDS).optional().describe("Agent provider. Defaults to the current provider."),
         model: z.string().optional().describe("Provider model ID. Omit to use the provider default."),
         effort: z.enum(["minimal", "low", "medium", "high", "max", "xhigh", "ultra"]).optional().describe("Reasoning effort for the scheduled run."),
@@ -332,6 +332,7 @@ function createServer(context: AppToolContext, board: BoardToolset): McpServer {
         daysOfWeek: z.array(z.number().int().min(0).max(6)).optional().describe("Weekly only: weekdays to run on, 0=Sunday to 6=Saturday. Default: the scheduled time's weekday"),
         reuseSession: z.boolean().optional().describe("If true and recurring, start each occurrence in a fresh session with summaries from the two most recent runs"),
         linkToSession: z.boolean().optional().describe("If true, link to this session and automatically return each run result here so this agent can continue. The task still runs independently. Omit or false for a standalone task."),
+        inSession: z.boolean().optional().describe("If true, start no run: when due, send the prompt into this session as a message so this agent handles it here, for example a follow-up to check a reply. Backend, model, effort, permission and reuseSession are ignored."),
         notificationMode: z.enum(["completion", "quiet"]).optional().describe("completion sends the normal completion notification. quiet sends no automatic notifications; the scheduled agent must call NotifyUser if the user should be alerted."),
       },
     },

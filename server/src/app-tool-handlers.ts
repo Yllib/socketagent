@@ -554,9 +554,12 @@ export interface NotifyUserArgs {
 
 export interface ScheduleTaskArgs {
   linkToSession?: boolean;
+  /** Send the prompt into this session when due instead of starting a run. Implies linkToSession. */
+  inSession?: boolean;
   name?: string;
   prompt: string;
-  cwd: string;
+  /** Required unless inSession, which uses this session's folder. */
+  cwd?: string;
   backend?: Backend;
   codexDriver?: CodexDriver;
   model?: string;
@@ -1444,9 +1447,14 @@ export async function handleScheduleTaskTool(
   if (scheduledDate.getTime() <= Date.now()) {
     return { content: [{ type: "text", text: "Scheduled time is in the past. Please provide a future time." }] };
   }
-  if (!fs.existsSync(args.cwd)) {
-    return { isError: true, content: [{ type: "text", text: `Folder not found on this computer: ${args.cwd}` }] };
+  const cwd = args.cwd || (args.inSession ? ctx.getCwd?.() : undefined);
+  if (!cwd) {
+    return { isError: true, content: [{ type: "text", text: "Give cwd, the folder the scheduled run works in." }] };
   }
+  if (!fs.existsSync(cwd)) {
+    return { isError: true, content: [{ type: "text", text: `Folder not found on this computer: ${cwd}` }] };
+  }
+  const linkToSession = args.linkToSession || args.inSession;
 
   // A scheduled run's session ends with the run, so a follow-up it links
   // reports to the session that started the chain. Other sessions, including
@@ -1454,12 +1462,12 @@ export async function handleScheduleTaskTool(
   const currentSessionId = ctx.getSessionId();
   const linksToSupervisor = Boolean(currentSessionId) &&
     getScheduledTaskSessionIds().has(currentSessionId);
-  const linkedSessionId = !args.linkToSession
+  const linkedSessionId = !linkToSession
     ? undefined
     : linksToSupervisor
       ? ctx.getDelegationSupervisorSessionId?.() || currentSessionId
       : currentSessionId;
-  if (args.linkToSession && !linkedSessionId) {
+  if (linkToSession && !linkedSessionId) {
     return { isError: true, content: [{ type: "text", text: "This task cannot be linked until the current session has an ID." }] };
   }
 
@@ -1469,7 +1477,7 @@ export async function handleScheduleTaskTool(
     id: crypto.randomUUID(),
     ...(args.name?.trim() ? { name: args.name.trim() } : {}),
     prompt: args.prompt,
-    cwd: args.cwd,
+    cwd,
     backend,
     ...(backend === "codex"
       ? { codexDriver: "app-server" as const }
@@ -1485,6 +1493,7 @@ export async function handleScheduleTaskTool(
       ctx.getSessionId() ||
       undefined,
     ...(linkedSessionId ? { linkedSessionId } : {}),
+    ...(args.inSession ? { inSession: true } : {}),
     recurrence,
     reuseSession: args.reuseSession || false,
     notificationMode: args.notificationMode === "quiet" ? "quiet" : "completion",
@@ -1500,14 +1509,18 @@ export async function handleScheduleTaskTool(
 
   const when = scheduledDate.toLocaleString();
   const recurrenceLabel = recurrence ? ` (recurring: ${recurrence.type})` : "";
-  const notificationLabel = (task.notificationMode === "quiet" ? " Quiet mode is on." : "")
+  const notificationLabel = (task.notificationMode === "quiet" && !args.inSession ? " Quiet mode is on." : "")
     + (!linkedSessionId
       ? ""
+      : args.inSession
+        ? linkedSessionId === currentSessionId
+          ? " The prompt will arrive in this session as a message, with no separate run."
+          : ` The prompt will arrive in session ${linkedSessionId}, which started this scheduled chain, as a message.`
       : linkedSessionId === currentSessionId
         ? " Results will return to this session and continue its agent."
         : ` Results will return to session ${linkedSessionId}, which started this scheduled chain, and continue its agent.`);
   const label = task.name ? `"${task.name}"` : "Task";
-  return { content: [{ type: "text", text: `${label} scheduled for ${when}${recurrenceLabel} in ${args.cwd}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
+  return { content: [{ type: "text", text: `${label} scheduled for ${when}${recurrenceLabel}${args.inSession ? "" : ` in ${cwd}`}.${notificationLabel}\n"${args.prompt.slice(0, 300)}"` }] };
 }
 
 function codexSkillsForContext(ctx: AppToolContext): SkillEntry[] {

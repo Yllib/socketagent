@@ -1,11 +1,12 @@
 # SocketAgent
 
-Access Claude Code, OpenAI Codex and Gemini agents on your computers from your Android phone or Windows desktop. Install the free SocketAgent server software on the computers you want to connect to, then pair them with the app.
+Access Claude Code, OpenAI Codex and Gemini agents on your computers from anywhere: the Android app, the Windows desktop app, or a browser. Install the free SocketAgent server software on the computers you want to connect to, then pair them with the app.
 
 ## Get the app
 
 - Windows desktop: [SocketAgent Desktop installer](https://rubanoenterprises.com/socketagent_desktop_installer.exe)
 - Android: [Google Play](https://play.google.com/store/apps/details?id=com.socketagent.app) or the [APK](https://github.com/Yllib/socketagent/releases/latest/download/app-release.apk)
+- Browser: [socketagent.rbno.net](https://socketagent.rbno.net)
 
 The desktop installer can also install the server on the same PC.
 

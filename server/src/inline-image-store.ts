@@ -15,8 +15,8 @@ function imageExtension(bytes: Buffer): string {
   throw new Error("Use a PNG, JPEG, GIF, or WebP image.");
 }
 
-/** Persistent attachments, not a cache. No TTL or automatic session cleanup:
- * branches and archived transcripts can still reference these snapshot IDs.
+/** Persistent attachments, not a cache. No TTL. Deleting a session removes
+ * the images it made unless a branch still references them.
  */
 export class InlineImageStore {
   constructor(private readonly root = socketAgentDataPath("inline-images")) {}
@@ -97,6 +97,26 @@ export class InlineImageStore {
       throw new Error("Invalid image snapshot ID. Only saved image IDs can be downloaded.");
     }
     return path.join(this.root, id, "image");
+  }
+
+  /** The IDs of the images these sessions made, from each image's metadata. */
+  ownedBy(sessionIds: ReadonlySet<string>): string[] {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.root);
+    } catch {
+      return [];
+    }
+    return names.filter((id) => {
+      if (!validId.test(id)) return false;
+      try {
+        const metadata: unknown = JSON.parse(fs.readFileSync(path.join(this.root, id, "metadata.json"), "utf8"));
+        return typeof metadata === "object" && metadata !== null && "sessionId" in metadata
+          && typeof metadata.sessionId === "string" && sessionIds.has(metadata.sessionId);
+      } catch {
+        return false;
+      }
+    });
   }
 
   /** Explicit cleanup only. Missing snapshots never fall back to the source. */

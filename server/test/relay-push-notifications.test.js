@@ -23,6 +23,7 @@ const {
   unregisterPushToken,
 } = require("#server/push-notifications");
 const { RelayClient } = require("#server/relay-client");
+const { saveSecureInput } = require("#server/secure-input-store");
 const { derivePushKey, secretTag } = require("#server/transport-v2");
 const { isRecord, parseJsonObject } = require("#server/value-guards");
 
@@ -414,6 +415,41 @@ test("a removed device's registrations leave the list for the relay, and a reset
     assert.equal(atOnce.at(-1), true);
   } finally {
     clearPushRegistrations();
+    setPushTransport(null);
+  }
+});
+
+test("a secret the agent repeats is taken out of the notification before it leaves", async () => {
+  const secret = crypto.randomBytes(32);
+  /** @type {import("#server/push-sealing").RelayPushRequest[]} */
+  const pushes = [];
+  saveSecureInput({ label: "PUSH_TOKEN", value: "push-secret-must-not-leak", scope: "global" });
+  setPushTransport({
+    sealingSecrets: () => [secret],
+    plaintextAllowed: () => false,
+    relayPush: (push) => {
+      pushes.push(push);
+      return Promise.resolve({ sent: 1, attempted: 1, dead: [] });
+    },
+    relayTokensChanged: () => {},
+  });
+  try {
+    await withCleanPushEnvironment(async () => {
+      process.env.RELAY_URL = "wss://relay.example.test";
+      process.env.PAIRING_TOKEN = "ab".repeat(32);
+      await sendPushNotification({
+        title: "Key push-secret-must-not-leak",
+        body: "I used push-secret-must-not-leak to log in",
+        data: { summary: "push-secret-must-not-leak" },
+      });
+      const bytes = Buffer.from(pushes[0].sealed.split(".")[1], "base64");
+      const opened = nacl.secretbox.open(bytes.subarray(24), bytes.subarray(0, 24), derivePushKey(secret));
+      assert.ok(opened);
+      const text = Buffer.from(opened).toString("utf8");
+      assert.equal(text.includes("push-secret-must-not-leak"), false);
+      assert.match(parseJsonObject(text).body, /^I used .+ to log in$/);
+    });
+  } finally {
     setPushTransport(null);
   }
 });

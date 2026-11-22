@@ -299,6 +299,9 @@ export function windowsRunServiceBatContent(inputs: WindowsWrapperInputs): strin
     // offset. cmd parses a whole line before running any of it.
     '"%NODE_EXE%" "%SERVER_DIR%\\dist\\windows-service-cli.js" arbitrate >nul 2>&1 & goto arbitrated',
     ":arbitrated",
+    // Nothing holds the log open between passes, so this is where it
+    // rotates: past 10 MB it becomes socketagent.log.1, replacing the last.
+    'for %%F in ("%LOG_FILE%") do if %%~zF GTR 10485760 move /Y "%LOG_FILE%" "%LOG_FILE%.1" >nul 2>&1',
     'if not exist "%RECOVERY_BAT%" exit /b 0',
     '"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%SERVER_DIR%\\scripts\\register-windows-recovery.ps1" >nul 2>&1',
     "exit /b 0",

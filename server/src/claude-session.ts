@@ -3544,7 +3544,7 @@ export class ClaudeSession {
 
     this.activeInputQueue.push(this._createUserMessage(withBoardBlock(prompt, boardTurn), sid, userMsgUuid));
     this._commitBoardTurn(sid, boardTurn);
-    console.log(`[WarmIdle] Reusing Claude SDK stream for ${sid || "(pending)"}, prompt=${prompt.slice(0, 80)}...`);
+    console.log(`[WarmIdle] Reusing Claude SDK stream for ${sid || "(pending)"}, prompt chars=${prompt.length}`);
     return turnPromise;
   }
 
@@ -4173,7 +4173,7 @@ export class ClaudeSession {
         promptLogged = true;
       }
 
-      console.log(`Starting query: resume=${resumeTarget || 'none'}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt=${prompt.slice(0, 80)}..., uuid=${userMsgUuid}, cwd=${this.cwd}`);
+      console.log(`Starting query: resume=${resumeTarget || 'none'}${resumeAt ? ` resumeAt=${resumeAt}` : ''}, effort=${this._effort}, thinking=${JSON.stringify(this._thinking)}, prompt chars=${prompt.length}, uuid=${userMsgUuid}, cwd=${this.cwd}`);
 
       const initialPermissionMode = this._permissionMode || "bypassPermissions";
 
@@ -4237,7 +4237,7 @@ export class ClaudeSession {
                 // Run plugin interceptors
                 const sessionCtx = this.getSessionContext();
                 let pluginAllowed = false;
-                console.log(`[Hook] PreToolUse: tool=${toolName} plugins=${this.plugins.length} cmd=${toolName === 'Bash' ? String(toolInput.command || '').slice(0, 100) : '...'}`);
+                console.log(`[Hook] PreToolUse: tool=${toolName} plugins=${this.plugins.length} cmd chars=${toolName === 'Bash' ? String(toolInput.command || '').length : 0}`);
                 for (const plugin of this.plugins) {
                   if (plugin.canUseToolInterceptor) {
                     console.log(`[Hook] Running plugin interceptor: ${plugin.name || 'unnamed'}`);
@@ -4489,7 +4489,7 @@ export class ClaudeSession {
                   const subject = input.task_subject || "";
                   const description = input.task_description || "";
                   const teammateName = input.teammate_name || "";
-                  console.log(`[Hook] TaskCompleted: id=${taskId} subject=${subject} desc=${description?.slice(0, 80)}`);
+                  console.log(`[Hook] TaskCompleted: id=${taskId} desc chars=${description?.length ?? 0}`);
                   this._publishClaudeTaskUpdate({
                     taskId,
                     subject,
@@ -5121,7 +5121,7 @@ export class ClaudeSession {
             }
             continue;
           }
-          console.log(`[SDK] Task notification: id=${sdkTaskId} status=${tn.status} originToolUseId=${originToolUseId} summary=${tn.summary?.slice(0, 80)}`);
+          console.log(`[SDK] Task notification: id=${sdkTaskId} status=${tn.status} originToolUseId=${originToolUseId}`);
           // If this task was being monitored, flush output and send final notification
           if (sdkTaskId && this._monitoredTasks.has(sdkTaskId)) {
             const mState = this._monitoredTasks.get(sdkTaskId)!;
@@ -5269,7 +5269,7 @@ export class ClaudeSession {
         // Handle tool use summaries — clean human-readable summaries of tool groups
         if (message.type === "tool_use_summary") {
           const summary = message;
-          console.log(`[SDK] Tool use summary: ${summary.summary?.slice(0, 100)}`);
+          console.log(`[SDK] Tool use summary (${summary.summary?.length ?? 0} chars)`);
           this.send({
             type: "tool_summary",
             summary: summary.summary || "",
@@ -5309,13 +5309,13 @@ export class ClaudeSession {
 
         if (message.type === "system" && message.subtype === "task_progress") {
           const tp = message;
-          console.log(`[SDK] Task progress: id=${tp.task_id} toolUseId=${tp.tool_use_id || this._taskIdToToolUseId.get(tp.task_id)} tool=${tp.last_tool_name} summary=${tp.summary?.slice(0, 60)}`);
+          console.log(`[SDK] Task progress: id=${tp.task_id} toolUseId=${tp.tool_use_id || this._taskIdToToolUseId.get(tp.task_id)} tool=${tp.last_tool_name}`);
           this._handleSdkTaskProgress(tp);
         }
 
         if (message.type === "system" && message.subtype === "task_updated") {
           const tu = message;
-          console.log(`[SDK] Task updated: id=${tu.task_id} patch=${JSON.stringify(tu.patch || {}).slice(0, 160)}`);
+          console.log(`[SDK] Task updated: id=${tu.task_id} fields=${Object.keys(tu.patch || {}).join(",")}`);
           this._handleSdkTaskUpdated(tu);
         }
 
@@ -5461,7 +5461,7 @@ export class ClaudeSession {
         // Forward local command output (#11)
         if (message.type === "system" && message.subtype === "local_command_output") {
           const lco = message;
-          console.log(`[SDK] Local command output: ${lco.content?.slice(0, 80)}`);
+          console.log(`[SDK] Local command output (${lco.content?.length ?? 0} chars)`);
           this.send({
             type: "local_command_output",
             content: lco.content || "",
@@ -5473,7 +5473,7 @@ export class ClaudeSession {
         if (message.type === "prompt_suggestion") {
           const ps = message;
           const suggestion = ps.suggestion || "";
-          console.log(`[SDK] Prompt suggestion: ${suggestion.slice(0, 80)}`);
+          console.log(`[SDK] Prompt suggestion (${suggestion.length} chars)`);
           this.send({
             type: "prompt_suggestion",
             suggestion,
@@ -6106,7 +6106,7 @@ export class ClaudeSession {
             currentText,
             sawMainAssistantText,
           )) {
-            console.log(`[SDK] Slash command result: ${resultText.slice(0, 100)}`);
+            console.log(`[SDK] Slash command result (${resultText.length} chars)`);
             this.send({
               type: "text",
               content: resultText,

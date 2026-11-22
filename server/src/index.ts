@@ -12193,7 +12193,7 @@ async function executeScheduledTask(task: ScheduledTask, trigger: "scheduled" | 
   saveScheduledTask(task);
   broadcastScheduledTaskList();
 
-  console.log(`[Scheduler] Executing ${trigger} task ${task.id} (run #${runNumber}): ${task.prompt.slice(0, 80)}`);
+  console.log(`[Scheduler] Executing ${trigger} task ${task.id} (run #${runNumber})`);
 
   try {
     if (!fs.existsSync(task.cwd)) {

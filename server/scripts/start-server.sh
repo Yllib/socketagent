@@ -18,6 +18,16 @@ if [[ "$(uname -s)" == "Darwin" && "${SOCKETAGENT_MACOS_HELPER:-}" != "1" ]]; th
   fi
 fi
 
+# launchd appends this process's output to socketagent.log and never trims
+# it. Past 10 MB, keep one older copy and start the log over. launchd opens it
+# for appending, so emptying it in place is safe while it is open.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  SERVICE_LOG="$SERVER_DIR/socketagent.log"
+  if [[ -f "$SERVICE_LOG" ]] && (( $(stat -f %z "$SERVICE_LOG") > 10485760 )); then
+    cp "$SERVICE_LOG" "$SERVICE_LOG.1" && : > "$SERVICE_LOG"
+  fi
+fi
+
 RECOVERY_SCRIPT="$SERVER_DIR/scripts/recovery-guard.sh"
 NODE_MIN_VERSION="${SOCKETAGENT_NODE_MIN_VERSION:-22}"
 NODE_RUNTIME_VERSION="${SOCKETAGENT_NODE_VERSION:-22.22.1}"

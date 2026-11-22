@@ -108,6 +108,7 @@ const schemaVersionRowSchema = z.object({ user_version: z.number() });
 const tableColumnsSchema = z.array(z.object({ name: z.string() }));
 const sessionIdRowsSchema = z.array(z.object({ session_id: z.string() }));
 const toolUseIdRowsSchema = z.array(z.object({ tool_use_id: z.string() }));
+const entryJsonRowsSchema = z.array(z.object({ entry_json: z.string() }));
 const optionalSummaryRowSchema = storedSummaryRowSchema.optional();
 const scalarRowSchema = z.object({ value: z.number() });
 const optionalScalarRowSchema = scalarRowSchema.optional();
@@ -1411,6 +1412,25 @@ export class TranscriptDatabase {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  /**
+   * Which of [ids] some session outside [excluded] still mentions, such as
+   * inline image IDs a branch copied from the session being deleted. One
+   * scan of the entries that mention an image at all.
+   */
+  mentionedOutside(ids: readonly string[], excluded: readonly string[]): Set<string> {
+    const found = new Set<string>();
+    if (!ids.length) return found;
+    const skip = excluded.length ? `AND session_id NOT IN (${excluded.map(() => "?").join(",")})` : "";
+    const rows = this.db.prepare(
+      `SELECT entry_json FROM transcript_entries WHERE instr(entry_json, 'socketagent://image?id=') > 0 ${skip}`,
+    ).all(...excluded);
+    for (const row of entryJsonRowsSchema.parse(rows)) {
+      for (const id of ids) if (row.entry_json.includes(id)) found.add(id);
+      if (found.size === ids.length) break;
+    }
+    return found;
   }
 
   sessionIds(): string[] {

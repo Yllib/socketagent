@@ -40,6 +40,7 @@ import { createInteractiveRequestId } from "./interactive-request-id";
 import { repairTranscriptIdentityCollisions, sameLogicalTranscriptEntry } from "./transcript-repair";
 import { claudeProjectSlug } from "./claude-memory";
 import { deleteSendFileDelivery } from "./send-file-store";
+import { inlineImageStore } from "./inline-image-store";
 import { ByteBoundedLru } from "./byte-bounded-lru";
 import {
   cloneHistoryEntry,
@@ -473,8 +474,77 @@ export function deleteSessionArtifacts(sessionId: string, sessionInfo?: SessionI
     }
   }
 
+  const archivedIds = deleteSessionArchives(sessionId, info, removed, warnings);
+  deleteSessionInlineImages(new Set([sessionId, ...archivedIds]), removed, warnings);
+
   deleteSession(sessionId);
   return { removed, warnings };
+}
+
+/**
+ * Deletes the session's Clear-context and rewind archives and their entries
+ * in the Remember index. That is the archives filed under its ID, and those
+ * filed under an ID it had before a clear moved it to a new one, matched by
+ * the creation time and folder in the archive's meta. Returns the IDs the
+ * archives were filed under, so the images those made go too.
+ */
+function deleteSessionArchives(
+  sessionId: string,
+  info: SessionInfo | undefined,
+  removed: string[],
+  warnings: string[],
+): Set<string> {
+  const archivedIds = new Set<string>();
+  try {
+    if (!fs.existsSync(ARCHIVE_DIR)) return archivedIds;
+    const groups = new Map<string, { sid: string; ts: string; files: Map<string, string> }>();
+    for (const name of fs.readdirSync(ARCHIVE_DIR)) {
+      const parsed = parseArchiveFilename(name);
+      if (!parsed || isCodexNativeArchiveTs(parsed.ts)) continue;
+      const key = `${parsed.sid}_${parsed.ts}`;
+      const group = groups.get(key) ?? { sid: parsed.sid, ts: parsed.ts, files: new Map<string, string>() };
+      group.files.set(parsed.kind, name);
+      groups.set(key, group);
+    }
+    for (const group of groups.values()) {
+      if (group.sid !== sessionId && !archiveMetaMatches(group.files.get("meta"), info)) continue;
+      archivedIds.add(group.sid);
+      for (const [kind, name] of group.files) {
+        unlinkIfExists(path.join(ARCHIVE_DIR, name), removed, `archive-${kind}`);
+        if (kind === "history") archivedRememberDatabase().deleteSession(name);
+      }
+    }
+  } catch (error: unknown) {
+    warnings.push(`Failed to delete archived copies: ${errorMessage(error)}`);
+  }
+  return archivedIds;
+}
+
+/** Whether an archive's meta file names the same session: same creation time and folder. */
+function archiveMetaMatches(metaName: string | undefined, info: SessionInfo | undefined): boolean {
+  if (!metaName || !info?.createdAt) return false;
+  try {
+    const meta = parseJsonObject(fs.readFileSync(path.join(ARCHIVE_DIR, metaName), "utf-8"));
+    return meta.createdAt === info.createdAt && meta.cwd === info.cwd;
+  } catch {
+    return false;
+  }
+}
+
+/** Deletes the inline images these sessions made, except ones a branch still shows. */
+function deleteSessionInlineImages(sessionIds: ReadonlySet<string>, removed: string[], warnings: string[]): void {
+  try {
+    const owned = inlineImageStore.ownedBy(sessionIds);
+    if (!owned.length) return;
+    const shown = historyDatabase().mentionedOutside(owned, [...sessionIds]);
+    for (const id of owned) {
+      if (shown.has(id)) continue;
+      inlineImageStore.remove(id);
+      removed.push(`inline-image:${id}`);
+    }
+  } catch (error: unknown) {
+    warnings.push(`Failed to delete inline images: ${errorMessage(error)}`);
+  }
 }
 
 /** Remap a session entry from oldId to newId (after context clear creates a fresh SDK session) */

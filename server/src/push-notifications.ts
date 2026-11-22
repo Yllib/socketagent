@@ -4,6 +4,7 @@ import { isRecord, unknownArray, errorMessage, parseJsonObject } from "./value-g
 import * as path from "path";
 import { GoogleAuth } from "google-auth-library";
 import { socketAgentDataPath } from "./socket-agent-paths";
+import { redactSecrets } from "./secure-input-store";
 import { legacyPushFields, plainPushData, sealPush, type PushNotificationPayload, type RelayPushRequest } from "./push-sealing";
 
 export type { PushNotificationPayload } from "./push-sealing";
@@ -549,14 +550,29 @@ async function sendFcmHttpV1(
 }
 
 /**
+ * The notification with stored secrets taken out of its text, scoped to its
+ * session the way chat text is. A notification leaves this computer, so an
+ * agent that repeats a secret must not put it on the lock screen.
+ */
+function redactPush(payload: PushNotificationPayload): PushNotificationPayload {
+  const context = payload.sessionId ? { sessionId: payload.sessionId } : undefined;
+  const text = (value: string | undefined) => (value === undefined ? undefined : redactSecrets(value, context));
+  const data = payload.data && Object.fromEntries(
+    Object.entries(payload.data).map(([key, value]) => [key, typeof value === "string" ? redactSecrets(value, context) : value]),
+  );
+  return { ...payload, title: redactSecrets(payload.title, context), body: text(payload.body), ...(data ? { data } : {}) };
+}
+
+/**
  * Sends one notification to this computer's phones. The relay gets a
  * `relay_push` for the phones registered with it. This computer's own
  * Firebase credentials serve the phones registered as direct, and every
  * registered phone when the relay reached none.
  */
 export async function sendPushNotification(
-  payload: PushNotificationPayload,
+  unredacted: PushNotificationPayload,
 ): Promise<{ sent: number; attempted: number }> {
+  const payload = redactPush(unredacted);
   // Test processes inherit the developer's relay credentials. Never let a
   // fixture notification escape to a real enrolled device.
   if (process.env.SOCKETAGENT_TEST_MODE === "1") {

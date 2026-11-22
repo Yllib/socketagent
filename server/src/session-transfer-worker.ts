@@ -167,7 +167,7 @@ async function exportBundle(task: Task<"export">) {
 
 /** Same storage preparation replaceHistory applies, minus the main thread's position bookkeeping. */
 function storedEntry(sessionId: string, entry: HistoryEntry, index: number): HistoryEntry {
-  const stored = compactHistoryEntryForStorage(sessionId, parseHistoryEntry(redactSecretsDeep(entry)), index);
+  const stored = compactHistoryEntryForStorage(sessionId, parseHistoryEntry(redactSecretsDeep(entry, { sessionId })), index);
   // Every stored entry has a durable position, so a bundle entry without one is malformed.
   if (!stored.entryId || !Number.isSafeInteger(stored.sessionSeq) || stored.sessionSeq! <= 0) {
     throw invalidBundle("history.sessionSeq");

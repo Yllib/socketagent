@@ -18,6 +18,7 @@ const {
   deleteSecureInput,
   replaceSecureInput,
   redactSecrets,
+  redactSecretsDeep,
 } = require("#server/secure-input-store");
 const {
   appendHistory,
@@ -274,5 +275,29 @@ test("redacts saved credentials but not a saved email address", () => {
   assert.equal(
     redactSecrets("token tok-redact-me-123 for admin@example.com"),
     "token [secure-input:redacted] for admin@example.com",
+  );
+});
+
+test("a short secret is scrubbed only as a word, and only in chats that can use it", () => {
+  saveSecureInput({ label: "GAME_PW", value: "amazon", scope: "project", cwd: "/work/games" });
+  saveSecureInput({ label: "SERVICE_TOKEN", value: "srv-long-token-99", scope: "project", cwd: "/work/games" });
+  const text = "amazon orders, amazonian, srv-long-token-99";
+  assert.equal(
+    redactSecrets(text, { cwd: "/work/games" }),
+    "[secure-input:redacted] orders, amazonian, [secure-input:redacted]",
+  );
+  assert.equal(
+    redactSecrets(text, { cwd: "/work/other" }),
+    "amazon orders, amazonian, [secure-input:redacted]",
+    "another project keeps the word; a long value goes everywhere",
+  );
+  assert.equal(
+    redactSecrets(text),
+    "[secure-input:redacted] orders, amazonian, [secure-input:redacted]",
+    "with no chat named, every short secret applies",
+  );
+  assert.deepEqual(
+    redactSecretsDeep({ sessionId: "s1", text: "amazon" }, { sessionId: "s1", cwd: "/work/other" }),
+    { sessionId: "s1", text: "amazon" },
   );
 });

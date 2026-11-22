@@ -29,7 +29,7 @@ import type {
 import { CodexAppServerClient, type CodexAppServerThreadListParams } from "./codex-app-server-client";
 import { codexAppServerThreadToHistory, codexRolloutJsonlToHistory } from "./codex-native-history";
 import { buildCodexSpawn } from "./codex-env";
-import { redactSecretsDeep } from "./secure-input-store";
+import { redactSecretsDeep, setRedactionSessionCwdLookup } from "./secure-input-store";
 import { socketAgentDataPath } from "./socket-agent-paths";
 import { claudeMessageUuid } from "./claude-message-uuid";
 import { mergeSessionTimestamps } from "./session-list-snapshot";
@@ -290,6 +290,9 @@ export function getSession(id: string): SessionInfo | undefined {
   const session = loadSessionStore().find((entry) => entry.id === id);
   return session ? structuredClone(session) : undefined;
 }
+
+// Redaction checks a chat's project before scrubbing a short project secret.
+setRedactionSessionCwdLookup((id) => loadSessionStore().find((entry) => entry.id === id)?.cwd);
 
 export function updateSessionAgentSettings(id: string, patch: Partial<AgentSessionSettings>): void {
   const sessions = readStore();
@@ -1167,9 +1170,9 @@ function safeHistoryEntriesForStorage(
     .map(({ entry }) => entry);
   return dirtyEntries
     ? positioned.map((entry, index) => dirtyEntries.has(entry)
-      ? compactHistoryEntryForStorage(sessionId, parseHistoryEntry(redactSecretsDeep(entry)), index)
+      ? compactHistoryEntryForStorage(sessionId, parseHistoryEntry(redactSecretsDeep(entry, { sessionId })), index)
       : entry)
-    : parseHistoryEntries(redactSecretsDeep(positioned))
+    : parseHistoryEntries(redactSecretsDeep(positioned, { sessionId }))
       .map((entry, index) => compactHistoryEntryForStorage(sessionId, entry, index));
 }
 
@@ -1454,7 +1457,7 @@ export function appendHistory(sessionId: string, entry: HistoryEntry): HistoryEn
   }
   const safeEntry = compactHistoryEntryForStorage(
     sessionId,
-    parseHistoryEntry(redactSecretsDeep(positioned)),
+    parseHistoryEntry(redactSecretsDeep(positioned, { sessionId })),
     Math.max(0, Number(positioned.sessionSeq || 1) - 1),
   );
   database.upsert(sessionId, safeEntry, historyPositionKey(safeEntry));
@@ -1610,7 +1613,7 @@ export function appendHistoryBulk(sessionId: string, newEntries: HistoryEntry[])
     }
     positioned.push(compactHistoryEntryForStorage(
       sessionId,
-      parseHistoryEntry(redactSecretsDeep(entry)),
+      parseHistoryEntry(redactSecretsDeep(entry, { sessionId })),
       Math.max(0, Number(entry.sessionSeq || 1) - 1),
     ));
   }
@@ -2293,7 +2296,7 @@ export async function rememberReadGlobalHistory(sourceId: string, selector: {
     ? database.context(id, selector.sessionSeq!, selector.before ?? 0, selector.after ?? 0)
     : [selector.entryId ? database.getByEntryId(id, selector.entryId)
       : database.getBySessionSeq(id, selector.sessionSeq!)].filter((entry): entry is HistoryEntry => !!entry);
-  return hydrateHistoryEntries(entries).map(entry => parseHistoryEntry(redactSecretsDeep(entry)));
+  return hydrateHistoryEntries(entries).map(entry => parseHistoryEntry(redactSecretsDeep(entry, { sessionId: id })));
 }
 
 /** Retrieve one durable transcript entry by stable sequence or entry ID. */

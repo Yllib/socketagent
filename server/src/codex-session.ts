@@ -2868,7 +2868,7 @@ export class CodexSession {
 
   private sendTo(ws: ClientTransport, msg: ServerMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(redactSecretsDeep(msg)));
+      ws.send(JSON.stringify(redactSecretsDeep(msg, { sessionId: this.sessionId || undefined, cwd: this.cwd })));
     }
   }
 
@@ -2937,12 +2937,12 @@ export class CodexSession {
       }
     }
     if (recipients.length === 0) return;
-    const payload = JSON.stringify(redactSecretsDeep(msg));
+    const payload = JSON.stringify(redactSecretsDeep(msg, { sessionId: this.sessionId || undefined, cwd: this.cwd }));
     for (const socket of recipients) socket.send(payload);
   }
 
   private dispatchToClients(msg: ServerMessage): void {
-    const payload = JSON.stringify(redactSecretsDeep(msg));
+    const payload = JSON.stringify(redactSecretsDeep(msg, { sessionId: this.sessionId || undefined, cwd: this.cwd }));
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(payload);
@@ -6264,7 +6264,7 @@ export class CodexSession {
     // visible without dumping an unlabelled raw "Tool" card into chat.
     const input = {
       itemType: String(item.type),
-      payload: redactSecretsDeep(item),
+      payload: redactSecretsDeep(item, { sessionId: this.sessionId || undefined, cwd: this.cwd }),
       _codexItemType: "unrecognized",
     };
     sendItem({

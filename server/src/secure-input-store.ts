@@ -102,8 +102,36 @@ function emitSecureInputState(
 
 const STORE_DIR = socketAgentDataPath("secrets");
 const pendingRequests = new Map<string, PendingSecureInput>();
-const secretValues = new Set<string>();
+/** A stored value and the context it belongs to. No scope means its metadata is missing. */
+interface KnownSecret {
+  value: string;
+  scope?: SecureInputScope;
+  sessionId?: string;
+  cwd?: string;
+}
+const knownSecrets: KnownSecret[] = [];
 let loadedExistingSecrets = false;
+
+/**
+ * Values at least this long are scrubbed from everything sent or stored, as
+ * substrings. Shorter ones (a PIN, a game server password that is a plain
+ * word) collide with ordinary text, so they are scrubbed only as whole words
+ * and only for chats that can use them.
+ */
+const STRONG_SECRET_LENGTH = 12;
+
+/** Who a redaction is for. The session's working directory is looked up when not given. */
+export interface RedactionContext {
+  sessionId?: string;
+  cwd?: string;
+}
+
+let sessionCwdLookup: (sessionId: string) => string | undefined = () => undefined;
+
+/** Lets redaction find a session's working directory, for project-scoped secrets. */
+export function setRedactionSessionCwdLookup(lookup: (sessionId: string) => string | undefined): void {
+  sessionCwdLookup = lookup;
+}
 
 function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -142,8 +170,24 @@ function normalizeEnvHint(label: string, envHint?: string): string {
 /** A bare email address is an identifier, not a credential, so redacting it would hide it everywhere it appears. */
 const BARE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function registerSecretValue(value: string): void {
-  if (value.length >= 4 && !BARE_EMAIL.test(value.trim())) secretValues.add(value);
+function registerSecretValue(value: string, metadata?: Partial<SavedSecureInput>): void {
+  if (value.length < 4 || BARE_EMAIL.test(value.trim())) return;
+  knownSecrets.push({
+    value,
+    ...(metadata?.scope ? { scope: metadata.scope } : {}),
+    ...(metadata?.sessionId ? { sessionId: metadata.sessionId } : {}),
+    ...(metadata?.cwd ? { cwd: metadata.cwd } : {}),
+  });
+  knownSecrets.sort((a, b) => b.value.length - a.value.length);
+}
+
+function readMetadataFor(secretPath: string): Partial<SavedSecureInput> | undefined {
+  try {
+    const parsed = savedSecureInputSchema.safeParse(JSON.parse(fs.readFileSync(`${secretPath}.json`, "utf8")));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function loadExistingSecretsForRedaction(): void {
@@ -158,7 +202,7 @@ function loadExistingSecretsForRedaction(): void {
         if (stat.isDirectory()) {
           walk(filePath);
         } else if (!filePath.endsWith(".json") && stat.size > 0 && stat.size < 1024 * 1024) {
-          registerSecretValue(fs.readFileSync(filePath, "utf8"));
+          registerSecretValue(fs.readFileSync(filePath, "utf8"), readMetadataFor(filePath));
         }
       }
     };
@@ -169,7 +213,7 @@ function loadExistingSecretsForRedaction(): void {
 }
 
 function rebuildSecretRedactionValues(): void {
-  secretValues.clear();
+  knownSecrets.length = 0;
   loadedExistingSecrets = false;
   loadExistingSecretsForRedaction();
 }
@@ -316,28 +360,52 @@ export function secureInputInventoryForAgent(sessionId?: string, cwd?: string): 
   ].join("\n");
 }
 
-export function redactSecrets(text: string): string {
+const REDACTED = "[secure-input:redacted]";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Whether a short secret applies to [context]. Without a context, or metadata, it does. */
+function shortSecretApplies(secret: KnownSecret, context: RedactionContext | undefined): boolean {
+  if (!context || !secret.scope) return true;
+  const cwd = context.cwd ?? (context.sessionId ? sessionCwdLookup(context.sessionId) : undefined);
+  return isMetadataInContext(secret, context.sessionId, cwd);
+}
+
+/**
+ * Replaces stored secret values in [text]. Long values go everywhere they
+ * appear; short ones only as whole words, and only when [context] can use
+ * the secret.
+ */
+export function redactSecrets(text: string, context?: RedactionContext): string {
   loadExistingSecretsForRedaction();
   let redacted = text;
-  const values = [...secretValues].sort((a, b) => b.length - a.length);
-  for (const value of values) {
-    if (!value || value.length < 4) continue;
-    redacted = redacted.split(value).join("[secure-input:redacted]");
+  for (const secret of knownSecrets) {
+    if (!redacted.includes(secret.value)) continue;
+    if (secret.value.length >= STRONG_SECRET_LENGTH) {
+      redacted = redacted.split(secret.value).join(REDACTED);
+    } else if (shortSecretApplies(secret, context)) {
+      const word = new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(secret.value)}(?![A-Za-z0-9])`, "g");
+      redacted = redacted.replace(word, REDACTED);
+    }
   }
   return redacted;
 }
 
 // Redaction can replace literal strings, so it cannot promise to preserve T.
-export function redactSecretsDeep(value: string): string;
-export function redactSecretsDeep(value: Record<string, unknown>): Record<string, unknown>;
-export function redactSecretsDeep(value: unknown[]): unknown[];
-export function redactSecretsDeep(value: unknown): unknown;
-export function redactSecretsDeep(value: unknown): unknown {
-  if (typeof value === "string") return redactSecrets(value);
-  if (Array.isArray(value)) return unknownArray(value).map(item => redactSecretsDeep(item));
+// Without a [context], a record's own sessionId names the chat it belongs to.
+export function redactSecretsDeep(value: string, context?: RedactionContext): string;
+export function redactSecretsDeep(value: Record<string, unknown>, context?: RedactionContext): Record<string, unknown>;
+export function redactSecretsDeep(value: unknown[], context?: RedactionContext): unknown[];
+export function redactSecretsDeep(value: unknown, context?: RedactionContext): unknown;
+export function redactSecretsDeep(value: unknown, context?: RedactionContext): unknown {
+  if (typeof value === "string") return redactSecrets(value, context);
+  if (Array.isArray(value)) return unknownArray(value).map(item => redactSecretsDeep(item, context));
   if (isRecord(value)) {
+    const own = context ?? (typeof value.sessionId === "string" && value.sessionId ? { sessionId: value.sessionId } : undefined);
     const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) out[key] = redactSecretsDeep(item);
+    for (const [key, item] of Object.entries(value)) out[key] = redactSecretsDeep(item, own);
     return out;
   }
   return value;
@@ -398,7 +466,7 @@ export function saveSecureInput(args: SecureInputSaveArgs): SavedSecureInput {
   };
   fs.writeFileSync(metadataPath, JSON.stringify({ ...saved, valueRedacted: true }, null, 2), { encoding: "utf8", mode: 0o600 });
   try { fs.chmodSync(metadataPath, 0o600); } catch {}
-  registerSecretValue(args.value);
+  registerSecretValue(args.value, saved);
   return saved;
 }
 

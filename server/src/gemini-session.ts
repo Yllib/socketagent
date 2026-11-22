@@ -751,7 +751,7 @@ export class GeminiSession {
   }
 
   private sendTo(ws: ClientTransport, msg: ServerMessage): void {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(redactSecretsDeep(msg)));
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(redactSecretsDeep(msg, { sessionId: this.sessionId || undefined, cwd: this.cwd })));
   }
 
   private sendImmediately(msg: ServerMessage): void {
@@ -762,7 +762,7 @@ export class GeminiSession {
   }
 
   private dispatchToClients(msg: ServerMessage): void {
-    const payload = JSON.stringify(redactSecretsDeep(msg));
+    const payload = JSON.stringify(redactSecretsDeep(msg, { sessionId: this.sessionId || undefined, cwd: this.cwd }));
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN) socket.send(payload);
       else if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) this.clientSockets.delete(socket);

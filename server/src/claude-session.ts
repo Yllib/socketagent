@@ -3013,7 +3013,7 @@ export class ClaudeSession {
 
   private sendTo(ws: ClientTransport, msg: ServerMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(redactSecretsDeep(msg)));
+      ws.send(JSON.stringify(redactSecretsDeep(msg, { sessionId: this.sessionId || undefined, cwd: this.cwd })));
     }
   }
 
@@ -3082,12 +3082,12 @@ export class ClaudeSession {
       }
     }
     if (recipients.length === 0) return;
-    const payload = JSON.stringify(redactSecretsDeep(msg));
+    const payload = JSON.stringify(redactSecretsDeep(msg, { sessionId: this.sessionId || undefined, cwd: this.cwd }));
     for (const socket of recipients) socket.send(payload);
   }
 
   private dispatchToClients(msg: ServerMessage): void {
-    const payload = JSON.stringify(redactSecretsDeep(msg));
+    const payload = JSON.stringify(redactSecretsDeep(msg, { sessionId: this.sessionId || undefined, cwd: this.cwd }));
     for (const socket of [...this.clientSockets]) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(payload);

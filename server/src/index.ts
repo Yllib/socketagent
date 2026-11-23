@@ -13378,17 +13378,31 @@ function execUpdateToolSync(command: string, args: string[], options: UpdateTool
   return execFileSync(command, args, options);
 }
 
+// scripts/check-deps.js exits 0 when node_modules already matches
+// package-lock.json. Updates reinstall only when it does not, which keeps
+// updates that leave the lockfile alone from rebuilding node_modules.
+function dependenciesCurrent(cwd: string): boolean {
+  try {
+    execFileSync(process.execPath, [path.join(cwd, "scripts", "check-deps.js"), cwd], { stdio: "pipe", timeout: 30000, windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function runPackageUpdateSync(cwd: string): void {
   const runtime = resolveUpdateRuntimeTools();
-  const npm = updateToolCommand(runtime.npm, ["ci", "--include=optional"]);
-  execUpdateToolSync(npm.command, npm.args, {
-    cwd,
-    env: runtime.env,
-    stdio: "pipe",
-    timeout: 120000,
-    windowsHide: true,
-    windowsVerbatimArguments: npm.windowsVerbatimArguments,
-  });
+  if (!dependenciesCurrent(cwd)) {
+    const npm = updateToolCommand(runtime.npm, ["ci", "--include=optional"]);
+    execUpdateToolSync(npm.command, npm.args, {
+      cwd,
+      env: runtime.env,
+      stdio: "pipe",
+      timeout: 120000,
+      windowsHide: true,
+      windowsVerbatimArguments: npm.windowsVerbatimArguments,
+    });
+  }
   execFileSync(process.execPath, [path.join(cwd, "scripts", "build-server.js")], {
     cwd,
     env: runtime.env,
@@ -13429,7 +13443,7 @@ function runUpdateToolAsync(runtime: UpdateRuntimeTools, command: string, args: 
 
 async function runPackageUpdate(cwd: string): Promise<void> {
   const runtime = resolveUpdateRuntimeTools();
-  await runUpdateToolAsync(runtime, runtime.npm, ["ci", "--include=optional"], cwd);
+  if (!dependenciesCurrent(cwd)) await runUpdateToolAsync(runtime, runtime.npm, ["ci", "--include=optional"], cwd);
   await new Promise<void>((resolve, reject) => {
     execFile(process.execPath, [path.join(cwd, "scripts", "build-server.js")], {
       cwd,

@@ -38,7 +38,15 @@ function newestSource() {
     }
   };
   visit(path.join(serverDir, "src"));
-  return Math.max(newest, fs.statSync(path.join(serverDir, "tsconfig.json")).mtimeMs);
+  newest = Math.max(newest, fs.statSync(path.join(serverDir, "tsconfig.json")).mtimeMs);
+  // npm rewrites this on every install, so new dependencies retry a compile
+  // that failed against the old ones.
+  try {
+    newest = Math.max(newest, fs.statSync(path.join(serverDir, "node_modules", ".package-lock.json")).mtimeMs);
+  } catch {
+    // No install yet; the compiler check below reports it.
+  }
+  return newest;
 }
 
 /** @returns {number | undefined} The source time of the last failed build. */
@@ -79,9 +87,17 @@ if (hasBuild && failedSource() === source) {
   process.exit(0);
 }
 
+const tsc = path.join(serverDir, "node_modules", "typescript", "bin", "tsc");
+// A broken node_modules is not a source failure, so nothing is recorded and
+// the compile runs again once npm ci restores it.
+if (!fs.existsSync(tsc)) {
+  log(`TypeScript is not installed. Run npm ci in ${serverDir}.`);
+  if (hasBuild) log("Running the previous build.");
+  process.exit(hasBuild ? 0 : 1);
+}
+
 log("Compiling the server");
 fs.rmSync(next, { recursive: true, force: true });
-const tsc = path.join(serverDir, "node_modules", "typescript", "bin", "tsc");
 const result = spawnSync(
   process.execPath,
   [tsc, "-p", path.join(serverDir, "tsconfig.json"), "--outDir", next, "--noEmitOnError"],

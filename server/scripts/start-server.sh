@@ -283,37 +283,9 @@ select_node_runtime() {
   set_node_runtime "$USER_NODE_DIR/bin/node"
 }
 
-deps_resolve() {
-  "$NODE_BIN" - <<'NODE'
-const modules = [
-  "@anthropic-ai/claude-agent-sdk",
-  "dotenv",
-  "tweetnacl",
-  "ws",
-  "zod",
-];
-
-for (const name of modules) {
-  require.resolve(name);
-}
-NODE
-}
-
+# scripts/check-deps.js checks every package the lockfile pins.
 deps_need_install() {
-  [[ -d node_modules ]] || return 0
-  [[ -f node_modules/.package-lock.json ]] || return 0
-  if [[ -f package-lock.json && package-lock.json -nt node_modules/.package-lock.json ]]; then
-    return 0
-  fi
-  if [[ -f package.json && package.json -nt node_modules/.package-lock.json ]]; then
-    return 0
-  fi
-
-  local deps_log="${TMPDIR:-/tmp}/socketagent-startup-deps-$$.log"
-  deps_resolve >"$deps_log" 2>&1 && return 1
-  log "Dependency check failed:"
-  sed 's/^/[startup]   /' "$deps_log" || true
-  return 0
+  ! "$NODE_BIN" "$SERVER_DIR/scripts/check-deps.js" "$SERVER_DIR"
 }
 
 run_repair() {

@@ -378,6 +378,37 @@ function Invoke-NativeCapture {
     }
 }
 
+# The service wrappers run npm ci themselves when node_modules is broken or
+# stale, and two npm runs in one node_modules delete each other's files. Setup
+# stops every copy first: the recovery guard, which would start the owner's
+# task again, SocketAgentService, which is disabled until the install ends so
+# its 5-minute trigger stays quiet, and the owner's task. Returns whether
+# SocketAgentService needs enabling again.
+function Stop-SocketAgentForInstall {
+    $adminHint = "SocketAgent is running from an administrator install. Rerun setup from PowerShell opened with Run as administrator"
+    try {
+        if (Get-ScheduledTask -TaskName 'SocketAgentRecovery' -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName 'SocketAgentRecovery' -Confirm:$false -ErrorAction Stop
+        }
+        $machineTask = Get-ScheduledTask -TaskName 'SocketAgentService' -ErrorAction SilentlyContinue
+        if ($machineTask) {
+            Disable-ScheduledTask -TaskName 'SocketAgentService' -ErrorAction Stop | Out-Null
+            Stop-ScheduledTask -TaskName 'SocketAgentService' -ErrorAction Stop
+        }
+        $ownerTask = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
+        if ($ownerTask -and $ownerTask.State -eq 'Running') {
+            Stop-ScheduledTask -TaskName $TASK_NAME -ErrorAction Stop
+        }
+    } catch {
+        throw "${adminHint}: $($_.Exception.Message)"
+    }
+    if ($machineTask -or ($ownerTask -and $ownerTask.State -eq 'Running')) {
+        Start-Sleep -Seconds 2
+        Write-Ok "Stopped the running server while dependencies install"
+    }
+    return [bool]$machineTask
+}
+
 function Install-ServerDependenciesAndBuild {
     if ($script:serverBuildDone) {
         Write-Ok "Server dependencies already installed and built"
@@ -695,7 +726,13 @@ Add-DirectoryToPath $NPM_BIN_DIR $true
 
 Write-Phase "Phase 4: Install Dependencies & Build"
 
-Install-ServerDependenciesAndBuild
+$reenableMachineTask = Stop-SocketAgentForInstall
+try {
+    Install-ServerDependenciesAndBuild
+} finally {
+    # Phase 7 stops it again before it rewrites the wrapper.
+    if ($reenableMachineTask) { Enable-ScheduledTask -TaskName 'SocketAgentService' | Out-Null }
+}
 & node -e "require(process.argv[1]).repairWindowsManagedShims(process.argv[2])" (Join-Path $SERVER_DIR 'dist\windows-managed-shims.js') $NPM_GLOBAL_DIR
 if ($LASTEXITCODE -ne 0) { throw 'Could not repair managed command launchers' }
 Install-BrowserRuntime

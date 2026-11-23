@@ -311,63 +311,138 @@ function writeMarker(executable) {
   fs.renameSync(tempPath, markerPath());
 }
 
-async function main() {
-  const systemBrowser = systemCandidates().find(executableWorks);
-  if (systemBrowser) {
-    try {
-      await validateBrowserLaunch(systemBrowser);
-      console.log(`Browser runtime available: ${systemBrowser}`);
-      return;
-    } catch (error) {
-      if (process.platform === "linux") throw error;
-      console.warn(`System browser is not automation-compatible; installing a managed runtime. ${error instanceof Error ? error.message : String(error)}`);
+/** @param {string} tool */
+function hasCommand(tool) {
+  return spawnSync("sh", ["-c", `command -v ${tool}`], { stdio: "ignore" }).status === 0;
+}
+
+/**
+ * Installs the distribution's Chromium with its package manager. The server
+ * runs without a terminal, so sudo may not ask for a password. Returns why
+ * it could not install, or "" once the package manager succeeded.
+ */
+function installLinuxChromium() {
+  const root = process.getuid?.() === 0;
+  if (!root && !hasCommand("sudo")) {
+    return "Installing Chromium needs administrator access, and sudo is not installed";
+  }
+  if (!root && spawnSync("sudo", ["-n", "true"], { stdio: "ignore" }).status !== 0) {
+    return "Installing Chromium needs administrator access, and sudo asks for a password on this computer. Run `sudo apt install chromium` (or your distribution's Chromium package), then try again";
+  }
+  /** @type {[string, string[], boolean][]} command, arguments, and whether a failure stops the install */
+  let steps;
+  if (hasCommand("apt-get")) {
+    // Debian ships `chromium`; Ubuntu has only `chromium-browser`, which installs the snap.
+    const policy = spawnSync("apt-cache", ["policy", "chromium"], { encoding: "utf8" }).stdout || "";
+    const pkg = /Candidate: (?!\(none\))\S/.test(policy) ? "chromium" : "chromium-browser";
+    const apt = ["-o", "DPkg::Lock::Timeout=120"];
+    steps = [
+      ["apt-get", [...apt, "update"], false],
+      ["env", ["DEBIAN_FRONTEND=noninteractive", "apt-get", ...apt, "install", "-y", pkg], true],
+    ];
+  } else if (hasCommand("dnf")) {
+    steps = [["dnf", ["install", "-y", "chromium"], true]];
+  } else if (hasCommand("pacman")) {
+    steps = [["pacman", ["-Sy", "--noconfirm", "chromium"], true]];
+  } else if (hasCommand("zypper")) {
+    steps = [["zypper", ["--non-interactive", "install", "chromium"], true]];
+  } else if (hasCommand("apk")) {
+    steps = [["apk", ["add", "chromium"], true]];
+  } else {
+    return "No supported package manager was found to install Chromium";
+  }
+  for (const [command, args, required] of steps) {
+    console.log(`Running ${command} ${args.join(" ")}...`);
+    const result = spawnSync(root ? command : "sudo", root ? args : ["-n", command, ...args], {
+      stdio: ["ignore", "inherit", "inherit"],
+      timeout: 15 * 60_000,
+    });
+    if (result.status !== 0 && required) {
+      return `${command} could not install Chromium (exit ${result.status ?? "timeout"})`;
     }
   }
+  return "";
+}
 
-  if (process.platform === "linux") {
-    throw new Error(
-      "No compatible system browser was found. Install the OS-packaged Chromium browser or set SOCKETAGENT_BROWSER_BINARY.",
-    );
+/** The reasons each attempt failed, so the error names the real cause. */
+/** @type {string[]} */
+const failures = [];
+
+/** @param {unknown} error */
+function reason(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Validates each installed system browser. True once one starts. */
+async function useSystemBrowser() {
+  for (const candidate of systemCandidates().filter(executableWorks)) {
+    try {
+      await validateBrowserLaunch(candidate);
+      console.log(`Browser runtime available: ${candidate}`);
+      return true;
+    } catch (error) {
+      failures.push(`${candidate} did not start: ${reason(error)}`);
+    }
+  }
+  return false;
+}
+
+async function main() {
+  if (await useSystemBrowser()) return;
+
+  // Linux distributions build their own Chromium for every architecture, and
+  // it brings the libraries Chrome needs. Chrome for Testing is the fallback.
+  if (process.platform === "linux" && !systemCandidates().some(executableWorks)) {
+    const problem = installLinuxChromium();
+    if (problem) failures.push(problem);
+    else if (await useSystemBrowser()) return;
+    else if (!systemCandidates().some(executableWorks)) failures.push("Chromium installed, but no Chromium executable was found");
   }
 
   const markedBrowser = existingMarker();
   if (executableWorks(markedBrowser)) {
-    await validateBrowserLaunch(markedBrowser);
-    console.log(`Managed browser runtime available: ${markedBrowser}`);
-    return;
+    try {
+      await validateBrowserLaunch(markedBrowser);
+      console.log(`Managed browser runtime available: ${markedBrowser}`);
+      return;
+    } catch (error) {
+      failures.push(`${markedBrowser} did not start: ${reason(error)}`);
+    }
   }
 
   const platform = detectBrowserPlatform();
   if (!platform || platform === "linux_arm") {
-    throw new Error(
-      "No compatible system browser was found, and Chrome for Testing is unavailable for this platform.",
-    );
+    throw new Error([...failures, "Chrome for Testing is not built for this platform"].join(". "));
   }
 
-  fs.mkdirSync(runtimeDir(), { recursive: true, mode: 0o700 });
-  const installed = (await getInstalledBrowsers({ cacheDir: runtimeDir() }))
-    .filter((browser) => browser.browser === Browser.CHROME && browser.platform === platform)
-    .filter((browser) => executableWorks(browser.executablePath))
-    .sort((left, right) => left.buildId.localeCompare(right.buildId, undefined, { numeric: true }))
-    .at(-1);
+  try {
+    fs.mkdirSync(runtimeDir(), { recursive: true, mode: 0o700 });
+    const installed = (await getInstalledBrowsers({ cacheDir: runtimeDir() }))
+      .filter((browser) => browser.browser === Browser.CHROME && browser.platform === platform)
+      .filter((browser) => executableWorks(browser.executablePath))
+      .sort((left, right) => left.buildId.localeCompare(right.buildId, undefined, { numeric: true }))
+      .at(-1);
 
-  let browser = installed;
-  if (!browser) {
-    const buildId = await resolveBuildId(Browser.CHROME, platform, BrowserTag.STABLE);
-    console.log(`Downloading Chrome for Testing ${buildId}...`);
-    browser = await install({
-      browser: Browser.CHROME,
-      buildId,
-      buildIdAlias: BrowserTag.STABLE,
-      cacheDir: runtimeDir(),
-      platform,
-      downloadProgressCallback: "default",
-    });
+    let browser = installed;
+    if (!browser) {
+      const buildId = await resolveBuildId(Browser.CHROME, platform, BrowserTag.STABLE);
+      console.log(`Downloading Chrome for Testing ${buildId}...`);
+      browser = await install({
+        browser: Browser.CHROME,
+        buildId,
+        buildIdAlias: BrowserTag.STABLE,
+        cacheDir: runtimeDir(),
+        platform,
+        downloadProgressCallback: "default",
+      });
+    }
+
+    await validateBrowserLaunch(browser.executablePath);
+    writeMarker(browser.executablePath);
+    console.log(`Managed browser runtime installed: ${browser.executablePath}`);
+  } catch (error) {
+    throw new Error([...failures, `Chrome for Testing: ${reason(error)}`].join(". "));
   }
-
-  await validateBrowserLaunch(browser.executablePath);
-  writeMarker(browser.executablePath);
-  console.log(`Managed browser runtime installed: ${browser.executablePath}`);
 }
 
 if (require.main === module) {

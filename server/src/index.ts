@@ -173,6 +173,7 @@ import {
   BrowserPhoneInput,
   normalizeBrowserProfile,
   normalizeBrowserUrl,
+  resolveBrowserBinary,
   WATCH_TTL_MS as BROWSER_WATCH_TTL_MS,
 } from "./browser-session-manager";
 import {
@@ -255,9 +256,28 @@ function runBrowserRuntimeInstaller(): Promise<void> {
         resolve();
         return;
       }
-      reject(new Error(output.trim() || `Browser component installer exited with code ${code ?? "unknown"}.`));
+      // The installer prints package manager output first and its error last.
+      const lastLine = output.trim().split(/\r?\n/).at(-1)?.trim();
+      reject(new Error(lastLine || `Browser component installer exited with code ${code ?? "unknown"}.`));
     });
   });
+}
+
+/**
+ * The browser is part of every install. A computer without one gets it in
+ * the background at startup, so the first browser session doesn't wait for
+ * a download, and an install from before this runs gets it too.
+ */
+function installMissingBrowserInBackground(): void {
+  try {
+    resolveBrowserBinary();
+    return;
+  } catch {}
+  console.log("[Browser] No browser found; installing the browser component");
+  ensureBrowserRuntimeInstalled().then(
+    () => console.log("[Browser] Browser component installed"),
+    (error: unknown) => console.warn(`[Browser] Could not install the browser component: ${errorMessage(error)}`),
+  );
 }
 
 async function ensureBrowserRuntimeInstalled(): Promise<void> {
@@ -6629,15 +6649,11 @@ function createConnectionHandler(
               message: "Browser component installed.",
             });
           } catch (error) {
-            const detail = error instanceof Error ? errorMessage(error) : "Browser component installation failed.";
-            const message = process.platform === "linux"
-              ? "Install Chrome or Chromium on this computer, then try again. Linux browser packages require administrator access and are not installed from the app."
-              : detail;
             sendJson({
               type: "browser_runtime_install_progress",
               profile,
               status: "failed",
-              message,
+              message: error instanceof Error ? errorMessage(error) : "Browser component installation failed.",
             });
           }
         })();
@@ -11833,6 +11849,7 @@ async function initializeListeningServer(): Promise<void> {
   }
   console.log(`Default working directory: ${getDefaultCwd()}`);
   console.log(`Supported backends: ${detectAvailableBackends().join(", ")}`);
+  installMissingBrowserInBackground();
 
   // Initialize plugins
   const pluginContext: PluginContext = {

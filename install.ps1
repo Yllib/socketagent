@@ -339,6 +339,21 @@ function Test-CodexAppServer($codexPath = "codex") {
     return $result.ExitCode -eq 0
 }
 
+# The browser for BrowserSession is part of every install. Without Chrome on
+# the computer, the runtime script downloads Chrome for Testing. The server
+# retries at startup, so a failed download doesn't stop setup.
+function Install-BrowserRuntime {
+    Write-Host "  Installing the browser for browser sessions..."
+    $browserScript = Join-Path (Join-Path $SERVER_DIR "scripts") "install-browser-runtime.js"
+    $browserResult = Invoke-NativeCapture { node $browserScript }
+    $browserResult.Output | Select-Object -Last 4 | ForEach-Object { Write-Host "    $_" }
+    if ($browserResult.ExitCode -eq 0) {
+        Write-Ok "Browser ready"
+    } else {
+        Write-Warn "The browser did not install. The server tries again each time it starts."
+    }
+}
+
 function Invoke-NativeCapture {
     param(
         [Parameter(Mandatory=$true)]
@@ -683,6 +698,7 @@ Write-Phase "Phase 4: Install Dependencies & Build"
 Install-ServerDependenciesAndBuild
 & node -e "require(process.argv[1]).repairWindowsManagedShims(process.argv[2])" (Join-Path $SERVER_DIR 'dist\windows-managed-shims.js') $NPM_GLOBAL_DIR
 if ($LASTEXITCODE -ne 0) { throw 'Could not repair managed command launchers' }
+Install-BrowserRuntime
 
 # ══════════════════════════════════════════════
 #  Phase 5: Antigravity CLI (Gemini)

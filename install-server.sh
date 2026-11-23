@@ -206,6 +206,49 @@ ensure_virtual_browser_display() {
   fi
 }
 
+# The browser for BrowserSession is part of every install. Linux gets the
+# distribution's Chromium, which brings the libraries Chrome needs; the
+# runtime script then checks it starts. The server retries at startup.
+install_browser_runtime() {
+  if [[ "$OS_NAME" == "Linux" ]] && ! {
+    command -v google-chrome >/dev/null 2>&1 \
+      || command -v google-chrome-stable >/dev/null 2>&1 \
+      || command -v chromium >/dev/null 2>&1 \
+      || command -v chromium-browser >/dev/null 2>&1 \
+      || command -v microsoft-edge >/dev/null 2>&1 \
+      || command -v microsoft-edge-stable >/dev/null 2>&1;
+  }; then
+    echo "  Installing Chromium for browser sessions..."
+    if command -v apt-get >/dev/null 2>&1; then
+      # Debian ships `chromium`; Ubuntu has only `chromium-browser`, which installs the snap.
+      local chromium_package="chromium"
+      local chromium_candidate
+      chromium_candidate="$(apt-cache policy chromium 2>/dev/null | awk '/Candidate:/ && !found { print $2; found=1 }')"
+      if [[ -z "$chromium_candidate" || "$chromium_candidate" == "(none)" ]]; then
+        chromium_package="chromium-browser"
+      fi
+      apt_install "$chromium_package"
+    elif command -v dnf >/dev/null 2>&1; then
+      run_as_root dnf install -y chromium
+    elif command -v yum >/dev/null 2>&1; then
+      run_as_root yum install -y chromium
+    elif command -v pacman >/dev/null 2>&1; then
+      run_as_root pacman -Sy --noconfirm chromium
+    elif command -v zypper >/dev/null 2>&1; then
+      run_as_root zypper --non-interactive install chromium
+    elif command -v apk >/dev/null 2>&1; then
+      run_as_root apk add chromium
+    fi
+  fi
+
+  echo "  Checking the browser starts..."
+  if (cd "$SERVER_DIR" && node scripts/install-browser-runtime.js); then
+    ok "Browser ready"
+  else
+    warn "The browser did not start. The server tries again each time it starts."
+  fi
+}
+
 require_git_checkout() {
   if ! command -v git >/dev/null 2>&1; then
     fail "Git is required. SocketAgent must be installed from a git checkout."
@@ -471,6 +514,7 @@ phase "Phase 4: Install Dependencies & Build"
 
 ensure_virtual_browser_display
 install_server_dependencies_and_build
+install_browser_runtime
 
 # ══════════════════════════════════════════════
 #  Phase 5: Antigravity CLI (Gemini)

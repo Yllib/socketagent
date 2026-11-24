@@ -1237,6 +1237,10 @@ test("preserves Codex reroutes, reasoning sections, and structured warnings", ()
       details: "Remove the obsolete setting.",
       path: "/tmp/config.toml",
     });
+    // Codex repeats a config problem as a thread warning right after.
+    const ignored = "Codex is ignoring 1 unrecognized configuration setting.\n  user (/tmp/config.toml): `old_key` is ignored.";
+    session.handleAppServerNotification("configWarning", { summary: ignored, details: null });
+    session.handleAppServerNotification("warning", { threadId: rootId, message: ignored });
 
     const thinking = sent.filter((message) => message.type === "thinking").filter((message) => message.streamId === "reasoning-1").at(-1);
     assert.equal(thinking.content, "First section.\n\nSecond section.");
@@ -1251,6 +1255,8 @@ test("preserves Codex reroutes, reasoning sections, and structured warnings", ()
     // Config problems go to the computer's errors and warnings, not the chat.
     assert.ok(!sent.some((message) => message.type === "error" && message.message.includes("Invalid config option")));
     assert.ok(getComputerIssues().some((issue) => issue.message === "Invalid config option Remove the obsolete setting."));
+    assert.ok(!sent.some((message) => message.type === "error" && message.message.includes("old_key")));
+    assert.ok(getComputerIssues().some((issue) => issue.message === ignored));
   } finally {
     fs.rmSync(
       path.join(os.homedir(), ".claude-assistant", "history", `${rootId}.json`),

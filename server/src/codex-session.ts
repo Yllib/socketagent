@@ -2,7 +2,7 @@ import { serviceState } from "./windows-service-env";
 import type { ComputersToolExecutor } from "./computers-tool";
 import type { ClientTransport } from "./client-transport";
 import { isCodexRewinding, rewindCodexConversation } from "./codex-conversation-rewind";
-import { peekClaudeAvailability, peekCodexAvailability, probeCodexAvailability, recordCodexConfigWarning, type CodexAvailability } from "./server-settings";
+import { isRecordedCodexConfigWarning, peekClaudeAvailability, peekCodexAvailability, probeCodexAvailability, recordCodexConfigWarning, type CodexAvailability } from "./server-settings";
 import type { JsonValue } from "./generated/codex/types/serde_json/JsonValue";
 import type { CollaborationMode } from "./generated/codex/types/CollaborationMode";
 import type { ModeKind } from "./generated/codex/types/ModeKind";
@@ -5537,6 +5537,8 @@ export class CodexSession {
             // Codex warns after every model switch on an existing thread.
             // Only set_model changes the model, so the switch was deliberate.
             console.log(`[CodexModels] ${summary}`);
+          } else if (isRecordedCodexConfigWarning(message)) {
+            // Already on the computer's status from configWarning.
           } else if (isCodexAuthError(p) || isCodexAuthError(message)) {
             void this.handleAppServerAuthFailure(message, {
               hintedMcp: isMcpAuthSignal(p) || isMcpAuthSignal(message),

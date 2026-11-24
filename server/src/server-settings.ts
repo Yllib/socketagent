@@ -166,6 +166,17 @@ export function recordCodexConfigWarning(message: string, configPath?: string): 
   notifyBackendHealthChange();
 }
 
+/**
+ * Codex 0.172 sends each config problem twice: as configWarning, then as a
+ * plain warning on the thread. The second copy is dropped, not shown in chat.
+ */
+export function isRecordedCodexConfigWarning(message: string): boolean {
+  for (const recorded of codexConfigWarnings.keys()) {
+    if (recorded === message || recorded.startsWith(`${message} `)) return true;
+  }
+  return false;
+}
+
 let windowsServiceWarning: string | undefined;
 
 /**

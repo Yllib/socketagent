@@ -5344,12 +5344,15 @@ function createConnectionHandler(
         const displayName = backendName(backend);
         const operationName = operation === "auth" ? "sign-in" : "reinstall";
 
+        // Sign-in sends the user to a browser, and the phone usually comes
+        // back on a new connection, so progress goes to every device rather
+        // than the one that asked. The app matches it by backend and requestId.
         const sendProgress = (progress: Record<string, unknown>) => {
           const active = activeBackendInstalls.get(backend);
           if (active && active.requestId === requestId) {
             active.lastProgress = { ...progress };
           }
-          sendJson({
+          broadcastControlMessage({
             type: "backend_install_progress",
             requestId,
             backend,

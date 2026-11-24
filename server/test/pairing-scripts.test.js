@@ -137,8 +137,9 @@ test("show-pairing --reset with no server running starts over in the files", () 
   assert.equal(computer.envValue("LINK_ROOM_TOKEN"), "cd".repeat(32), "the link room stays while the owner key does");
   assert.equal(computer.showPairing(), second.join("|"));
 
-  // It is the way out of a damaged state file too.
+  // It is the way out of a damaged state file with no good backup too.
   fs.writeFileSync(path.join(computer.folder, "transport.json"), "{ damaged");
+  fs.rmSync(path.join(computer.folder, "transport.json.bak"));
   assert.throws(() => computer.showPairing(), /pair --reset/);
   const third = computer.showPairing("--reset").split("|");
   assert.equal(third[0], "SA3");

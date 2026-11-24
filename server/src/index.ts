@@ -9,6 +9,7 @@ import { SessionTransferJobs } from "./session-transfer-jobs";
 import { modelDownloadArchive } from "./model-download-archive";
 import { serveDownloadFile } from "./http-file-download";
 import { repairWindowsManagedShims } from "./windows-managed-shims";
+import { startPairingRepairToast, stopPairingRepairToast } from "./pairing-repair-toast";
 import { addMachineServiceTask, refreshMachineMarker, SERVICE_TASK, taskExists } from "./windows-machine-service";
 import { runInstallRepair } from "./windows-install-repair";
 import { captureWindowsServiceConfig, describeRuntime, windowsLauncherPath, windowsRecoveryBatContent, windowsRunServiceBatContent, windowsServiceConfigPath, wrapperPathValue, writeWindowsServiceConfig, type WindowsServiceConfig } from "./windows-service-config";
@@ -89,7 +90,7 @@ import { BIN_MARKER_UPLOAD_CHUNK, DirectClientTransport } from "./direct-client-
 import { broadcastDirectCapabilities, closeDroppedKey, removeRegisteredKey } from "./device-removal";
 import { hasOriginHeader, hasReadableTarget, isLoopbackRequest } from "./loopback-request";
 import { ViewHub, parseViewSet } from "./view-hub";
-import { DeviceRegistry, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
+import { DeviceRegistry, STATE_RESET_HINT, computerAccessSchema, computerConfirmSchema, isValidPublicKey, normalizePublicKey, type ComputerAccess, type DevicePlatform } from "./device-registry";
 import { retiredPassKeysOf, verifiedPassKey } from "./account-pass";
 import { DeviceAuthGate, inheritedVouchedBy, recordApprovedDevice } from "./device-auth";
 import { constantTimeEqual } from "./secret-compare";
@@ -123,7 +124,7 @@ import { AiConnectorHttp } from "./ai-connector-http";
 import type { AiConnectorGrant, AiConnectorSettings } from "./ai-connector-store";
 import type { AiConnectorStatusServerMessage, ProjectBoardMemberServerMessage } from "./protocol";
 import { isAuthFailureMessage } from "./backend-auth";
-import { clearBackendHealthOverride, getBackendHealth, getGeminiAvailability, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setWindowsServiceWarning } from "./server-settings";
+import { clearBackendHealthOverride, getBackendHealth, getGeminiAvailability, getAdvertisedServerSettings, onBackendHealthChange, getClaudeAutoCompactWindow, getDefaultCwd, getServerSystemPrompt, invalidateBackendHealthCache, isServerSystemPromptInitialized, markBackendAuthRequired, normalizeClaudeAutoCompactWindow, setClaudeAutoCompactWindow, setDefaultCwd, setServerSystemPrompt, getSentFileRetentionDays, setSentFileRetentionDays, setInstallRepairWarning, setPairingProblem, setWindowsServiceWarning } from "./server-settings";
 import { clearPushRegistrations, dropDeviceRegistrations, getPushDeliveryCapabilities, isPushTokenRegistered, registerPushToken, relayPushTokens, sendPushNotification, setPushTransport, shouldSendForwardedPush, unregisterPushToken } from "./push-notifications";
 import { pushSealingSecrets } from "./push-sealing";
 import { SessionPushRunTracker, sessionPushEventId } from "./session-push-state";
@@ -556,10 +557,14 @@ function rotateAuthToken(why = "a device was removed"): void {
   console.log(`[Devices] Rotated AUTH_TOKEN after ${why}`);
 }
 
+// The key pair loads first: when its file is lost, it marks pairing to start
+// over, and the registry has to see that mark.
+loadServerKeyPair();
 // The pairing secrets, the lock and the record of keys that paired. The first
 // start after the update makes transport.json from devices.json, which is not
 // read again. A new install starts unlocked.
 const deviceRegistry = new DeviceRegistry(socketAgentDataPath("transport.json"), socketAgentDataPath("devices.json"));
+setPairingProblem(deviceRegistry.problem && `${deviceRegistry.problem}. Nobody can connect to this computer until pairing starts over. ${STATE_RESET_HINT}`);
 const deviceAuthGate = new DeviceAuthGate(deviceRegistry, () => AUTH_TOKEN);
 
 /**
@@ -1595,6 +1600,8 @@ function startPairingOver(): void {
   // the empty list for the room this computer is about to leave.
   clearPushRegistrations();
   const { newOwnerKey, dropped } = deviceRegistry.resetPairing();
+  setPairingProblem(undefined);
+  if (process.platform === "win32") stopPairingRepairToast(SERVER_DIR);
   // The reset deleted every record a pass put here. An AI client or a link
   // among them would otherwise keep its tokens or its open channel.
   for (const publicKey of dropped) closeDroppedKey(publicKey, droppedKeySteps());
@@ -14190,6 +14197,7 @@ if (managedBackendAutoUpdateEnabled()) {
 }
 
 if (process.platform === "win32") {
+  if (!serviceState.service && !deviceRegistry.readable) startPairingRepairToast(SERVER_DIR);
   const writeMachineMarker = () => {
     if (!serviceState.service && !windowsElevated()) return;
     refreshMachineMarker({ directory: GIT_ROOT, port: PORT, publicKey: toBase64(loadServerKeyPair().publicKey) });

@@ -7,6 +7,7 @@ import type { Backend, BackendHealthInfo, CodexDriver, ComputerIssue } from "./p
 import { buildCodexSpawn, resolveCodexCommand } from "./codex-env";
 import { getCodexLinuxSandboxHealth } from "./codex-linux-sandbox";
 import { resolveClientPath } from "./path-utils";
+import { onStateFileIssue, stateFileIssues } from "./state-file";
 import { backendConfigFileIdForPath } from "./backend-config-files";
 import { buildClaudeExecutableSpawn, getClaudeExecutableInfo, type ClaudeAvailability } from "./claude-session";
 import { BackgroundProbe, runProbe, type ProbeResult } from "./async-probe";
@@ -201,15 +202,31 @@ export function setInstallRepairWarning(message: string | undefined): void {
   notifyBackendHealthChange();
 }
 
+let pairingProblem: string | undefined;
+
 /**
- * The computer's problems: a Windows install without SocketAgentService, one
- * left half-moved, and recorded Codex config problems whose file has not
- * changed since.
+ * Shows, or with undefined clears, why nobody can connect to this computer
+ * until pairing starts over. See DeviceRegistry.problem.
+ */
+export function setPairingProblem(message: string | undefined): void {
+  if (message === pairingProblem) return;
+  pairingProblem = message;
+  notifyBackendHealthChange();
+}
+
+onStateFileIssue(notifyBackendHealthChange);
+
+/**
+ * The computer's problems: pairing that has to start over, damaged state
+ * files, a Windows install without SocketAgentService, one left half-moved,
+ * and recorded Codex config problems whose file has not changed since.
  */
 export function getComputerIssues(): ComputerIssue[] {
-  const issues: ComputerIssue[] = [windowsServiceWarning, installRepairWarning]
-    .filter((message): message is string => message !== undefined)
-    .map((message) => ({ severity: "warning", message }));
+  const issues: ComputerIssue[] = pairingProblem ? [{ severity: "error", message: pairingProblem }] : [];
+  for (const issue of stateFileIssues()) issues.push({ severity: issue.severity, message: issue.message, path: issue.file });
+  for (const message of [windowsServiceWarning, installRepairWarning]) {
+    if (message !== undefined) issues.push({ severity: "warning", message });
+  }
   for (const [message, seen] of codexConfigWarnings) {
     if (modifiedAt(seen.file) !== seen.mtimeMs) codexConfigWarnings.delete(message);
     else {

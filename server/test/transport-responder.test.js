@@ -658,6 +658,7 @@ test("local-request hands a recorded device the secret and makes every other key
 test("local-request answers nobody while the state file is unreadable", () => {
   const env = setup();
   fs.writeFileSync(env.file, "{ damaged");
+  fs.rmSync(`${env.file}.bak`, { force: true });
   const registry = new DeviceRegistry(env.file);
   const responder = new TransportResponder({ registry, keyPair: () => env.keyPair, roomId: () => ROOM_ID, serverVersion: "1.1.530" });
   assert.equal(responder.handleHs1(env.device({ path: "local-request", secret: Buffer.alloc(32).toString("base64") }).hs1, { path: "local-request", lane: "control" }).result, "silent");

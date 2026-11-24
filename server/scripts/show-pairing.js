@@ -15,11 +15,6 @@
 // room another computer has claimed. A running server does the reset itself,
 // so one process owns the files; without one this script writes them.
 
-/** @param {unknown} value @returns {value is Record<string, unknown>} */
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
@@ -29,6 +24,7 @@ const { localIpv4Addresses, openTransportState, pairingCode, relayUrlForCode } =
 // Needs the built server (`npx tsc`), as the transport state does.
 const { rotateAuthTokenInEnv, writeEnvValue } = require("#server/env-file");
 const { requestPairingReset } = require("#server/pairing-reset-request");
+const { loadOrCreateKeyPair, toBase64 } = require("#server/relay-crypto");
 
 const serverDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(serverDir, "..");
@@ -37,7 +33,9 @@ const dataDir = process.env.SOCKETAGENT_DATA_DIR
   || process.env.SOCKET_AGENT_DATA_DIR
   || path.join(os.homedir(), ".socket-agent");
 const legacyDataDir = path.join(os.homedir(), ".claude-assistant");
-const defaultKeysFile = fs.existsSync(path.join(dataDir, "relay-keys.json"))
+/** @param {string} file A state file, which may have only its backup left. */
+const stateFileExists = (file) => fs.existsSync(file) || fs.existsSync(`${file}.bak`);
+const defaultKeysFile = stateFileExists(path.join(dataDir, "relay-keys.json"))
   ? path.join(dataDir, "relay-keys.json")
   : path.join(legacyDataDir, "relay-keys.json");
 const keysFile = process.env.SOCKETAGENT_KEYS_FILE || defaultKeysFile;
@@ -78,10 +76,14 @@ async function main() {
     console.error(`No ${envFile} found. Run the SocketAgent installer first.`);
     process.exit(1);
   }
-  if (!fs.existsSync(keysFile)) {
+  if (!stateFileExists(keysFile)) {
     console.error(`No relay key file found at ${keysFile}. Run the SocketAgent installer first.`);
     process.exit(1);
   }
+
+  // A damaged key file gets new keys here and marks pairing to start over,
+  // so the reset below clears that mark instead of following it.
+  const publicKey = toBase64(loadOrCreateKeyPair(keysFile).publicKey);
 
   if (process.argv.includes("--reset")) {
     // A running server does the reset. It and this script first prove to
@@ -100,13 +102,6 @@ async function main() {
     process.exit(1);
   }
 
-  /** @type {unknown} */
-  const keys = JSON.parse(fs.readFileSync(keysFile, "utf8"));
-  if (!isRecord(keys) || typeof keys.publicKey !== "string" || !keys.publicKey) {
-    console.error(`Relay key file is missing publicKey: ${keysFile}`);
-    process.exit(1);
-  }
-
   const state = openTransportState(keysFile);
   if (!state.readable) {
     console.error(`${state.problem}. Run \`socketagent pair --reset\` to start over with a new pairing code.`);
@@ -115,7 +110,7 @@ async function main() {
 
   const payload = pairingCode({
     roomId: env.PAIRING_TOKEN,
-    publicKey: keys.publicKey,
+    publicKey,
     secret: state.currentSecret().secret,
     port: env.PORT || "8085",
     hosts: localIpv4Addresses(),

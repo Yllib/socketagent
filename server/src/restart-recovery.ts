@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import { z } from "zod";
+import { readStateFile, reportStateFileIssue, setAsideDamagedFile, writeStateFile } from "./state-file";
 import { errorMessage } from "./value-guards";
 import * as path from "path";
 import { randomUUID } from "crypto";
@@ -49,24 +50,32 @@ export function buildFailureNote(file: string): string | undefined {
   ].join("\n");
 }
 
+const recoveryFileSchema = z.object({
+  version: z.literal(1),
+  runs: z.array(z.object({
+    sessionId: z.string(), id: z.string(),
+    state: z.enum(["active", "pending", "failed"]),
+    attempts: z.number().int().nonnegative(), nextAttemptAt: z.number(),
+    error: z.string().optional(),
+  })),
+  completed: z.array(z.string()).default([]),
+});
+
 export class RestartRecoveryStore {
   private runs = new Map<string, RecoveryRun>();
   private completed: string[] = [];
 
   constructor(private readonly file: string) {
-    if (!fs.existsSync(file)) return;
-    const data = z.object({
-      version: z.literal(1),
-      runs: z.array(z.object({
-        sessionId: z.string(), id: z.string(),
-        state: z.enum(["active", "pending", "failed"]),
-        attempts: z.number().int().nonnegative(), nextAttemptAt: z.number(),
-        error: z.string().optional(),
-      })),
-      completed: z.array(z.string()).default([]),
-    }).parse(JSON.parse(fs.readFileSync(file, "utf8")));
-    this.completed = data.completed.slice(-1000);
-    for (const run of data.runs) {
+    const read = readStateFile(file, (text) => recoveryFileSchema.parse(JSON.parse(text)));
+    if (read.status === "missing") return;
+    if (read.status === "damaged") {
+      const setAside = setAsideDamagedFile(file);
+      reportStateFileIssue(file, "warning",
+        `recovery/runs.json was damaged (${read.problem}), so turns cut off by the last restart were not resumed. The damaged file is ${setAside}.`);
+      return;
+    }
+    this.completed = read.value.completed.slice(-1000);
+    for (const run of read.value.runs) {
       // An active run belonged to the previous process, not this one.
       this.runs.set(run.sessionId, { ...run, state: run.state === "active" ? "pending" : run.state });
     }
@@ -74,19 +83,8 @@ export class RestartRecoveryStore {
   }
 
   private save(): void {
-    const dir = path.dirname(this.file);
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const temporary = `${this.file}.${process.pid}.tmp`;
-    const fd = fs.openSync(temporary, "w", 0o600);
-    try {
-      fs.writeFileSync(fd, JSON.stringify({ version: 1, runs: [...this.runs.values()], completed: this.completed }));
-      fs.fsyncSync(fd);
-    } finally { fs.closeSync(fd); }
-    fs.renameSync(temporary, this.file);
-    if (process.platform !== "win32") {
-      const directory = fs.openSync(dir, "r");
-      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
-    }
+    fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    writeStateFile(this.file, JSON.stringify({ version: 1, runs: [...this.runs.values()], completed: this.completed }));
   }
 
   list(): RecoveryRun[] { return [...this.runs.values()].map(run => ({ ...run })); }

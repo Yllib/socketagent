@@ -1,6 +1,7 @@
 import { isBackend } from "./protocol";
 import * as os from "os";
 import { parseStoredSessions } from "./session-schema";
+import { readStateFile, reportStateFileIssue, setAsideDamagedFile, writeStateFile } from "./state-file";
 import { isRecord, unknownArray, errorMessage, parseJsonObject } from "./value-guards";
 import { promptTitle } from "./prompt-title";
 import { parseHistoryEntry, parseHistoryEntries } from "./history-schema";
@@ -182,12 +183,14 @@ function cloneSessions(sessions: SessionInfo[]): SessionInfo[] {
 function loadSessionStore(): SessionInfo[] {
   if (sessionStoreCache) return sessionStoreCache;
   ensureStoreDir();
-  if (!fs.existsSync(STORE_FILE)) {
-    sessionStoreCache = [];
-    return sessionStoreCache;
+  const read = readStateFile(STORE_FILE, (text) => parseStoredSessions(JSON.parse(text)));
+  if (read.status === "damaged") {
+    // The server still starts. Chats stay in each agent's own transcripts.
+    const setAside = setAsideDamagedFile(STORE_FILE);
+    reportStateFileIssue(STORE_FILE, "error",
+      `sessions.json was damaged (${read.problem}) and had no good backup, so the session list started empty. The damaged file is ${setAside}.`);
   }
-  const raw = fs.readFileSync(STORE_FILE, "utf-8");
-  sessionStoreCache = parseStoredSessions(JSON.parse(raw));
+  sessionStoreCache = read.status === "ok" ? read.value : [];
   return sessionStoreCache;
 }
 
@@ -201,13 +204,7 @@ export function flushSessionStore(): void {
   const snapshot = pendingSessionStoreSnapshot;
   // Compact: pretty-printing made the store over 50% larger on every rewrite.
   const serialized = JSON.stringify(snapshot);
-  if (process.platform === "win32") {
-    fs.writeFileSync(STORE_FILE, serialized, { encoding: "utf8", mode: 0o600 });
-  } else {
-    const temporary = `${STORE_FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, serialized, { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(temporary, STORE_FILE);
-  }
+  writeStateFile(STORE_FILE, serialized);
   pendingSessionStoreSnapshot = undefined;
 }
 

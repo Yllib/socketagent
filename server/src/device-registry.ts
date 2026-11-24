@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as nacl from "tweetnacl";
 import { z } from "zod";
+import { readStateFile, writeStateFile } from "./state-file";
 import { errorMessage } from "./value-guards";
 
 /**
@@ -233,16 +234,31 @@ function randomSecret(): string {
 /** What to run on the computer when the state file cannot be used. */
 export const STATE_RESET_HINT = "Run `socketagent pair --reset` on this computer to start over with a new pairing code.";
 
+function resetMarkerPath(stateFile: string): string {
+  return `${stateFile}.reset-needed`;
+}
+
 /**
- * The state file, loaded once and kept in memory. Every change is written
- * through a temporary file and a rename.
+ * Records that pairing has to start over for the registry in [stateFile],
+ * and why. The registry refuses everyone, across restarts, until
+ * resetPairing runs. Used when transport.json or relay-keys.json is lost.
+ */
+export function markPairingResetNeeded(stateFile: string, reason: string): void {
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(resetMarkerPath(stateFile), reason, { encoding: "utf8", mode: 0o600 });
+}
+
+/**
+ * The state file, loaded once and kept in memory. Every change goes through
+ * writeStateFile, which keeps the previous version as `transport.json.bak`.
  *
  * `new DeviceRegistry(statePath, legacyPath)` reads `transport.json`. When it
  * does not exist yet it is made from `devices.json` at `legacyPath`, which is
  * never read again after that (spec section 7.2).
  *
- * A file that exists but cannot be read or does not validate leaves the
- * registry unreadable: `readable` is false, `problem` says why, every lookup
+ * A damaged file is replaced by its backup when that one is good. With no
+ * good backup, or when `transport.json.reset-needed` sits beside it (see
+ * markPairingResetNeeded), the registry is unreadable: `readable` is false, `problem` says why, every lookup
  * comes back empty, and anything that would change state throws. The caller
  * admits nobody over the relay or the LAN until `resetPairing` runs. It
  * never falls back to letting unknown keys in.
@@ -253,13 +269,21 @@ export class DeviceRegistry {
   private listeners = new Set<() => void>();
 
   constructor(readonly filePath: string, legacyFilePath?: string) {
-    if (fs.existsSync(filePath)) {
-      try {
-        const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
-        this.state = stateFileSchema.parse(parsed);
-      } catch (err: unknown) {
-        this.refuse(`Could not read ${filePath}: ${errorMessage(err)}`);
-      }
+    const marker = resetMarkerPath(filePath);
+    if (fs.existsSync(marker)) {
+      this.refuse(fs.readFileSync(marker, "utf8").trim() || "Pairing has to start over");
+      return;
+    }
+    const read = readStateFile(filePath, (text) => stateFileSchema.parse(JSON.parse(text)));
+    if (read.status === "ok") {
+      this.state = read.value;
+      return;
+    }
+    if (read.status === "damaged") {
+      // Starting fresh here would forget the lock and every removed key.
+      const problem = `${path.basename(filePath)} is damaged (${read.problem}) and has no good backup`;
+      markPairingResetNeeded(filePath, problem);
+      this.refuse(problem);
       return;
     }
     let legacy: z.infer<typeof legacyRegistryFileSchema> | undefined;
@@ -313,10 +337,7 @@ export class DeviceRegistry {
     const state = this.loaded();
     this.pruneSecrets(state);
     this.expiredUnsaved = false;
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    const temporary = `${this.filePath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(state, null, 2), { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(temporary, this.filePath);
+    writeStateFile(this.filePath, JSON.stringify(state, null, 2));
     try {
       if (process.platform !== "win32") fs.chmodSync(this.filePath, 0o600);
     } catch {
@@ -714,6 +735,8 @@ export class DeviceRegistry {
       for (const entry of this.state.devices) delete entry.passKey;
     } else {
       if (fs.existsSync(this.filePath)) fs.renameSync(this.filePath, `${this.filePath}.unreadable`);
+      // The backup belongs to the state that is being replaced.
+      fs.rmSync(`${this.filePath}.bak`, { force: true });
       this.state = {
         version: 2,
         locked: false,
@@ -725,6 +748,7 @@ export class DeviceRegistry {
       this.unreadable = undefined;
     }
     this.write();
+    fs.rmSync(resetMarkerPath(this.filePath), { force: true });
     return { newOwnerKey, dropped };
   }
 }

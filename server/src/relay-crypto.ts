@@ -2,6 +2,8 @@ import { errorMessage, isRecord, parseJsonObject, unknownArray } from "./value-g
 import * as nacl from "tweetnacl";
 import * as fs from "fs";
 import * as path from "path";
+import { markPairingResetNeeded } from "./device-registry";
+import { readStateFile, setAsideDamagedFile, writeStateFile } from "./state-file";
 
 export interface KeyPair {
   publicKey: Uint8Array;
@@ -137,28 +139,33 @@ export function fromBase64(b64: string): Uint8Array {
   return new Uint8Array(Buffer.from(b64, "base64"));
 }
 
-/** Load key pair from file, or generate and save a new one */
-export function loadOrCreateKeyPair(configPath: string): KeyPair {
-  if (fs.existsSync(configPath)) {
-    const data = parseJsonObject(fs.readFileSync(configPath, "utf-8"));
-    if (typeof data.publicKey !== "string" || typeof data.secretKey !== "string") throw new Error("Invalid relay key file");
-    return {
-      publicKey: fromBase64(data.publicKey),
-      secretKey: fromBase64(data.secretKey),
-    };
-  }
+function parseKeyPair(text: string): KeyPair {
+  const data = parseJsonObject(text);
+  if (typeof data.publicKey !== "string" || typeof data.secretKey !== "string") throw new Error("publicKey or secretKey is missing");
+  const keyPair = { publicKey: fromBase64(data.publicKey), secretKey: fromBase64(data.secretKey) };
+  if (keyPair.secretKey.length !== nacl.box.secretKeyLength) throw new Error("secretKey has the wrong length");
+  const derived = nacl.box.keyPair.fromSecretKey(keyPair.secretKey).publicKey;
+  if (!Buffer.from(derived).equals(Buffer.from(keyPair.publicKey))) throw new Error("publicKey does not belong to secretKey");
+  return keyPair;
+}
 
+/**
+ * Loads this computer's key pair, or makes and saves one. Phones and linked
+ * computers know the public key, so a damaged file with no good backup gets
+ * a new pair and marks pairing to start over: nobody who knew the old key
+ * can reach this computer until `socketagent pair --reset` runs.
+ */
+export function loadOrCreateKeyPair(configPath: string): KeyPair {
+  const read = readStateFile(configPath, parseKeyPair);
+  if (read.status === "ok") return read.value;
+  if (read.status === "damaged") {
+    const setAside = setAsideDamagedFile(configPath);
+    // The transport state sits beside the key file.
+    markPairingResetNeeded(path.join(path.dirname(configPath), "transport.json"),
+      `${path.basename(configPath)} was damaged (${read.problem}) and had no good backup, so this computer has new keys that paired devices don't know. The damaged file is ${setAside}`);
+  }
   const kp = generateKeyPair();
-  const dir = path.dirname(configPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(
-    configPath,
-    JSON.stringify({
-      publicKey: toBase64(kp.publicKey),
-      secretKey: toBase64(kp.secretKey),
-    }),
-    { mode: 0o600 } // owner-only read/write
-  );
+  writeStateFile(configPath, JSON.stringify({ publicKey: toBase64(kp.publicKey), secretKey: toBase64(kp.secretKey) }));
   console.log(`Generated new relay key pair → ${configPath}`);
   return kp;
 }

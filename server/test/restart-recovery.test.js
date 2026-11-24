@@ -75,11 +75,12 @@ test("setup failures back off and stop after five attempts, across process resta
   assert.equal(current.claim("a", id), false);
 });
 
-test("corrupt recovery data fails closed and preserves the file", t => {
+test("corrupt recovery data starts empty instead of stopping the server, and keeps the file", t => {
   const { file } = fixture(t);
   fs.writeFileSync(file, "not valid json");
-  assert.throws(() => new RestartRecoveryStore(file));
-  assert.equal(fs.readFileSync(file, "utf8"), "not valid json");
+  assert.deepEqual(new RestartRecoveryStore(file).list(), []);
+  const kept = fs.readdirSync(path.dirname(file)).find(name => name.startsWith(`${path.basename(file)}.damaged-`));
+  assert.equal(fs.readFileSync(path.join(path.dirname(file), kept ?? ""), "utf8"), "not valid json");
 });
 
 test("setup deadline rejects a hung backend without awaiting it forever", async () => {

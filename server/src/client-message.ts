@@ -23,3 +23,13 @@ export function parseClientMessage(value: unknown): JsonClientMessage {
   }
   return value;
 }
+
+/**
+ * The error text a client gets back for a message the server could not use.
+ * Only unparseable text is "Invalid JSON"; a schema rejection names the field,
+ * so a client bug is not mistaken for corrupt data.
+ */
+export function rejectedMessageText(err: unknown): string {
+  if (err instanceof SyntaxError) return "Invalid JSON";
+  return err instanceof Error ? err.message : "Invalid message";
+}

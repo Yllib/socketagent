@@ -139,7 +139,7 @@ test("a direct v2 socket sends hs2 and nothing else until transport_ready, then 
   // A sealed message this server does not know is answered, not punished.
   socket.ws.send(socket.channel.seal({ type: "no_such_message" }));
   await socket.frames(3);
-  assert.deepEqual(socket.open(2), { type: "error", message: "Invalid JSON" });
+  assert.deepEqual(socket.open(2), { type: "error", message: "Unsupported client message type" });
   assert.deepEqual(env.delivered.map((message) => message.type), ["list_sessions"]);
   assert.equal(channelKindForMessage(env.delivered[0]), "v2");
   assert.equal(relayPeerKeyForMessage(env.delivered[0]), device.publicKey);

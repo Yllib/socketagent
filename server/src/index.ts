@@ -104,7 +104,7 @@ import type { ComputersToolArgs, ComputersToolListEntry } from "./computers-tool
 import { parseStoredData } from "./stored-data";
 import { rotateAuthTokenInEnv, writeEnvValue } from "./env-file";
 import { PairingResetGate, answerPairingResetRequest } from "./pairing-reset-request";
-import { parseClientMessage } from "./client-message";
+import { parseClientMessage, rejectedMessageText } from "./client-message";
 import { listBackendConfigFiles, readBackendConfigFile, writeBackendConfigFile } from "./backend-config-files";
 import {
   KeyPair,
@@ -12769,8 +12769,8 @@ wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
         } else {
           msg = parseClientMessage(parsed);
         }
-      } catch {
-        transport.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
+      } catch (err: unknown) {
+        transport.send(JSON.stringify({ type: "error", message: rejectedMessageText(err) }));
         return;
       }
     }

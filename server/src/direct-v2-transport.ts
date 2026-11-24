@@ -2,7 +2,7 @@ import WebSocket from "ws";
 import type { BinaryFileDownloadChunkMetadata } from "./file-transfer-wire";
 import { encodeBinaryFileDownloadChunk, supportsBinaryFileDownload } from "./file-transfer-wire";
 import { supportsBinaryBrowserFrames } from "./browser-frame-wire";
-import { parseClientMessage } from "./client-message";
+import { parseClientMessage, rejectedMessageText } from "./client-message";
 import type { ClientTransport } from "./client-transport";
 import {
   supportsMonitorOutputAcknowledgement,
@@ -269,8 +269,8 @@ export class DirectV2Transport implements ClientTransport {
     let message: ClientMessage;
     try {
       message = parseClientMessage(JSON.parse(json));
-    } catch {
-      this.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
+    } catch (err: unknown) {
+      this.send(JSON.stringify({ type: "error", message: rejectedMessageText(err) }));
       return;
     }
     this.deliver(message);

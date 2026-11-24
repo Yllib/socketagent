@@ -189,8 +189,12 @@ interface FailureLimit {
   max: number;
 }
 const MAX_PSK_TRIES = 4;
-/** How long a responder waits for `transport_ready` after `hs2`, and a direct socket for `hs1`. */
-export const HANDSHAKE_WAIT_MS = 10 * 1000;
+/**
+ * How long a responder waits for `transport_ready` after `hs2`, and a direct
+ * socket for `hs1`. Long enough for a phone on a slow cellular link, where a
+ * round trip through the relay can take several seconds.
+ */
+export const HANDSHAKE_WAIT_MS = 30 * 1000;
 /** How long a held peer waits for Allow before it is told `not_approved`. */
 export const HELD_PEER_WAIT_MS = 10 * 60 * 1000;
 

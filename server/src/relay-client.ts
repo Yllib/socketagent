@@ -90,26 +90,29 @@ export function relayAuthMessage(roomId: string, nonce: Uint8Array): Buffer {
 const PING_STALL_SLACK_MS = 5_000;
 
 /**
- * Pings a socket every interval and reports it dead when a ping goes a whole
- * interval unanswered. After an event-loop stall, timers run before pending
+ * Pings a socket every interval and reports it dead once nothing has arrived
+ * from it, pong or message, for `silenceLimitMs`. A slow or lossy link can
+ * hold one pong behind queued data for a while, so a single late pong does not
+ * end the connection. After an event-loop stall, timers run before pending
  * socket reads, so the verdict waits for those reads, and a tick that fired
- * late pings again instead of judging a reply it could not have read yet.
+ * late restarts the count instead of judging silence it was not listening to.
  */
 export class PingKeepalive {
   private timer: ReturnType<typeof setInterval> | null = null;
-  private answered = true;
-  private lastPingAt = 0;
+  private lastHeardAt = 0;
+  private lastTickAt = 0;
 
   constructor(
     private readonly socket: { readonly readyState: number; ping(): void },
     private readonly intervalMs: number,
+    private readonly silenceLimitMs: number,
     private readonly onDead: () => void,
   ) {}
 
   start(): void {
     this.stop();
-    this.answered = true;
-    this.lastPingAt = Date.now();
+    this.lastHeardAt = Date.now();
+    this.lastTickAt = this.lastHeardAt;
     this.timer = setInterval(() => this.tick(), this.intervalMs);
   }
 
@@ -118,21 +121,23 @@ export class PingKeepalive {
     this.timer = null;
   }
 
-  pong(): void {
-    this.answered = true;
+  /** Call for every frame the socket receives. */
+  heard(): void {
+    this.lastHeardAt = Date.now();
   }
 
   private tick(): void {
     if (this.socket.readyState !== WebSocket.OPEN) return;
-    const stalled = Date.now() - this.lastPingAt > this.intervalMs + PING_STALL_SLACK_MS;
+    const now = Date.now();
+    const stalled = now - this.lastTickAt > this.intervalMs + PING_STALL_SLACK_MS;
+    this.lastTickAt = now;
     setImmediate(() => {
       if (!this.timer || this.socket.readyState !== WebSocket.OPEN) return;
-      if (!this.answered && !stalled) {
+      if (stalled) this.lastHeardAt = Date.now();
+      else if (Date.now() - this.lastHeardAt > this.silenceLimitMs) {
         this.onDead();
         return;
       }
-      this.answered = false;
-      this.lastPingAt = Date.now();
       this.socket.ping();
     });
   }
@@ -387,7 +392,9 @@ export class RelayClient {
   private keepalive: PingKeepalive | null = null;
   private outbox = new RelayMessageOutbox();
   private readonly sessionKeyedPeers: SessionKeyedPeers;
-  private static PING_INTERVAL = 30_000;  // send ping every 30s
+  private static PING_INTERVAL = 15_000;
+  // A minute of silence, so a slow link survives a few late pongs.
+  private static SILENCE_LIMIT = 60_000;
 
   // Virtual WebSocket interface for ClaudeSession compatibility
   private virtualWs: VirtualRelaySocket;
@@ -444,10 +451,11 @@ export class RelayClient {
     });
 
     this.ws.on("pong", () => {
-      this.keepalive?.pong();
+      this.keepalive?.heard();
     });
 
     this.ws.on("message", (data, isBinary) => {
+      this.keepalive?.heard();
       try {
         if (isBinary) {
           this.handleBinaryFrame(Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data));
@@ -1089,7 +1097,7 @@ export class RelayClient {
       // holds this handshake's keys.
       peer.auth = "admitted";
       peer.pendingTimer = setTimeout(() => {
-        if (peer.auth === "admitted") this.dropV2Peer(peerId, peer, "no transport_ready within 10 s");
+        if (peer.auth === "admitted") this.dropV2Peer(peerId, peer, `no transport_ready within ${HANDSHAKE_WAIT_MS / 1000} s`);
       }, HANDSHAKE_WAIT_MS);
       peer.pendingTimer.unref?.();
       return;
@@ -1465,8 +1473,8 @@ export class RelayClient {
     this.stopPingPong();
     const ws = this.ws;
     if (!ws) return;
-    this.keepalive = new PingKeepalive(ws, RelayClient.PING_INTERVAL, () => {
-      console.warn(`[Relay] No pong received in ${RelayClient.PING_INTERVAL / 1000}s — forcing reconnect`);
+    this.keepalive = new PingKeepalive(ws, RelayClient.PING_INTERVAL, RelayClient.SILENCE_LIMIT, () => {
+      console.warn(`[Relay] Nothing received in ${RelayClient.SILENCE_LIMIT / 1000}s, forcing reconnect`);
       ws.terminate(); // force-close, triggers 'close' event → scheduleReconnect
     });
     this.keepalive.start();

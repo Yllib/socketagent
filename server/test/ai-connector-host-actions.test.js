@@ -44,10 +44,15 @@ function setup({ waitMs = 150 } = {}) {
   const cards = [];
   /** @type {string[]} */
   const resolved = [];
+  /** @type {string[]} */
+  const history = [];
   const requests = new ComputerAccessRequests({
-    broadcast: (message) => { if (message.type === "computer_access_resolved") resolved.push(message.decision); },
-    appendHistory: (_sessionId, entry) => { if (entry.computerAccess) cards.push(entry.computerAccess); return entry; },
-    markResolved: () => {},
+    broadcast: (message) => {
+      if (message.type === "computer_access_resolved") resolved.push(message.decision);
+      else cards.push(message);
+    },
+    appendHistory: (sessionId, entry) => { history.push(sessionId); return entry; },
+    markResolved: (sessionId) => { history.push(sessionId); },
   });
   /** @type {string[]} */
   const pushes = [];
@@ -65,7 +70,7 @@ function setup({ waitMs = 150 } = {}) {
     const box = encrypt(JSON.stringify(claims), serverKeys.publicKey, phone.secretKey);
     return requests.answer({ type: "computer_access_answer", requestId: card.requestId, decision: scope, approval: { from: toBase64(phone.publicKey), n: box.n, c: box.c } });
   };
-  return { registry, grant, actions, cards, pushes, resolved, allow, listed: () => listed, requests };
+  return { registry, grant, actions, cards, pushes, resolved, history, allow, listed: () => listed, requests };
 }
 
 const waitingError = /Waiting for your approval on the phone/;
@@ -80,6 +85,7 @@ test("tapping Allow on the host computer's card completes the waiting tool call"
   assert.equal(card.source.name, "Desktop");
   assert.equal(card.target.publicKey, card.source.publicKey, "this computer is both source and target");
   assert.deepEqual(card.client, { name: "Claude", publicKey: env.grant.publicKey });
+  assert.equal(card.appWide, true, "the app prompts for it outside any chat");
   assert.deepEqual(env.pushes, [card.summary.split("\n")[0].slice(0, 120)]);
   assert.equal(env.listed(), 0, "nothing ran before the answer");
 
@@ -88,6 +94,8 @@ test("tapping Allow on the host computer's card completes the waiting tool call"
   assert.deepEqual(result, { sessions: [{ id: "s1", title: "T", backend: "claude", cwd: "/", updatedAt: "", running: false }] });
   assert.equal(env.listed(), 1);
   assert.deepEqual(env.resolved, ["once"]);
+  assert.deepEqual(env.history, [], "the client's activity log never holds the card");
+  assert.deepEqual(env.requests.openCards(), []);
 });
 
 test("Deny on the card fails the call with the user's decision", async () => {

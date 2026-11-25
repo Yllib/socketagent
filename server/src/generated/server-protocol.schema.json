@@ -5138,6 +5138,9 @@
         },
         "approvalKey": {
           "type": "string"
+        },
+        "appWide": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -7022,6 +7025,9 @@
         },
         "approvalKey": {
           "type": "string"
+        },
+        "appWide": {
+          "type": "boolean"
         },
         "type": {
           "type": "string",

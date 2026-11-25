@@ -35,7 +35,9 @@ export interface ComputerAccessRequestHost {
 /**
  * Cards that ask the user, in the source chat, to approve a remote action or
  * to link a computer. The card is persisted so it reappears when the chat is
- * reopened, and every device hears when it is answered or expires.
+ * reopened, and every device hears when it is answered or expires. An
+ * app-wide card skips the chat: the app prompts for it wherever it is, and
+ * a reconnecting device gets it again from openCards.
  */
 export class ComputerAccessRequests {
   private pending = new Map<string, PendingRequest>();
@@ -51,7 +53,8 @@ export class ComputerAccessRequests {
     const requestId = `computer_access_${crypto.randomUUID()}`;
     const expiresAt = Math.min(card.expiresAt ?? Number.MAX_SAFE_INTEGER, Date.now() + COMPUTER_ACCESS_REQUEST_TTL_MS);
     const full: ComputerAccessRequestCard = { ...card, requestId, expiresAt };
-    const positioned = this.host.appendHistory(sessionId, {
+    // An app-wide card is a prompt, not part of any chat.
+    const positioned: Partial<HistoryEntry> = card.appWide ? {} : this.host.appendHistory(sessionId, {
       role: "computer_access",
       content: card.summary || card.reason || "",
       questionId: requestId,
@@ -93,7 +96,7 @@ export class ComputerAccessRequests {
     this.pending.delete(requestId);
     clearTimeout(entry.timer);
     if (entry.onAbort) entry.signal?.removeEventListener("abort", entry.onAbort);
-    this.host.markResolved(entry.sessionId, requestId, answer.decision);
+    if (!entry.card.appWide) this.host.markResolved(entry.sessionId, requestId, answer.decision);
     this.host.broadcast({ type: "computer_access_resolved", requestId, sessionId: entry.sessionId, decision: answer.decision });
     entry.resolve(answer);
   }

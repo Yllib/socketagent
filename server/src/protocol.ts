@@ -3382,6 +3382,12 @@ export interface ComputerAccessRequestCard {
    * that raised the card.
    */
   approvalKey?: string;
+  /**
+   * Shown as a prompt anywhere in the app, not in a chat. Set on cards from
+   * AI connector clients, whose sessionId is only the client's activity log
+   * and binds the approval token; the card is not written to that log.
+   */
+  appWide?: boolean;
 }
 
 export interface ComputerAccessRequestServerMessage extends ComputerAccessRequestCard {

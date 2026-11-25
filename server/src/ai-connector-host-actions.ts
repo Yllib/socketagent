@@ -17,7 +17,10 @@ export interface ConnectorHostActionsDeps {
   peerApi: Pick<ComputerLinkPeerApi, "handle">;
   /** This computer, as the card names it on both sides. */
   self(): { name: string; publicKey: string };
-  /** Raises the card in the client's session and resolves with the phone's answer. */
+  /**
+   * Raises an app-wide card and resolves with the phone's answer. [sessionId]
+   * is the client's activity log, which the approval token is bound to.
+   */
   ask(
     sessionId: string,
     card: Omit<ComputerAccessRequestCard, "requestId" | "expiresAt"> & { expiresAt?: number },
@@ -39,7 +42,7 @@ interface Inflight {
  * Runs an AI client's actions on the computer that hosts the connector,
  * through the same peer API a linked computer uses, so the registry's
  * access boxes and confirm mode apply. When the computer wants approval the
- * card goes in the client's session and names the client; the approval the
+ * app prompts with a card that names the client, outside any chat; the approval the
  * phone seals carries the client's key, since this computer is both source
  * and target.
  */
@@ -131,6 +134,7 @@ export class ConnectorHostActions {
         summary,
         client: { name: grant.clientName, publicKey: grant.publicKey },
         approvalKey: grant.publicKey,
+          appWide: true,
       });
     } finally {
       entry.waitingForApproval = false;
@@ -166,6 +170,7 @@ export class ConnectorHostActions {
             expiresAt: challenge.expiresAt,
             client: { name: grant.clientName, publicKey: grant.publicKey },
             approvalKey: grant.publicKey,
+          appWide: true,
           });
         } finally {
           entry.waitingForApproval = false;

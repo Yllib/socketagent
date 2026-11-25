@@ -85,6 +85,7 @@ export const historyEntrySchema = z.object({
     reason: optionalText,
     client: z.object({ name: z.string(), publicKey: z.string() }).passthrough().optional(),
     approvalKey: optionalText,
+    appWide: z.boolean().optional(),
   } satisfies Shape<ComputerAccessRequestCard>).passthrough().optional(),
   memory: z.object({
     path: z.string(), name: z.string(), description: z.string(), memoryType: z.string(),

@@ -3519,11 +3519,10 @@ function noteConnectorAgentOutcome(record: DelegatedAgentRecord, run: DelegatedA
 }
 
 /**
- * One action for a connector client on this computer. The peer API applies
- * the client's access and confirm settings; when it wants an approval, the
- * card goes in the client's session, sealed to this computer's own key.
+ * Actions an AI client takes on this computer. The peer API applies the
+ * client's access and confirm settings; when it wants an approval, the app
+ * prompts outside any chat and seals the answer to this computer's own key.
  */
-/** Actions an AI client takes on this computer, with cards in its session when the registry says to ask. */
 const connectorHostActions = new ConnectorHostActions({
   peerApi: computerLinkPeerApi,
   self: () => ({ name: os.hostname(), publicKey: toBase64(loadServerKeyPair().publicKey) }),
@@ -3532,7 +3531,7 @@ const connectorHostActions = new ConnectorHostActions({
     void sendPushNotification({
       title: `${grant.clientName} needs your approval`,
       body: summary,
-      sessionId: grant.sessionId,
+      // No sessionId: tapping it opens the app, which shows the prompt.
       kind: "computer_access",
       showNotification: true,
     }).catch(() => undefined);

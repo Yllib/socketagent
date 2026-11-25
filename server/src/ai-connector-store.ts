@@ -52,6 +52,8 @@ export interface AiConnectorGrant {
   publicKey: string;
   /** The session whose transcript logs this client's actions and shows its cards. */
   sessionId: string;
+  /** Project IDs of the boards the user let this client use, each approved once on the phone. */
+  boards?: string[];
   createdAt: string;
   lastUsedAt: string;
 }
@@ -95,6 +97,7 @@ const grantSchema = z.object({
   clientName: z.string(),
   publicKey: z.string().min(1),
   sessionId: z.string().min(1),
+  boards: z.array(z.string()).optional(),
   createdAt: z.string(),
   lastUsedAt: z.string(),
 });
@@ -232,6 +235,14 @@ export class AiConnectorStore {
     this.state.grants.push(record);
     this.write();
     return { ...record };
+  }
+
+  /** Lets the grant's client use the board of [projectId] from now on. */
+  allowBoard(grantId: string, projectId: string): void {
+    const grant = this.state.grants.find((entry) => entry.grantId === grantId);
+    if (!grant || grant.boards?.includes(projectId)) return;
+    grant.boards = [...grant.boards ?? [], projectId];
+    this.write();
   }
 
   /** Drops the grant and every token issued for it. Returns the removed grant. */

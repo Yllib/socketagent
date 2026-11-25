@@ -12,7 +12,7 @@ import { errorMessage, isRecord } from "./value-guards";
 export const PEER_ACTIONS = [
   "hello", "sessions_list", "transcript_read", "transcript_search", "run_command",
   "agent_start", "agent_message", "agent_status", "agent_tail", "agent_stop", "agent_list",
-  "agent_report_ack", "link_upgrade",
+  "agent_report_ack", "link_upgrade", "session_message",
 ] as const;
 export type PeerAction = typeof PEER_ACTIONS[number];
 
@@ -108,6 +108,7 @@ const agentArgs = z.object({
   after_session_seq: z.number().int().nonnegative().optional(),
   limit: z.number().int().min(1).max(50).optional(),
 });
+const sessionMessageArgs = z.object({ sessionId: z.string().min(1).max(400), prompt: z.string().min(1).max(100_000) });
 const reportAckArgs = z.object({ delegationId: z.string(), runId: z.string() });
 const linkUpgradeArgs = z.object({ linkSecret: z.string().refine(isValidPublicKey, "must be base64 of 32 bytes") });
 
@@ -146,6 +147,11 @@ export interface PeerApiHost {
   runCommand(request: PeerCommandRequest): Promise<PeerCommandResult>;
   agent(args: AgentSessionToolArgs, supervisor: RemoteSupervisor): Promise<AgentSessionToolResponse>;
   ackAgentReport(delegationId: string, runId: string): void;
+  /**
+   * Sends [prompt] into any existing session, as a message from [from]. A
+   * running session gets it at its next safe point; an idle one resumes.
+   */
+  messageSession(sessionId: string, prompt: string, from: string): Promise<{ sessionId: string; delivery: "queued" | "started" }>;
   /** A computer said hello; pending reports for it can be sent now. */
   onHello?(publicKey: string): void;
 }
@@ -223,6 +229,8 @@ export function approvalSummary(action: PeerAction, args: Record<string, unknown
       return `Read transcript ${String(args.sessionId || "")}`;
     case "transcript_search":
       return `Search transcripts for "${String(args.query || "")}"`;
+    case "session_message":
+      return `Message session ${String(args.sessionId || "")}: ${preview}`;
     default:
       return action;
   }
@@ -355,6 +363,10 @@ export class ComputerLinkPeerApi {
           cwd: resolvePeerCommandCwd(args.cwd),
           timeoutSeconds: clampPeerCommandTimeout(args.timeoutSeconds),
         }));
+      }
+      case "session_message": {
+        const args = sessionMessageArgs.parse(request.args);
+        return this.ok(request, await this.host.messageSession(args.sessionId, args.prompt, entry.name || "A linked computer"));
       }
       case "agent_report_ack": {
         const args = reportAckArgs.parse(request.args);

@@ -3323,6 +3323,38 @@ async function manageDelegatedAgents(
   throw new Error(`Unsupported AgentSession action: ${action}`);
 }
 
+/**
+ * A prompt from a linked computer or an AI client for any session here, not
+ * only agents it started. It goes the way scheduled reports do: injected at
+ * the next safe point of a running turn, or as a new turn that resumes an
+ * idle session. The prompt names who sent it, so the agent does not take it
+ * for the user. Returns once a running session queued it, or once an idle
+ * one survived its first second.
+ */
+async function messageExistingSession(sessionId: string, prompt: string, from: string): Promise<{ sessionId: string; delivery: "queued" | "started" }> {
+  const info = getSession(sessionId);
+  if (!info) throw new Error(`No session ${sessionId} on this computer`);
+  if (aiConnectorStore.grantForSession(sessionId)) throw new Error("That is an AI client's activity log, not an agent session");
+  assertSessionAutomationAllowed(sessionId, `A message from ${from}`);
+  const running = activeSessions.get(sessionId)?.isRunning === true;
+  const text = `[Message from ${from}, sent through SocketAgent. It is not from the user.]\n\n${prompt}`;
+  const delivery = runSessionReport(sessionId, text, `peer-message:${crypto.randomUUID()}`, `message from ${from}`);
+  if (running) {
+    await delivery;
+    return { sessionId, delivery: "queued" };
+  }
+  let early: unknown;
+  let failed = false;
+  delivery.catch((error: unknown) => {
+    failed = true;
+    early = error;
+    console.warn(`[Links] Message from ${from} to ${sessionId} failed: ${errorMessage(error)}`);
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  if (failed) throw early instanceof Error ? early : new Error(String(early));
+  return { sessionId, delivery: "started" };
+}
+
 // ── Computer links: this computer as a target ──
 
 function remoteSupervisorSessionId(remote: RemoteSupervisor): string {
@@ -3397,6 +3429,7 @@ const computerLinkPeerApi = new ComputerLinkPeerApi(deviceRegistry, loadServerKe
     title: hit.title,
   })),
   runCommand: (request) => runPeerCommand(request),
+  messageSession: (sessionId, prompt, from) => messageExistingSession(sessionId, prompt, from),
   agent: (args, remote) => {
     // An AI connector client supervises from its own activity session here,
     // so its children report there instead of over a link lane.
@@ -3608,6 +3641,15 @@ const aiConnectorHttp = new AiConnectorHttp({
     if (!deviceRegistry.get(grant.publicKey)) throw new Error("This client was removed in the SocketAgent app. Sign in again.");
     if (isThisComputer(computer)) return runConnectorActionHere(grant, action, args);
     return (await callComputer(grant.sessionId, computer, action, args, undefined, timeoutMs)).result;
+  },
+  board: (grant, tool, args, work) => {
+    if (!deviceRegistry.get(grant.publicKey)) throw new Error("This client was removed in the SocketAgent app. Sign in again.");
+    return connectorHostActions.runLocal(grant, `board:${tool}`, args, (approve) => work({
+      clientName: grant.clientName,
+      allowed: () => aiConnectorStore.getGrant(grant.grantId)?.boards ?? [],
+      allow: (projectId) => aiConnectorStore.allowBoard(grant.grantId, projectId),
+      approve,
+    }));
   },
   logCall: (grant, toolUseId, tool, input) => {
     const positioned = appendConnectorEntry(grant, {

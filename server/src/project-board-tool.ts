@@ -96,7 +96,7 @@ export interface ProjectBoardToolContext {
 const SYNC_WAIT_MS = 4_000;
 
 /** Waits for [work] up to [ms]; the work carries on in the background after that. */
-async function bounded(work: Promise<unknown>, ms = SYNC_WAIT_MS): Promise<void> {
+export async function bounded(work: Promise<unknown>, ms = SYNC_WAIT_MS): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   await Promise.race([work, new Promise((resolve) => { timer = setTimeout(resolve, ms); })]);
   if (timer) clearTimeout(timer);
@@ -151,7 +151,7 @@ function cardInFull(card: BoardCard, config: BoardConfig) {
   };
 }
 
-function writeMessage(outcome: Extract<BoardWriteOutcome, { ok: true }>): string {
+export function writeMessage(outcome: Extract<BoardWriteOutcome, { ok: true }>): string {
   return outcome.pending
     ? "Saved on this computer. The relay could not be reached, so other chats and the app see it once it syncs."
     : "Saved to the board.";
@@ -162,7 +162,7 @@ function chatName(sessionId: string): string {
   return getSession(sessionId)?.title?.trim() || sessionId || "An agent";
 }
 
-function requireCard(board: BoardReplica, cardId: string | undefined): BoardCard {
+export function requireCard(board: BoardReplica, cardId: string | undefined): BoardCard {
   if (!cardId) throw new Error("card_id is required for this action.");
   const value = board.view().get(cardRecordId(cardId));
   if (isTombstone(value)) throw new Error(`Card ${cardId} was deleted.`);

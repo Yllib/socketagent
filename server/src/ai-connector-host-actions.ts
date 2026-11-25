@@ -57,12 +57,32 @@ export class ConnectorHostActions {
    * the same call again, within ten minutes, returns what it produced
    * without a second card.
    */
-  async run(grant: AiConnectorGrant, action: PeerAction, args: Record<string, unknown>): Promise<unknown> {
-    const key = `${grant.grantId}\u0000${action}\u0000${canonicalJson(args)}`;
+  run(grant: AiConnectorGrant, action: PeerAction, args: Record<string, unknown>): Promise<unknown> {
+    return this.hold(grant, action, args, (entry) => this.execute(entry, grant, action, args));
+  }
+
+  /**
+   * Work done here rather than through the peer API, such as board changes,
+   * with the same early return while a card waits. [work] calls [approve]
+   * with an action name and a summary to raise a card; it throws when the
+   * user denies or does not answer. [name] and [args] identify the call, so
+   * the retry after approving collects the result.
+   */
+  runLocal(
+    grant: AiConnectorGrant,
+    name: string,
+    args: Record<string, unknown>,
+    work: (approve: (action: string, summary: string) => Promise<void>) => Promise<unknown>,
+  ): Promise<unknown> {
+    return this.hold(grant, name, args, (entry) => work((action, summary) => this.approveHere(entry, grant, action, summary)));
+  }
+
+  private async hold(grant: AiConnectorGrant, name: string, args: Record<string, unknown>, start: (entry: Inflight) => Promise<unknown>): Promise<unknown> {
+    const key = `${grant.grantId}\u0000${name}\u0000${canonicalJson(args)}`;
     let entry = this.inflight.get(key);
     if (!entry) {
       const started: Inflight = { promise: Promise.resolve(), waitingForApproval: false, settled: false };
-      started.promise = this.execute(started, grant, action, args).finally(() => {
+      started.promise = start(started).finally(() => {
         started.settled = true;
         started.holdTimer = setTimeout(() => {
           if (this.inflight.get(key) === started) this.inflight.delete(key);
@@ -94,6 +114,29 @@ export class ConnectorHostActions {
       if ("failed" in outcome) throw outcome.error;
       return outcome.value;
     }
+  }
+
+  /** A card for work that does not go through the peer API. Resolves once the user allows it. */
+  private async approveHere(entry: Inflight, grant: AiConnectorGrant, action: string, summary: string): Promise<void> {
+    const self = this.deps.self();
+    this.deps.notify?.(grant, summary.split("\n")[0].slice(0, 120));
+    entry.waitingForApproval = true;
+    let answer: ComputerAccessAnswer;
+    try {
+      answer = await this.deps.ask(grant.sessionId, {
+        kind: "approval",
+        source: self,
+        target: self,
+        action,
+        summary,
+        client: { name: grant.clientName, publicKey: grant.publicKey },
+        approvalKey: grant.publicKey,
+      });
+    } finally {
+      entry.waitingForApproval = false;
+    }
+    if (answer.decision === "deny") throw new Error("The user denied this request.");
+    if (answer.decision === "expired") throw new Error("The user did not answer the approval request in time.");
   }
 
   private async execute(entry: Inflight, grant: AiConnectorGrant, action: PeerAction, args: Record<string, unknown>): Promise<unknown> {

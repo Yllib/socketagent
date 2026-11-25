@@ -568,8 +568,9 @@ test("the listener serves only the connector and runs the full flow with a real 
   const { client, state, signIn } = await connectClient(env, baseUrl);
   const tools = await client.listTools();
   assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [
-    "agent_status", "list_agents", "list_computers", "list_sessions", "message_agent", "read_transcript",
-    "run_command", "search_transcripts", "start_agent", "stop_agent",
+    "add_card", "agent_status", "close_card", "delete_card", "get_card", "list_agents", "list_boards", "list_cards",
+    "list_computers", "list_sessions", "message_agent", "message_session", "move_card", "read_transcript",
+    "run_command", "search_transcripts", "start_agent", "stop_agent", "update_card",
   ]);
 
   const computers = await client.callTool({ name: "list_computers", arguments: {} });

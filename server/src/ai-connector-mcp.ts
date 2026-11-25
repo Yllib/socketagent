@@ -8,6 +8,10 @@ import type { PeerAction } from "./computer-link-peer";
 import type { McpTextResult } from "./app-tool-handlers";
 import { errorMessage } from "./value-guards";
 import { LIFETIME_GUIDANCE } from "./fleeting-sessions";
+import {
+  addCard, closeCard, CONNECTOR_BOARD_INPUTS, deleteCard, getCard, listBoards, listCards, moveCard, updateCard,
+  type ConnectorBoardContext,
+} from "./ai-connector-boards";
 
 /**
  * The tools an AI client gets through the connector. Each one is a peer
@@ -26,9 +30,14 @@ export interface AiConnectorToolHost {
    * any other name goes through the link to that computer.
    */
   act(grant: AiConnectorGrant, computer: string | undefined, action: PeerAction, args: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
-  /** Records the call in the client's session and shows it on connected phones. */
+  /**
+   * Runs board work on this computer for the client. Approval cards go in the
+   * client's session, and a call still waiting on one returns early, as act does.
+   */
+  board(grant: AiConnectorGrant, tool: string, args: Record<string, unknown>, work: (ctx: ConnectorBoardContext) => Promise<unknown>): Promise<unknown>;
   /** A request authenticated with the grant's token, for "last seen" in Devices. */
   grantSeen?(grant: AiConnectorGrant): void;
+  /** Records the call in the client's session and shows it on connected phones. */
   logCall(grant: AiConnectorGrant, toolUseId: string, tool: string, input: Record<string, unknown>): void;
   logResult(grant: AiConnectorGrant, toolUseId: string, output: string, isError: boolean): void;
 }
@@ -44,7 +53,7 @@ function text(value: unknown, isError = false): McpTextResult {
 /** The tools for one signed-in client. A new server is built per request. */
 export function createAiConnectorMcpServer(grant: AiConnectorGrant, host: AiConnectorToolHost): McpServer {
   const server = new McpServer({ name: "socketagent", version: "1.0.0" }, {
-    instructions: `SocketAgent on ${host.serverName()} gives you the user's computers: run shell commands, read agent session transcripts, and start or steer full Claude or Codex agent sessions. Start with list_computers. The user approves actions on their phone; a call that needs approval waits for the answer, so tell the user when you are waiting. Actions can be refused by the user or by that computer's access settings.`,
+    instructions: `SocketAgent on ${host.serverName()} gives you the user's computers: run shell commands, read agent session transcripts, start or steer full Claude or Codex agent sessions, message any session, and keep the user's project boards current. Start with list_computers, or list_boards for boards. The user approves actions on their phone; a call that needs approval waits for the answer, so tell the user when you are waiting. Actions can be refused by the user or by that computer's access settings.`,
   });
 
   const run = async (tool: string, input: Record<string, unknown>, work: () => Promise<unknown>): Promise<McpTextResult> => {
@@ -193,6 +202,68 @@ export function createAiConnectorMcpServer(grant: AiConnectorGrant, host: AiConn
       session_id: z.string().min(1).describe("The session_id returned by start_agent"),
     },
   }, async (args) => run("stop_agent", args, () => host.act(grant, args.computer, "agent_stop", { session_id: args.session_id })));
+
+  server.registerTool("message_session", {
+    title: "Message a session",
+    description: "Sends a prompt to any existing session on a computer, not only agents you started. A running session gets it at its next safe point; an idle one resumes with it. The session sees it as a message from you, not from the user.",
+    inputSchema: {
+      computer: computerArg,
+      session_id: z.string().min(1).describe("A session id from list_sessions"),
+      prompt: z.string().min(1),
+    },
+  }, async (args) => run("message_session", args, () =>
+    host.act(grant, args.computer, "session_message", { sessionId: args.session_id, prompt: args.prompt })));
+
+  const boardTool = <A extends Record<string, unknown>>(tool: string, args: A, work: (ctx: ConnectorBoardContext) => Promise<unknown>) =>
+    run(tool, args, () => host.board(grant, tool, args, work));
+
+  server.registerTool("list_boards", {
+    title: "List boards",
+    description: "The user's project boards on this computer: id, name, and whether you may use it yet. The first use of a board asks the user once on their phone.",
+    inputSchema: {},
+  }, async () => boardTool("list_boards", {}, async (ctx) => listBoards(ctx)));
+
+  server.registerTool("list_cards", {
+    title: "List cards",
+    description: "A board's statuses and its cards: id, title, status, notes, links and when each last changed, newest first. Filter by status or kind, find cards linking a permalink with link_ref, or search text with query. Before adding a card for a message, check link_ref so it is not carded twice.",
+    inputSchema: CONNECTOR_BOARD_INPUTS.list_cards,
+  }, async (args) => boardTool("list_cards", args, (ctx) => listCards(ctx, args)));
+
+  server.registerTool("get_card", {
+    title: "Get a card",
+    description: "One card in full: detail, links, history, and the user's answer when the card asked something.",
+    inputSchema: CONNECTOR_BOARD_INPUTS.get_card,
+  }, async (args) => boardTool("get_card", args, (ctx) => getCard(ctx, args)));
+
+  server.registerTool("add_card", {
+    title: "Add a card",
+    description: "Adds a card to the board's first new status (Inbox) with a title, Markdown detail and the source message's link. When a card already links that message it is returned instead, with created false.",
+    inputSchema: CONNECTOR_BOARD_INPUTS.add_card,
+  }, async (args) => boardTool("add_card", args, (ctx) => addCard(ctx, args)));
+
+  server.registerTool("update_card", {
+    title: "Update a card",
+    description: "Replaces a card's short notes line, adds Markdown to the end of its detail, or adds a link, such as a reply in the same thread.",
+    inputSchema: CONNECTOR_BOARD_INPUTS.update_card,
+  }, async (args) => boardTool("update_card", args, (ctx) => updateCard(ctx, args)));
+
+  server.registerTool("move_card", {
+    title: "Move a card",
+    description: "Moves a card to another status with a one-line why. A status of kind user needs ask, the exact question; the user's answer shows on the card.",
+    inputSchema: CONNECTOR_BOARD_INPUTS.move_card,
+  }, async (args) => boardTool("move_card", args, (ctx) => moveCard(ctx, args)));
+
+  server.registerTool("close_card", {
+    title: "Close a card",
+    description: "Moves a card to the board's done status.",
+    inputSchema: CONNECTOR_BOARD_INPUTS.close_card,
+  }, async (args) => boardTool("close_card", args, (ctx) => closeCard(ctx, args)));
+
+  server.registerTool("delete_card", {
+    title: "Delete a card",
+    description: "Deletes a card for good. The user approves every delete on their phone; close finished work instead.",
+    inputSchema: CONNECTOR_BOARD_INPUTS.delete_card,
+  }, async (args) => boardTool("delete_card", args, (ctx) => deleteCard(ctx, args)));
 
   return server;
 }

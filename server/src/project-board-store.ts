@@ -666,6 +666,11 @@ export class ProjectBoardStore {
     return hint && this.grants.some((grant) => grant.projectId === hint) ? hint : null;
   }
 
+  /** Every board granted to this computer, by project. */
+  boards(): { projectId: string; name: string }[] {
+    return this.grants.map(({ projectId, name }) => ({ projectId, name }));
+  }
+
   grant(projectId: string): BoardGrant | undefined {
     return this.grants.find((grant) => grant.projectId === projectId);
   }

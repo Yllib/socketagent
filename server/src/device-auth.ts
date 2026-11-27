@@ -115,8 +115,8 @@ export class DeviceAuthGate {
    * from then on it gets in over the relay with no token, and `pairing_upgrade`
    * hands it the pairing secret, which carries it over to transport v2 for
    * good. On a locked computer, AUTH_TOKEN and reach of the port therefore
-   * make a lasting device with no Allow. This ends when the old path is
-   * switched off (SOCKETAGENT_LEGACY_TRANSPORT).
+   * make a lasting device with no Allow. Only while the old path is
+   * switched on (SOCKETAGENT_LEGACY_TRANSPORT=on).
    *
    * A socket from this computer, which is
    * loopback with no proxy in front, may also send no token and raise an

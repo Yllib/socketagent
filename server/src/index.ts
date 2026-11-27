@@ -569,11 +569,13 @@ const deviceAuthGate = new DeviceAuthGate(deviceRegistry, () => AUTH_TOKEN);
 
 /**
  * The old path: key_exchange over the relay and on `e2e=1` direct sockets.
- * On unless SOCKETAGENT_LEGACY_TRANSPORT in .env turns it off. The loopback
- * token socket that this computer's own tools use is not part of it.
+ * Off since app 1.1.4 had two weeks to reach everyone, unless
+ * SOCKETAGENT_LEGACY_TRANSPORT=on in .env turns it back on for an app that
+ * never updated. The loopback token socket that this computer's own tools
+ * use is not part of it.
  */
-const LEGACY_TRANSPORT = !/^(0|off|false|no)$/i.test((process.env.SOCKETAGENT_LEGACY_TRANSPORT ?? "").trim());
-if (!LEGACY_TRANSPORT) console.log("[Devices] The old transport is off (SOCKETAGENT_LEGACY_TRANSPORT)");
+const LEGACY_TRANSPORT = /^(1|on|true|yes)$/i.test((process.env.SOCKETAGENT_LEGACY_TRANSPORT ?? "").trim());
+if (LEGACY_TRANSPORT) console.log("[Devices] The old transport is on (SOCKETAGENT_LEGACY_TRANSPORT)");
 
 /** Whether this install has SocketAgentService, so it serves every Windows account. */
 let machineServiceRegistered = process.platform === "win32" && (serviceState.service || taskExists(SERVICE_TASK));
